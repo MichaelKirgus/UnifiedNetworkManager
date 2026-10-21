@@ -24,6 +24,18 @@ version: "3.9"
 # networks:
 #   unm-vlan:
 #     external: true
+#
+# ── Unprivileged containers (default) ───────────────────────────────────────
+# Every UNM image runs its app as uid/gid 1001 (`app`) after boot. The entrypoint
+# wrapper (scripts/docker-entrypoint.sh) chowns pre-existing root-owned data
+# volumes (UNM_CHOWN_PATHS, set per service below), joins a host docker group
+# when UNM_DOCKER_GID is set, then drops privileges before starting the app.
+# Opt-outs (set in .env, apply to every service):
+#   UNM_RUN_AS_ROOT=1     run as root — no privilege drop (rollback switch)
+#   UNM_SKIP_CHOWN=1      skip the runtime data-dir chown (pre-chowned stores)
+#   UNM_DOCKER_GID=<gid>  join this host group (e.g. `id -g docker`) so a
+#                         mounted /var/run/docker.sock is accessible
+#   UNM_DOCKER_UID=<uid>  run the app under this uid instead of 1001
 
 services:
   postgres:
@@ -135,6 +147,17 @@ services:
       - UNM_MCP_URL=http://mcp:3901
       # Optional macvlan default gateway (scripts/docker-entrypoint.sh) — empty = no-op.
       - UNM_DEFAULT_GATEWAY=${UNM_DEFAULT_GATEWAY:-}
+      # Privilege drop (scripts/docker-entrypoint.sh): the app runs as uid/gid 1001
+      # by default. UNM_RUN_AS_ROOT=1 skips the drop, UNM_SKIP_CHOWN=1 skips the
+      # data-dir chown below, UNM_DOCKER_GID/UID join a host group / set the uid.
+      - UNM_RUN_AS_ROOT=${UNM_RUN_AS_ROOT:-}
+      - UNM_SKIP_CHOWN=${UNM_SKIP_CHOWN:-}
+      - UNM_DOCKER_GID=${UNM_DOCKER_GID:-}
+      - UNM_DOCKER_UID=${UNM_DOCKER_UID:-}
+      # Runtime chown of pre-existing root-owned data volumes (first boot after
+      # the unprivileged switch; no-op once owned by uid 1001). /data/ca is
+      # deliberately EXCLUDED — it's shared with unm-ca and group-writable there.
+      - UNM_CHOWN_PATHS=/data/backups /data/file-repo /data/tls
     volumes:
       # Stored UNM backups (Backups page) — local-destination archives live here.
       # Named volume by default; set UNM_BACKUP_VOLUME to a host path or another
@@ -182,6 +205,16 @@ services:
       - ADVERTISED_ENDPOINT=http://file-repo-plugin:4080
       # Optional macvlan default gateway (scripts/docker-entrypoint.sh) — empty = no-op.
       - UNM_DEFAULT_GATEWAY=${UNM_DEFAULT_GATEWAY:-}
+      # Privilege drop (scripts/docker-entrypoint.sh): the app runs as uid/gid 1001
+      # by default. UNM_RUN_AS_ROOT=1 skips the drop, UNM_SKIP_CHOWN=1 skips the
+      # data-dir chown below, UNM_DOCKER_GID/UID join a host group / set the uid.
+      - UNM_RUN_AS_ROOT=${UNM_RUN_AS_ROOT:-}
+      - UNM_SKIP_CHOWN=${UNM_SKIP_CHOWN:-}
+      - UNM_DOCKER_GID=${UNM_DOCKER_GID:-}
+      - UNM_DOCKER_UID=${UNM_DOCKER_UID:-}
+      # Runtime chown of pre-existing root-owned data volumes (first boot after
+      # the unprivileged switch; no-op once owned by uid 1001).
+      - UNM_CHOWN_PATHS=/data/file-repo /data/tls
       # Base URL of the API's internal endpoints (plugin -> API) — log shipping.
       - UNM_API_URL=http://api:3000/v1
       # mTLS (Stage 1): enroll against the CA and serve TLS on :4080.
@@ -229,6 +262,13 @@ services:
       - ADVERTISED_ENDPOINT=http://opnsense-plugin:4080
       # Optional macvlan default gateway (scripts/docker-entrypoint.sh) — empty = no-op.
       - UNM_DEFAULT_GATEWAY=${UNM_DEFAULT_GATEWAY:-}
+      # Privilege drop (scripts/docker-entrypoint.sh): the app runs as uid/gid 1001
+      # by default. UNM_RUN_AS_ROOT=1 skips the drop, UNM_SKIP_CHOWN=1 skips the
+      # data-dir chown, UNM_DOCKER_GID/UID join a host group / set the uid.
+      - UNM_RUN_AS_ROOT=${UNM_RUN_AS_ROOT:-}
+      - UNM_SKIP_CHOWN=${UNM_SKIP_CHOWN:-}
+      - UNM_DOCKER_GID=${UNM_DOCKER_GID:-}
+      - UNM_DOCKER_UID=${UNM_DOCKER_UID:-}
       # Base URL of the API's internal endpoints (plugin -> API) — used for log shipping.
       - UNM_API_URL=http://api:3000/v1
       # mTLS (Stage 1): enroll against the CA and serve TLS on :4080.
@@ -268,6 +308,13 @@ services:
       - ADVERTISED_ENDPOINT=http://icmp-plugin:4080
       # Optional macvlan default gateway (scripts/docker-entrypoint.sh) — empty = no-op.
       - UNM_DEFAULT_GATEWAY=${UNM_DEFAULT_GATEWAY:-}
+      # Privilege drop (scripts/docker-entrypoint.sh): the app runs as uid/gid 1001
+      # by default. UNM_RUN_AS_ROOT=1 skips the drop, UNM_SKIP_CHOWN=1 skips the
+      # data-dir chown, UNM_DOCKER_GID/UID join a host group / set the uid.
+      - UNM_RUN_AS_ROOT=${UNM_RUN_AS_ROOT:-}
+      - UNM_SKIP_CHOWN=${UNM_SKIP_CHOWN:-}
+      - UNM_DOCKER_GID=${UNM_DOCKER_GID:-}
+      - UNM_DOCKER_UID=${UNM_DOCKER_UID:-}
       # Base URL of the API's internal endpoints (plugin -> API) — used for log shipping.
       - UNM_API_URL=http://api:3000/v1
       # mTLS (Stage 1): enroll against the CA and serve TLS on :4080.
@@ -326,6 +373,13 @@ services:
       - ADVERTISED_ENDPOINT=http://generic-snmp-plugin:4080
       # Optional macvlan default gateway (scripts/docker-entrypoint.sh) — empty = no-op.
       - UNM_DEFAULT_GATEWAY=${UNM_DEFAULT_GATEWAY:-}
+      # Privilege drop (scripts/docker-entrypoint.sh): the app runs as uid/gid 1001
+      # by default. UNM_RUN_AS_ROOT=1 skips the drop, UNM_SKIP_CHOWN=1 skips the
+      # data-dir chown, UNM_DOCKER_GID/UID join a host group / set the uid.
+      - UNM_RUN_AS_ROOT=${UNM_RUN_AS_ROOT:-}
+      - UNM_SKIP_CHOWN=${UNM_SKIP_CHOWN:-}
+      - UNM_DOCKER_GID=${UNM_DOCKER_GID:-}
+      - UNM_DOCKER_UID=${UNM_DOCKER_UID:-}
       # Base URL of the API's internal endpoints (plugin -> API) — used for log shipping.
       - UNM_API_URL=http://api:3000/v1
       # mTLS (Stage 1): enroll against the CA and serve TLS on :4080.
@@ -365,6 +419,13 @@ services:
       - ADVERTISED_ENDPOINT=http://lancom-lx-plugin:4080
       # Optional macvlan default gateway (scripts/docker-entrypoint.sh) — empty = no-op.
       - UNM_DEFAULT_GATEWAY=${UNM_DEFAULT_GATEWAY:-}
+      # Privilege drop (scripts/docker-entrypoint.sh): the app runs as uid/gid 1001
+      # by default. UNM_RUN_AS_ROOT=1 skips the drop, UNM_SKIP_CHOWN=1 skips the
+      # data-dir chown, UNM_DOCKER_GID/UID join a host group / set the uid.
+      - UNM_RUN_AS_ROOT=${UNM_RUN_AS_ROOT:-}
+      - UNM_SKIP_CHOWN=${UNM_SKIP_CHOWN:-}
+      - UNM_DOCKER_GID=${UNM_DOCKER_GID:-}
+      - UNM_DOCKER_UID=${UNM_DOCKER_UID:-}
       # Base URL of the API's internal endpoints (plugin -> API) — used for log shipping.
       - UNM_API_URL=http://api:3000/v1
       # mTLS (Stage 1): enroll against the CA and serve TLS on :4080.
@@ -406,6 +467,13 @@ services:
       - ADVERTISED_ENDPOINT=http://lancom-lcos-plugin:4080
       # Optional macvlan default gateway (scripts/docker-entrypoint.sh) — empty = no-op.
       - UNM_DEFAULT_GATEWAY=${UNM_DEFAULT_GATEWAY:-}
+      # Privilege drop (scripts/docker-entrypoint.sh): the app runs as uid/gid 1001
+      # by default. UNM_RUN_AS_ROOT=1 skips the drop, UNM_SKIP_CHOWN=1 skips the
+      # data-dir chown, UNM_DOCKER_GID/UID join a host group / set the uid.
+      - UNM_RUN_AS_ROOT=${UNM_RUN_AS_ROOT:-}
+      - UNM_SKIP_CHOWN=${UNM_SKIP_CHOWN:-}
+      - UNM_DOCKER_GID=${UNM_DOCKER_GID:-}
+      - UNM_DOCKER_UID=${UNM_DOCKER_UID:-}
       # Base URL of the API's internal endpoints (plugin -> API) — used for log shipping.
       - UNM_API_URL=http://api:3000/v1
       # mTLS (Stage 1): enroll against the CA and serve TLS on :4080.
@@ -447,6 +515,13 @@ services:
       - ADVERTISED_ENDPOINT=http://lancom-sx-plugin:4080
       # Optional macvlan default gateway (scripts/docker-entrypoint.sh) — empty = no-op.
       - UNM_DEFAULT_GATEWAY=${UNM_DEFAULT_GATEWAY:-}
+      # Privilege drop (scripts/docker-entrypoint.sh): the app runs as uid/gid 1001
+      # by default. UNM_RUN_AS_ROOT=1 skips the drop, UNM_SKIP_CHOWN=1 skips the
+      # data-dir chown, UNM_DOCKER_GID/UID join a host group / set the uid.
+      - UNM_RUN_AS_ROOT=${UNM_RUN_AS_ROOT:-}
+      - UNM_SKIP_CHOWN=${UNM_SKIP_CHOWN:-}
+      - UNM_DOCKER_GID=${UNM_DOCKER_GID:-}
+      - UNM_DOCKER_UID=${UNM_DOCKER_UID:-}
       # Base URL of the API's internal endpoints (plugin -> API) — used for log shipping.
       - UNM_API_URL=http://api:3000/v1
       # mTLS (Stage 1): enroll against the CA and serve TLS on :4080.
@@ -484,6 +559,13 @@ services:
       - ADVERTISED_ENDPOINT=http://fbox-plugin:4080
       # Optional macvlan default gateway (scripts/docker-entrypoint.sh) — empty = no-op.
       - UNM_DEFAULT_GATEWAY=${UNM_DEFAULT_GATEWAY:-}
+      # Privilege drop (scripts/docker-entrypoint.sh): the app runs as uid/gid 1001
+      # by default. UNM_RUN_AS_ROOT=1 skips the drop, UNM_SKIP_CHOWN=1 skips the
+      # data-dir chown, UNM_DOCKER_GID/UID join a host group / set the uid.
+      - UNM_RUN_AS_ROOT=${UNM_RUN_AS_ROOT:-}
+      - UNM_SKIP_CHOWN=${UNM_SKIP_CHOWN:-}
+      - UNM_DOCKER_GID=${UNM_DOCKER_GID:-}
+      - UNM_DOCKER_UID=${UNM_DOCKER_UID:-}
       # Base URL of the API's internal endpoints (plugin -> API) — used for log shipping.
       - UNM_API_URL=http://api:3000/v1
       # mTLS (Stage 1): enroll against the CA and serve TLS on :4080.
@@ -520,6 +602,13 @@ services:
       - ADVERTISED_ENDPOINT=http://mikrotik-swos-plugin:4080
       # Optional macvlan default gateway (scripts/docker-entrypoint.sh) — empty = no-op.
       - UNM_DEFAULT_GATEWAY=${UNM_DEFAULT_GATEWAY:-}
+      # Privilege drop (scripts/docker-entrypoint.sh): the app runs as uid/gid 1001
+      # by default. UNM_RUN_AS_ROOT=1 skips the drop, UNM_SKIP_CHOWN=1 skips the
+      # data-dir chown, UNM_DOCKER_GID/UID join a host group / set the uid.
+      - UNM_RUN_AS_ROOT=${UNM_RUN_AS_ROOT:-}
+      - UNM_SKIP_CHOWN=${UNM_SKIP_CHOWN:-}
+      - UNM_DOCKER_GID=${UNM_DOCKER_GID:-}
+      - UNM_DOCKER_UID=${UNM_DOCKER_UID:-}
       # Base URL of the API's internal endpoints (plugin -> API) — used for log shipping.
       - UNM_API_URL=http://api:3000/v1
       # mTLS (Stage 1): enroll against the CA and serve TLS on :4080.
@@ -557,6 +646,13 @@ services:
       - ADVERTISED_ENDPOINT=http://mikrotik-routeros-plugin:4080
       # Optional macvlan default gateway (scripts/docker-entrypoint.sh) — empty = no-op.
       - UNM_DEFAULT_GATEWAY=${UNM_DEFAULT_GATEWAY:-}
+      # Privilege drop (scripts/docker-entrypoint.sh): the app runs as uid/gid 1001
+      # by default. UNM_RUN_AS_ROOT=1 skips the drop, UNM_SKIP_CHOWN=1 skips the
+      # data-dir chown, UNM_DOCKER_GID/UID join a host group / set the uid.
+      - UNM_RUN_AS_ROOT=${UNM_RUN_AS_ROOT:-}
+      - UNM_SKIP_CHOWN=${UNM_SKIP_CHOWN:-}
+      - UNM_DOCKER_GID=${UNM_DOCKER_GID:-}
+      - UNM_DOCKER_UID=${UNM_DOCKER_UID:-}
       # Base URL of the API's internal endpoints (plugin -> API) — used for log shipping.
       - UNM_API_URL=http://api:3000/v1
       # mTLS (Stage 1): enroll against the CA and serve TLS on :4080.
@@ -593,6 +689,13 @@ services:
       - ADVERTISED_ENDPOINT=http://ix-truenas-plugin:4080
       # Optional macvlan default gateway (scripts/docker-entrypoint.sh) — empty = no-op.
       - UNM_DEFAULT_GATEWAY=${UNM_DEFAULT_GATEWAY:-}
+      # Privilege drop (scripts/docker-entrypoint.sh): the app runs as uid/gid 1001
+      # by default. UNM_RUN_AS_ROOT=1 skips the drop, UNM_SKIP_CHOWN=1 skips the
+      # data-dir chown, UNM_DOCKER_GID/UID join a host group / set the uid.
+      - UNM_RUN_AS_ROOT=${UNM_RUN_AS_ROOT:-}
+      - UNM_SKIP_CHOWN=${UNM_SKIP_CHOWN:-}
+      - UNM_DOCKER_GID=${UNM_DOCKER_GID:-}
+      - UNM_DOCKER_UID=${UNM_DOCKER_UID:-}
       # Base URL of the API's internal endpoints (plugin -> API) — used for log shipping.
       - UNM_API_URL=http://api:3000/v1
       # mTLS (Stage 1): enroll against the CA and serve TLS on :4080.
@@ -627,6 +730,13 @@ services:
       - ADVERTISED_ENDPOINT=http://mailcow-plugin:4080
       # Optional macvlan default gateway (scripts/docker-entrypoint.sh) — empty = no-op.
       - UNM_DEFAULT_GATEWAY=${UNM_DEFAULT_GATEWAY:-}
+      # Privilege drop (scripts/docker-entrypoint.sh): the app runs as uid/gid 1001
+      # by default. UNM_RUN_AS_ROOT=1 skips the drop, UNM_SKIP_CHOWN=1 skips the
+      # data-dir chown, UNM_DOCKER_GID/UID join a host group / set the uid.
+      - UNM_RUN_AS_ROOT=${UNM_RUN_AS_ROOT:-}
+      - UNM_SKIP_CHOWN=${UNM_SKIP_CHOWN:-}
+      - UNM_DOCKER_GID=${UNM_DOCKER_GID:-}
+      - UNM_DOCKER_UID=${UNM_DOCKER_UID:-}
       # Base URL of the API's internal endpoints (plugin -> API) — used for log shipping.
       - UNM_API_URL=http://api:3000/v1
       # mTLS (Stage 1): enroll against the CA and serve TLS on :4080.
@@ -662,6 +772,13 @@ services:
       - ADVERTISED_ENDPOINT=http://docker-plugin:4080
       # Optional macvlan default gateway (scripts/docker-entrypoint.sh) — empty = no-op.
       - UNM_DEFAULT_GATEWAY=${UNM_DEFAULT_GATEWAY:-}
+      # Privilege drop (scripts/docker-entrypoint.sh): the app runs as uid/gid 1001
+      # by default. UNM_RUN_AS_ROOT=1 skips the drop, UNM_SKIP_CHOWN=1 skips the
+      # data-dir chown, UNM_DOCKER_GID/UID join a host group / set the uid.
+      - UNM_RUN_AS_ROOT=${UNM_RUN_AS_ROOT:-}
+      - UNM_SKIP_CHOWN=${UNM_SKIP_CHOWN:-}
+      - UNM_DOCKER_GID=${UNM_DOCKER_GID:-}
+      - UNM_DOCKER_UID=${UNM_DOCKER_UID:-}
       # Base URL of the API's internal endpoints (plugin -> API) — used for log shipping.
       - UNM_API_URL=http://api:3000/v1
       # mTLS (Stage 1): enroll against the CA and serve TLS on :4080.
@@ -683,6 +800,8 @@ services:
     restart: unless-stopped
     # Needed for transport=socket devices (daemon on the UNM host itself).
     # Grants the plugin full control of that daemon — enable deliberately.
+    # The app runs unprivileged: set UNM_DOCKER_GID to your host docker group's
+    # GID (`id -g docker`) so it can open the socket after the privilege drop.
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
 
@@ -703,6 +822,13 @@ services:
       - ADVERTISED_ENDPOINT=http://openwrt-plugin:4080
       # Optional macvlan default gateway (scripts/docker-entrypoint.sh) — empty = no-op.
       - UNM_DEFAULT_GATEWAY=${UNM_DEFAULT_GATEWAY:-}
+      # Privilege drop (scripts/docker-entrypoint.sh): the app runs as uid/gid 1001
+      # by default. UNM_RUN_AS_ROOT=1 skips the drop, UNM_SKIP_CHOWN=1 skips the
+      # data-dir chown, UNM_DOCKER_GID/UID join a host group / set the uid.
+      - UNM_RUN_AS_ROOT=${UNM_RUN_AS_ROOT:-}
+      - UNM_SKIP_CHOWN=${UNM_SKIP_CHOWN:-}
+      - UNM_DOCKER_GID=${UNM_DOCKER_GID:-}
+      - UNM_DOCKER_UID=${UNM_DOCKER_UID:-}
       # Base URL of the API's internal endpoints (plugin -> API) — used for log shipping.
       - UNM_API_URL=http://api:3000/v1
       # mTLS (Stage 1): enroll against the CA and serve TLS on :4080.
@@ -740,6 +866,13 @@ services:
       - ADVERTISED_ENDPOINT=http://generic-ssh-plugin:4080
       # Optional macvlan default gateway (scripts/docker-entrypoint.sh) — empty = no-op.
       - UNM_DEFAULT_GATEWAY=${UNM_DEFAULT_GATEWAY:-}
+      # Privilege drop (scripts/docker-entrypoint.sh): the app runs as uid/gid 1001
+      # by default. UNM_RUN_AS_ROOT=1 skips the drop, UNM_SKIP_CHOWN=1 skips the
+      # data-dir chown, UNM_DOCKER_GID/UID join a host group / set the uid.
+      - UNM_RUN_AS_ROOT=${UNM_RUN_AS_ROOT:-}
+      - UNM_SKIP_CHOWN=${UNM_SKIP_CHOWN:-}
+      - UNM_DOCKER_GID=${UNM_DOCKER_GID:-}
+      - UNM_DOCKER_UID=${UNM_DOCKER_UID:-}
       # Base URL of the API's internal endpoints (plugin -> API) — used for log shipping.
       - UNM_API_URL=http://api:3000/v1
       # mTLS (Stage 1): enroll against the CA and serve TLS on :4080.
@@ -778,6 +911,13 @@ services:
       - ADVERTISED_ENDPOINT=http://generic-http-plugin:4080
       # Optional macvlan default gateway (scripts/docker-entrypoint.sh) — empty = no-op.
       - UNM_DEFAULT_GATEWAY=${UNM_DEFAULT_GATEWAY:-}
+      # Privilege drop (scripts/docker-entrypoint.sh): the app runs as uid/gid 1001
+      # by default. UNM_RUN_AS_ROOT=1 skips the drop, UNM_SKIP_CHOWN=1 skips the
+      # data-dir chown, UNM_DOCKER_GID/UID join a host group / set the uid.
+      - UNM_RUN_AS_ROOT=${UNM_RUN_AS_ROOT:-}
+      - UNM_SKIP_CHOWN=${UNM_SKIP_CHOWN:-}
+      - UNM_DOCKER_GID=${UNM_DOCKER_GID:-}
+      - UNM_DOCKER_UID=${UNM_DOCKER_UID:-}
       # Base URL of the API's internal endpoints (plugin -> API) — used for log shipping.
       - UNM_API_URL=http://api:3000/v1
       # mTLS (Stage 1): enroll against the CA and serve TLS on :4080.
@@ -817,6 +957,13 @@ services:
       - ADVERTISED_ENDPOINT=http://zabbix-plugin:4080
       # Optional macvlan default gateway (scripts/docker-entrypoint.sh) — empty = no-op.
       - UNM_DEFAULT_GATEWAY=${UNM_DEFAULT_GATEWAY:-}
+      # Privilege drop (scripts/docker-entrypoint.sh): the app runs as uid/gid 1001
+      # by default. UNM_RUN_AS_ROOT=1 skips the drop, UNM_SKIP_CHOWN=1 skips the
+      # data-dir chown, UNM_DOCKER_GID/UID join a host group / set the uid.
+      - UNM_RUN_AS_ROOT=${UNM_RUN_AS_ROOT:-}
+      - UNM_SKIP_CHOWN=${UNM_SKIP_CHOWN:-}
+      - UNM_DOCKER_GID=${UNM_DOCKER_GID:-}
+      - UNM_DOCKER_UID=${UNM_DOCKER_UID:-}
       # Base URL of the API's internal endpoints (plugin -> API) — used for log
       # shipping AND the brokered inventory read (GET /v1/plugin/inventory/hosts).
       - UNM_API_URL=http://api:3000/v1
@@ -853,6 +1000,13 @@ services:
       - ADVERTISED_ENDPOINT=http://netcup-scp-plugin:4080
       # Optional macvlan default gateway (scripts/docker-entrypoint.sh) — empty = no-op.
       - UNM_DEFAULT_GATEWAY=${UNM_DEFAULT_GATEWAY:-}
+      # Privilege drop (scripts/docker-entrypoint.sh): the app runs as uid/gid 1001
+      # by default. UNM_RUN_AS_ROOT=1 skips the drop, UNM_SKIP_CHOWN=1 skips the
+      # data-dir chown, UNM_DOCKER_GID/UID join a host group / set the uid.
+      - UNM_RUN_AS_ROOT=${UNM_RUN_AS_ROOT:-}
+      - UNM_SKIP_CHOWN=${UNM_SKIP_CHOWN:-}
+      - UNM_DOCKER_GID=${UNM_DOCKER_GID:-}
+      - UNM_DOCKER_UID=${UNM_DOCKER_UID:-}
       # Base URL of the API's internal endpoints (plugin -> API) — used for log
       # shipping AND the brokered inventory read (GET /v1/plugin/inventory/hosts).
       - UNM_API_URL=http://api:3000/v1
@@ -890,6 +1044,13 @@ services:
       - ADVERTISED_ENDPOINT=http://generic-ipmi-plugin:4080
       # Optional macvlan default gateway (scripts/docker-entrypoint.sh) — empty = no-op.
       - UNM_DEFAULT_GATEWAY=${UNM_DEFAULT_GATEWAY:-}
+      # Privilege drop (scripts/docker-entrypoint.sh): the app runs as uid/gid 1001
+      # by default. UNM_RUN_AS_ROOT=1 skips the drop, UNM_SKIP_CHOWN=1 skips the
+      # data-dir chown, UNM_DOCKER_GID/UID join a host group / set the uid.
+      - UNM_RUN_AS_ROOT=${UNM_RUN_AS_ROOT:-}
+      - UNM_SKIP_CHOWN=${UNM_SKIP_CHOWN:-}
+      - UNM_DOCKER_GID=${UNM_DOCKER_GID:-}
+      - UNM_DOCKER_UID=${UNM_DOCKER_UID:-}
       # Base URL of the API's internal endpoints (plugin -> API) — used for log shipping.
       - UNM_API_URL=http://api:3000/v1
       # mTLS (Stage 1): enroll against the CA and serve TLS on :4080.
@@ -929,6 +1090,13 @@ services:
       - ADVERTISED_ENDPOINT=http://generic-ntp-plugin:4080
       # Optional macvlan default gateway (scripts/docker-entrypoint.sh) — empty = no-op.
       - UNM_DEFAULT_GATEWAY=${UNM_DEFAULT_GATEWAY:-}
+      # Privilege drop (scripts/docker-entrypoint.sh): the app runs as uid/gid 1001
+      # by default. UNM_RUN_AS_ROOT=1 skips the drop, UNM_SKIP_CHOWN=1 skips the
+      # data-dir chown, UNM_DOCKER_GID/UID join a host group / set the uid.
+      - UNM_RUN_AS_ROOT=${UNM_RUN_AS_ROOT:-}
+      - UNM_SKIP_CHOWN=${UNM_SKIP_CHOWN:-}
+      - UNM_DOCKER_GID=${UNM_DOCKER_GID:-}
+      - UNM_DOCKER_UID=${UNM_DOCKER_UID:-}
       # Base URL of the API's internal endpoints (plugin -> API) — used for log shipping.
       - UNM_API_URL=http://api:3000/v1
       # mTLS (Stage 1): enroll against the CA and serve TLS on :4080.
@@ -970,6 +1138,13 @@ services:
       - ADVERTISED_ENDPOINT=http://flow-collector-plugin:4080
       # Optional macvlan default gateway (scripts/docker-entrypoint.sh) — empty = no-op.
       - UNM_DEFAULT_GATEWAY=${UNM_DEFAULT_GATEWAY:-}
+      # Privilege drop (scripts/docker-entrypoint.sh): the app runs as uid/gid 1001
+      # by default. UNM_RUN_AS_ROOT=1 skips the drop, UNM_SKIP_CHOWN=1 skips the
+      # data-dir chown, UNM_DOCKER_GID/UID join a host group / set the uid.
+      - UNM_RUN_AS_ROOT=${UNM_RUN_AS_ROOT:-}
+      - UNM_SKIP_CHOWN=${UNM_SKIP_CHOWN:-}
+      - UNM_DOCKER_GID=${UNM_DOCKER_GID:-}
+      - UNM_DOCKER_UID=${UNM_DOCKER_UID:-}
       # Base URL of the API's internal endpoints (plugin -> API) — flow batch pushes + logs.
       - UNM_API_URL=http://api:3000/v1
       # mTLS (Stage 1): enroll against the CA and serve TLS on :4080.
@@ -1016,6 +1191,13 @@ services:
       - ADVERTISED_ENDPOINT=http://web-fetch-plugin:4080
       # Optional macvlan default gateway (scripts/docker-entrypoint.sh) — empty = no-op.
       - UNM_DEFAULT_GATEWAY=${UNM_DEFAULT_GATEWAY:-}
+      # Privilege drop (scripts/docker-entrypoint.sh): the app runs as uid/gid 1001
+      # by default. UNM_RUN_AS_ROOT=1 skips the drop, UNM_SKIP_CHOWN=1 skips the
+      # data-dir chown, UNM_DOCKER_GID/UID join a host group / set the uid.
+      - UNM_RUN_AS_ROOT=${UNM_RUN_AS_ROOT:-}
+      - UNM_SKIP_CHOWN=${UNM_SKIP_CHOWN:-}
+      - UNM_DOCKER_GID=${UNM_DOCKER_GID:-}
+      - UNM_DOCKER_UID=${UNM_DOCKER_UID:-}
       # Base URL of the API's internal endpoints (plugin -> API) — log shipping.
       - UNM_API_URL=http://api:3000/v1
       # mTLS (Stage 1): enroll against the CA and serve TLS on :4080.
@@ -1079,6 +1261,17 @@ services:
       - DATABASE_URL=postgresql://unm:unm@postgres:5432/unm
       # Optional macvlan default gateway (scripts/docker-entrypoint.sh) — empty = no-op.
       - UNM_DEFAULT_GATEWAY=${UNM_DEFAULT_GATEWAY:-}
+      # Privilege drop (scripts/docker-entrypoint.sh): the app runs as uid/gid 1001
+      # by default. UNM_RUN_AS_ROOT=1 skips the drop, UNM_SKIP_CHOWN=1 skips the
+      # data-dir chown below, UNM_DOCKER_GID/UID join a host group / set the uid.
+      - UNM_RUN_AS_ROOT=${UNM_RUN_AS_ROOT:-}
+      - UNM_SKIP_CHOWN=${UNM_SKIP_CHOWN:-}
+      - UNM_DOCKER_GID=${UNM_DOCKER_GID:-}
+      - UNM_DOCKER_UID=${UNM_DOCKER_UID:-}
+      # Runtime chown of pre-existing root-owned data volumes (first boot after
+      # the unprivileged switch; no-op once owned by uid 1001). /data/ca is
+      # deliberately EXCLUDED — it's mounted read-only here.
+      - UNM_CHOWN_PATHS=/data/tls
     volumes:
       # mTLS (Stage 2): the CA config volume READ-ONLY — MCP only reads
       # root_ca.crt from it to build its trust bundle. The PKI volume is never
@@ -1144,6 +1337,13 @@ services:
       - ADVERTISED_ENDPOINT=http://basic-auth-plugin:4080
       # Optional macvlan default gateway (scripts/docker-entrypoint.sh) — empty = no-op.
       - UNM_DEFAULT_GATEWAY=${UNM_DEFAULT_GATEWAY:-}
+      # Privilege drop (scripts/docker-entrypoint.sh): the app runs as uid/gid 1001
+      # by default. UNM_RUN_AS_ROOT=1 skips the drop, UNM_SKIP_CHOWN=1 skips the
+      # data-dir chown, UNM_DOCKER_GID/UID join a host group / set the uid.
+      - UNM_RUN_AS_ROOT=${UNM_RUN_AS_ROOT:-}
+      - UNM_SKIP_CHOWN=${UNM_SKIP_CHOWN:-}
+      - UNM_DOCKER_GID=${UNM_DOCKER_GID:-}
+      - UNM_DOCKER_UID=${UNM_DOCKER_UID:-}
       # Base URL of the API's internal user-data endpoints (plugin -> API).
       - UNM_API_URL=http://api:3000/v1
       # mTLS (Stage 1): enroll against the CA and serve TLS on :4080.
@@ -1186,6 +1386,13 @@ services:
       - ADVERTISED_ENDPOINT=http://secrets-provider-plugin:4080
       # Optional macvlan default gateway (scripts/docker-entrypoint.sh) — empty = no-op.
       - UNM_DEFAULT_GATEWAY=${UNM_DEFAULT_GATEWAY:-}
+      # Privilege drop (scripts/docker-entrypoint.sh): the app runs as uid/gid 1001
+      # by default. UNM_RUN_AS_ROOT=1 skips the drop, UNM_SKIP_CHOWN=1 skips the
+      # data-dir chown, UNM_DOCKER_GID/UID join a host group / set the uid.
+      - UNM_RUN_AS_ROOT=${UNM_RUN_AS_ROOT:-}
+      - UNM_SKIP_CHOWN=${UNM_SKIP_CHOWN:-}
+      - UNM_DOCKER_GID=${UNM_DOCKER_GID:-}
+      - UNM_DOCKER_UID=${UNM_DOCKER_UID:-}
       # Base URL of the API's internal secrets-data endpoints (plugin -> API).
       - UNM_API_URL=http://api:3000/v1
       # mTLS (Stage 1): enroll against the CA and serve TLS on :4080.
@@ -1225,6 +1432,13 @@ services:
     environment:
       # Optional macvlan default gateway (scripts/docker-entrypoint.sh) — empty = no-op.
       - UNM_DEFAULT_GATEWAY=${UNM_DEFAULT_GATEWAY:-}
+      # Privilege drop (scripts/docker-entrypoint.sh): the app runs as uid/gid 1001
+      # by default. UNM_RUN_AS_ROOT=1 skips the drop, UNM_SKIP_CHOWN=1 skips the
+      # data-dir chown, UNM_DOCKER_GID/UID join a host group / set the uid.
+      - UNM_RUN_AS_ROOT=${UNM_RUN_AS_ROOT:-}
+      - UNM_SKIP_CHOWN=${UNM_SKIP_CHOWN:-}
+      - UNM_DOCKER_GID=${UNM_DOCKER_GID:-}
+      - UNM_DOCKER_UID=${UNM_DOCKER_UID:-}
     # Static-serve self-check on :5173 (the baked build-tag manifest is a
     # stable same-origin URL that exists in every image).
     healthcheck:

@@ -37,8 +37,16 @@ WORKDIR /app/plugins/template
 
 EXPOSE 4080
 
-# UNM entrypoint wrapper — optional macvlan default gateway (UNM_DEFAULT_GATEWAY);
-# pure passthrough when the variable is unset. See scripts/docker-entrypoint.sh.
+# Unprivileged runtime user (uid/gid 1001) — the entrypoint wrapper drops to it.
+RUN addgroup -g 1001 unm && adduser -u 1001 -G unm -D app \
+    && mkdir -p /data/tls && chown -R 1001:1001 /data/tls
+
+# Privilege-drop helper — joins UNM_DOCKER_GID, drops to `app`, re-execs the app.
+COPY scripts/unm-privdrop.js /usr/local/lib/unm-privdrop.js
+
+# UNM entrypoint wrapper — macvlan gateway (UNM_DEFAULT_GATEWAY), data-dir chown
+# (UNM_CHOWN_PATHS, skip via UNM_SKIP_CHOWN=1) and privilege drop to `app`
+# (opt out with UNM_RUN_AS_ROOT=1). See scripts/docker-entrypoint.sh.
 COPY scripts/docker-entrypoint.sh /usr/local/bin/unm-entrypoint.sh
 RUN chmod +x /usr/local/bin/unm-entrypoint.sh
 ENTRYPOINT ["/usr/local/bin/unm-entrypoint.sh"]

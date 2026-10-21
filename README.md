@@ -27,6 +27,7 @@ Open-source network management and monitoring platform for mixed-vendor environm
 - [Security model](#security-model)
   - [Network exposure — keep it off the public internet](#network-exposure--keep-it-off-the-public-internet)
   - [Dedicated management VLAN (macvlan deployment)](#dedicated-management-vlan-macvlan-deployment)
+  - [Unprivileged containers](#unprivileged-containers)
 - [Device addressing (multi-IP)](#device-addressing-multi-ip)
 - [Plugin model](#plugin-model)
   - [Plugin log pipeline](#plugin-log-pipeline)
@@ -233,6 +234,29 @@ Notes:
 - **Service-name URLs keep working.** Docker's embedded DNS resolves names of containers sharing a user-defined network, macvlan included — so `ADVERTISED_ENDPOINT=http://file-repo-plugin:4080`, `UNM_API_URL=http://api:3000/v1` and the ACME directory default need no changes. Just don't mix service names and VLAN IPs for the same endpoint: plugin mTLS leaf certs get their SAN from the host of `ADVERTISED_ENDPOINT`, so URL and certificate must match.
 - **Inter-container traffic transits the physical segment** on macvlan — expected for a management stack, but it shows up on the wire.
 - The wrapper never blocks startup: if no suitable interface is found or the route cannot be written (missing `CAP_NET_ADMIN`), it logs to stderr and continues. `UNM_GW_IFACE` forces the interface instead of auto-detect (which skips `lo` and Docker's 172.16/12 bridge range).
+
+### Unprivileged containers
+
+Every UNM image runs its application as a dedicated unprivileged user **`app`** (uid/gid `1001`) by default — the entrypoint wrapper (`scripts/docker-entrypoint.sh`, PID 1) performs all root-only work first, then drops privileges via a dependency-free Node helper (`scripts/unm-privdrop.js`). The CA container already ran as its own non-root user; this extends that to the API, MCP server and every plugin.
+
+What the wrapper does at boot (all steps best-effort — a failure logs to stderr and never blocks startup):
+1. **Default gateway** — see [macvlan deployment](#dedicated-management-vlan-macvlan-deployment) above (`UNM_DEFAULT_GATEWAY`).
+2. **Data-dir ownership** — chowns the paths listed in `UNM_CHOWN_PATHS` (set per service in `docker-compose.dev.yml`) to `1001:1001`, so persistent volumes created while running as root keep working after the drop.
+3. **Privilege drop** — joins any host docker group (`UNM_DOCKER_GID`), then drops to `app` and re-execs the app with stdio inherited and SIGTERM/SIGINT forwarded (so `docker stop` stays graceful).
+
+Environment variables (all wired into every service in `docker-compose.dev.yml`; set them in `.env`):
+
+| Variable | Effect |
+|----------|--------|
+| `UNM_RUN_AS_ROOT=1` | Explicit opt-out: skip the privilege drop and run as root (e.g. for rollback). |
+| `UNM_SKIP_CHOWN=1` | Skip the runtime data-dir chown entirely — use it for huge byte stores you pre-chowned once (`chown -R 1001:1001 <volume>`), so boot stays instant. |
+| `UNM_DOCKER_GID=<gid>` | Join this host group (e.g. `id -g docker`) as a supplementary group of `app`, so a mounted `/var/run/docker.sock` (owned `root:<gid>`) is accessible after the drop — needed by the docker plugin's socket transport. |
+| `UNM_DOCKER_UID=<uid>` | Run the app under this uid instead of 1001, e.g. to match an existing host user that owns bind-mounted data dirs. |
+
+Notes:
+- **Existing volumes.** If you upgrade a running deployment, your data volumes are still root-owned — on first boot after the switch the wrapper chowns them once (that's what `UNM_CHOWN_PATHS` is for). For large stores, stop the stack and pre-chown instead: `chown -R 1001:1001 /var/lib/docker/volumes/<unm-stack>_filerepo-plugin/_data`, then set `UNM_SKIP_CHOWN=1`.
+- **Shared CA volume.** `/data/ca` is shared between the API (writes `ca.json`) and the CA container (`step`, uid 1000, owns its state DB). It is group-writable for gid 1001 with setgid in the CA image — no runtime chown needed or wanted there.
+- **No extra capabilities.** The ICMP plugin's `ping` works unprivileged (busybox uses SOCK_DGRAM ICMP sockets); nothing in the stack needs `NET_ADMIN` except the optional macvlan default-route step, which degrades gracefully without it.
 
 ## Device addressing (multi-IP)
 

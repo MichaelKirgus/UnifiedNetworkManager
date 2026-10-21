@@ -50,10 +50,22 @@ else
   log "existing PKI found in $PKI_DIR — reusing"
 fi
 
+# The UNM API (uid/gid 1001) renders ca.json into this shared volume, so its top
+# dir must be group-writable for gid 1001. Fresh volumes get that from the image
+# build; volumes created by OLDER images were step-owned 755 and need a one-time
+# root fixup (this container runs as `step` and cannot chgrp to a foreign group):
+#   docker run --rm -v <ca-cfg-volume>:/mnt alpine sh -c 'chgrp 1001 /mnt && chmod 2775 /mnt'
+if [ "$(stat -c %G "$CFG_DIR" 2>/dev/null)" != "1001" ]; then
+  log "WARN: $CFG_DIR is not group-owned by gid 1001 — the API cannot write ca.json. Fix once (as root): chgrp 1001 + chmod 2775 on the volume's top dir."
+fi
+
 # The PUBLIC root cert is mirrored into the shared config volume so the UNM API
 # (which mounts /data/ca but never /pki) can use it as its TLS trust anchor and
 # surface the fingerprint/expiry. Only the certificate — no keys ever leave /pki.
 cp "$PKI_DIR/root_ca.crt" "$CFG_DIR/root_ca.crt"
+# The UNM API runs unprivileged (uid 1001); make this PUBLIC cert world-readable
+# so it can read its mTLS trust anchor regardless of who created the file.
+chmod 644 "$CFG_DIR/root_ca.crt"
 
 # --- 2. Default ca.json (only if the API has not rendered one yet) ------------
 if [ ! -f "$CA_JSON" ]; then

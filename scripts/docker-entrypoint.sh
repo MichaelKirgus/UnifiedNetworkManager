@@ -1,30 +1,35 @@
 #!/bin/sh
 # UNM container entrypoint wrapper — baked into every image built from the repo
-# root context (api, mcp, all plugins). Runs as PID 1 before the app starts.
+# root context (api, mcp, all plugins). Runs as PID 1 (root) before the app.
 #
-# Optional macvlan default-gateway setup: Docker does NOT install a default
-# route into macvlan interfaces — without one, a container only reaches its own
-# VLAN subnet (no internet, no other subnets). When UNM_DEFAULT_GATEWAY is set,
-# this wrapper installs `default via <gw>` on the container's non-Docker
-# interface before exec'ing the app. Unset/empty = pure passthrough, so normal
-# bridge deployments are completely unaffected.
+# It performs three OPTIONAL, root-only steps in order, then hands off to the app:
 #
-#   UNM_DEFAULT_GATEWAY  IPv4 to use as default gateway (e.g. 192.168.50.1).
-#                        Empty/unset → the wrapper does nothing but exec "$@".
-#   UNM_GW_IFACE         Optional: force the interface name instead of auto-detect.
+#   1. Default gateway (macvlan): when UNM_DEFAULT_GATEWAY is set, install
+#      `default via <gw>` on the container's non-Docker interface. Docker does not
+#      add a default route to macvlan interfaces — without it a container only
+#      reaches its own VLAN subnet. Unset/empty = no-op (bridge deployments).
 #
-# Auto-detect picks the first non-lo interface with a global IPv4 OUTSIDE
-# Docker's bridge range (172.16/12) — i.e. the macvlan interface in both hybrid
-# (bridge + macvlan) and macvlan-only setups. `ip route replace` is idempotent;
-# in a hybrid setup it deliberately STEALS the bridge default route, so all
-# outbound traffic then flows through your VLAN gateway.
+#   2. Data-dir ownership: when UNM_CHOWN_PATHS is set, chown each listed path to
+#      the unprivileged user so EXISTING persistent volumes (created while running
+#      as root) are writable after the drop below. Skip with UNM_SKIP_CHOWN=1
+#      (e.g. huge byte stores you pre-chowned once). Fresh/ephemeral dirs are
+#      already created owned by `app` at build time, so they need no runtime chown.
 #
-# The wrapper NEVER blocks startup: if no suitable interface is found or the
-# route cannot be written (missing CAP_NET_ADMIN), it logs to stderr and
-# continues with the app anyway.
+#   3. Privilege drop: unless UNM_RUN_AS_ROOT=1, exec the app through
+#      /usr/local/lib/unm-privdrop.js (a dependency-free Node helper) which joins
+#      any host docker group (UNM_DOCKER_GID), drops to `app` (uid/gid 1001), and
+#      runs the real command with stdio inherited + signal forwarding. Set
+#      UNM_RUN_AS_ROOT=1 to skip the drop entirely (the explicit "run as root"
+#      opt-out, e.g. for rollback).
+#
+# Every step is best-effort: a failure logs to stderr and NEVER blocks startup.
 
 set -u
 
+APP_UID=1001
+APP_GID=1001
+
+# --- 1. Optional macvlan default gateway --------------------------------------
 if [ -n "${UNM_DEFAULT_GATEWAY:-}" ]; then
   IFACE="${UNM_GW_IFACE:-}"
   if [ -z "$IFACE" ]; then
@@ -50,4 +55,28 @@ if [ -n "${UNM_DEFAULT_GATEWAY:-}" ]; then
   fi
 fi
 
-exec "$@"
+# --- 2. Optional runtime chown of persistent data dirs ------------------------
+if [ "${UNM_SKIP_CHOWN:-0}" = "1" ]; then
+  echo "[unm] UNM_SKIP_CHOWN=1 — skipping data-dir ownership fixup"
+elif [ -n "${UNM_CHOWN_PATHS:-}" ]; then
+  for p in $UNM_CHOWN_PATHS; do
+    if [ -e "$p" ]; then
+      if chown -R "$APP_UID:$APP_GID" "$p" >/dev/null 2>&1; then
+        echo "[unm] chowned $p -> ${APP_UID}:${APP_GID}"
+      else
+        echo "[unm] WARN: could not chown $p (continuing)" >&2
+      fi
+    fi
+  done
+fi
+
+# --- 3. Privilege drop (or explicit root) -------------------------------------
+if [ "${UNM_RUN_AS_ROOT:-0}" = "1" ]; then
+  echo "[unm] UNM_RUN_AS_ROOT=1 — running as root (no privilege drop)"
+  exec "$@"
+else
+  # The Node helper does the group join + setuid/setgid and re-execs the app with
+  # stdio inherited and SIGTERM/SIGINT forwarded, exiting with the app's code.
+  exec node /usr/local/lib/unm-privdrop.js "$@"
+fi
+
