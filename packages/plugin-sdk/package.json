@@ -15,14 +15,14 @@
     "cors": "^2.8.5",
     "express": "^5.3.0",
     "ssh2": "^1.16.0",
-    "ws": "^8.21.3"
+    "ws": "^8.22.0"
   },
   "devDependencies": {
     "@types/cors": "^2.8.17",
     "@types/express": "^5.0.6",
     "@types/node": "^26.6.4",
     "@types/ssh2": "^1.15.6",
-    "@types/ws": "^8.18.1",
+    "@types/ws": "^8.18.2",
     "typescript": "^5.3.2"
   }
 }
