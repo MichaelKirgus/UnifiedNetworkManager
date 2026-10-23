@@ -12,10 +12,10 @@
     "postinstall": "node scripts/postinstall-patch-asn1-ber.cjs"
   },
   "dependencies": {
-    "net-snmp": "^3.29.1"
+    "net-snmp": "^3.29.2"
   },
   "devDependencies": {
-    "@types/node": "^26.6.4",
+    "@types/node": "^26.6.5",
     "typescript": "^5.3.2"
   }
 }
