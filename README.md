@@ -122,15 +122,18 @@ The default `docker-compose.yml` is the end-user deployment: same services, env 
 
 The **MCP server is not exposed to the host by default** — it carries an API token with full agent capabilities, so publishing it on all interfaces is a deliberate choice. If you need remote MCP access, add your own mapping (e.g. `UNM_MCP_PORT=8081`) behind auth or a reverse proxy.
 
-For a production deployment, copy the annotated template to `.env` and change at least the values marked **MUST CHANGE** (`MASTER_KEY`, `CRYPTO_SALT`, `POSTGRES_PASSWORD`, `PLUGIN_API_KEY`) — they are insecure dev defaults:
+For a production deployment, copy the annotated template to `.env` and change at least the values marked **MUST CHANGE** (`MASTER_KEY`, `CRYPTO_SALT`, `JWT_SECRET`, `POSTGRES_PASSWORD`, `PLUGIN_API_KEY`) — they are insecure dev defaults:
 
 ```bash
 cp .env.example .env
-# edit .env → set a strong MASTER_KEY (openssl rand -hex 32), CRYPTO_SALT, POSTGRES_PASSWORD, PLUGIN_API_KEY
+# edit .env → set a strong MASTER_KEY (openssl rand -hex 32), CRYPTO_SALT, JWT_SECRET,
+#              POSTGRES_PASSWORD, PLUGIN_API_KEY
 docker compose up -d
 ```
 
 Tear down with `docker compose down` (add `-v` to also remove the Postgres volume).
+
+**Postgres is not published to the host** — api/mcp reach it over the internal compose network only. If you need psql-from-host, add a loopback-only mapping (`"127.0.0.1:5432:5432"`) rather than `"5432:5432"`. Note that `POSTGRES_USER/PASSWORD/DB` are applied when the data volume is first initialized; to rotate credentials on an existing deployment, run `ALTER USER <user> PASSWORD '<new>';` inside Postgres and set the same value in `.env`.
 
 ### First login
 
@@ -333,7 +336,7 @@ The `mcp/` service exposes the UNM API to AI agents via the [Model Context Proto
 | `UNM_API_BASE` | Base URL of the API. Defaults to `http://localhost:3000/v1`; the container uses `http://api:3000/v1`. |
 | `MCP_DEBUG_KEY` | Bearer key gating `/debug/mcp` (default in compose: `dev-mcp-debug-key`). |
 | `MCP_KEY` | Optional — when set, also gates the plain `/mcp` endpoint. |
-| `DATABASE_URL` | Postgres connection used by the debug SQL tool only (same DB as the API). |
+| `DATABASE_URL` | Postgres connection used by the debug SQL tool only (same DB as the API; rendered from the same `POSTGRES_*` vars in compose). |
 
 **VS Code MCP client config** (remote/HTTP transport):
 
@@ -367,7 +370,8 @@ The same server also runs in **stdio mode** without Docker (client-launched, pro
 | Variable | Default | Effect |
 |----------|---------|--------|
 | `JWT_SECRET` | `dev-secret` | JWT signing key. Set a random value in `.env` for production (compose reads it via `${JWT_SECRET:-dev-secret}`) |
-| `DATABASE_URL` | `postgresql://unm:unm@postgres:5432/unm` | Postgres connection |
+| `DATABASE_URL` | built from `POSTGRES_*` vars | Postgres connection — compose renders `postgresql://${POSTGRES_USER:-unm}:${POSTGRES_PASSWORD:-unm}@postgres:5432/${POSTGRES_DB:-unm}`, so setting the `POSTGRES_*` vars in `.env` is enough; you only override this directly to point at an external database |
+| `UNM_CORS_ORIGINS` | *(empty)* | Comma-separated CORS allowlist for the API. The webapp origin from `WEBAUTHN_ORIGIN` is always included, and `http(s)://localhost` / `127.0.0.1` on any port are always allowed (dev works without setting this). Production: set your real origin(s), e.g. `https://unm.example.com` |
 | `PLUGIN_API_KEY` | `dev-plugin-key` | Shared key the API presents to plugins (`x-plugin-api-key`) and that plugins use for log shipping / broker calls |
 | `AUTH_PLUGIN_ID` | built-in basic-auth plugin | Active identity provider; falls back to built-in when unset/offline |
 | `SECRETS_PLUGIN_ID` | built-in secrets-provider plugin | Active secrets provider; same fallback behavior |
