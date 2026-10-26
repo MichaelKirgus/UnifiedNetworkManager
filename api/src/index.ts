@@ -67,6 +67,36 @@ import { db } from './db';
 const PORT = Number(process.env.PORT ?? 3000);
 const API_PREFIX = '/v1';
 
+/**
+ * Explicitly allowed CORS origins, from UNM_CORS_ORIGINS (comma-separated).
+ * WEBAUTHN_ORIGIN is folded in too: the webapp origin that passkeys are bound
+ * to and the origin browsers may call cross-origin should be the same list —
+ * keeping them separate invites a misconfiguration where one works and the
+ * other doesn't. Read at request time (cheap string split) so `docker compose`
+ * env changes apply on restart without code coupling.
+ */
+function corsAllowedOrigins(): string[] {
+  const raw = [process.env.UNM_CORS_ORIGINS ?? '', process.env.WEBAUTHN_ORIGIN ?? '']
+    .join(',')
+    .split(',')
+    .map((o) => o.trim())
+    .filter(Boolean);
+  return [...new Set(raw)];
+}
+
+/**
+ * True for any http(s)://localhost:<port> or http(s)://127.0.0.1:<port>. These
+ * loopback origins are ALWAYS allowed regardless of configuration: the
+ * development webapp is served from http://localhost:8080 without a
+ * fully-qualified domain name, and local scripts/probes hit the API cross-origin
+ * all the time — both must keep working out of the box on every machine. This
+ * only ever widens access for loopback origins (unreachable off-host anyway);
+ * it is deliberately not configurable away.
+ */
+function isLocalhostOrigin(origin: string): boolean {
+  return /^(https?:\/\/)(localhost|127\.0\.0\.1)(:\d+)?\/?$/.test(origin);
+}
+
 // General limiter applied to every /v1 route to guard database-backed
 // handlers against abuse/brute force. The per-window budget is a global setting
 // (apiRateLimitPerMinute) so busy multi-user deployments — where the webapp's
@@ -129,9 +159,28 @@ async function main(): Promise<void> {
   const spec = loadOpenApiSpec();
   const specPath = resolveOpenApiPath();
 
+  // CORS: this is an admin API — never answer with a wildcard origin. Allowed
+  // origins come from UNM_CORS_ORIGINS (comma-separated, e.g.
+  // "https://unm.example.com") plus WEBAUTHN_ORIGIN so the passkey browser
+  // check and the CORS allowlist can't drift apart. Localhost/127.0.0.1 origins
+  // are ALWAYS allowed: the dev webapp runs on http://localhost:8080 (or any
+  // port) without a fully-qualified domain name, and local scripts/probes must
+  // keep working out of the box. Anything else gets no CORS headers at all —
+  // cross-origin browsers then block the response.
+  const corsOrigins = new Set<string>(corsAllowedOrigins());
+
   const app = express();
   app.use(helmet());
-  app.use(cors());
+  app.use(
+    cors({
+      origin(origin, callback) {
+        // No Origin header (same-origin request or non-browser client) → allow.
+        if (!origin || isLocalhostOrigin(origin) || corsOrigins.has(origin)) return callback(null, true);
+        console.warn(`[api] CORS: rejecting cross-origin request from ${origin} (not in UNM_CORS_ORIGINS/WEBAUTHN_ORIGIN)`);
+        return callback(null, false);
+      },
+    }),
+  );
   // Filesystem writes (POST /devices/:id/filesystem op=write) carry base64 file
   // contents — allow up to ~10 MiB of inbound JSON so a user can upload files that size.
   app.use(express.json({ limit: '12mb' }));

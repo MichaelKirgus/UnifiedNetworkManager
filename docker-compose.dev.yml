@@ -110,6 +110,12 @@ services:
       #   WEBAUTHN_RP_ID=unm.example.com  WEBAUTHN_ORIGIN=https://unm.example.com
       - WEBAUTHN_RP_ID=${WEBAUTHN_RP_ID:-localhost}
       - WEBAUTHN_ORIGIN=${WEBAUTHN_ORIGIN:-http://localhost:8080}
+      # CORS allowlist for the API (comma-separated origins). The webapp origin
+      # from WEBAUTHN_ORIGIN is always included, and http(s)://localhost /
+      # 127.0.0.1 on ANY port are always allowed so the dev webapp works without
+      # a fully-qualified domain name. Production: set your real origin(s), e.g.
+      #   UNM_CORS_ORIGINS=https://unm.example.com
+      - UNM_CORS_ORIGINS=${UNM_CORS_ORIGINS:-}
       # How many days of plugin log entries are kept before the retention sweep deletes them.
       - LOG_RETENTION_DAYS=${LOG_RETENTION_DAYS:-7}
       # Central file repository metadata lives in Postgres; the BYTES live in a
