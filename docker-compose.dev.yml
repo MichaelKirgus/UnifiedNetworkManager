@@ -125,6 +125,15 @@ services:
       # a fully-qualified domain name. Production: set your real origin(s), e.g.
       #   UNM_CORS_ORIGINS=https://unm.example.com
       - UNM_CORS_ORIGINS=${UNM_CORS_ORIGINS:-}
+      # Reverse-proxy support (see docs/REVERSE-PROXY.md). When the API sits
+      # behind a proxy, set UNM_TRUST_PROXY so rate limiting buckets on the real
+      # client IP from X-Forwarded-For instead of the proxy's address:
+      #   "1" = one hop (single proxy), N = N hops, or CIDR/named policies.
+      - UNM_TRUST_PROXY=${UNM_TRUST_PROXY:-}
+      # Optional explicit client-IP header (e.g. Cloudflare: CF-Connecting-IP).
+      # Wins over X-Forwarded-For — only set it if the proxy is the sole path
+      # to the API, otherwise clients can forge it and reset their own limits.
+      - UNM_CLIENT_IP_HEADER=${UNM_CLIENT_IP_HEADER:-}
       # How many days of plugin log entries are kept before the retention sweep deletes them.
       - LOG_RETENTION_DAYS=${LOG_RETENTION_DAYS:-7}
       # Central file repository metadata lives in Postgres; the BYTES live in a
@@ -1439,9 +1448,12 @@ services:
       # so it must be passed as a build arg here rather than as a plain
       # `environment:` entry below, which the already-built assets would
       # never see. The value is the URL the *browser* (not the container)
-      # uses to reach the API, i.e. the host's published api port.
+      # uses to reach the API. Dev default is the ABSOLUTE host port because
+      # the vite dev server (:8080) and the host-run API (:3000) are different
+      # origins; set UNM_WEBAPP_API_URL=/v1 for a same-origin reverse-proxy
+      # setup (no CORS; see docs/REVERSE-PROXY.md).
       args:
-        VITE_API_URL: http://localhost:3000/v1
+        VITE_API_URL: ${UNM_WEBAPP_API_URL:-http://localhost:3000/v1}
     ports:
       - ${UNM_WEB_PORT:-8080}:5173
     environment:

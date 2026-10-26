@@ -59,6 +59,7 @@ import { startAutomationEvaluatorWorker } from './workers/automations';
 import { LEADER_KEYS, runAsLeader } from './workers/leader';
 import { initWorker } from './workers/stats';
 import { attachConsoleProxy } from './consoleProxy';
+import { clientIpKeyGenerator, parseTrustProxy } from './utils/clientIp';
 import { setPluginTransports } from './utils/pluginHttp';
 import { startApiMtls } from './ca/apiMtls';
 import { apiVersion } from './version';
@@ -105,6 +106,18 @@ function isLocalhostOrigin(origin: string): boolean {
 // the default budget applies (the limiter must never break request flow). The
 // auth endpoints keep their own tight, FIXED limiter below — brute-force
 // protection is not tunable from the UI.
+//
+// Client-IP resolution behind a reverse proxy: by default express-rate-limit
+// buckets on req.ip, which is the PROXY's address when UNM sits behind one —
+// collapsing every real client into a single bucket. Two env knobs fix that
+// (see docs/REVERSE-PROXY.md):
+//   UNM_TRUST_PROXY        → app.set('trust proxy', …) so req.ip comes from the
+//                            leftmost X-Forwarded-For entry of TRUSTED peers.
+//   UNM_CLIENT_IP_HEADER   → explicit client-IP header (e.g. Cloudflare's
+//                            CF-Connecting-IP); wins over everything else via
+//                            the keyGenerator below. Only set it if your proxy
+//                            is the sole path to the API — otherwise clients
+//                            can forge the header and reset their own bucket.
 const generalLimiter = rateLimit({
   windowMs: 60_000,
   limit: async () => {
@@ -114,6 +127,8 @@ const generalLimiter = rateLimit({
     } catch { /* fall through to the default budget */ }
     return 300;
   },
+  // undefined = library default (req.ip) — correct once trust proxy is set.
+  keyGenerator: clientIpKeyGenerator(),
   standardHeaders: true,
   legacyHeaders: false,
   // JSON body so the webapp's error handling shows a useful message instead of
@@ -128,6 +143,8 @@ const generalLimiter = rateLimit({
 const authLimiter = rateLimit({
   windowMs: 60_000,
   limit: 10,
+  // Same client-IP resolution as the general limiter (see above).
+  keyGenerator: clientIpKeyGenerator(),
   standardHeaders: true,
   legacyHeaders: false,
   message: { error: 'Too many login attempts' },
@@ -170,6 +187,25 @@ async function main(): Promise<void> {
   const corsOrigins = new Set<string>(corsAllowedOrigins());
 
   const app = express();
+
+  // Reverse-proxy support (UNM_TRUST_PROXY): when set, Express reads the real
+  // client IP from X-Forwarded-For for peers matching the policy — "1" trusts
+  // exactly one hop (a single proxy), a number N trusts N hops, and CIDR lists
+  // / named policies (loopback, link-local, …) trust whole networks. Without
+  // it req.ip is always the direct TCP peer, which behind a proxy means every
+  // client shares the proxy's rate-limit bucket. See docs/REVERSE-PROXY.md.
+  //
+  // Deliberately NOT set to `false` when unset: express-rate-limit v8 throws
+  // ERR_ERL_UNEXPECTED_X_FORWARDED_FOR for XFF requests only when trust proxy
+  // is strictly false, while the default (undefined) ignores the header — so
+  // leaving it untouched keeps pre-existing proxy deployments working until
+  // UNM_TRUST_PROXY is configured.
+  const trustProxy = parseTrustProxy(process.env.UNM_TRUST_PROXY);
+  if (trustProxy) { // truthy: unset/empty/"0" mean no trusted hops — leave the default alone
+    app.set('trust proxy', trustProxy);
+    console.log(`[api] trust proxy enabled: ${JSON.stringify(trustProxy)} — client IPs are read from X-Forwarded-For for matching peers`);
+  }
+
   app.use(helmet());
   app.use(
     cors({

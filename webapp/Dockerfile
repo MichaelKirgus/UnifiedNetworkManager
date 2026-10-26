@@ -11,7 +11,11 @@ WORKDIR /app
 # import.meta.env.VITE_* references during `vite build`), so it must be
 # supplied as a build arg rather than a runtime container environment
 # variable, which would have no effect on the already-built assets.
-ARG VITE_API_URL=http://localhost:3000/v1
+# Empty (the default) → the bundle uses the RELATIVE base "/v1": same-origin
+# access, i.e. the webapp and API are served under one hostname — the standard
+# reverse-proxy deployment (see docs/REVERSE-PROXY.md). Set an absolute URL
+# only for cross-origin setups (e.g. dev: http://localhost:3000/v1).
+ARG VITE_API_URL=
 ENV VITE_API_URL=${VITE_API_URL}
 
 COPY package*.json ./

@@ -176,6 +176,18 @@ Two automated lanes sit on top of that (see `.github/workflows/docker-publish.ym
   `git tag v0.2.0 && git push origin v0.2.0`
 - **Nightly pre-releases** — a daily scheduled build of `main` (or manual dispatch) publishes images tagged `nightly-<YYYYMMDD>` plus rolling `nightly`, and creates a dated GitHub **pre-release**. Pre-releases never move `latest`.
 
+### Reverse proxy (remote access)
+
+The supported way to reach UNM remotely is **TLS termination + auth at a reverse proxy** in front of the stack — see [docs/REVERSE-PROXY.md](docs/REVERSE-PROXY.md) for full nginx / Caddy / Cloudflare examples. Three env vars make it work:
+
+| Variable | Default | Effect |
+|----------|---------|--------|
+| `UNM_TRUST_PROXY` | *(off)* | **Required behind any proxy.** Trusts `X-Forwarded-For` so rate limiting buckets on the **real client IP** instead of the proxy's address. Set to `1` for a single proxy hop, `N` for N hops, or a CIDR list / named policy (`loopback`, …). Without it, every proxied request is rejected with 500 — the rate limiter refuses untrusted `X-Forwarded-For` headers by design. |
+| `UNM_CLIENT_IP_HEADER` | *(off)* | Explicit header carrying the client IP (e.g. Cloudflare's `CF-Connecting-IP`). Wins over `X-Forwarded-For`; only set it if the proxy is the sole path to the API. |
+| `UNM_WEBAPP_API_URL` | `/v1` (relative) | The URL the *browser* uses for the API, baked into the webapp at build time. Pre-built images default to same-origin (`/v1`) — one public hostname serves UI + API, no CORS. Set an absolute URL only for cross-origin setups (e.g. dev: `http://localhost:3000/v1`); rebuild the webapp image after changing it. |
+
+The recommended layout is **same-origin**: one public hostname serves the webapp and proxies `/v1/*` to the API, so there's no CORS configuration and the SSH-console WebSocket works with zero extra client setup — which is exactly what the pre-built images ship by default.
+
 ## Security model
 
 - **RBAC** — flat permission catalog (`api/src/auth/permissions.ts` is the single source of truth; `GET /v1/permissions` serves it to the UIs). Users carry their effective permissions in JWT claims; roles are DB-backed bundles unioned into explicit grants at login time. New permissions added to the catalog are **backfilled onto existing admin users and the built-in admin role** on API start, so upgrades never lock admins out.
@@ -371,7 +383,9 @@ The same server also runs in **stdio mode** without Docker (client-launched, pro
 |----------|---------|--------|
 | `JWT_SECRET` | `dev-secret` | JWT signing key. Set a random value in `.env` for production (compose reads it via `${JWT_SECRET:-dev-secret}`) |
 | `DATABASE_URL` | built from `POSTGRES_*` vars | Postgres connection — compose renders `postgresql://${POSTGRES_USER:-unm}:${POSTGRES_PASSWORD:-unm}@postgres:5432/${POSTGRES_DB:-unm}`, so setting the `POSTGRES_*` vars in `.env` is enough; you only override this directly to point at an external database |
-| `UNM_CORS_ORIGINS` | *(empty)* | Comma-separated CORS allowlist for the API. The webapp origin from `WEBAUTHN_ORIGIN` is always included, and `http(s)://localhost` / `127.0.0.1` on any port are always allowed (dev works without setting this). Production: set your real origin(s), e.g. `https://unm.example.com` |
+| `UNM_CORS_ORIGINS` | *(empty)* | Comma-separated CORS allowlist for the API. The webapp origin from `WEBAUTHN_ORIGIN` is always included, and `http(s)://localhost` / `127.0.0.1` on any port are always allowed (dev works without setting this). Production: set your real origin(s), e.g. `https://unm.example.com`. Not needed for a same-origin reverse-proxy setup |
+| `UNM_TRUST_PROXY` | *(off)* | Reverse proxy: trust `X-Forwarded-For` so rate limiting uses the real client IP (`1` = one hop, `N`, or CIDR/named policy). See [Reverse proxy](#reverse-proxy-remote-access) |
+| `UNM_CLIENT_IP_HEADER` | *(off)* | Reverse proxy: explicit client-IP header (e.g. Cloudflare's `CF-Connecting-IP`). Wins over `X-Forwarded-For`; only set if the proxy is the sole ingress |
 | `PLUGIN_API_KEY` | `dev-plugin-key` | Shared key the API presents to plugins (`x-plugin-api-key`) and that plugins use for log shipping / broker calls |
 | `AUTH_PLUGIN_ID` | built-in basic-auth plugin | Active identity provider; falls back to built-in when unset/offline |
 | `SECRETS_PLUGIN_ID` | built-in secrets-provider plugin | Active secrets provider; same fallback behavior |

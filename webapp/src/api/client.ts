@@ -1,4 +1,12 @@
-const BASE = import.meta.env.VITE_API_URL ?? 'http://localhost:3000/v1';
+// API base URL, baked in at build time (Vite inlines VITE_* at build).
+// - Unset → "/v1" (relative): the browser calls the API on the SAME origin as
+//   the webapp. This is the default for pre-built images and the recommended
+//   reverse-proxy layout — one public URL serves UI + API, no CORS needed, and
+//   rate limiting sees real client IPs via X-Forwarded-For (docs/REVERSE-PROXY.md).
+// - Absolute URL (e.g. http://localhost:3000/v1): cross-origin access, used by
+//   the dev setup where the vite server on :8080 talks to the host-run API on
+//   :3000. Set via VITE_API_URL at build time.
+const BASE = import.meta.env.VITE_API_URL || '/v1';
 
 /** API error that may carry per-field validation messages (e.g. plugin settings). */
 export class ApiError extends Error {
@@ -3007,10 +3015,21 @@ export interface ConsoleTicketResponse {
 /** Builds the browser-facing console WebSocket URL for one minted ticket.
  *  The API proxies it verbatim to the plugin's /console endpoint — binary frames
  *  are raw terminal I/O, text frames carry JSON control messages ({ type: 'ready' |
- *  'resize' | 'exit' | 'error', … }). */
+ *  'resize' | 'exit' | 'error', … }).
+ *
+ *  WebSocket URLs must be absolute (ws:// or wss://). When BASE is a relative
+ *  path (reverse-proxy / same-origin setup) the scheme + origin are derived from
+ *  window.location — https pages get wss, http pages get ws. */
 export function consoleSocketUrl(deviceId: string, ticket: string): string {
   const base = BASE.replace(/\/$/, '');
-  const wsBase = base.replace(/^http/i, 'ws');
+  let wsBase: string;
+  if (/^https?:/i.test(base)) {
+    wsBase = base.replace(/^http/i, 'ws');
+  } else {
+    // Relative BASE — same origin as the webapp (reverse proxy in front).
+    const loc = window.location;
+    wsBase = `${loc.protocol === 'https:' ? 'wss' : 'ws'}://${loc.host}${base}`;
+  }
   return `${wsBase}/devices/${encodeURIComponent(deviceId)}/console/ws?ticket=${encodeURIComponent(ticket)}`;
 }
 
