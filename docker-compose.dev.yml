@@ -44,8 +44,14 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:-unm}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-unm}
       POSTGRES_DB: ${POSTGRES_DB:-unm}
+    # Loopback-only host port. The api/mcp containers reach Postgres over the
+    # compose network (postgres:5432); this mapping exists ONLY so the dev
+    # workflow's host-side tooling works — `drizzle-kit push` and the host-run
+    # API both connect to localhost:5432. Binding 127.0.0.1 (not 0.0.0.0) keeps
+    # it off the LAN while still serving those local tools. The end-user
+    # docker-compose.yml drops this port entirely (see generator).
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     # Accepting-connections check (no auth) with the initdb user/database.

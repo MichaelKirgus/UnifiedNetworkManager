@@ -33,8 +33,13 @@ const kept = [];
 const skipped = [];
 for (const [name, svc] of Object.entries(services)) {
   if (!svc.build) {
-    // External images (postgres, test-only fixtures) — keep verbatim.
-    kept.push([name, svc]);
+    // External images — keep verbatim, except Postgres: end users reach it only
+    // from inside the compose network (api/mcp), so drop its host port mapping.
+    // The dev file keeps a loopback-only bind for host-side tooling; re-add a
+    // "5432:5432" entry here if you want psql-from-host in an end-user deploy.
+    const out = name === 'postgres' ? { ...svc } : svc;
+    if (name === 'postgres') delete out.ports;
+    kept.push([name, out]);
     continue;
   }
   const out = { ...svc };
@@ -72,6 +77,10 @@ const header = `# UNM — standard deployment compose (END USERS: no local build
 # token with full agent capabilities, so exposing it on all interfaces is a
 # deliberate choice. If you need remote MCP access, add your own mapping in .env
 # or a reverse proxy (with auth), e.g. UNM_MCP_PORT=8081.
+#
+# Postgres is likewise NOT published to the host — api/mcp reach it over the
+# internal compose network only. Re-add a "5432:5432" ports entry if you need
+# psql-from-host (bind 127.0.0.1, not 0.0.0.0).
 `;
 
 const body = YAML.stringify(outDoc, { lineWidth: 0 });

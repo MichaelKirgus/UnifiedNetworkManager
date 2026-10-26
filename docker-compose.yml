@@ -16,6 +16,10 @@
 # token with full agent capabilities, so exposing it on all interfaces is a
 # deliberate choice. If you need remote MCP access, add your own mapping in .env
 # or a reverse proxy (with auth), e.g. UNM_MCP_PORT=8081.
+#
+# Postgres is likewise NOT published to the host — api/mcp reach it over the
+# internal compose network only. Re-add a "5432:5432" ports entry if you need
+# psql-from-host (bind 127.0.0.1, not 0.0.0.0).
 
 version: "3.9"
 services:
@@ -25,8 +29,6 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:-unm}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-unm}
       POSTGRES_DB: ${POSTGRES_DB:-unm}
-    ports:
-      - 5432:5432
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
