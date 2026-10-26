@@ -63,7 +63,7 @@ services:
     environment:
       - PORT=3000
       - JWT_SECRET=${JWT_SECRET:-dev-secret}
-      - DATABASE_URL=postgresql://unm:unm@postgres:5432/unm
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-unm}:${POSTGRES_PASSWORD:-unm}@postgres:5432/${POSTGRES_DB:-unm}
       - AUTH_PLUGIN_ID=${AUTH_PLUGIN_ID:-00000000-0000-4000-8000-000000000001}
       - PLUGIN_API_KEY=${PLUGIN_API_KEY:-dev-plugin-key}
       - WEBAUTHN_RP_ID=${WEBAUTHN_RP_ID:-localhost}
@@ -706,7 +706,7 @@ services:
       - UNM_API_TOKEN=${UNM_API_TOKEN:-}
       - MCP_DEBUG_KEY=${MCP_DEBUG_KEY:-dev-mcp-debug-key}
       - MCP_KEY=${MCP_KEY:-}
-      - DATABASE_URL=postgresql://unm:unm@postgres:5432/unm
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-unm}:${POSTGRES_PASSWORD:-unm}@postgres:5432/${POSTGRES_DB:-unm}
       - UNM_DEFAULT_GATEWAY=${UNM_DEFAULT_GATEWAY:-}
       - UNM_RUN_AS_ROOT=${UNM_RUN_AS_ROOT:-}
       - UNM_SKIP_CHOWN=${UNM_SKIP_CHOWN:-}

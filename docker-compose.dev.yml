@@ -105,7 +105,9 @@ services:
       - PORT=3000
       # Read from .env in production; dev falls back to the placeholder.
       - JWT_SECRET=${JWT_SECRET:-dev-secret}
-      - DATABASE_URL=postgresql://unm:unm@postgres:5432/unm
+      # Built from the same POSTGRES_* vars as the postgres service, so a custom
+      # user/password/db set in .env reaches the API (empty/unset → unm/unm/unm).
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-unm}:${POSTGRES_PASSWORD:-unm}@postgres:5432/${POSTGRES_DB:-unm}
       # Identity provider selection (the API is a pure auth broker).
       # AUTH_PLUGIN_ID names the active identity provider plugin; if unset or
       # offline the API falls back to the built-in basic-auth plugin.
@@ -1271,7 +1273,7 @@ services:
       # Same database as the API — used by the debug SQL tool AND by the
       # plugin_probe debug tool (it reads every endpoint from the plugins
       # table, so there is no static endpoint list to maintain here).
-      - DATABASE_URL=postgresql://unm:unm@postgres:5432/unm
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-unm}:${POSTGRES_PASSWORD:-unm}@postgres:5432/${POSTGRES_DB:-unm}
       # Optional macvlan default gateway (scripts/docker-entrypoint.sh) — empty = no-op.
       - UNM_DEFAULT_GATEWAY=${UNM_DEFAULT_GATEWAY:-}
       # Privilege drop (scripts/docker-entrypoint.sh): the app runs as uid/gid 1001
