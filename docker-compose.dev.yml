@@ -97,7 +97,8 @@ services:
       - "3000:3000"
     environment:
       - PORT=3000
-      - JWT_SECRET=dev-secret
+      # Read from .env in production; dev falls back to the placeholder.
+      - JWT_SECRET=${JWT_SECRET:-dev-secret}
       - DATABASE_URL=postgresql://unm:unm@postgres:5432/unm
       # Identity provider selection (the API is a pure auth broker).
       # AUTH_PLUGIN_ID names the active identity provider plugin; if unset or

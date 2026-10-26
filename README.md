@@ -366,7 +366,7 @@ The same server also runs in **stdio mode** without Docker (client-launched, pro
 
 | Variable | Default | Effect |
 |----------|---------|--------|
-| `JWT_SECRET` | `dev-secret` | JWT signing key — change in production |
+| `JWT_SECRET` | `dev-secret` | JWT signing key. Set a random value in `.env` for production (compose reads it via `${JWT_SECRET:-dev-secret}`) |
 | `DATABASE_URL` | `postgresql://unm:unm@postgres:5432/unm` | Postgres connection |
 | `PLUGIN_API_KEY` | `dev-plugin-key` | Shared key the API presents to plugins (`x-plugin-api-key`) and that plugins use for log shipping / broker calls |
 | `AUTH_PLUGIN_ID` | built-in basic-auth plugin | Active identity provider; falls back to built-in when unset/offline |

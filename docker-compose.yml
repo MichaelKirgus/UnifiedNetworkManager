@@ -60,7 +60,7 @@ services:
       - 3000:3000
     environment:
       - PORT=3000
-      - JWT_SECRET=dev-secret
+      - JWT_SECRET=${JWT_SECRET:-dev-secret}
       - DATABASE_URL=postgresql://unm:unm@postgres:5432/unm
       - AUTH_PLUGIN_ID=${AUTH_PLUGIN_ID:-00000000-0000-4000-8000-000000000001}
       - PLUGIN_API_KEY=${PLUGIN_API_KEY:-dev-plugin-key}
