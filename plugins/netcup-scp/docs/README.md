@@ -29,7 +29,7 @@ which performs exactly this flow and stores only a refresh token:
 | Field | Value |
 | --- | --- |
 | Plugin | netcup SCP Plugin |
-| Management address | `servercontrolpanel.de` — a bare host. UNM device addresses must not carry a scheme or path; the plugin adds `https://` and the `/scp-core` API prefix automatically. |
+| Management address | `www.servercontrolpanel.de` — a bare host. UNM device addresses must not carry a scheme or path; the plugin adds `https://` and the `/scp-core` API prefix automatically. **It must match the host you logged in with:** netcup's Keycloak realm is per-host, so a refresh token minted via `www.` (e.g. by the netcup CLI) only works against `www.` — mixing hosts fails with "Invalid token issuer". |
 | Secret | *netcup SCP Refresh Token* (preferred) **or** *API Key (without secret)* containing a static access token |
 
 One UNM device = one netcup account. All VMs in that account appear as rows of

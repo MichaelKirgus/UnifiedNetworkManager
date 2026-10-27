@@ -313,11 +313,13 @@ export class ScpClient {
     return `Bearer ${resp.access_token}`;
   }
 
-  /** Throws ScpApiError for non-2xx; returns the parsed body otherwise. */
-  private async request<T>(method: string, path: string, opts?: { body?: unknown; contentType?: string; params?: Record<string, unknown> }): Promise<T> {
+  /** Throws ScpApiError for non-2xx; returns the parsed body otherwise.
+   *  `noAuth` skips the Authorization header entirely (liveness probes) so a
+   *  bad token can't be mistaken for an unreachable API. */
+  private async request<T>(method: string, path: string, opts?: { body?: unknown; contentType?: string; params?: Record<string, unknown>; noAuth?: boolean }): Promise<T> {
     const headers: Record<string, string> = {};
     if (opts?.body !== undefined) headers['Content-Type'] = opts.contentType ?? 'application/json';
-    headers.Authorization = await this.resolveAuth();
+    if (!opts?.noAuth) headers.Authorization = await this.resolveAuth();
     const config: Record<string, unknown> = { headers };
     if (opts?.body !== undefined) config.data = opts.body;
     if (opts?.params) config.params = opts.params;
@@ -341,9 +343,9 @@ export class ScpClient {
 
   // --- Misc -----------------------------------------------------------------
 
-  /** Liveness probe — no auth required. Resolves "OK". */
+  /** Liveness probe — no auth required (and none sent). Resolves "OK". */
   async ping(): Promise<string> {
-    const resp = await this.request<string>('GET', '/api/ping');
+    const resp = await this.request<string>('GET', '/api/ping', { noAuth: true });
     return typeof resp === 'string' ? resp : JSON.stringify(resp);
   }
 
