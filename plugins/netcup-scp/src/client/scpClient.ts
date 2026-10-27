@@ -3,8 +3,10 @@
  *
  * Contract facts (verified against the live spec, version 2026.1020.160222):
  *   - Base URL: https://servercontrolpanel.de/scp-core — all endpoints below it
- *     are /api/... (e.g. <base>/api/v1/servers). The device's managementAddress
- *     carries the base; a bare host is upgraded to https://<host>.
+ *     are /api/... (e.g. <base>/api/v1/servers). UNM device addresses are bare
+ *     network targets (no scheme, no path), so the device's managementAddress is
+ *     a host like `servercontrolpanel.de`; normalizeBaseUrl() upgrades it to
+ *     https://<host>/scp-core.
  *   - Auth: OAuth2 Bearer token (Keycloak, realm "scp"). Tokens are long-lived
  *     (~30 days, refreshed on use) and are obtained interactively — see
  *     docs/README.md. The token travels in the Authorization header; there is
@@ -173,14 +175,27 @@ export interface ScpClientOptions {
   timeoutMs?: number;
 }
 
-/** Normalizes managementAddress → API base URL (scheme + trailing slash stripped). */
+/** The SCP API lives under this path on the panel host (all endpoints are <base>/api/...). */
+export const SCP_CORE_PATH = '/scp-core';
+
+/**
+ * Normalizes managementAddress → API base URL.
+ *
+ * UNM device addresses are bare network targets — no scheme, no path (the API's
+ * address validation rejects both) — so in practice a host like
+ * `servercontrolpanel.de` lands here: we add https:// and append /scp-core.
+ * Full URLs still work (e.g. local mocks): an existing non-root path is kept as-is,
+ * trailing slashes are stripped.
+ */
 export function normalizeBaseUrl(managementAddress: string): string {
   let u = managementAddress.trim();
   if (!u) return '';
   if (!/^https?:\/\//i.test(u)) u = `https://${u}`;
   try {
     const parsed = new URL(u);
-    return `${parsed.protocol}//${parsed.host}${parsed.pathname === '/' ? '' : parsed.pathname.replace(/\/+$/, '')}`;
+    let path = parsed.pathname.replace(/\/+$/, '');
+    if (path === '') path = SCP_CORE_PATH; // bare host → the standard SCP API base
+    return `${parsed.protocol}//${parsed.host}${path}`;
   } catch {
     return '';
   }

@@ -11,17 +11,19 @@ import http from 'node:http';
 export async function startScpMock() {
   const requests = [];
   const server = http.createServer((req, res) => {
-    requests.push({ method: req.method, url: req.url });
+    // The plugin normalizes a bare host to <host>/scp-core — accept both with and without the prefix.
+    const url = (req.url ?? '').replace(/^\/scp-core/, '') || '/';
+    requests.push({ method: req.method, url });
     const send = (status, body) => {
       res.writeHead(status, { 'Content-Type': 'application/json' });
       res.end(typeof body === 'string' ? body : JSON.stringify(body));
     };
 
-    if (req.method === 'GET' && req.url === '/api/ping') return send(200, '"OK"');
+    if (req.method === 'GET' && url === '/api/ping') return send(200, '"OK"');
 
-    if (req.method === 'GET' && req.url.startsWith('/api/v1/servers/')) {
+    if (req.method === 'GET' && url.startsWith('/api/v1/servers/')) {
       // Strip the query string (?loadServerLiveInfo=true) before parsing the id.
-      const pathOnly = req.url.split('?')[0];
+      const pathOnly = url.split('?')[0];
       const id = Number(pathOnly.split('/')[4]);
       if (id === 1) {
         return send(200, {
@@ -49,22 +51,22 @@ export async function startScpMock() {
       return send(404, { code: 'error.not.found', message: `server ${id} not found` });
     }
 
-    if (req.method === 'GET' && req.url.startsWith('/api/v1/servers')) {
+    if (req.method === 'GET' && url.startsWith('/api/v1/servers')) {
       return send(200, [{ id: 1, name: 'vm-test', hostname: 'vm-test.example.com', nickname: 'Test VM', disabled: false }]);
     }
 
-    if (req.method === 'GET' && req.url.startsWith('/api/v1/tasks')) {
+    if (req.method === 'GET' && url.startsWith('/api/v1/tasks')) {
       // No tasks → resolveUserId() returns null → firewall policy reads are skipped.
       return send(200, []);
     }
 
-    if (req.method === 'GET' && req.url.includes('/interfaces')) {
+    if (req.method === 'GET' && url.includes('/interfaces')) {
       return send(200, [
         { mac: 'AA:BB:CC:DD:EE:01', driver: 'virtio', speedInMBits: 1000, ipv4Addresses: [{ id: 10, ip: '192.168.10.5', netmask: '255.255.255.0' }], ipv6Addresses: [] },
       ]);
     }
 
-    return send(404, { code: 'error.not.found', message: `no mock route for ${req.method} ${req.url}` });
+    return send(404, { code: 'error.not.found', message: `no mock route for ${req.method} ${url}` });
   });
 
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));

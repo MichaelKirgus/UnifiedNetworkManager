@@ -62,7 +62,8 @@ const PLUGIN_OPTIONS: PluginOptionDescriptor[] = [
     label: 'SCP API base URL',
     type: 'string' as const,
     default: 'https://servercontrolpanel.de/scp-core',
-    description: 'Base of the SCP REST API. The device managementAddress is used when set; this option is the fallback for multi-instance setups.',
+    description:
+      'Base of the SCP REST API. The device managementAddress is used when set (a bare host like servercontrolpanel.de is fine — https:// and /scp-core are added automatically); this option is the fallback for multi-instance setups.',
   },
   { key: 'timeoutMs', label: 'Request timeout (ms)', type: 'integer' as const, default: 15000, min: 2000, max: 60000, description: 'Per-request timeout for SCP API calls.' },
   {

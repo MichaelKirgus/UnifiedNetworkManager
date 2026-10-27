@@ -28,7 +28,7 @@ reports `critical` health with an explicit "token expired" message until then.
 | Field | Value |
 | --- | --- |
 | Plugin | netcup SCP Plugin |
-| Management address | `https://servercontrolpanel.de/scp-core` (or a bare host — the plugin adds `https://`) |
+| Management address | `servercontrolpanel.de` — a bare host. UNM device addresses must not carry a scheme or path; the plugin adds `https://` and the `/scp-core` API prefix automatically. |
 | Secret | *API Key (without secret)* containing the Bearer token |
 
 One UNM device = one netcup account. All VMs in that account appear as rows of
