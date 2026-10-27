@@ -42,7 +42,7 @@ import { NETCUP_SCP_DEVICE_SUPPORT } from './deviceSupport';
 import { ScpActionContext, registry as actionRegistry } from './actions';
 import { buildPlan, PlanningError } from './plan';
 import { collectScpMonitoring } from './monitoring';
-import { createScpClient, isAuthError, normalizeBaseUrl, ScpApiError } from './client/scpClient';
+import { createScpClient, DEFAULT_REFRESH_WINDOW_SEC, isAuthError, normalizeBaseUrl, ScpApiError } from './client/scpClient';
 
 // --- Identity -----------------------------------------------------------------
 const identity = resolvePluginIdentity({
@@ -66,6 +66,16 @@ const PLUGIN_OPTIONS: PluginOptionDescriptor[] = [
       'Base of the SCP REST API. The device managementAddress is used when set (a bare host like servercontrolpanel.de is fine — https:// and /scp-core are added automatically); this option is the fallback for multi-instance setups.',
   },
   { key: 'timeoutMs', label: 'Request timeout (ms)', type: 'integer' as const, default: 15000, min: 2000, max: 60000, description: 'Per-request timeout for SCP API calls.' },
+  {
+    key: 'refreshWindowSec',
+    label: 'Refresh window (s)',
+    type: 'integer' as const,
+    default: DEFAULT_REFRESH_WINDOW_SEC,
+    min: 0,
+    max: 3600,
+    description:
+      'How long BEFORE an access token expires the plugin proactively exchanges the bound refresh token for a fresh one (covers clock skew + in-flight calls). 0 = only when actually expired.',
+  },
   {
     key: 'collectFirewall',
     label: 'Collect firewall rules into UNM',
@@ -131,13 +141,14 @@ function hostOf(managementAddress: unknown): string {
 }
 
 /** Resolves effective options from injected settings. */
-function endpointsOf(settings: Record<string, unknown>, managementAddress: string): { baseUrl: string; timeoutMs: number } {
+function endpointsOf(settings: Record<string, unknown>, managementAddress: string): { baseUrl: string; timeoutMs: number; refreshWindowSec: number } {
   // The device's managementAddress wins (it is the per-device identity); the
   // option is a fallback for setups where the address was left empty.
   const raw = managementAddress !== '' ? managementAddress : (typeof settings['baseUrl'] === 'string' ? (settings['baseUrl'] as string) : '');
   return {
     baseUrl: normalizeBaseUrl(raw),
     timeoutMs: clampInt(settings['timeoutMs'], 2000, 60000, 15000),
+    refreshWindowSec: clampInt(settings['refreshWindowSec'], 0, 3600, DEFAULT_REFRESH_WINDOW_SEC),
   };
 }
 
@@ -157,8 +168,8 @@ function resolveCredentials(credentials: Record<string, unknown> | undefined): {
 }
 
 /** Builds a bound client for one SCP account. */
-function buildClient(baseUrl: string, cred: { token?: string; refreshToken?: string }, timeoutMs?: number) {
-  return createScpClient({ baseUrl, token: cred.token, refreshToken: cred.refreshToken, timeoutMs });
+function buildClient(baseUrl: string, cred: { token?: string; refreshToken?: string }, timeoutMs?: number, refreshWindowSec?: number) {
+  return createScpClient({ baseUrl, token: cred.token, refreshToken: cred.refreshToken, timeoutMs, refreshWindowSec });
 }
 
 /** Human-readable message from an unknown rejection reason. */
@@ -206,7 +217,7 @@ async function handleMonitoring(req: Request, res: Response, body: Record<string
     return;
   }
 
-  const client = buildClient(ep.baseUrl, { token, refreshToken }, ep.timeoutMs);
+  const client = buildClient(ep.baseUrl, { token, refreshToken }, ep.timeoutMs, ep.refreshWindowSec);
   const fail = (health: Health, error: string): void => {
     res.status(200).json({ deviceId: deviceId ?? null, collectedAt: new Date().toISOString(), health, metrics: { 'system.error': error }, metricDescriptors: [errorDescriptor()], error });
   };
@@ -225,6 +236,7 @@ async function handleMonitoring(req: Request, res: Response, body: Record<string
       baseUrl: ep.baseUrl,
       collectFirewall: settings.collectFirewall !== false,
       logToApi: settings.logToApi === true,
+      refreshWindowSec: ep.refreshWindowSec,
     },
   });
 }
@@ -278,7 +290,7 @@ app.post('/config', async (req, res) => {
   }
 
   try {
-    const client = buildClient(ep.baseUrl, { token, refreshToken }, action.timeoutMs ?? ep.timeoutMs);
+    const client = buildClient(ep.baseUrl, { token, refreshToken }, action.timeoutMs ?? ep.timeoutMs, ep.refreshWindowSec);
     const ctx: ScpActionContext = { client, settings };
     const result = await action.execute(ctx, input);
     res.status(200).json({ success: result.success, result });

@@ -176,6 +176,10 @@ export interface ScpClientOptions {
    *  tokens on demand and cached in-process. Preferred over a static token. */
   refreshToken?: string;
   timeoutMs?: number;
+  /** How long BEFORE the access token's expiry we proactively re-exchange it
+   *  (seconds; default 60 — covers clock skew + in-flight calls). 0 = refresh
+   *  only when actually expired. */
+  refreshWindowSec?: number;
 }
 
 /** The SCP API lives under this path on the panel host (all endpoints are <base>/api/...). */
@@ -234,12 +238,12 @@ interface ScpTokenResponse {
 /** In-process access-token cache: one entry per bound refresh token. */
 const tokenCache = new Map<string, { accessToken: string; expiresAt: number }>();
 const TOKEN_CACHE_MAX = 32;
-/** Refresh at least this long before the actual expiry (clock skew / in-flight calls). */
-const EXPIRY_SAFETY_MS = 60_000;
+/** Default proactive-refresh margin (seconds) when the plugin option is unset. */
+export const DEFAULT_REFRESH_WINDOW_SEC = 60;
 
-function cacheSet(refreshToken: string, accessToken: string, expiresInSec: number): void {
+function cacheSet(refreshToken: string, accessToken: string, expiresInSec: number, refreshWindowMs: number): void {
   if (tokenCache.size >= TOKEN_CACHE_MAX) tokenCache.delete(tokenCache.keys().next().value as string); // evict oldest
-  const ttlMs = Math.max(expiresInSec * 1000 - EXPIRY_SAFETY_MS, 5_000);
+  const ttlMs = Math.max(expiresInSec * 1000 - refreshWindowMs, 5_000);
   tokenCache.set(refreshToken, { accessToken, expiresAt: Date.now() + ttlMs });
 }
 
@@ -278,6 +282,8 @@ export class ScpClient {
   private refreshToken?: string;
   private tokenEndpoint: string;
   private timeoutMs: number;
+  /** Proactive-refresh margin before the access token's expiry (ms). */
+  private refreshWindowMs: number;
 
   constructor(opts: ScpClientOptions) {
     this.baseUrl = normalizeBaseUrl(opts.baseUrl);
@@ -289,6 +295,8 @@ export class ScpClient {
     this.refreshToken = refreshToken || undefined;
     this.tokenEndpoint = tokenEndpointOf(this.baseUrl);
     this.timeoutMs = opts.timeoutMs ?? 15_000;
+    const windowSec = typeof opts.refreshWindowSec === 'number' && Number.isFinite(opts.refreshWindowSec) ? Math.max(0, opts.refreshWindowSec) : DEFAULT_REFRESH_WINDOW_SEC;
+    this.refreshWindowMs = windowSec * 1000;
     this.http = axios.create({
       baseURL: this.baseUrl,
       timeout: this.timeoutMs,
@@ -309,7 +317,7 @@ export class ScpClient {
     }
     const resp = await exchangeRefreshToken(this.tokenEndpoint, rt, this.timeoutMs);
     if (typeof resp.access_token !== 'string' || resp.access_token === '') throw new ScpApiError(0, 'SCP token refresh returned no access_token');
-    cacheSet(rt, resp.access_token, typeof resp.expires_in === 'number' ? resp.expires_in : 3600);
+    cacheSet(rt, resp.access_token, typeof resp.expires_in === 'number' ? resp.expires_in : 3600, this.refreshWindowMs);
     return `Bearer ${resp.access_token}`;
   }
 

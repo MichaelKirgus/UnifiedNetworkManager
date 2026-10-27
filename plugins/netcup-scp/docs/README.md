@@ -37,6 +37,12 @@ the **Servers** metric table; every interface IP alias feeds UNM's Networks page
 and every firewall rule feeds the unified Firewall page (toggle via the
 *Collect firewall rules into UNM* option).
 
+In refresh-token mode the plugin proactively exchanges the bound refresh token
+for a fresh access token shortly before expiry — how early is set by the
+*Refresh window (s)* option (default 60, range 0–3600; `0` = exchange only when
+the cached token has actually expired). The exchanged access token is kept in an
+in-process cache and reused until it nears expiry.
+
 ## Capabilities
 
 ### Monitoring (read)

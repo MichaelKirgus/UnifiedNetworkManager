@@ -148,6 +148,19 @@ export default {
             }),
           });
           rec.check('X', 'cached access token reused (no re-exchange)', ap.tokenIssuances() === issuancesBefore, `issuances=${ap.tokenIssuances()} before=${issuancesBefore}`);
+
+          // The refreshWindowSec option must flow through x-unm-settings into the client.
+          const optRes = await fetch(`${url}/monitoring`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'x-unm-settings': JSON.stringify({ refreshWindowSec: 300 }) },
+            body: JSON.stringify({
+              deviceId: 'refresh-test-device-3',
+              managementAddress: `http://127.0.0.1:${ap.port}`,
+              credentials: { refreshToken: 'mock-refresh-1' },
+            }),
+          });
+          const optMon = await optRes.json().catch(() => ({}));
+          rec.check('X', 'refreshWindowSec option honored via x-unm-settings', optMon.activeSettings?.refreshWindowSec === 300, `activeSettings=${JSON.stringify(optMon.activeSettings ?? {})}`);
         },
       },
     };
