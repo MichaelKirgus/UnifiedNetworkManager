@@ -368,6 +368,19 @@ export class ScpClient {
   }
 
   /**
+   * CPU metrics time series — GET /servers/{id}/metrics/cpu?hours=N.
+   * Shape (verified live): `{ "<ISO-8601 minute>": { "CPU0": <value>, ... } }` —
+   * one point per MINUTE, one entry per vCPU. The value is a RATE in ns of CPU
+   * time consumed per wall-clock second (cgroup-style accounting; 1e9 = that
+   * core at 100%) — the same rate family as disk (IOPS) and network (B/s).
+   */
+  getServerCpuMetrics(serverId: number, hours?: number): Promise<Record<string, Record<string, number>>> {
+    const params: Record<string, unknown> = {};
+    if (typeof hours === 'number') params['hours'] = hours;
+    return this.request('GET', `/api/v1/servers/${serverId}/metrics/cpu`, { params });
+  }
+
+  /**
    * Power control. ONE attribute per PATCH (API constraint); stateOption is a
    * query param — valid values: ON → POWERCYCLE|RESET, OFF → POWEROFF.
    */

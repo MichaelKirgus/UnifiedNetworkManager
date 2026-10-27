@@ -39,6 +39,17 @@ export async function startScpMock() {
 
     if (req.method === 'GET' && url === '/api/ping') return send(200, '"OK"');
 
+    // CPU metrics time series — { "<ISO minute>": { "CPU<n>": <ns of CPU-time per s wall> } }.
+    // Latest point: CPU0 = 5e8 (50%), CPU1 = 1e9 (100%) → mean 7.5e8 → cpuPct 75, vcpus 2.
+    if (req.method === 'GET' && url.includes('/metrics/cpu')) {
+      const id = Number(url.split('?')[0].split('/')[4]);
+      if (id !== 1) return send(404, { code: 'error.not.found', message: `server ${id} not found` });
+      return send(200, {
+        '2026-01-01T00:00:00Z': { CPU0: 1e8, CPU1: 1e8 },
+        '2026-01-01T00:01:00Z': { CPU0: 5e8, CPU1: 1e9 },
+      });
+    }
+
     if (req.method === 'GET' && url.startsWith('/api/v1/servers/')) {
       // Strip the query string (?loadServerLiveInfo=true) before parsing the id.
       const pathOnly = url.split('?')[0];
@@ -188,6 +199,54 @@ export default {
           });
           const optMon = await optRes.json().catch(() => ({}));
           rec.check('X', 'refreshWindowSec option honored via x-unm-settings', optMon.activeSettings?.refreshWindowSec === 300, `activeSettings=${JSON.stringify(optMon.activeSettings ?? {})}`);
+
+          // --- Live CPU probe (capability 'probe' → VMs page CPU column). ---
+          const cpuCallsBefore = ap.requests.filter((q) => q.url.includes('/metrics/cpu')).length;
+          const probeRes = await fetch(`${url}/probe`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              deviceId: 'probe-check-device',
+              managementAddress: `http://127.0.0.1:${ap.port}`,
+              credentials: { apiKey: 'test-scp-token' },
+              keys: ['vmStats'],
+            }),
+          });
+          const probe = await probeRes.json().catch(() => ({}));
+          rec.check('X', 'POST /probe → 200 with collectedAt + metrics', probeRes.status === 200 && typeof probe.collectedAt === 'string' && probe.metrics !== undefined, `status=${probeRes.status} body=${JSON.stringify(probe).slice(0, 300)}`);
+          rec.check('X', 'probe serves vmStates as an (empty) object so the webapp keeps vmStats', probe.metrics?.vmStates !== null && typeof probe.metrics.vmStates === 'object' && Object.keys(probe.metrics.vmStates).length === 0, `vmStates=${JSON.stringify(probe.metrics?.vmStates ?? null)}`);
+          const vmStat = probe.metrics?.vmStats?.['vm-test'];
+          // Latest mock point: (5e8 + 1e9)/2 = 7.5e8 ns/s → 75% of allocated cores, 2 vCPUs.
+          rec.check('X', 'probe vmStats carries cpuPct (mean over vCPUs ÷ 1e9) + vcpus', vmStat?.cpuPct === 75 && vmStat?.vcpus === 2, `vm-test=${JSON.stringify(vmStat ?? null)} all=${JSON.stringify(probe.metrics?.vmStats ?? {})}`);
+          rec.check('X', 'probe hit the mock metrics/cpu endpoint', ap.requests.filter((q) => q.url.includes('/metrics/cpu')).length > cpuCallsBefore, `cpuCalls before=${cpuCallsBefore} after=${ap.requests.length}`);
+
+          // A second probe within the 15 s TTL must be served from cache — no new netcup calls.
+          const totalBefore = ap.requests.length;
+          await fetch(`${url}/probe`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              deviceId: 'probe-check-device',
+              managementAddress: `http://127.0.0.1:${ap.port}`,
+              credentials: { apiKey: 'test-scp-token' },
+              keys: ['vmStats'],
+            }),
+          });
+          rec.check('X', 'second probe within TTL served from cache (no new netcup calls)', ap.requests.length === totalBefore, `requests before=${totalBefore} after=${ap.requests.length}`);
+
+          // Unknown-only key list → 502 with an error (nothing supported requested).
+          const badProbe = await fetch(`${url}/probe`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              deviceId: 'probe-check-device',
+              managementAddress: `http://127.0.0.1:${ap.port}`,
+              credentials: { apiKey: 'test-scp-token' },
+              keys: ['nope'],
+            }),
+          });
+          const badBody = await badProbe.json().catch(() => ({}));
+          rec.check('X', 'probe with only unknown keys → 502 + error', badProbe.status === 502 && typeof badBody.error === 'string' && badBody.error.includes('No supported probe keys'), `status=${badProbe.status} body=${JSON.stringify(badBody)}`);
         },
       },
     };

@@ -54,6 +54,23 @@ in-process cache and reused until it nears expiry.
   unified `firewallRules[]` (policy rules expanded per interface; a failed read
   never wipes previously ingested rows)
 
+### Probe (live CPU for the VMs page)
+
+The plugin advertises the `probe` capability, so UNM's **VMs page** polls it every
+3 s and fills the live **CPU % column**:
+
+- `vmStats` — per-VM utilization from SCP's `GET /servers/{id}/metrics/cpu?hours=1`.
+  Each vCPU series value is a rate in *ns of CPU time consumed per wall-clock second*
+  (cgroup-style accounting; `1e9` = that core at 100%), so `cpuPct` = mean over the VM's
+  vCPUs of latest point ÷ 1e9, clamped to 0–100 — i.e. percent of **allocated** cores
+  (2 cores at 50 % each read as 50 %, not 100 %). `vcpus` = number of series entries.
+- Snapshots are cached in-process for 15 s per device, so netcup is hit at most once
+  per TTL; a failed refresh keeps serving the last good snapshot until it goes stale.
+- `vmStates` — served as an **empty map** (SCP has no cheap per-poll state endpoint).
+  It must be present in the response: UNM's VMs page drops the whole probe entry when
+  `vmStates` is absent, which would hide `vmStats`. With `{}`, states fall back to the
+  ~30 s inventory poll while the CPU column stays live.
+
 ### Configuration (plan-gated writes)
 
 | Module | Actions | Risk |

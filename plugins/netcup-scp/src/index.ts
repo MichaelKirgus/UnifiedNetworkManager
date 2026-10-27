@@ -34,14 +34,17 @@ import {
   createPluginServer,
   errorDescriptor,
   isTransientTransportError,
+  probeHandler,
   readSettings,
   resolvePluginIdentity,
   validateInput,
 } from '@unm/plugin-sdk';
+import type { ProbeRequestBody } from '@unm/plugin-sdk';
 import { NETCUP_SCP_DEVICE_SUPPORT } from './deviceSupport';
 import { ScpActionContext, registry as actionRegistry } from './actions';
 import { buildPlan, PlanningError } from './plan';
 import { collectScpMonitoring } from './monitoring';
+import { collectScpVmStats } from './probe';
 import { createScpClient, DEFAULT_REFRESH_WINDOW_SEC, isAuthError, normalizeBaseUrl, ScpApiError } from './client/scpClient';
 
 // --- Identity -----------------------------------------------------------------
@@ -52,7 +55,9 @@ const identity = resolvePluginIdentity({
     'netcup Server Control Panel integration — VM inventory/state/task metrics, network + firewall rule inventory into UNM, and plan-gated VM management (power, snapshots, ISO, image setup, firewall policies).',
   version: '0.1.0',
   vendors: ['netcup'],
-  capabilities: ['monitoring', 'inventory', 'configuration'],
+  // 'probe' — short-cycle live telemetry (POST /probe): per-VM CPU utilization
+  // for the VMs page's CPU column, from SCP's metrics/cpu time series.
+  capabilities: ['monitoring', 'inventory', 'configuration', 'probe'],
 });
 
 // --- Options --------------------------------------------------------------------
@@ -240,6 +245,50 @@ async function handleMonitoring(req: Request, res: Response, body: Record<string
     },
   });
 }
+
+// ---------------------------------------------------------------------------
+// POST /probe — SHORT-CYCLE live telemetry (capability 'probe'). The webapp's
+// VMs page polls this every 3 s through the API broker, requesting keys
+// `vmStates` + `vmStats`. SCP has no SSH and no per-poll state endpoint, so:
+//   - vmStats: per-VM CPU utilization from GET /servers/{id}/metrics/cpu (the
+//     latest point of each vCPU's rate series → percent of allocated cores).
+//     Cached in-process for 15 s — netcup is hit at most once per TTL, and a
+//     failed refresh keeps serving the last good snapshot.
+//   - vmStates: an EMPTY map. SCP has no cheap per-poll state endpoint, so we
+//     serve {} — but it MUST be present in the response: the webapp's live-probe
+//     memo early-returns when `vmStates` is absent and would drop vmStats too.
+//     With {}, the VMs page falls back to the inventory state from /monitoring
+//     (~30 s cadence) while still rendering the CPU column.
+// Unknown keys are ignored; an empty/absent list means "the default set".
+// ---------------------------------------------------------------------------
+const PROBE_KEYS = new Set(['vmStats']);
+
+app.post('/probe', probeHandler(async (body: ProbeRequestBody, req) => {
+  const settings = readSettings(req, PLUGIN_OPTIONS);
+  logger.setEnabled(settings.logToApi === true);
+
+  const ep = endpointsOf(settings, hostOf(body.managementAddress));
+  if (!ep.baseUrl) throw new Error('Missing managementAddress');
+
+  const { token, refreshToken, error: credError } = resolveCredentials(body.credentials as Record<string, unknown> | undefined);
+  if (!token && !refreshToken) throw new Error(credError ?? 'Missing credentials');
+
+  // Which keys did the caller ask for? Absent/empty = default set. Unknown ignored.
+  const requested = Array.isArray(body.keys) && body.keys.length > 0 ? body.keys : ['vmStats'];
+  const wanted = new Set(requested.filter((k) => PROBE_KEYS.has(k)));
+  if (wanted.size === 0) throw new Error(`No supported probe keys in [${requested.join(', ')}]`);
+
+  const client = buildClient(ep.baseUrl, { token, refreshToken }, ep.timeoutMs, ep.refreshWindowSec);
+
+  const metrics: Record<string, unknown> = {};
+  // MUST be present (even empty) — see the comment above. The webapp's live-probe
+  // memo drops the whole entry when vmStates is absent, which would hide vmStats.
+  metrics['vmStates'] = {};
+  if (wanted.has('vmStats')) {
+    metrics['vmStats'] = await collectScpVmStats(client, body.deviceId ?? 'unknown');
+  }
+  return { collectedAt: new Date().toISOString(), metrics };
+}, 'netcup-scp-plugin'));
 
 // ---------------------------------------------------------------------------
 // POST /config — executes ONE action step against one SCP account. The API's
