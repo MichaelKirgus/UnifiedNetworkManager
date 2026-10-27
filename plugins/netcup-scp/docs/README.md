@@ -48,6 +48,7 @@ in-process cache and reused until it nears expiry.
 ### Monitoring (read)
 
 - `netcup.servers` — one row per VM: name, nickname, state (`RUNNING`, `SHUTOFF`, …), vCPU, RAM, IPs
+- `vms[]` / `vmHosts[]` — the same servers mapped to UNM's generic **VMs page** (state, vCPUs, RAM, NIC child rows) and **Hosts page** (one row per NIC MAC of a running VM with its live IP). SCP states are normalized (`SHUTOFF`/`SHUTDOWN` → `STOPPED`, `PMSUSPENDED` → `SUSPENDED`, `CRASHED` → `ERROR`).
 - `netcup.tasks` — the 10 most recent SCP tasks with their state
 - Inventory propagation into UNM: `networks[]` (v4/v6 aliases per interface) and
   unified `firewallRules[]` (policy rules expanded per interface; a failed read

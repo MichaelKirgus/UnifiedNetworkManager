@@ -6,7 +6,9 @@
  *   2. listServers (auth probe) — the server inventory table;
  *   3. per-server getServer (live info: state, CPUs, RAM, interfaces/IPs);
  *   4. recent tasks table;
- *   5. inventory propagation: networks[] (every IP alias of every interface)
+ *   5. generic vms[] + vmHosts[] — the same servers mapped to UNM's VMs page
+ *      (normalized vms table) and Hosts page (NIC MAC rows);
+ *   6. inventory propagation: networks[] (every IP alias of every interface)
  *      and firewallRules[] (unified rows from each interface's firewall).
  *
  * Budget discipline: everything after the auth probe runs in parallel with a
@@ -16,7 +18,7 @@
  */
 
 import { Health } from '@unm/plugin-sdk';
-import type { ScpClient, ScpServer, ScpInterface, ScpFirewallRule, ScpFirewallPolicy, ScpServerFirewall } from './client/scpClient';
+import type { ScpClient, ScpServer, ScpServerMinimal, ScpInterface, ScpFirewallRule, ScpFirewallPolicy, ScpServerFirewall } from './client/scpClient';
 import { isAuthError } from './client/scpClient';
 
 /** Cap on per-server detail fetches per poll (a huge fleet must not blow the 10 s budget). */
@@ -129,6 +131,80 @@ function networkRowsForServer(serverName: string, ifaces: ScpInterface[]): Netwo
   return rows;
 }
 
+/** Generic UNM VM row (ingested by the API's telemetry worker into the vms table). */
+interface VmRow {
+  name: string;
+  state?: string;
+  vcpus?: number | null;
+  memoryMiB?: number | null;
+  archType?: string | null;
+  extra?: Record<string, unknown>;
+}
+
+/** Maps SCP server states to the canonical uppercase VM states the webapp badges. */
+function normalizeVmState(state: string | undefined): string {
+  switch (state) {
+    case 'RUNNING': return 'RUNNING';
+    case 'SHUTOFF':
+    case 'SHUTDOWN':
+    case 'NOSTATE': return 'STOPPED';
+    case 'PMSUSPENDED': return 'SUSPENDED';
+    case 'PAUSED': return 'PAUSED';
+    case 'CRASHED': return 'ERROR';
+    default: return state && state !== '' ? state.toUpperCase() : 'UNKNOWN';
+  }
+}
+
+/** One generic vms[] row per SCP server — feeds UNM's VMs page. NIC MACs ride in
+ * extra.devices (child rows) and vmHosts (Hosts page), same contract as TrueNAS. */
+function buildVmRows(servers: ScpServerMinimal[], byId: Map<number, ScpServer>): VmRow[] {
+  const rows: VmRow[] = [];
+  for (const s of servers) {
+    const full = byId.get(s.id);
+    const live = full?.serverLiveInfo;
+    const state = normalizeVmState(live?.state);
+
+    // NICs — MAC + driver/speed detail, one child row per interface.
+    const devices: { dtype: string; label?: string; detail?: string }[] = [];
+    for (const iface of live?.interfaces ?? []) {
+      if (!iface.mac) continue;
+      const speed = typeof iface.speedInMBits === 'number' ? `${iface.speedInMBits} MBit/s` : '';
+      devices.push({ dtype: 'NIC', label: iface.mac.toLowerCase(), detail: [iface.driver, speed].filter(Boolean).join(' · ') || undefined });
+    }
+
+    rows.push({
+      name: s.name,
+      state,
+      vcpus: typeof live?.cpuCount === 'number' ? live.cpuCount : null,
+      memoryMiB: typeof live?.currentServerMemoryInMiB === 'number' ? live.currentServerMemoryInMiB : null,
+      archType: live?.machineType ?? null,
+      extra: {
+        devices,
+        ...(full?.nickname || s.nickname ? { description: full?.nickname || s.nickname } : {}),
+        autostart: typeof live?.autostart === 'boolean' ? live.autostart : undefined,
+        ...(typeof live?.uptimeInSeconds === 'number' && state === 'RUNNING' ? { uptimeSeconds: live.uptimeInSeconds } : {}),
+      },
+    });
+  }
+  return rows.sort((a, b) => a.name.localeCompare(b.name));
+}
+
+/** vmHosts[] rows — one per NIC MAC of a RUNNING server (feeds the Hosts page). */
+function buildVmHostRows(servers: ScpServerMinimal[], byId: Map<number, ScpServer>): { mac: string; ip?: string; hostname?: string }[] {
+  const out: { mac: string; ip?: string; hostname?: string }[] = [];
+  for (const s of servers) {
+    const full = byId.get(s.id);
+    const live = full?.serverLiveInfo;
+    if (!live || normalizeVmState(live.state) !== 'RUNNING') continue; // stopped VMs: no live IP
+    for (const iface of live.interfaces ?? []) {
+      if (!iface.mac) continue;
+      const v4 = (iface.ipv4Addresses ?? []).map((a) => a.ip).find(Boolean);
+      out.push({ mac: iface.mac.toLowerCase(), ...(v4 ? { ip: v4 } : {}), hostname: s.name });
+    }
+  }
+  return out;
+}
+
 // --- Main collection -----------------------------------------------------------------
 
 export async function collectScpMonitoring(client: ScpClient, opts: ScpMonitoringOptions): Promise<ScpMonitoringResult> {
@@ -182,6 +258,12 @@ export async function collectScpMonitoring(client: ScpClient, opts: ScpMonitorin
     };
   });
   metrics['netcup.servers'] = rows;
+
+  // Generic vms[] — the same servers mapped to UNM's VMs page (the telemetry
+  // worker ingests this into the normalized vms table). Present-but-empty is
+  // authoritative: an account with zero servers must clear stale rows.
+  metrics['vms'] = buildVmRows(servers, byId);
+  metrics['vmHosts'] = buildVmHostRows(servers, byId);
 
   // 4. Recent tasks (account-wide — shows what SCP is doing right now).
   try {

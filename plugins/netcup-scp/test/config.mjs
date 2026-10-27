@@ -115,6 +115,33 @@ export default {
           const serverList = ap.requests.filter((q) => q.method === 'GET' && q.url.startsWith('/api/v1/servers') && !q.url.includes('/interfaces'));
           rec.check('X', 'mock received server list + detail reads', serverList.length >= 2, `requests=${ap.requests.length}`);
 
+          // --- Generic vms[]/vmHosts[] emission (feeds UNM's VMs + Hosts pages). ---
+          const vmRes = await fetch(`${url}/monitoring`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ deviceId: 'vms-check-device', managementAddress: `http://127.0.0.1:${ap.port}`, credentials: { apiKey: 'test-scp-token' } }),
+          });
+          const vmMon = await vmRes.json().catch(() => ({}));
+          const vms = Array.isArray(vmMon.metrics?.vms) ? vmMon.metrics.vms : null;
+          rec.check('X', 'monitoring emits generic vms[] rows', vms !== null && vms.length === 1, `vms=${JSON.stringify(vms ?? [])}`);
+          if (vms?.[0]) {
+            const row = vms[0];
+            rec.check(
+              'X',
+              'vm row carries state/vcpus/memory + NIC device child row',
+              row.name === 'vm-test' && row.state === 'RUNNING' && row.vcpus === 2 && row.memoryMiB === 4096
+                && Array.isArray(row.extra?.devices) && row.extra.devices[0]?.dtype === 'NIC' && row.extra.devices[0]?.label === 'aa:bb:cc:dd:ee:01',
+              JSON.stringify(row),
+            );
+          }
+          const vmHosts = Array.isArray(vmMon.metrics?.vmHosts) ? vmMon.metrics.vmHosts : null;
+          rec.check(
+            'X',
+            'monitoring emits vmHosts[] with MAC + live IP (RUNNING only)',
+            vmHosts !== null && vmHosts.length === 1 && vmHosts[0].mac === 'aa:bb:cc:dd:ee:01' && vmHosts[0].ip === '192.168.10.5' && vmHosts[0].hostname === 'vm-test',
+            JSON.stringify(vmHosts ?? []),
+          );
+
           // --- Refresh-token mode: a second poll with an scpRefreshToken credential. ---
           const before = ap.requests.length;
           const monRes = await fetch(`${url}/monitoring`, {
