@@ -59,6 +59,17 @@ export const SECRET_TYPES: SecretType[] = [
     ],
   },
   {
+    // netcup SCP — OAuth2 refresh token from the Keycloak realm "scp" (device-code
+    // login, e.g. via the `netcup` CLI). The netcup-scp plugin exchanges it for a
+    // short-lived access token on demand; the user only re-authenticates when the
+    // refresh token lapses (~30 days without use).
+    type: 'scpRefreshToken',
+    label: 'netcup SCP Refresh Token',
+    fields: [
+      { name: 'refreshToken', label: 'Refresh Token', input: 'password', secret: true, required: true },
+    ],
+  },
+  {
     type: 'usernamePassword',
     label: 'Username / Password',
     fields: [

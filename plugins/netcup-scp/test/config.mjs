@@ -1,23 +1,41 @@
 /**
  * Test config for plugins/netcup-scp — see packages/plugin-test-kit README.
  * T4 target: a plain-HTTP mock of the netcup SCP REST API (ping, server list +
- * detail with live info/interfaces, tasks). The mock is self-contained here
- * because the test kit has no shared SCP appliance yet.
+ * detail with live info/interfaces, tasks) PLUS the Keycloak token endpoint
+ * (refresh-token exchange). The mock is self-contained here because the test
+ * kit has no shared SCP appliance yet.
  */
 
 import http from 'node:http';
 
-/** Minimal in-process SCP API mock — just enough for /monitoring to go green. */
+/** Minimal in-process SCP API + OAuth2 mock — just enough for /monitoring to go green. */
 export async function startScpMock() {
   const requests = [];
+  let tokenIssuances = 0;
   const server = http.createServer((req, res) => {
     // The plugin normalizes a bare host to <host>/scp-core — accept both with and without the prefix.
     const url = (req.url ?? '').replace(/^\/scp-core/, '') || '/';
-    requests.push({ method: req.method, url });
+    requests.push({ method: req.method, url, auth: req.headers.authorization ?? '' });
     const send = (status, body) => {
       res.writeHead(status, { 'Content-Type': 'application/json' });
       res.end(typeof body === 'string' ? body : JSON.stringify(body));
     };
+
+    // Keycloak realm "scp" token endpoint — refresh-token exchange.
+    if (req.method === 'POST' && url === '/realms/scp/protocol/openid-connect/token') {
+      let raw = '';
+      req.on('data', (c) => (raw += c));
+      req.on('end', () => {
+        const params = new URLSearchParams(raw);
+        if (params.get('grant_type') !== 'refresh_token' || !params.get('refresh_token')) {
+          return send(400, { error: 'invalid_request', error_description: 'unsupported grant or missing refresh_token' });
+        }
+        tokenIssuances += 1;
+        // Keycloak rotates the refresh token in the response — the plugin must keep using the original.
+        return send(200, { access_token: `mock-access-${tokenIssuances}`, expires_in: 3600, refresh_token: 'rotated-should-be-ignored', token_type: 'Bearer' });
+      });
+      return;
+    }
 
     if (req.method === 'GET' && url === '/api/ping') return send(200, '"OK"');
 
@@ -75,6 +93,7 @@ export async function startScpMock() {
     name: 'scp-mock',
     port,
     requests,
+    tokenIssuances: () => tokenIssuances,
     stop: () => new Promise((resolve) => server.close(() => resolve())),
   };
 }
@@ -86,15 +105,49 @@ export default {
       mocks: [ap],
       config: {
         monitoringAddress: `http://127.0.0.1:${ap.port}`,
-        credentials: { apiKey: 'test-scp-token' }, // Bearer token (apiKeyNoSecret)
+        credentials: { apiKey: 'test-scp-token' }, // static Bearer token (apiKeyNoSecret) — T4 happy path
         expectHealth: 'ok',
         deadAddress: `http://127.0.0.1:${getDeadTcpPort()}`,
         expectDeadHealth: 'critical',
-        extraChecks: async ({ rec }) => {
+        extraChecks: async ({ url, rec }) => {
           const pings = ap.requests.filter((q) => q.url === '/api/ping');
           rec.check('X', 'mock received /api/ping probe(s)', pings.length > 0, `requests=${ap.requests.length}`);
           const serverList = ap.requests.filter((q) => q.method === 'GET' && q.url.startsWith('/api/v1/servers') && !q.url.includes('/interfaces'));
-          rec.check('X', 'mock received server list + detail reads', serverList.length >= 2, `requests=${serverList.length}`);
+          rec.check('X', 'mock received server list + detail reads', serverList.length >= 2, `requests=${ap.requests.length}`);
+
+          // --- Refresh-token mode: a second poll with an scpRefreshToken credential. ---
+          const before = ap.requests.length;
+          const monRes = await fetch(`${url}/monitoring`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              deviceId: 'refresh-test-device',
+              managementAddress: `http://127.0.0.1:${ap.port}`,
+              credentials: { refreshToken: 'mock-refresh-1' },
+            }),
+          });
+          const mon = await monRes.json().catch(() => ({}));
+          rec.check('X', 'refresh-token monitoring → health ok', mon.health === 'ok', `health=${mon.health} err=${JSON.stringify(mon.metrics?.['system.error'] ?? '')}`);
+
+          const tokenCalls = ap.requests.filter((q) => q.url === '/realms/scp/protocol/openid-connect/token');
+          rec.check('X', 'mock received refresh-token exchange(s)', tokenCalls.length >= 1, `tokenCalls=${tokenCalls.length}`);
+
+          // The exchanged access token must be what the API calls carry (not the raw refresh token).
+          const usedExchanged = ap.requests.slice(before).filter((q) => q.auth === 'Bearer mock-access-1');
+          rec.check('X', 'API calls carried the EXCHANGED access token', usedExchanged.length > 0, `post-poll requests=${ap.requests.slice(before).map((r) => `${r.method} ${r.url} auth=${r.auth}`).join(', ')}`);
+
+          // A second poll with the SAME refresh token must reuse the cached access token (no new exchange).
+          const issuancesBefore = ap.tokenIssuances();
+          await fetch(`${url}/monitoring`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              deviceId: 'refresh-test-device-2',
+              managementAddress: `http://127.0.0.1:${ap.port}`,
+              credentials: { refreshToken: 'mock-refresh-1' },
+            }),
+          });
+          rec.check('X', 'cached access token reused (no re-exchange)', ap.tokenIssuances() === issuancesBefore, `issuances=${ap.tokenIssuances()} before=${issuancesBefore}`);
         },
       },
     };

@@ -147,7 +147,7 @@ export async function collectScpMonitoring(client: ScpClient, opts: ScpMonitorin
   try {
     servers = await client.listServers();
   } catch (err) {
-    if (isAuthError(err)) return { health: 'critical', metrics: { 'system.error': `Invalid or expired SCP API token (${errMsg(err)}). Re-create the token in your netcup account and update the bound secret.` }, errors };
+    if (isAuthError(err)) return { health: 'critical', metrics: { 'system.error': `Invalid or expired SCP credential (${errMsg(err)}). For a static access token: re-create it in your netcup account and update the bound secret. For a refresh token: log in again (e.g. via the netcup CLI) and replace the "netcup SCP Refresh Token" secret.` }, errors };
     return { health: 'critical', metrics: { 'system.error': `SCP server list failed: ${errMsg(err)}` }, errors };
   }
 

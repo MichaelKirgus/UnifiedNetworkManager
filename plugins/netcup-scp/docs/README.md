@@ -4,24 +4,25 @@ Manages **netcup Server Control Panel (SCP)** accounts from UNM — VM fleet
 monitoring plus plan-gated VM and firewall management over the official SCP REST API.
 
 - **API base:** `https://servercontrolpanel.de/scp-core` (verified live; spec version 2026.1020.x)
-- **Auth:** OAuth2 Bearer token from netcup's Keycloak realm `scp` — see [Getting a token](#getting-an-api-token) below
-- **Secret type:** *API Key (without secret)* — the single field holds the raw Bearer token
+- **Auth:** OAuth2 Bearer tokens from netcup's Keycloak realm `scp` — see [Getting a token](#getting-an-api-token) below
+- **Secret types:** *netcup SCP Refresh Token* (preferred, auto-refreshing) or *API Key (without secret)* (static access token)
 
-## Getting an API token
+## Getting a token
 
 The SCP API has no non-interactive login: tokens are issued through the
-**Keycloak Device Authorization Grant** (the same flow the `ncctl` CLI uses).
+**Keycloak Device Authorization Grant**. The easiest way is the community CLI
+[`netcup-scp-cli`](https://github.com/pavelpikta/netcup-scp-cli) (`pipx install netcup-scp-cli`),
+which performs exactly this flow and stores only a refresh token:
 
-1. Log in to your netcup account and open **Server Control Panel → Settings → API**
-   (or use any tool that performs the device-code flow against
-   `https://servercontrolpanel.de`, realm `scp`).
-2. Approve the device code in the browser; you receive a long-lived access token.
-3. Paste it into an UNM secret of type **API Key (without secret)** and bind that
-   secret to your SCP device.
-
-Tokens stay valid for roughly **30 days** and are refreshed on use — when one
-expires, create a new token in the SCP UI and update the bound secret. The plugin
-reports `critical` health with an explicit "token expired" message until then.
+1. `netcup auth login` — opens the browser for device-code approval.
+2. **Preferred:** copy the refresh token from `~/.config/netcup-scp-cli/credentials`
+   (`{"refresh_token": "…"}`) into an UNM secret of type **netcup SCP Refresh Token**
+   and bind it to your SCP device. The plugin exchanges it for fresh access tokens
+   on demand (cached in-process); the refresh token stays valid as long as it is
+   used at least once every ~30 days — so a bound UNM device keeps itself alive.
+3. **Alternative:** paste a static access token into an UNM secret of type
+   *API Key (without secret)* instead. It works until it lapses (~30 days), then
+   you must re-create and update the secret.
 
 ## Device setup
 
@@ -29,7 +30,7 @@ reports `critical` health with an explicit "token expired" message until then.
 | --- | --- |
 | Plugin | netcup SCP Plugin |
 | Management address | `servercontrolpanel.de` — a bare host. UNM device addresses must not carry a scheme or path; the plugin adds `https://` and the `/scp-core` API prefix automatically. |
-| Secret | *API Key (without secret)* containing the Bearer token |
+| Secret | *netcup SCP Refresh Token* (preferred) **or** *API Key (without secret)* containing a static access token |
 
 One UNM device = one netcup account. All VMs in that account appear as rows of
 the **Servers** metric table; every interface IP alias feeds UNM's Networks page,

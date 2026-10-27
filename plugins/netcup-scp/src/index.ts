@@ -105,8 +105,11 @@ const server = createPluginServer({
   // GET /plugins/:id/asset) — referenced from discovery.deviceSupport.
   assetsDir: path.join(__dirname, '../..'),
   discovery: {
-    // SCP authenticates with a long-lived OAuth2 Bearer token (Keycloak device-code flow).
+    // Two credential modes, both from netcup's Keycloak realm "scp": a static
+    // access token (apiKeyNoSecret) or — preferred — an OAuth2 refresh token
+    // (scpRefreshToken), which the plugin exchanges for fresh access tokens on demand.
     requiredSecretType: 'apiKeyNoSecret',
+    requiredSecretTypes: ['apiKeyNoSecret', 'scpRefreshToken'],
     metrics: METRIC_DESCRIPTORS,
     options: PLUGIN_OPTIONS,
     actions: actionRegistry.listCatalog(),
@@ -138,17 +141,24 @@ function endpointsOf(settings: Record<string, unknown>, managementAddress: strin
   };
 }
 
-/** Resolves the SCP Bearer token from the request's credentials body. */
-function resolveCredentials(credentials: Record<string, unknown> | undefined): { token?: string; error?: string } {
+/** Resolves the SCP credential from the request's credentials body.
+ *  Accepts either secret type: `apiKeyNoSecret` (static access token in
+ *  `apiKey`) or `scpRefreshToken` (OAuth2 refresh token in `refreshToken`). */
+function resolveCredentials(credentials: Record<string, unknown> | undefined): { token?: string; refreshToken?: string; error?: string } {
   if (!credentials || typeof credentials !== 'object') return { error: 'Missing credentials' };
   const token = typeof credentials['apiKey'] === 'string' && credentials['apiKey'].length > 0 ? credentials['apiKey'].trim() : undefined;
   if (token) return { token };
-  return { error: 'Missing SCP API token — bind an "API Key (without secret)" containing your netcup SCP Bearer token to this device.' };
+  const refreshToken = typeof credentials['refreshToken'] === 'string' && credentials['refreshToken'].length > 0 ? credentials['refreshToken'].trim() : undefined;
+  if (refreshToken) return { refreshToken };
+  return {
+    error:
+      'Missing SCP credential — bind either an "API Key (without secret)" containing a static access token, or a "netcup SCP Refresh Token" secret (preferred: it auto-refreshes and only lapses after ~30 days of non-use).',
+  };
 }
 
 /** Builds a bound client for one SCP account. */
-function buildClient(baseUrl: string, token: string, timeoutMs?: number) {
-  return createScpClient({ baseUrl, token, timeoutMs });
+function buildClient(baseUrl: string, cred: { token?: string; refreshToken?: string }, timeoutMs?: number) {
+  return createScpClient({ baseUrl, token: cred.token, refreshToken: cred.refreshToken, timeoutMs });
 }
 
 /** Human-readable message from an unknown rejection reason. */
@@ -190,13 +200,13 @@ async function handleMonitoring(req: Request, res: Response, body: Record<string
     return;
   }
 
-  const { token, error: credError } = resolveCredentials(body.credentials as Record<string, unknown> | undefined);
-  if (!token) {
+  const { token, refreshToken, error: credError } = resolveCredentials(body.credentials as Record<string, unknown> | undefined);
+  if (!token && !refreshToken) {
     res.status(200).json({ deviceId: deviceId ?? null, collectedAt: new Date().toISOString(), health: 'critical', metrics: { 'system.error': credError ?? 'Missing credentials' }, metricDescriptors: [errorDescriptor()] });
     return;
   }
 
-  const client = buildClient(ep.baseUrl, token, ep.timeoutMs);
+  const client = buildClient(ep.baseUrl, { token, refreshToken }, ep.timeoutMs);
   const fail = (health: Health, error: string): void => {
     res.status(200).json({ deviceId: deviceId ?? null, collectedAt: new Date().toISOString(), health, metrics: { 'system.error': error }, metricDescriptors: [errorDescriptor()], error });
   };
@@ -254,8 +264,8 @@ app.post('/config', async (req, res) => {
     return;
   }
 
-  const { token, error: credError } = resolveCredentials(body.credentials as Record<string, unknown> | undefined);
-  if (!token) {
+  const { token, refreshToken, error: credError } = resolveCredentials(body.credentials as Record<string, unknown> | undefined);
+  if (!token && !refreshToken) {
     res.status(200).json({ success: false, result: { error: credError ?? 'Missing credentials' } });
     return;
   }
@@ -268,7 +278,7 @@ app.post('/config', async (req, res) => {
   }
 
   try {
-    const client = buildClient(ep.baseUrl, token, action.timeoutMs ?? ep.timeoutMs);
+    const client = buildClient(ep.baseUrl, { token, refreshToken }, action.timeoutMs ?? ep.timeoutMs);
     const ctx: ScpActionContext = { client, settings };
     const result = await action.execute(ctx, input);
     res.status(200).json({ success: result.success, result });

@@ -7,11 +7,11 @@
  *     network targets (no scheme, no path), so the device's managementAddress is
  *     a host like `servercontrolpanel.de`; normalizeBaseUrl() upgrades it to
  *     https://<host>/scp-core.
- *   - Auth: OAuth2 Bearer token (Keycloak, realm "scp"). Tokens are long-lived
- *     (~30 days, refreshed on use) and are obtained interactively — see
- *     docs/README.md. The token travels in the Authorization header; there is
- *     no client-side refresh here (the user re-pastes a fresh token into the
- *     bound secret when it expires).
+ *   - Auth: OAuth2 Bearer tokens from netcup's Keycloak realm "scp". Two modes,
+ *     both resolved in this client: a STATIC access token (used as-is, lapses in
+ *     ~30 days) or a REFRESH token (exchanged on demand for fresh access tokens,
+ *     cached in-process; stays valid while used at least once every ~30 days).
+ *     See docs/README.md.
  *   - PATCH /api/v1/servers/{id} requires Content-Type application/merge-patch+json
  *     and accepts ONLY ONE attribute per request; stateOption is a QUERY param.
  *   - Most mutating endpoints answer 202 with a TaskInfo (async work) — callers
@@ -170,8 +170,11 @@ export interface ScpTaskInfo {
 export interface ScpClientOptions {
   /** API base URL (e.g. https://servercontrolpanel.de/scp-core) or a bare host. */
   baseUrl: string;
-  /** Bearer token from the bound apiKeyNoSecret secret. */
-  token: string;
+  /** Static OAuth2 access (Bearer) token — used as-is until it lapses (~30 days). */
+  token?: string;
+  /** OAuth2 refresh token (Keycloak realm "scp") — exchanged for fresh access
+   *  tokens on demand and cached in-process. Preferred over a static token. */
+  refreshToken?: string;
   timeoutMs?: number;
 }
 
@@ -201,32 +204,129 @@ export function normalizeBaseUrl(managementAddress: string): string {
   }
 }
 
+// --- OAuth2 refresh-token support ---------------------------------------------------
+//
+// The realm "scp" is a public client (no client secret): netcup's own CLI
+// authenticates with client_id "scp" + scope "offline_access openid". A bound
+// refresh token is exchanged for short-lived access tokens here and cached in
+// process memory — the plugin container holds no credential state on disk.
+
+export const SCP_OAUTH_CLIENT_ID = 'scp';
+export const SCP_OAUTH_SCOPE = 'offline_access openid';
+
+/** Token endpoint for a given API base — same host, Keycloak realm path. */
+export function tokenEndpointOf(baseUrl: string): string {
+  try {
+    const u = new URL(baseUrl);
+    return `${u.protocol}//${u.host}/realms/scp/protocol/openid-connect/token`;
+  } catch {
+    return '';
+  }
+}
+
+interface ScpTokenResponse {
+  access_token?: string;
+  expires_in?: number;
+  refresh_token?: string; // rotated by Keycloak — intentionally NOT persisted (see exchangeRefreshToken)
+  token_type?: string;
+}
+
+/** In-process access-token cache: one entry per bound refresh token. */
+const tokenCache = new Map<string, { accessToken: string; expiresAt: number }>();
+const TOKEN_CACHE_MAX = 32;
+/** Refresh at least this long before the actual expiry (clock skew / in-flight calls). */
+const EXPIRY_SAFETY_MS = 60_000;
+
+function cacheSet(refreshToken: string, accessToken: string, expiresInSec: number): void {
+  if (tokenCache.size >= TOKEN_CACHE_MAX) tokenCache.delete(tokenCache.keys().next().value as string); // evict oldest
+  const ttlMs = Math.max(expiresInSec * 1000 - EXPIRY_SAFETY_MS, 5_000);
+  tokenCache.set(refreshToken, { accessToken, expiresAt: Date.now() + ttlMs });
+}
+
+/**
+ * Exchanges a refresh token for a fresh access token (grant_type=refresh_token).
+ * Keycloak rotates the refresh token in the response; we deliberately keep using
+ * the ORIGINAL one — netcup's own CLI does exactly this and the realm tolerates it.
+ */
+export async function exchangeRefreshToken(tokenEndpoint: string, refreshToken: string, timeoutMs: number): Promise<ScpTokenResponse> {
+  const body = new URLSearchParams({ grant_type: 'refresh_token', client_id: SCP_OAUTH_CLIENT_ID, refresh_token: refreshToken }).toString();
+  const resp = await axios.post(tokenEndpoint, body, {
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    timeout: timeoutMs,
+    validateStatus: () => true,
+    httpsAgent: insecureHttpsAgent(),
+  });
+  if (resp.status < 200 || resp.status >= 300) {
+    const data = resp.data;
+    let code = '';
+    let message = typeof data === 'string' ? data : JSON.stringify(data ?? `HTTP ${resp.status}`);
+    if (data && typeof data === 'object') {
+      if (typeof data['error'] === 'string') code = data['error'];
+      if (typeof data['error_description'] === 'string') message = data['error_description'];
+    }
+    throw new ScpApiError(resp.status, `SCP token refresh failed: ${message} (${resp.status})`, code);
+  }
+  return resp.data as ScpTokenResponse;
+}
+
 export class ScpClient {
   private http: AxiosInstance;
   readonly baseUrl: string;
+  /** Static Bearer token (apiKeyNoSecret secret) — used verbatim when set. */
+  private staticToken?: string;
+  /** Refresh token (scpRefreshToken secret) — exchanged on demand when no static token is bound. */
+  private refreshToken?: string;
+  private tokenEndpoint: string;
+  private timeoutMs: number;
 
   constructor(opts: ScpClientOptions) {
     this.baseUrl = normalizeBaseUrl(opts.baseUrl);
     if (!this.baseUrl) throw new ScpApiError(0, 'Invalid SCP base URL');
-    const timeoutMs = opts.timeoutMs ?? 15_000;
+    const token = typeof opts.token === 'string' ? opts.token.trim() : '';
+    const refreshToken = typeof opts.refreshToken === 'string' ? opts.refreshToken.trim() : '';
+    if (!token && !refreshToken) throw new ScpApiError(0, 'Missing SCP credential (access or refresh token)');
+    this.staticToken = token || undefined;
+    this.refreshToken = refreshToken || undefined;
+    this.tokenEndpoint = tokenEndpointOf(this.baseUrl);
+    this.timeoutMs = opts.timeoutMs ?? 15_000;
     this.http = axios.create({
       baseURL: this.baseUrl,
-      timeout: timeoutMs,
+      timeout: this.timeoutMs,
       validateStatus: () => true, // we classify statuses ourselves (2xx vs error body)
       httpsAgent: insecureHttpsAgent(),
-      headers: { Authorization: `Bearer ${opts.token}` },
     });
+  }
+
+  /** Resolves the Authorization header — static token as-is; refresh token via cache/exchange. */
+  private async resolveAuth(forceRefresh = false): Promise<string> {
+    if (this.staticToken) return `Bearer ${this.staticToken}`;
+    const rt = this.refreshToken!;
+    if (!forceRefresh) {
+      const hit = tokenCache.get(rt);
+      if (hit && hit.expiresAt > Date.now()) return `Bearer ${hit.accessToken}`;
+    } else {
+      tokenCache.delete(rt); // the server rejected the cached token — force a fresh exchange
+    }
+    const resp = await exchangeRefreshToken(this.tokenEndpoint, rt, this.timeoutMs);
+    if (typeof resp.access_token !== 'string' || resp.access_token === '') throw new ScpApiError(0, 'SCP token refresh returned no access_token');
+    cacheSet(rt, resp.access_token, typeof resp.expires_in === 'number' ? resp.expires_in : 3600);
+    return `Bearer ${resp.access_token}`;
   }
 
   /** Throws ScpApiError for non-2xx; returns the parsed body otherwise. */
   private async request<T>(method: string, path: string, opts?: { body?: unknown; contentType?: string; params?: Record<string, unknown> }): Promise<T> {
-    const config: Record<string, unknown> = {};
-    if (opts?.body !== undefined) {
-      config.data = opts.body;
-      config.headers = { 'Content-Type': opts.contentType ?? 'application/json' };
-    }
+    const headers: Record<string, string> = {};
+    if (opts?.body !== undefined) headers['Content-Type'] = opts.contentType ?? 'application/json';
+    headers.Authorization = await this.resolveAuth();
+    const config: Record<string, unknown> = { headers };
+    if (opts?.body !== undefined) config.data = opts.body;
     if (opts?.params) config.params = opts.params;
-    const resp = await this.http.request({ method, url: path, ...config });
+    let resp = await this.http.request({ method, url: path, ...config });
+    // Refresh mode only: the cached token may have been revoked server-side — force one re-exchange + retry.
+    if ((resp.status === 401 || resp.status === 403) && !this.staticToken) {
+      headers.Authorization = await this.resolveAuth(true);
+      resp = await this.http.request({ method, url: path, ...config });
+    }
     if (resp.status >= 200 && resp.status < 300) return resp.data as T;
     // Error body is usually {code, message} — keep both for diagnostics.
     const data = resp.data;
