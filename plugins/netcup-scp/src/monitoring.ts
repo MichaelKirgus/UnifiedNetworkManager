@@ -142,7 +142,7 @@ interface VmRow {
 }
 
 /** Maps SCP server states to the canonical uppercase VM states the webapp badges. */
-function normalizeVmState(state: string | undefined): string {
+export function normalizeVmState(state: string | undefined): string {
   switch (state) {
     case 'RUNNING': return 'RUNNING';
     case 'SHUTOFF':

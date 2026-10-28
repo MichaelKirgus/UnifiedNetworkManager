@@ -71,6 +71,34 @@ The plugin advertises the `probe` capability, so UNM's **VMs page** polls it eve
   `vmStates` is absent, which would hide `vmStats`. With `{}`, states fall back to the
   ~30 s inventory poll while the CPU column stays live.
 
+### VM management (VMs page)
+
+The plugin implements UNM's **generic hypervisor contract**, so netcup VMs get the
+same Management Actions buttons and Edit-VM dialog as TrueNAS/Proxmox-style plugins:
+
+| Action | SCP call | Notes |
+| --- | --- | --- |
+| `vms.start` | `PATCH state=ON` | idempotent — already-running VMs are skipped, not errored |
+| `vms.stop` | `PATCH state=OFF` (ACPI) | dangerous; on timeout the error suggests Kill |
+| `vms.kill` | `PATCH state=OFF&stateOption=POWEROFF` | hard power-off, no guest cooperation |
+| `vms.restart` | stopped → `ON`; running → `ON&stateOption=RESET` | matches netcup's own UI semantics (powercycle/reset) |
+| `vms.suspend` | `PATCH state=SUSPENDED` | only from RUNNING |
+| `vms.resume` | `PATCH state=ON` | only from SUSPENDED/PAUSED |
+
+All lifecycle actions take `{ names: string[] }` (guest names, as shown on the VMs
+page), resolve them against the account's server list, and **verify by re-reading
+the live state** until it reaches the target (`verified: true`). There is no
+`vms.delete`: the SCP API has no server-delete endpoint, so UNM simply doesn't offer
+a Delete button for netcup devices.
+
+The Edit-VM dialog is driven by three read/write actions: `vms.vm-edit-schema`
+(field catalog), `vms.vm-get {name}` (current values prefill) and
+`vms.vm-update {name, fields}` — which sends **one merge-patch per changed field**
+(SCP accepts exactly one attribute per PATCH) and verifies all of them by re-reading.
+Editable fields: hostname, nickname (clearable), autostart, UEFI boot, OS
+optimization (LINUX/WINDOWS/BSD/LINUX_LEGACY), keyboard layout — none require a
+stopped VM, mirroring netcup's own settings UI.
+
 ### Configuration (plan-gated writes)
 
 | Module | Actions | Risk |
@@ -82,6 +110,7 @@ The plugin advertises the `probe` capability, so UNM's **VMs page** polls it eve
 | Image | `image.setup` — full OS re-install with provisioning (hostname, locale, timezone, additional user, SSH keys, custom script) | **dangerous — wipes the disk** |
 | Firewall | `firewall.policy.create/update/delete`, `firewall.interface.apply` (replaces the policy set on one interface MAC) | write / dangerous |
 | rDNS | `rdns.set`, `rdns.delete` (v4 + v6, auto-detected) | write |
+| VMs | `vms.start/stop/kill/restart/suspend/resume` (name-based, idempotent), `vms.vm-update` (Edit-VM dialog) — see [VM management](#vm-management-vms-page) | write / dangerous |
 | Tasks | `task.cancel` | dangerous |
 
 All writes **verify by re-reading state** afterwards (`verified: true` only when

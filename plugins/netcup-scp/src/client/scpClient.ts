@@ -63,6 +63,12 @@ export interface ScpServerLiveInfo {
   state?: ServerState;
   autostart?: boolean;
   uefi?: boolean;
+  bootorder?: Array<'HDD' | 'CDROM' | 'NETWORK'>;
+  osOptimization?: string | null;
+  keyboardLayout?: string | null;
+  backupTime?: string | null;
+  sockets?: number | null;
+  coresPerSocket?: number | null;
   interfaces?: ScpInterface[];
   disks?: Record<string, unknown>[];
   uptimeInSeconds?: number | null;
@@ -383,8 +389,9 @@ export class ScpClient {
   /**
    * Power control. ONE attribute per PATCH (API constraint); stateOption is a
    * query param — valid values: ON → POWERCYCLE|RESET, OFF → POWEROFF.
+   * SUSPENDED freezes the guest's RAM state; resume = plain ON.
    */
-  patchServerState(serverId: number, state: 'ON' | 'OFF', stateOption?: string): Promise<unknown> {
+  patchServerState(serverId: number, state: 'ON' | 'OFF' | 'SUSPENDED', stateOption?: string): Promise<unknown> {
     const params: Record<string, unknown> = {};
     if (stateOption) params['stateOption'] = stateOption;
     return this.request('PATCH', `/api/v1/servers/${serverId}`, { body: { state }, contentType: 'application/merge-patch+json', params });
@@ -396,6 +403,15 @@ export class ScpClient {
 
   patchServerNickname(serverId: number, nickname: string): Promise<unknown> {
     return this.request('PATCH', `/api/v1/servers/${serverId}`, { body: { nickname }, contentType: 'application/merge-patch+json' });
+  }
+
+  /**
+   * Generic single-attribute merge-patch (API constraint: exactly ONE attribute
+   * per request). Body is one of {autostart} | {uefi} | {bootorder} |
+   * {os_optimization} | {keyboardLayout}.
+   */
+  patchServerAttribute(serverId: number, attr: Record<string, unknown>): Promise<unknown> {
+    return this.request('PATCH', `/api/v1/servers/${serverId}`, { body: attr, contentType: 'application/merge-patch+json' });
   }
 
   // --- Interfaces / networking ---------------------------------------------------

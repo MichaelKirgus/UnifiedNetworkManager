@@ -12,6 +12,18 @@ import http from 'node:http';
 export async function startScpMock() {
   const requests = [];
   let tokenIssuances = 0;
+
+  // Mutable server-1 state — the vms.* lifecycle actions drive it via PATCH.
+  const vmState = {
+    live: 'RUNNING', // ServerState (wire value)
+    hostname: 'vm-test.example.com',
+    nickname: 'Test VM',
+    autostart: true,
+    uefi: false,
+    osOptimization: '',
+    keyboardLayout: '',
+  };
+
   const server = http.createServer((req, res) => {
     // The plugin normalizes a bare host to <host>/scp-core — accept both with and without the prefix.
     const url = (req.url ?? '').replace(/^\/scp-core/, '') || '/';
@@ -20,6 +32,31 @@ export async function startScpMock() {
       res.writeHead(status, { 'Content-Type': 'application/json' });
       res.end(typeof body === 'string' ? body : JSON.stringify(body));
     };
+
+    // PATCH /servers/{id} — state machine + single-attribute merge-patches.
+    if (req.method === 'PATCH' && url.startsWith('/api/v1/servers/')) {
+      let raw = '';
+      req.on('data', (c) => (raw += c));
+      req.on('end', () => {
+        const id = Number(url.split('?')[0].split('/')[4]);
+        if (id !== 1) return send(404, { code: 'error.not.found', message: `server ${id} not found` });
+        let body;
+        try { body = JSON.parse(raw || '{}'); } catch { return send(400, { code: 'error.bad.request', message: 'invalid JSON' }); }
+        if (typeof body.state === 'string') {
+          // ON → RUNNING · OFF (+POWEROFF) → SHUTOFF · SUSPENDED → PMSUSPENDED.
+          vmState.live = body.state === 'ON' ? 'RUNNING' : body.state === 'OFF' ? 'SHUTOFF' : body.state === 'SUSPENDED' ? 'PMSUSPENDED' : vmState.live;
+        } else {
+          if (typeof body.hostname === 'string') vmState.hostname = body.hostname;
+          if (typeof body.nickname === 'string') vmState.nickname = body.nickname;
+          if (typeof body.autostart === 'boolean') vmState.autostart = body.autostart;
+          if (typeof body.uefi === 'boolean') vmState.uefi = body.uefi;
+          if (typeof body.os_optimization === 'string') vmState.osOptimization = body.os_optimization;
+          if (typeof body.keyboardLayout === 'string') vmState.keyboardLayout = body.keyboardLayout;
+        }
+        return send(200, { id: 1 });
+      });
+      return;
+    }
 
     // Keycloak realm "scp" token endpoint — refresh-token exchange.
     if (req.method === 'POST' && url === '/realms/scp/protocol/openid-connect/token') {
@@ -58,12 +95,15 @@ export async function startScpMock() {
         return send(200, {
           id: 1,
           name: 'vm-test',
-          hostname: 'vm-test.example.com',
-          nickname: 'Test VM',
+          hostname: vmState.hostname,
+          nickname: vmState.nickname,
           disabled: false,
           serverLiveInfo: {
-            state: 'RUNNING',
-            autostart: true,
+            state: vmState.live,
+            autostart: vmState.autostart,
+            uefi: vmState.uefi,
+            osOptimization: vmState.osOptimization || null,
+            keyboardLayout: vmState.keyboardLayout || null,
             cpuCount: 2,
             cpuMaxCount: 4,
             currentServerMemoryInMiB: 4096,
@@ -105,6 +145,7 @@ export async function startScpMock() {
     port,
     requests,
     tokenIssuances: () => tokenIssuances,
+    vmState, // live mutable state of server 1 (driven by the vms.* PATCH checks)
     stop: () => new Promise((resolve) => server.close(() => resolve())),
   };
 }
@@ -247,6 +288,61 @@ export default {
           });
           const badBody = await badProbe.json().catch(() => ({}));
           rec.check('X', 'probe with only unknown keys → 502 + error', badProbe.status === 502 && typeof badBody.error === 'string' && badBody.error.includes('No supported probe keys'), `status=${badProbe.status} body=${JSON.stringify(badBody)}`);
+
+          // --- Generic VMs-page contract (vms.* lifecycle + Edit-VM trio). ----
+          const cfg = async (actionId, input) => {
+            const r = await fetch(`${url}/config`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ deviceId: 'vms-action-device', managementAddress: `http://127.0.0.1:${ap.port}`, credentials: { apiKey: 'test-scp-token' }, actionId, input }),
+            });
+            return r.json().catch(() => ({}));
+          };
+
+          // vms.stop — RUNNING → SHUTOFF, verified by re-read; idempotent on a 2nd call.
+          const stopRes = await cfg('vms.stop', { names: ['vm-test'] });
+          rec.check('X', 'vms.stop stops the VM (verified)', stopRes.success === true && stopRes.result?.details?.stopped === 1, JSON.stringify(stopRes));
+          const stopAgain = await cfg('vms.stop', { names: ['vm-test'] });
+          rec.check('X', 'vms.stop is idempotent (already stopped → skipped)', stopAgain.success === true && stopAgain.result?.details?.skipped?.['vm-test'] !== undefined, JSON.stringify(stopAgain));
+
+          // vms.start — SHUTOFF → RUNNING.
+          const startRes = await cfg('vms.start', { names: ['vm-test'] });
+          rec.check('X', 'vms.start starts the VM (verified)', startRes.success === true && startRes.result?.details?.started === 1, JSON.stringify(startRes));
+
+          // vms.suspend — RUNNING → PMSUSPENDED; then vms.resume back to RUNNING.
+          const suspRes = await cfg('vms.suspend', { names: ['vm-test'] });
+          rec.check('X', 'vms.suspend freezes the VM (verified)', suspRes.success === true && suspRes.result?.details?.suspended === 1, JSON.stringify(suspRes));
+          const resumeRes = await cfg('vms.resume', { names: ['vm-test'] });
+          rec.check('X', 'vms.resume unfreezes the VM (verified)', resumeRes.success === true && resumeRes.result?.details?.resumed === 1, JSON.stringify(resumeRes));
+
+          // vms.restart — RUNNING stays RUNNING via ON+RESET.
+          const restartRes = await cfg('vms.restart', { names: ['vm-test'] });
+          rec.check('X', 'vms.restart keeps the VM running (verified)', restartRes.success === true && restartRes.result?.details?.restarted === 1, JSON.stringify(restartRes));
+
+          // vms.kill — hard OFF+POWEROFF → SHUTOFF.
+          const killRes = await cfg('vms.kill', { names: ['vm-test'] });
+          rec.check('X', 'vms.kill hard-stops the VM (verified)', killRes.success === true && killRes.result?.details?.killed === 1, JSON.stringify(killRes));
+
+          // Unknown name → missing, not a failure.
+          const missRes = await cfg('vms.start', { names: ['no-such-vm'] });
+          rec.check('X', 'vms.* with unknown name reports missing (success)', missRes.success === true && Array.isArray(missRes.result?.details?.missing) && missRes.result.details.missing.includes('no-such-vm'), JSON.stringify(missRes));
+
+          // Edit-VM trio — schema is static, get prefills from live state.
+          const schemaRes = await cfg('vms.vm-edit-schema', {});
+          const fields = Array.isArray(schemaRes.result?.details?.fields) ? schemaRes.result.details.fields : [];
+          rec.check('X', 'vms.vm-edit-schema returns the field catalog', schemaRes.success === true && fields.length >= 5 && fields.every((f) => f.key && f.type && typeof f.requiresStopped === 'boolean'), JSON.stringify(fields.map((f) => f.key)));
+          const getRes = await cfg('vms.vm-get', { name: 'vm-test' });
+          rec.check('X', 'vms.vm-get prefills current values', getRes.success === true && getRes.result?.details?.values?.hostname === ap.vmState.hostname && typeof getRes.result.details.values.autostart === 'boolean', JSON.stringify(getRes));
+
+          // vms.vm-update — one merge-patch per changed field, verified by re-read.
+          const updRes = await cfg('vms.vm-update', { name: 'vm-test', fields: { hostname: 'renamed.example.com', nickname: '', autostart: false } });
+          rec.check('X', 'vms.vm-update applies the changed fields (verified)', updRes.success === true && updRes.result?.details?.updated?.length === 3, JSON.stringify(updRes));
+          const getAfter = await cfg('vms.vm-get', { name: 'vm-test' });
+          rec.check('X', 'vms.vm-update values stick on re-read', getAfter.result?.details?.values?.hostname === 'renamed.example.com' && getAfter.result?.details?.values?.nickname === '' && getAfter.result?.details?.values?.autostart === false, JSON.stringify(getAfter));
+
+          // Restore the mock's baseline for any later checks.
+          await cfg('vms.vm-update', { name: 'vm-test', fields: { hostname: 'vm-test.example.com', nickname: 'Test VM', autostart: true } });
+          await cfg('vms.start', { names: ['vm-test'] });
         },
       },
     };

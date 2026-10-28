@@ -10,6 +10,11 @@
  *   - Firewall   : policy CRUD + apply a policy set to one interface
  *   - rDNS       : set / delete reverse DNS for v4/v6 addresses
  *   - Tasks      : cancel a running SCP task
+ *   - VMs        : generic hypervisor contract (vms.start/stop/kill/restart/
+ *                  suspend/resume + vm-edit-schema/vm-get/vm-update) — feeds the
+ *                  webapp's VMs page Management Actions column + Edit-VM dialog.
+ *                  Input is guest NAMES; there is no vms.delete (the SCP API has
+ *                  no server-delete endpoint).
  *
  * Conventions (mirrors zabbix/truenas):
  *   - A ScpApiError means the API ANSWERED — hard/final failure. Transport-level
@@ -23,6 +28,7 @@
 import { ActionDescriptor, ActionResult, createRegistry, isTransientTransportError, pollUntil } from '@unm/plugin-sdk';
 import type { ScpClient, ScpServer, ScpSnapshot, ScpFirewallPolicy, ScpFirewallRule, ScpTaskInfo } from './client/scpClient';
 import { ScpApiError } from './client/scpClient';
+import { normalizeVmState } from './monitoring';
 
 /** Executor context for one /config step — the client is already bound + authenticated. */
 export interface ScpActionContext {
@@ -738,6 +744,558 @@ const taskCancelAction: ActionDescriptor<ScpActionContext> = {
   },
 };
 
+// --- VMs page (generic hypervisor contract) ------------------------------------
+// The webapp's VMs page renders its Management Actions column + Edit-VM dialog
+// GENERICALLY: a button appears only when this plugin advertises the matching
+// action id in /discover, and every lifecycle op takes guest NAMES (`names[]`)
+// so bulk ops group per device. netcup mapping (verified against the SCP UI's
+// own control page): start=ON · stop=OFF (ACPI) · kill=OFF+POWEROFF (hard) ·
+// restart=ON+RESET/POWERCYCLE · suspend=SUSPENDED · resume=ON. There is NO
+// server-delete endpoint in the SCP API, so vms.delete is intentionally absent.
+
+/** One VM as far as the lifecycle actions need it — name + normalized state. */
+interface ScpVmInfo {
+  id: number;
+  name: string;
+  /** Canonical uppercase state (RUNNING / STOPPED / SUSPENDED / PAUSED / ERROR). */
+  state: string;
+}
+
+/** Lists every server with its live state — the name→id + state source of truth. */
+async function listScpVms(ctx: ScpActionContext): Promise<ScpVmInfo[]> {
+  const servers = await ctx.client.listServers();
+  const out: ScpVmInfo[] = [];
+  for (const s of servers) {
+    let state = 'UNKNOWN';
+    try {
+      state = normalizeVmState((await ctx.client.getServer(s.id)).serverLiveInfo?.state);
+    } catch { /* live info unreadable — keep UNKNOWN, the action will surface it */ }
+    out.push({ id: s.id, name: s.name, state });
+  }
+  return out;
+}
+
+/** Per-name outcome planning — already in target state = skipped (idempotent). */
+function planScpVmOutcomes(
+  names: string[],
+  vms: ScpVmInfo[],
+  target: Set<string>,
+): { toRun: ScpVmInfo[]; skipped: Record<string, string>; missing: string[] } {
+  const byName = new Map(vms.map((v) => [v.name, v]));
+  const toRun: ScpVmInfo[] = [];
+  const skipped: Record<string, string> = {};
+  const missing: string[] = [];
+  for (const n of names) {
+    const vm = byName.get(n);
+    if (!vm) {
+      missing.push(n); // already gone — nothing to do
+      continue;
+    }
+    if (target.has(vm.state)) skipped[n] = vm.state.toLowerCase();
+    else toRun.push(vm);
+  }
+  return { toRun, skipped, missing };
+}
+
+/** Reads the VM's live state after a power op — bounded, never throws. */
+async function readVmState(ctx: ScpActionContext, id: number): Promise<string> {
+  try {
+    return normalizeVmState((await ctx.client.getServer(id)).serverLiveInfo?.state);
+  } catch {
+    return 'UNKNOWN';
+  }
+}
+
+const vmsStartAction: ActionDescriptor<ScpActionContext> = {
+  id: 'vms.start',
+  label: 'Start VM(s)',
+  description: 'Powers the selected VMs on (state ON). Already-running VMs are skipped, not failed.',
+  module: 'VMs',
+  riskLevel: 'write' as const,
+  deviceCount: 1 as const,
+  retryOnDispatchFailure: false,
+  timeoutMs: 300_000,
+  inputSchema: {
+    names: { type: 'array', required: true, items: { type: 'string', minLength: 1 }, description: 'VM names to start' },
+  },
+  async execute(ctx, input) {
+    const names = Array.isArray(input['names']) ? (input['names'] as unknown[]).filter((n): n is string => typeof n === 'string') : [];
+    if (names.length === 0) return { success: false, error: 'No VM names provided' };
+    let vms: ScpVmInfo[];
+    try {
+      vms = await listScpVms(ctx);
+    } catch (err) {
+      return failureResult(err);
+    }
+    const { toRun, skipped, missing } = planScpVmOutcomes(names, vms, new Set(['RUNNING']));
+
+    let started = 0;
+    const errors: Record<string, string> = {};
+    for (const vm of toRun) {
+      try {
+        await ctx.client.patchServerState(vm.id, 'ON');
+        const wait = await pollUntil(
+          async () => readVmState(ctx, vm.id),
+          (s) => s === 'RUNNING',
+          { timeoutMs: 180_000, intervalMs: 5_000 },
+        );
+        if (!wait.ok) errors[vm.name] = `Start dispatched but state is ${wait.value ?? 'unknown'} after 180 s`;
+        else started++;
+      } catch (err) {
+        const now = await readVmState(ctx, vm.id);
+        if (now === 'RUNNING') skipped[vm.name] = 'already running'; // response lost — state proves it
+        else errors[vm.name] = errMsg(err);
+      }
+    }
+    return { success: Object.keys(errors).length === 0, applied: true, verified: started > 0 || toRun.length === 0, details: { started, skipped, missing, ...(Object.keys(errors).length ? { errors } : {}) } };
+  },
+};
+
+const vmsStopAction: ActionDescriptor<ScpActionContext> = {
+  id: 'vms.stop',
+  label: 'Stop VM(s)',
+  description: 'Gracefully stops the selected VMs (state OFF — ACPI powerdown). Already-stopped VMs are skipped. Use Kill for unresponsive guests.',
+  module: 'VMs',
+  riskLevel: 'dangerous' as const,
+  deviceCount: 1 as const,
+  retryOnDispatchFailure: false,
+  timeoutMs: 300_000,
+  inputSchema: {
+    names: { type: 'array', required: true, items: { type: 'string', minLength: 1 }, description: 'VM names to stop' },
+  },
+  async execute(ctx, input) {
+    const names = Array.isArray(input['names']) ? (input['names'] as unknown[]).filter((n): n is string => typeof n === 'string') : [];
+    if (names.length === 0) return { success: false, error: 'No VM names provided' };
+    let vms: ScpVmInfo[];
+    try {
+      vms = await listScpVms(ctx);
+    } catch (err) {
+      return failureResult(err);
+    }
+    const { toRun, skipped, missing } = planScpVmOutcomes(names, vms, new Set(['STOPPED']));
+
+    let stopped = 0;
+    const errors: Record<string, string> = {};
+    for (const vm of toRun) {
+      try {
+        await ctx.client.patchServerState(vm.id, 'OFF');
+        const wait = await pollUntil(
+          async () => readVmState(ctx, vm.id),
+          (s) => s === 'STOPPED',
+          { timeoutMs: 180_000, intervalMs: 5_000 },
+        );
+        if (!wait.ok) errors[vm.name] = `Stop dispatched but state is ${wait.value ?? 'unknown'} after 180 s — the guest may ignore ACPI; try Kill`;
+        else stopped++;
+      } catch (err) {
+        const now = await readVmState(ctx, vm.id);
+        if (now === 'STOPPED') skipped[vm.name] = 'already stopped'; // response lost — state proves it
+        else errors[vm.name] = errMsg(err);
+      }
+    }
+    return { success: Object.keys(errors).length === 0, applied: true, verified: stopped > 0 || toRun.length === 0, details: { stopped, skipped, missing, ...(Object.keys(errors).length ? { errors } : {}) } };
+  },
+};
+
+const vmsKillAction: ActionDescriptor<ScpActionContext> = {
+  id: 'vms.kill',
+  label: 'Kill VM(s)',
+  description: 'HARD-KILLS the selected VMs (state OFF + POWEROFF) — no ACPI handshake, for guests unresponsive to a graceful stop. Already-stopped VMs are skipped.',
+  module: 'VMs',
+  riskLevel: 'dangerous' as const,
+  deviceCount: 1 as const,
+  retryOnDispatchFailure: false,
+  timeoutMs: 300_000,
+  inputSchema: {
+    names: { type: 'array', required: true, items: { type: 'string', minLength: 1 }, description: 'VM names to kill' },
+  },
+  async execute(ctx, input) {
+    const names = Array.isArray(input['names']) ? (input['names'] as unknown[]).filter((n): n is string => typeof n === 'string') : [];
+    if (names.length === 0) return { success: false, error: 'No VM names provided' };
+    let vms: ScpVmInfo[];
+    try {
+      vms = await listScpVms(ctx);
+    } catch (err) {
+      return failureResult(err);
+    }
+    const { toRun, skipped, missing } = planScpVmOutcomes(names, vms, new Set(['STOPPED']));
+
+    let killed = 0;
+    const errors: Record<string, string> = {};
+    for (const vm of toRun) {
+      try {
+        await ctx.client.patchServerState(vm.id, 'OFF', 'POWEROFF');
+        const wait = await pollUntil(
+          async () => readVmState(ctx, vm.id),
+          (s) => s === 'STOPPED',
+          { timeoutMs: 180_000, intervalMs: 5_000 },
+        );
+        if (!wait.ok) errors[vm.name] = `Kill dispatched but state is ${wait.value ?? 'unknown'} after 180 s`;
+        else killed++;
+      } catch (err) {
+        const now = await readVmState(ctx, vm.id);
+        if (now === 'STOPPED') skipped[vm.name] = 'already stopped'; // response lost — state proves it
+        else errors[vm.name] = errMsg(err);
+      }
+    }
+    return { success: Object.keys(errors).length === 0, applied: true, verified: killed > 0 || toRun.length === 0, details: { killed, skipped, missing, ...(Object.keys(errors).length ? { errors } : {}) } };
+  },
+};
+
+const vmsRestartAction: ActionDescriptor<ScpActionContext> = {
+  id: 'vms.restart',
+  label: 'Restart VM(s)',
+  description: 'Restarts the selected VMs (state ON + RESET — ACPI reset; falls back to POWERCYCLE when the guest does not ack). Stopped VMs are started directly.',
+  module: 'VMs',
+  riskLevel: 'write' as const,
+  deviceCount: 1 as const,
+  retryOnDispatchFailure: false,
+  timeoutMs: 300_000,
+  inputSchema: {
+    names: { type: 'array', required: true, items: { type: 'string', minLength: 1 }, description: 'VM names to restart' },
+  },
+  async execute(ctx, input) {
+    const names = Array.isArray(input['names']) ? (input['names'] as unknown[]).filter((n): n is string => typeof n === 'string') : [];
+    if (names.length === 0) return { success: false, error: 'No VM names provided' };
+    let vms: ScpVmInfo[];
+    try {
+      vms = await listScpVms(ctx);
+    } catch (err) {
+      return failureResult(err);
+    }
+    const byName = new Map(vms.map((v) => [v.name, v]));
+
+    let restarted = 0;
+    const missing: string[] = [];
+    const errors: Record<string, string> = {};
+    for (const n of names) {
+      const vm = byName.get(n);
+      if (!vm) {
+        missing.push(n); // already gone — nothing to do
+        continue;
+      }
+      try {
+        if (vm.state === 'STOPPED') await ctx.client.patchServerState(vm.id, 'ON');
+        else await ctx.client.patchServerState(vm.id, 'ON', 'RESET');
+        const wait = await pollUntil(
+          async () => readVmState(ctx, vm.id),
+          (s) => s === 'RUNNING',
+          { timeoutMs: 180_000, intervalMs: 5_000 },
+        );
+        if (!wait.ok) errors[n] = `Restart dispatched but state is ${wait.value ?? 'unknown'} after 180 s`;
+        else restarted++;
+      } catch (err) {
+        const now = await readVmState(ctx, vm.id);
+        if (now === 'RUNNING') restarted++; // response lost — state proves it
+        else errors[n] = errMsg(err);
+      }
+    }
+    return { success: Object.keys(errors).length === 0, applied: true, verified: restarted > 0 || names.every((n) => !byName.has(n)), details: { restarted, missing, ...(Object.keys(errors).length ? { errors } : {}) } };
+  },
+};
+
+const vmsSuspendAction: ActionDescriptor<ScpActionContext> = {
+  id: 'vms.suspend',
+  label: 'Suspend VM(s)',
+  description: 'Suspends the selected RUNNING VMs (state SUSPENDED) — RAM state is frozen, resume continues exactly where it left off.',
+  module: 'VMs',
+  riskLevel: 'write' as const,
+  deviceCount: 1 as const,
+  retryOnDispatchFailure: false,
+  timeoutMs: 300_000,
+  inputSchema: {
+    names: { type: 'array', required: true, items: { type: 'string', minLength: 1 }, description: 'VM names to suspend' },
+  },
+  async execute(ctx, input) {
+    const names = Array.isArray(input['names']) ? (input['names'] as unknown[]).filter((n): n is string => typeof n === 'string') : [];
+    if (names.length === 0) return { success: false, error: 'No VM names provided' };
+    let vms: ScpVmInfo[];
+    try {
+      vms = await listScpVms(ctx);
+    } catch (err) {
+      return failureResult(err);
+    }
+    const { toRun, skipped, missing } = planScpVmOutcomes(names, vms, new Set(['SUSPENDED']));
+
+    let suspended = 0;
+    const errors: Record<string, string> = {};
+    for (const vm of toRun) {
+      if (vm.state !== 'RUNNING') {
+        skipped[vm.name] = `not running (${vm.state.toLowerCase()})`;
+        continue;
+      }
+      try {
+        await ctx.client.patchServerState(vm.id, 'SUSPENDED');
+        const wait = await pollUntil(
+          async () => readVmState(ctx, vm.id),
+          (s) => s === 'SUSPENDED',
+          { timeoutMs: 120_000, intervalMs: 5_000 },
+        );
+        if (!wait.ok) errors[vm.name] = `Suspend dispatched but state is ${wait.value ?? 'unknown'} after 120 s`;
+        else suspended++;
+      } catch (err) {
+        const now = await readVmState(ctx, vm.id);
+        if (now === 'SUSPENDED') skipped[vm.name] = 'already suspended'; // response lost — state proves it
+        else errors[vm.name] = errMsg(err);
+      }
+    }
+    return { success: Object.keys(errors).length === 0, applied: true, verified: suspended > 0 || toRun.length === 0, details: { suspended, skipped, missing, ...(Object.keys(errors).length ? { errors } : {}) } };
+  },
+};
+
+const vmsResumeAction: ActionDescriptor<ScpActionContext> = {
+  id: 'vms.resume',
+  label: 'Resume VM(s)',
+  description: 'Resumes the selected SUSPENDED/PAUSED VMs (state ON). Already-running VMs are skipped.',
+  module: 'VMs',
+  riskLevel: 'write' as const,
+  deviceCount: 1 as const,
+  retryOnDispatchFailure: false,
+  timeoutMs: 300_000,
+  inputSchema: {
+    names: { type: 'array', required: true, items: { type: 'string', minLength: 1 }, description: 'VM names to resume' },
+  },
+  async execute(ctx, input) {
+    const names = Array.isArray(input['names']) ? (input['names'] as unknown[]).filter((n): n is string => typeof n === 'string') : [];
+    if (names.length === 0) return { success: false, error: 'No VM names provided' };
+    let vms: ScpVmInfo[];
+    try {
+      vms = await listScpVms(ctx);
+    } catch (err) {
+      return failureResult(err);
+    }
+    const byName = new Map(vms.map((v) => [v.name, v]));
+
+    let resumed = 0;
+    const skipped: Record<string, string> = {};
+    const missing: string[] = [];
+    const errors: Record<string, string> = {};
+    for (const n of names) {
+      const vm = byName.get(n);
+      if (!vm) {
+        missing.push(n);
+        continue;
+      }
+      if (vm.state === 'RUNNING') {
+        skipped[n] = 'already running';
+        continue;
+      }
+      if (vm.state !== 'SUSPENDED' && vm.state !== 'PAUSED') {
+        skipped[n] = `not suspended (${vm.state.toLowerCase()})`;
+        continue;
+      }
+      try {
+        await ctx.client.patchServerState(vm.id, 'ON');
+        const wait = await pollUntil(
+          async () => readVmState(ctx, vm.id),
+          (s) => s === 'RUNNING',
+          { timeoutMs: 120_000, intervalMs: 5_000 },
+        );
+        if (!wait.ok) errors[n] = `Resume dispatched but state is ${wait.value ?? 'unknown'} after 120 s`;
+        else resumed++;
+      } catch (err) {
+        const now = await readVmState(ctx, vm.id);
+        if (now === 'RUNNING') skipped[n] = 'already running'; // response lost — state proves it
+        else errors[n] = errMsg(err);
+      }
+    }
+    return { success: Object.keys(errors).length === 0, applied: true, verified: resumed > 0 || names.every((n) => !byName.has(n)), details: { resumed, skipped, missing, ...(Object.keys(errors).length ? { errors } : {}) } };
+  },
+};
+
+// --- Edit-VM (generic contract: vm-edit-schema / vm-get / vm-update) --------------
+// The webapp's "Edit VM" dialog is driven by three actions: a static field
+// catalog (read), the current values for prefill (read), and a partial update
+// (write). netcup accepts ONE attribute per PATCH, so vm-update issues one
+// merge-patch per changed field.
+
+interface ScpVmEditField {
+  key: string;
+  label: string;
+  description?: string;
+  type: 'string' | 'number' | 'boolean';
+  required?: boolean;
+  default?: unknown;
+  enum?: (string | number)[];
+  min?: number;
+  max?: number;
+  pattern?: string;
+  /** True when the appliance only accepts this change while the VM is inactive. */
+  requiresStopped: boolean;
+  /** Optional strings where '' is a real value (clears the setting). */
+  clearable?: boolean;
+}
+
+/** The editable-VM-settings catalog for netcup — static per plugin. */
+const SCP_VM_EDIT_FIELDS: ScpVmEditField[] = [
+  { key: 'hostname', label: 'Hostname', type: 'string', required: false, pattern: '(?=^([a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9\\-]{0,61}[a-zA-Z0-9])(\\.[a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9\\-]{0,61}[a-zA-Z0-9]))*$).{1,255}', description: 'Guest hostname (RFC 1123).', requiresStopped: false },
+  { key: 'nickname', label: 'Nickname', type: 'string', required: false, clearable: true, description: 'Display name shown in the SCP UI (max 255 chars). Leave empty to remove it.', requiresStopped: false },
+  { key: 'autostart', label: 'Start after boot (autostart)', type: 'boolean', default: false, description: 'Start this VM automatically when the host boots.', requiresStopped: false },
+  { key: 'uefi', label: 'UEFI firmware', type: 'boolean', default: true, description: 'Boot with UEFI instead of legacy BIOS. Changing it on a running guest may break boot — stop first if unsure.', requiresStopped: false },
+  { key: 'osOptimization', label: 'OS optimization', type: 'string', required: false, enum: ['LINUX', 'WINDOWS', 'BSD', 'LINUX_LEGACY'], description: 'Guest OS family for driver/storage tuning (netcup applies the matching virtio profile).', requiresStopped: false },
+  { key: 'keyboardLayout', label: 'Keyboard layout', type: 'string', required: false, clearable: true, description: 'Console keyboard layout code — e.g. "en-us", "de". Leave empty to keep.', requiresStopped: false },
+];
+
+const vmsVmEditSchemaAction: ActionDescriptor<ScpActionContext> = {
+  id: 'vms.vm-edit-schema',
+  label: 'List editable VM settings',
+  description: 'Read-only descriptor of every VM-level setting netcup can edit in place. Drives the webapp\'s generic "Edit VM" dialog; no appliance round-trip.',
+  module: 'VMs',
+  riskLevel: 'read' as const,
+  deviceCount: 1 as const,
+  inputSchema: {},
+  async execute(): Promise<ActionResult> {
+    return { success: true, details: { fields: SCP_VM_EDIT_FIELDS } };
+  },
+};
+
+const vmsVmGetAction: ActionDescriptor<ScpActionContext> = {
+  id: 'vms.vm-get',
+  label: 'Read VM settings values',
+  description: 'Read-only — returns the current editable setting values of ONE VM (prefill for the Edit-VM dialog). Field names match vms.vm-edit-schema.',
+  module: 'VMs',
+  riskLevel: 'read' as const,
+  deviceCount: 1 as const,
+  inputSchema: {
+    name: { type: 'string', required: true, minLength: 1, description: 'VM name (the vms[] row name)' },
+  },
+  async execute(ctx, input): Promise<ActionResult> {
+    const name = typeof input['name'] === 'string' ? (input['name'] as string) : '';
+    if (!name) return { success: false, details: { error: 'VM name is required' } };
+    try {
+      const servers = await ctx.client.listServers();
+      const srv = servers.find((s) => s.name === name);
+      if (!srv) return { success: false, details: { error: `VM "${name}" not found in this netcup account` } };
+      const full = await ctx.client.getServer(srv.id);
+      const live = full.serverLiveInfo ?? {};
+      return {
+        success: true,
+        details: {
+          name,
+          state: normalizeVmState(live.state),
+          values: {
+            hostname: typeof full.hostname === 'string' ? full.hostname : '',
+            nickname: (full.nickname ?? srv.nickname) || '',
+            autostart: live.autostart === true,
+            uefi: live.uefi === true,
+            osOptimization: typeof live.osOptimization === 'string' && live.osOptimization !== '' ? live.osOptimization : '',
+            keyboardLayout: typeof live.keyboardLayout === 'string' ? live.keyboardLayout : '',
+          },
+        },
+      };
+    } catch (err) {
+      return failureResult(err);
+    }
+  },
+};
+
+const vmsVmUpdateAction: ActionDescriptor<ScpActionContext> = {
+  id: 'vms.vm-update',
+  label: 'Edit VM settings',
+  description: 'Updates ONE VM\'s own settings in place — hostname/nickname/autostart/UEFI/OS optimization/keyboard layout. Only fields named by vms.vm-edit-schema are accepted; everything else keeps its current value. netcup accepts one attribute per PATCH, so each changed field is a separate merge-patch.',
+  module: 'VMs',
+  riskLevel: 'write' as const,
+  deviceCount: 1 as const,
+  timeoutMs: 300_000,
+  inputSchema: {
+    name: { type: 'string', required: true, minLength: 1, description: 'Current VM name (lookup key)' },
+    fields: { type: 'object', required: true, properties: {}, description: 'Changed settings (names match vms.vm-edit-schema; empty string clears nickname/keyboardLayout/osOptimization)' },
+  },
+  async execute(ctx, input): Promise<ActionResult> {
+    const name = typeof input['name'] === 'string' ? (input['name'] as string) : '';
+    if (!name) return { success: false, error: 'VM name is required' };
+    const fieldsRaw = input['fields'];
+    if (!fieldsRaw || typeof fieldsRaw !== 'object' || Array.isArray(fieldsRaw)) {
+      return { success: false, error: 'fields (object) is required' };
+    }
+    const fields = fieldsRaw as Record<string, unknown>;
+
+    try {
+      const servers = await ctx.client.listServers();
+      const srv = servers.find((s) => s.name === name);
+      if (!srv) return { success: false, error: `VM "${name}" not found in this netcup account` };
+
+      // Map generic field names onto SCP attributes — one merge-patch each.
+      const patches: Record<string, unknown>[] = [];
+      const updated: string[] = [];
+      if ('hostname' in fields) {
+        const v = String(fields['hostname']);
+        if (v !== '') { patches.push({ hostname: v }); updated.push('hostname'); }
+      }
+      if ('nickname' in fields) {
+        // Empty string CLEARS the nickname — a legitimate change.
+        patches.push({ nickname: String(fields['nickname']) });
+        updated.push('nickname');
+      }
+      if ('autostart' in fields && typeof fields['autostart'] === 'boolean') {
+        patches.push({ autostart: fields['autostart'] });
+        updated.push('autostart');
+      }
+      if ('uefi' in fields && typeof fields['uefi'] === 'boolean') {
+        patches.push({ uefi: fields['uefi'] });
+        updated.push('uefi');
+      }
+      if ('osOptimization' in fields) {
+        const v = String(fields['osOptimization']);
+        if (v !== '') { patches.push({ os_optimization: v }); updated.push('osOptimization'); }
+      }
+      if ('keyboardLayout' in fields) {
+        // Empty string CLEARS the layout override.
+        patches.push({ keyboardLayout: String(fields['keyboardLayout']) });
+        updated.push('keyboardLayout');
+      }
+      if (patches.length === 0) return { success: false, error: 'No editable fields provided' };
+
+      for (const p of patches) await ctx.client.patchServerAttribute(srv.id, p);
+
+      // Verify by re-reading — EVERY driven field must show its new value.
+      const checks: Array<(now: Record<string, unknown>) => boolean> = [];
+      if ('hostname' in fields && String(fields['hostname']) !== '') {
+        const want = String(fields['hostname']);
+        checks.push((now) => now.hostname === want);
+      }
+      if ('nickname' in fields) {
+        const want = String(fields['nickname']);
+        checks.push((now) => now.nickname === want);
+      }
+      if ('autostart' in fields && typeof fields['autostart'] === 'boolean') {
+        const want = fields['autostart'];
+        checks.push((now) => now.autostart === want);
+      }
+      if ('uefi' in fields && typeof fields['uefi'] === 'boolean') {
+        const want = fields['uefi'];
+        checks.push((now) => now.uefi === want);
+      }
+      if ('osOptimization' in fields && String(fields['osOptimization']) !== '') {
+        const want = String(fields['osOptimization']);
+        checks.push((now) => now.osOptimization === want);
+      }
+      if ('keyboardLayout' in fields) {
+        const want = String(fields['keyboardLayout']);
+        checks.push((now) => now.keyboardLayout === want);
+      }
+      const wait = await pollUntil(
+        async () => {
+          const full = await ctx.client.getServer(srv.id);
+          const live = full.serverLiveInfo ?? {};
+          return {
+            hostname: typeof full.hostname === 'string' ? full.hostname : '',
+            nickname: (full.nickname ?? '') || '',
+            autostart: live.autostart === true,
+            uefi: live.uefi === true,
+            osOptimization: typeof live.osOptimization === 'string' ? live.osOptimization : '',
+            keyboardLayout: typeof live.keyboardLayout === 'string' ? live.keyboardLayout : '',
+          };
+        },
+        (now) => checks.every((c) => c(now)),
+        { timeoutMs: 30_000, intervalMs: 2_000 },
+      );
+      return { success: wait.ok, applied: true, verified: wait.ok, details: { name, updated } };
+    } catch (err) {
+      return failureResult(err);
+    }
+  },
+};
+
 // --- Registry ---------------------------------------------------------------------
 
 export const registry = createRegistry<ScpActionContext>([
@@ -761,4 +1319,13 @@ export const registry = createRegistry<ScpActionContext>([
   rdnsSetAction,
   rdnsDeleteAction,
   taskCancelAction,
+  vmsStartAction,
+  vmsStopAction,
+  vmsKillAction,
+  vmsRestartAction,
+  vmsSuspendAction,
+  vmsResumeAction,
+  vmsVmEditSchemaAction,
+  vmsVmGetAction,
+  vmsVmUpdateAction,
 ]);
