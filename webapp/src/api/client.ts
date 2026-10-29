@@ -3351,6 +3351,18 @@ export interface AutomationDraft {
   cooldownSec?: number;
 }
 
+/** One ready-made rule draft from the template catalog (built-in or plugin-advertised). */
+export interface AutomationTemplate {
+  id: string;
+  name: string;
+  description?: string;
+  /** 'builtin' or the advertising plugin's id. */
+  source: string;
+  /** Display name of the source ('Built-in' for built-ins, else the plugin name). */
+  sourceName: string;
+  draft: AutomationDraft;
+}
+
 /** A rule as served by GET /automations (with computed next-run previews). */
 export interface Automation {
   id: string;
@@ -4384,6 +4396,8 @@ export const api = {
     apiFetch<{ setting: SettingView }>(`/settings/${encodeURIComponent(key)}`, { method: 'DELETE' }),
   // Actions & Schedules (automation rules).
   automations: () => apiFetch<{ automations: Automation[] }>('/automations'),
+  /** Template catalog — built-ins + plugin-advertised rule drafts. */
+  automationTemplates: () => apiFetch<{ templates: AutomationTemplate[] }>('/automations/templates'),
   createAutomation: (body: AutomationDraft) =>
     apiFetch<Automation>('/automations', { method: 'POST', body: JSON.stringify(body) }),
   updateAutomation: (id: string, body: Partial<AutomationDraft>) =>

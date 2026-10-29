@@ -92,6 +92,9 @@ export type { GpuRow, GpuExecBackend, PciGpuEntry } from './gpu';
 // Generic plugin state store — persistent opaque JSON blobs in the UNM database
 // across polls/restarts (baselines, counters, TOFU fingerprints). See stateStore.ts.
 export { createPluginStateStore } from './stateStore';
+
+// Automation template advertisement (see automations.ts).
+export type { AutomationTemplate } from './automations';
 export type { PluginStateStore, PluginStateEntry, PluginStateRow, PluginStateStoreOptions } from './stateStore';
 // SSH access for plugins (shared transport + credential resolution). See ssh.ts.
 export { SshClient, createSshPool, resolveSshCredentials, resolveSlotFields, resolveRootSlotCredentials, wrapSudo, probePrivilege, shQuote, normalizeFingerprint, fingerprintMatches, computeFingerprint, normalizePrivateKey } from './ssh';

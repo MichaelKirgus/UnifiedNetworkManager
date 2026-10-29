@@ -307,6 +307,11 @@ export const plugins = pgTable('plugins', {
   // effective-capability evaluation (see types/deviceSupport.ts). NULL = no
   // support matrix advertised.
   deviceSupport: text('deviceSupport'),
+  // Ready-made automation rule drafts declared by the plugin in /discover (JSON
+  // array of { id, name, description?, draft }). Served by GET /automations/
+  // templates alongside the API's built-in templates; the webapp opens the rule
+  // builder pre-filled from one. NULL = none advertised.
+  automationTemplates: text('automationTemplates'),
   // mTLS state (Stage 1): true when discovery last confirmed this plugin is
   // serving TLS with a CA-signed leaf on its conventional port. The API's
   // pluginHttp factory uses https+client-cert for these, plain http otherwise.

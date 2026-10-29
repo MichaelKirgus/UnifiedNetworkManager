@@ -216,6 +216,9 @@ export async function initDb(): Promise<void> {
   // Short catalog description for the webapp's plugin picker (see
   // schema.plugins.description) — advertised in /discover, NULL when undeclared.
   await pool.query(`ALTER TABLE plugins ADD COLUMN IF NOT EXISTS "description" TEXT`);
+  // Ready-made automation rule drafts advertised in /discover (see
+  // schema.plugins.automationTemplates) — served by GET /automations/templates.
+  await pool.query(`ALTER TABLE plugins ADD COLUMN IF NOT EXISTS "automationTemplates" TEXT`);
   // mTLS state (Stage 1): discovery persists whether a plugin is serving TLS
   // with a CA-signed leaf; the API's pluginHttp factory picks https+client-cert.
   await pool.query(`ALTER TABLE plugins ADD COLUMN IF NOT EXISTS "tlsLive" BOOLEAN`);

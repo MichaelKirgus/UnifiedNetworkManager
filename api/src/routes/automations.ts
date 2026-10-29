@@ -16,6 +16,7 @@ import { requireAuth, requirePermission } from '../auth/middleware';
 import { db } from '../db';
 import * as schema from '../db/schema';
 import { nextScheduleRun, parseJsonField, previewSchedule, validateAutomationDraft } from '../automations/engine';
+import { listAutomationTemplates } from '../automations/templates';
 import type { ActionBlock, Automation, AutomationDraft, AutomationRun, LogTrigger, ScheduleSpec, TriggerBlock } from '../automations/types';
 import { fireRule, scanLogMatches } from '../workers/automations';
 
@@ -85,6 +86,15 @@ async function loadRule(id: string): Promise<RuleRow | null> {
 router.get('/automations', requireAuth, requirePermission('automations:read'), async (_req: Request, res: Response) => {
   const rows = await db.select().from(schema.automations).orderBy(desc(schema.automations.createdAt));
   res.status(200).json({ automations: (rows as unknown as RuleRow[]).map(serializeRule) });
+});
+
+// GET /automations/templates — the template catalog (built-ins + plugin-
+// advertised). Registered BEFORE /automations/:id so the static segment wins.
+// Picking a template creates nothing — it only pre-fills the rule builder;
+// saving goes through POST /automations as usual.
+router.get('/automations/templates', requireAuth, requirePermission('automations:read'), async (_req: Request, res: Response) => {
+  const templates = await listAutomationTemplates();
+  res.status(200).json({ templates });
 });
 
 // GET /automations/preview-schedule — upcoming occurrences of a schedule spec

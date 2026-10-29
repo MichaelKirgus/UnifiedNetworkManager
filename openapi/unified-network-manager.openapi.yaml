@@ -7675,6 +7675,21 @@ paths:
         '500':
           description: Pattern scan failed
 
+  /automations/templates:
+    get:
+      tags: [Automations]
+      summary: Template catalog — built-in + plugin-advertised rule drafts (pre-fill for the builder; picking one creates nothing)
+      responses:
+        '200':
+          description: All templates, built-ins first
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AutomationTemplatesResponse' }
+        '401':
+          description: Authentication required
+        '403':
+          description: Missing automations:read permission
+
   /automations/{id}:
     parameters:
       - in: path
@@ -12221,6 +12236,7 @@ components:
         - $ref: '#/components/schemas/AutomationDeviceStatusTrigger'
         - $ref: '#/components/schemas/AutomationFlowTrigger'
         - $ref: '#/components/schemas/AutomationContainerLogTrigger'
+        - $ref: '#/components/schemas/AutomationUpdateTrigger'
 
     AutomationScheduleTrigger:
       type: object
@@ -12305,6 +12321,34 @@ components:
         tail: { type: integer, minimum: 20, maximum: 5000, default: 300, description: "Trailing lines to read per evaluation" }
         pattern: { type: string, description: "JS regex source (search semantics) matched against each new line" }
 
+    AutomationUpdateTrigger:
+      type: object
+      required: [id, type, condition]
+      description: >-
+        Fires on UPDATE transitions in device_updates (the Updates page's data):
+        a row appearing, its version advancing, or the row disappearing.
+        `condition` selects which transitions fire ('available' = appeared/
+        advanced, 'resolved' = disappeared). `defer` holds each firing until
+        the next occurrence of its schedule spec; `maxWaitHours` caps how long
+        an event waits before firing immediately. A `rebootRequired` filter
+        never matches rows whose flag is null (unknown ≠ safe to auto-apply).
+      properties:
+        id: { type: string }
+        type: { type: string, enum: [updateAvailable] }
+        scope: { $ref: '#/components/schemas/AutomationDeviceScope' }
+        pluginId: { type: string, description: "Only updates reported by this plugin (absent = all)" }
+        kinds: { type: array, items: { type: string }, description: "Only these device_updates.kind values (absent = all; plugins may emit custom kinds)" }
+        names: { type: array, items: { type: string }, description: "Exact row names to match (absent/empty = all)" }
+        namePattern: { type: string, description: "JS regex source matched against the row name (search semantics)" }
+        condition: { type: string, enum: [available, resolved] }
+        rebootRequired: { type: boolean, description: "Only rows whose rebootRequired flag EQUALS this value (null-flagged rows never match)" }
+        defer:
+          type: object
+          required: [schedule]
+          properties:
+            schedule: { $ref: '#/components/schemas/AutomationScheduleSpec' }
+            maxWaitHours: { type: number, exclusiveMinimum: 0, description: "Fire immediately once the event has waited this long (absent = wait for the slot unbounded)" }
+
     AutomationActionBlock:
       oneOf:
         - $ref: '#/components/schemas/AutomationIntentAction'
@@ -12314,18 +12358,25 @@ components:
 
     AutomationIntentAction:
       type: object
-      required: [id, type, pluginId, actionId]
+      required: [id, type]
+      description: >-
+        Creates + enqueues a plan (the same path the webapp's CreatePlan dialog
+        uses). `pluginId`/`actionId` are required unless `resolveFromTrigger`
+        is 'update', in which case they are filled at fire time from the firing
+        update row's apply path.
       properties:
         id: { type: string }
         type: { type: string, enum: [intent] }
-        pluginId: { type: string }
-        actionId: { type: string, description: "Catalog entry id (plugins.actionDescriptors)" }
+        pluginId: { type: string, description: "Required unless resolveFromTrigger fills it" }
+        actionId: { type: string, description: "Catalog entry id (plugins.actionDescriptors). Required unless resolveFromTrigger fills it." }
         devices:
           type: object
           properties:
             scope: { $ref: '#/components/schemas/AutomationDeviceScope' }
             deviceIds: { type: array, items: { type: string }, description: "Explicit ids narrow/override the scope" }
-        input: { type: object, additionalProperties: true, description: "Intent payload (validated against the catalog inputSchema in the UI)" }
+        input: { type: object, additionalProperties: true, description: "Intent payload (validated against the catalog inputSchema in the UI). With resolveFromTrigger='update' it overrides the row's pre-filled applyInput." }
+        resolveFromTrigger: { type: string, enum: [update], description: "Fill pluginId/actionId/input from the firing update row's apply path (updateAvailable triggers only)" }
+        requireNoReboot: { type: boolean, default: false, description: "Skip execution when the firing update row requires a reboot" }
 
     AutomationWebhookAction:
       type: object
@@ -12402,6 +12453,32 @@ components:
                   description: "triggerId → next occurrence (ISO) for each schedule trigger"
                   type: object
                   additionalProperties: { type: string, format: date-time, nullable: true }
+
+    AutomationTemplate:
+      type: object
+      required: [id, name, source, sourceName, draft]
+      properties:
+        id: { type: string }
+        name: { type: string }
+        description: { type: string }
+        source: { type: string, description: "'builtin' or the advertising plugin's id" }
+        sourceName: { type: string, description: "Display name of the source ('Built-in' for built-ins)" }
+        draft:
+          type: object
+          required: [name, triggers, actions]
+          properties:
+            name: { type: string }
+            description: { type: string, nullable: true }
+            enabled: { type: boolean }
+            triggers: { type: array, minItems: 1, items: { $ref: '#/components/schemas/AutomationTriggerBlock' } }
+            actions: { type: array, minItems: 1, items: { $ref: '#/components/schemas/AutomationActionBlock' } }
+            cooldownSec: { type: integer, minimum: 0 }
+
+    AutomationTemplatesResponse:
+      type: object
+      required: [templates]
+      properties:
+        templates: { type: array, items: { $ref: '#/components/schemas/AutomationTemplate' } }
 
     AutomationListResponse:
       type: object

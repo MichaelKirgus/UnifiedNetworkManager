@@ -6,7 +6,7 @@ import { CSS } from '@dnd-kit/utilities';
 import clsx from 'clsx';
 import { GripVertical, Trash2, Workflow } from 'lucide-react';
 import {
-  api, ApiError, Automation, AutomationActionBlock, AutomationDraft, AutomationNotificationSeverity, AutomationTriggerBlock,
+  api, ApiError, Automation, AutomationActionBlock, AutomationDraft, AutomationNotificationSeverity, AutomationScheduleSpec, AutomationTriggerBlock,
   AUTOMATION_NOTIFICATION_SEVERITIES, BACKUP_PRESETS, CatalogEntry, DEVICE_STATUSES, DeviceStatusValue, FLOW_CLASSES, FLOW_DIRECTIONS,
   FlowClassValue, FlowDirectionValue, InputSchema, LOG_LEVELS, LogLevel, METRIC_COMPARATORS, MetricComparator, Plugin, Site,
 } from '../api/client';
@@ -42,6 +42,9 @@ function newFlowTrigger(): AutomationTriggerBlock {
 }
 function newContainerLogTrigger(): AutomationTriggerBlock {
   return { id: newId('t'), type: 'containerLog', pluginId: '', appName: '', pattern: '' };
+}
+function newUpdateTrigger(): AutomationTriggerBlock {
+  return { id: newId('t'), type: 'updateAvailable', condition: 'available' };
 }
 
 function newIntentAction(): AutomationActionBlock {
@@ -118,6 +121,13 @@ function validateDraft(draft: AutomationDraft): string[] {
         }
         break;
       }
+      case 'updateAvailable': {
+        if (t.namePattern) { try { new RegExp(t.namePattern); } catch (e) { errors.push(`${where}: invalid name regex — ${(e as Error).message}`); } }
+        if (t.defer?.maxWaitHours !== undefined && (!Number.isFinite(t.defer.maxWaitHours) || t.defer.maxWaitHours <= 0)) {
+          errors.push(`${where}: max wait must be a positive number of hours`);
+        }
+        break;
+      }
     }
   }
   if (draft.actions.length === 0) errors.push('Add at least one action');
@@ -125,9 +135,12 @@ function validateDraft(draft: AutomationDraft): string[] {
     const where = `Action ${i + 1}`;
     switch (a.type) {
       case 'intent': {
-        if (!a.pluginId) errors.push(`${where}: pick a plugin`);
-        else if (!a.actionId) errors.push(`${where}: pick an action`);
-        else if ((a.devices.deviceIds ?? []).length === 0) errors.push(`${where}: select at least one device`);
+        // With resolveFromTrigger the row's apply path fills plugin/action/device at fire time.
+        if (a.resolveFromTrigger !== 'update') {
+          if (!a.pluginId) errors.push(`${where}: pick a plugin`);
+          else if (!a.actionId) errors.push(`${where}: pick an action`);
+          else if ((a.devices.deviceIds ?? []).length === 0) errors.push(`${where}: select at least one device`);
+        }
         break;
       }
       case 'webhook': {
@@ -245,42 +258,51 @@ function SchedulePreview({ kind, expr }: { kind: 'cron' | 'interval' | 'dailyAt'
 
 // ── Trigger editors ───────────────────────────────────────────────────────────
 
-function ScheduleTriggerEditor({ block, onChange }: { block: Extract<AutomationTriggerBlock, { type: 'schedule' }>; onChange: (b: AutomationTriggerBlock) => void }) {
-  const s = block.schedule;
+/** Shared schedule-spec fields (kind + value + preview) — used by the schedule
+ * trigger editor and the updateAvailable defer window. */
+function ScheduleSpecFields({ spec, onChange }: { spec: AutomationScheduleSpec; onChange: (s: AutomationScheduleSpec) => void }) {
   return (
-    <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+    <>
       <div>
         <span className={labelCls}>Kind</span>
-        <select className={inputCls} value={s.kind} onChange={(e) => {
+        <select className={inputCls} value={spec.kind} onChange={(e) => {
           const kind = e.target.value as 'cron' | 'interval' | 'dailyAt';
-          onChange({ ...block, schedule: kind === 'cron' ? { kind, expr: s.kind === 'cron' ? s.expr : '' } : kind === 'interval' ? { kind, everyMinutes: s.kind === 'interval' ? s.everyMinutes : 5 } : { kind, time: s.kind === 'dailyAt' ? s.time : '09:00' } });
+          onChange(kind === 'cron' ? { kind, expr: spec.kind === 'cron' ? spec.expr : '' } : kind === 'interval' ? { kind, everyMinutes: spec.kind === 'interval' ? spec.everyMinutes : 5 } : { kind, time: spec.kind === 'dailyAt' ? spec.time : '09:00' });
         }}>
           <option value="cron">Cron expression</option>
           <option value="interval">Fixed interval</option>
           <option value="dailyAt">Daily at time</option>
         </select>
       </div>
-      {s.kind === 'cron' && (
+      {spec.kind === 'cron' && (
         <div>
           <span className={labelCls}>Cron expression</span>
-          <input className={inputCls} value={s.expr} placeholder="*/5 * * * *" onChange={(e) => onChange({ ...block, schedule: { kind: 'cron', expr: e.target.value } })} />
+          <input className={inputCls} value={spec.expr} placeholder="*/5 * * * *" onChange={(e) => onChange({ kind: 'cron', expr: e.target.value })} />
         </div>
       )}
-      {s.kind === 'interval' && (
+      {spec.kind === 'interval' && (
         <div>
           <span className={labelCls}>Every (minutes)</span>
-          <input type="number" min={1} className={inputCls} value={Number.isFinite(s.everyMinutes) ? s.everyMinutes : ''} onChange={(e) => onChange({ ...block, schedule: { kind: 'interval', everyMinutes: Number(e.target.value) } })} />
+          <input type="number" min={1} className={inputCls} value={Number.isFinite(spec.everyMinutes) ? spec.everyMinutes : ''} onChange={(e) => onChange({ kind: 'interval', everyMinutes: Number(e.target.value) })} />
         </div>
       )}
-      {s.kind === 'dailyAt' && (
+      {spec.kind === 'dailyAt' && (
         <div>
           <span className={labelCls}>Time (24h, server local)</span>
-          <input type="time" className={inputCls} value={s.time} onChange={(e) => onChange({ ...block, schedule: { kind: 'dailyAt', time: e.target.value } })} />
+          <input type="time" className={inputCls} value={spec.time} onChange={(e) => onChange({ kind: 'dailyAt', time: e.target.value })} />
         </div>
       )}
       <div className="sm:col-span-2">
-        <SchedulePreview kind={s.kind} expr={s.kind === 'cron' ? s.expr : s.kind === 'interval' ? String(s.everyMinutes) : s.time} />
+        <SchedulePreview kind={spec.kind} expr={spec.kind === 'cron' ? spec.expr : spec.kind === 'interval' ? String(spec.everyMinutes) : spec.time} />
       </div>
+    </>
+  );
+}
+
+function ScheduleTriggerEditor({ block, onChange }: { block: Extract<AutomationTriggerBlock, { type: 'schedule' }>; onChange: (b: AutomationTriggerBlock) => void }) {
+  return (
+    <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+      <ScheduleSpecFields spec={block.schedule} onChange={(s) => onChange({ ...block, schedule: s })} />
     </div>
   );
 }
@@ -540,6 +562,75 @@ function ContainerLogTriggerEditor({ block, onChange, plugins }: { block: Extrac
   );
 }
 
+function UpdateTriggerEditor({ block, onChange, plugins }: { block: Extract<AutomationTriggerBlock, { type: 'updateAvailable' }>; onChange: (b: AutomationTriggerBlock) => void; plugins: Plugin[] }) {
+  let regexError: string | null = null;
+  if (block.namePattern) { try { new RegExp(block.namePattern); } catch (e) { regexError = (e as Error).message; } }
+
+  const setDefer = (defer: { schedule: AutomationScheduleSpec; maxWaitHours?: number } | undefined) => onChange({ ...block, defer });
+
+  return (
+    <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+      <div>
+        <span className={labelCls}>Condition</span>
+        <select className={inputCls} value={block.condition} onChange={(e) => onChange({ ...block, condition: e.target.value as 'available' | 'resolved' })}>
+          <option value="available">Update appeared / advanced</option>
+          <option value="resolved">Update disappeared (applied/withdrawn)</option>
+        </select>
+      </div>
+      <div>
+        <span className={labelCls}>Plugin (optional)</span>
+        <select className={inputCls} value={block.pluginId ?? ''} onChange={(e) => onChange({ ...block, pluginId: e.target.value || undefined })}>
+          <option value="">Any plugin</option>
+          {plugins.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+        </select>
+      </div>
+      <div>
+        <span className={labelCls}>Kinds (comma-separated, optional)</span>
+        <input className={inputCls} value={(block.kinds ?? []).join(', ')} placeholder="firmware, os-package, docker-image, app" onChange={(e) => {
+          const kinds = e.target.value.split(',').map((k) => k.trim()).filter(Boolean);
+          onChange({ ...block, kinds: kinds.length ? kinds : undefined });
+        }} />
+      </div>
+      <div>
+        <span className={labelCls}>Name pattern (regex, optional)</span>
+        <input className={inputCls} value={block.namePattern ?? ''} placeholder="e.g. ^os$" onChange={(e) => onChange({ ...block, namePattern: e.target.value || undefined })} />
+        {regexError && <p className="mt-1 text-xs text-danger">Invalid regex — {regexError}</p>}
+      </div>
+      <div className="flex items-center gap-2">
+        <input id={`upd-reboot-${block.id}`} type="checkbox" checked={block.rebootRequired === true} onChange={(e) => onChange({ ...block, rebootRequired: e.target.checked ? true : undefined })} />
+        <label htmlFor={`upd-reboot-${block.id}`} className="text-sm text-secondary">Only rows that require a reboot</label>
+      </div>
+      <div className="flex items-center gap-2">
+        <input id={`upd-noreboot-${block.id}`} type="checkbox" checked={block.rebootRequired === false} onChange={(e) => onChange({ ...block, rebootRequired: e.target.checked ? false : undefined })} />
+        <label htmlFor={`upd-noreboot-${block.id}`} className="text-sm text-secondary">Only rows that do NOT require a reboot</label>
+      </div>
+
+      {block.defer && (
+        <details open className="sm:col-span-2 rounded-md border border-border bg-muted/30 px-3 py-2">
+          <summary className="cursor-pointer select-none text-xs font-medium uppercase tracking-wide text-faint hover:text-secondary">Deferral window — hold each firing until the next slot</summary>
+          <div className="mt-2 grid grid-cols-1 gap-3 sm:grid-cols-2">
+            <ScheduleSpecFields spec={block.defer.schedule} onChange={(s) => setDefer({ ...block.defer!, schedule: s })} />
+            <div>
+              <span className={labelCls}>Max wait (hours, optional)</span>
+              <input type="number" min={0.5} step={0.5} className={inputCls} value={block.defer.maxWaitHours ?? ''} placeholder="unbounded — run-asap on the slot" onChange={(e) => setDefer({ ...block.defer!, maxWaitHours: e.target.value === '' ? undefined : Number(e.target.value) })} />
+              <p className={hintCls}>Fire immediately once an event has waited this long, even if no slot has passed yet.</p>
+            </div>
+          </div>
+        </details>
+      )}
+      {!block.defer && (
+        <button type="button" onClick={() => setDefer({ schedule: { kind: 'dailyAt', time: '02:00' } })} className="justify-self-start rounded-md border border-border px-2 py-1 text-xs font-medium text-secondary hover:bg-muted">
+          + Add deferral window
+        </button>
+      )}
+      <div className="sm:col-span-2">
+        <p className={hintCls}>Fires on TRANSITIONS only — a row that stays listed does not re-fire. With a deferral window, firings are held until the next slot (version advances refresh the snapshot without moving the slot; an 'available' update disappearing cancels its pending firing).</p>
+      </div>
+      <ScopeEditor scope={block.scope} onChange={(scope) => onChange({ ...block, scope: Object.keys(scope).length ? scope : undefined })} />
+    </div>
+  );
+}
+
 // ── Action editors ────────────────────────────────────────────────────────────
 
 function IntentActionEditor({ block, onChange, plugins }: { block: Extract<AutomationActionBlock, { type: 'intent' }>; onChange: (b: AutomationActionBlock) => void; plugins: Plugin[] }) {
@@ -563,18 +654,20 @@ function IntentActionEditor({ block, onChange, plugins }: { block: Extract<Autom
     onChange({ ...block, devices: { deviceIds: next } });
   }
 
+  const fromTrigger = block.resolveFromTrigger === 'update';
+
   return (
     <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
       <div>
         <span className={labelCls}>Plugin</span>
-        <select className={inputCls} value={block.pluginId} onChange={(e) => onChange({ ...block, pluginId: e.target.value, actionId: '', input: {}, devices: { deviceIds: [] } })}>
+        <select className={`${inputCls} disabled:opacity-50`} value={block.pluginId ?? ''} onChange={(e) => onChange({ ...block, pluginId: e.target.value || undefined, actionId: '', input: {}, devices: { deviceIds: [] } })} disabled={fromTrigger}>
           <option value="" disabled>Select a plugin</option>
           {plugins.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
         </select>
       </div>
       <div>
         <span className={labelCls}>Action (catalog)</span>
-        <select className={`${inputCls} disabled:opacity-50`} disabled={!block.pluginId || catalog.length === 0} value={block.actionId} onChange={(e) => {
+        <select className={`${inputCls} disabled:opacity-50`} disabled={!block.pluginId || catalog.length === 0 || fromTrigger} value={block.actionId ?? ''} onChange={(e) => {
           const next = catalog.find((c) => c.id === e.target.value);
           onChange({ ...block, actionId: e.target.value, input: next?.inputSchema ? defaultValues(next.inputSchema) : {} });
         }}>
@@ -591,9 +684,16 @@ function IntentActionEditor({ block, onChange, plugins }: { block: Extract<Autom
           <IntentInputForm schema={entry.inputSchema} values={block.input ?? {}} onChange={(input) => onChange({ ...block, input })} />
         </div>
       )}
+      {fromTrigger && (
+        <div className="sm:col-span-2 rounded-md border border-accent-indigo/40 bg-accent-indigo/10 px-3 py-2 text-xs text-secondary">
+          Plugin, action and target device are filled at fire time from the firing update row's apply path (device_updates.applyActionId / applyInput). Rows without an apply path skip this action with a logged reason.
+        </div>
+      )}
       <div className="sm:col-span-2">
         <span className={labelCls}>Target devices ({eligibleDevices.length} with this plugin)</span>
-        {eligibleDevices.length === 0 ? (
+        {fromTrigger ? (
+          <p className={hintCls}>Ignored in trigger-resolved mode — the firing row's own device is always the target.</p>
+        ) : eligibleDevices.length === 0 ? (
           <p className={hintCls}>{block.pluginId ? 'No device has this plugin assigned yet.' : 'Pick a plugin first.'}</p>
         ) : (
           <div className="max-h-40 overflow-y-auto rounded-md border border-border p-2">
@@ -606,6 +706,16 @@ function IntentActionEditor({ block, onChange, plugins }: { block: Extract<Autom
             ))}
           </div>
         )}
+      </div>
+      <div className="flex items-center gap-4 sm:col-span-2">
+        <label className="flex items-center gap-2 text-sm text-secondary">
+          <input type="checkbox" checked={fromTrigger} onChange={(e) => onChange({ ...block, resolveFromTrigger: e.target.checked ? 'update' : undefined })} />
+          Resolve plugin/action/device from the firing update row
+        </label>
+        <label className="flex items-center gap-2 text-sm text-secondary">
+          <input type="checkbox" checked={block.requireNoReboot === true} onChange={(e) => onChange({ ...block, requireNoReboot: e.target.checked || undefined })} />
+          Skip when the update requires a reboot
+        </label>
       </div>
     </div>
   );
@@ -717,6 +827,7 @@ const TRIGGER_PALETTE: Array<{ type: AutomationTriggerBlock['type']; label: stri
   { type: 'deviceStatus', label: 'Device status', make: newDeviceStatusTrigger },
   { type: 'flow', label: 'Flow traffic', make: newFlowTrigger },
   { type: 'containerLog', label: 'Container log', make: newContainerLogTrigger },
+  { type: 'updateAvailable', label: 'Update available', make: newUpdateTrigger },
 ];
 const ACTION_PALETTE: Array<{ type: AutomationActionBlock['type']; label: string; make: () => AutomationActionBlock }> = [
   { type: 'intent', label: 'Run plan', make: newIntentAction },
@@ -787,6 +898,8 @@ function BlockCard({ title, onRemove, dragHandle, children }: { title: string; o
 interface RuleBuilderDialogProps {
   /** null = create; otherwise the rule being edited. */
   existing: Automation | null;
+  /** Pre-fill for a fresh rule (e.g. from a template) — block ids are regenerated so two rules never share them. */
+  initialDraft?: Pick<AutomationDraft, 'name' | 'description' | 'enabled' | 'triggers' | 'actions' | 'cooldownSec'>;
   onClose: () => void;
   onSaved: () => void;
 }
@@ -798,15 +911,26 @@ interface RuleBuilderDialogProps {
  * dragging a chip into a zone or clicking its label. Every block is validated
  * client-side against the same rules as the API's validateAutomationDraft.
  */
-export default function RuleBuilderDialog({ existing, onClose, onSaved }: RuleBuilderDialogProps) {
-  const [name, setName] = useState(existing?.name ?? '');
-  const [description, setDescription] = useState(existing?.description ?? '');
-  const [enabled, setEnabled] = useState(existing?.enabled ?? true);
-  const [cooldownSec, setCooldownSec] = useState(String(existing?.cooldownSec ?? 0));
+export default function RuleBuilderDialog({ existing, initialDraft, onClose, onSaved }: RuleBuilderDialogProps) {
+  // A template pre-fill is a CREATE with seed values — regenerate block ids so
+  // the draft's placeholder ids never collide across rules.
+  const seeded = !existing && initialDraft ? JSON.parse(JSON.stringify(initialDraft)) : null;
+  const [name, setName] = useState(existing?.name ?? seeded?.name ?? '');
+  const [description, setDescription] = useState(existing?.description ?? seeded?.description ?? '');
+  const [enabled, setEnabled] = useState(existing?.enabled ?? (seeded ? seeded.enabled !== false : true));
+  const [cooldownSec, setCooldownSec] = useState(String(existing?.cooldownSec ?? seeded?.cooldownSec ?? 0));
 
   // Deep-copy incoming blocks so edits never mutate the cached query data.
-  const [triggers, setTriggers] = useState<AutomationTriggerBlock[]>(() => (existing ? JSON.parse(JSON.stringify(existing.triggers)) : [newScheduleTrigger()]));
-  const [actions, setActions] = useState<AutomationActionBlock[]>(() => (existing ? JSON.parse(JSON.stringify(existing.actions)) : [newNotificationAction()]));
+  const [triggers, setTriggers] = useState<AutomationTriggerBlock[]>(() => {
+    if (existing) return JSON.parse(JSON.stringify(existing.triggers)) as AutomationTriggerBlock[];
+    if (seeded?.triggers?.length) return (seeded.triggers as AutomationTriggerBlock[]).map((t) => ({ ...t, id: newId('t') }));
+    return [newScheduleTrigger()];
+  });
+  const [actions, setActions] = useState<AutomationActionBlock[]>(() => {
+    if (existing) return JSON.parse(JSON.stringify(existing.actions)) as AutomationActionBlock[];
+    if (seeded?.actions?.length) return (seeded.actions as AutomationActionBlock[]).map((a) => ({ ...a, id: newId('a') }));
+    return [newNotificationAction()];
+  });
   // Show live client-side validation errors only after the first submit attempt.
   const [showErrors, setShowErrors] = useState(false);
   const draftErrors = showErrors ? validateDraft(buildDraft()) : [];
@@ -957,6 +1081,7 @@ export default function RuleBuilderDialog({ existing, onClose, onSaved }: RuleBu
                       {t.type === 'deviceStatus' && <DeviceStatusTriggerEditor block={t} onChange={setTrigger} />}
                       {t.type === 'flow' && <FlowTriggerEditor block={t} onChange={setTrigger} />}
                       {t.type === 'containerLog' && <ContainerLogTriggerEditor block={t} onChange={setTrigger} plugins={plugins} />}
+                      {t.type === 'updateAvailable' && <UpdateTriggerEditor block={t} onChange={setTrigger} plugins={plugins} />}
                     </SortableBlock>
                   ))}
                 </div>

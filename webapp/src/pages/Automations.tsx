@@ -1,7 +1,7 @@
 import { useMemo, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { ChevronDown, ChevronRight, FlaskConical, Pencil, Plus, Trash2, Workflow } from 'lucide-react';
-import { api, Automation, AutomationActionBlock, AutomationRun, AutomationTriggerBlock } from '../api/client';
+import { api, Automation, AutomationActionBlock, AutomationDraft, AutomationRun, AutomationTemplate, AutomationTriggerBlock } from '../api/client';
 import { can } from '../auth/permissions';
 import { DataTable, DataTableColumn } from '../components/DataTable';
 import { Layout } from '../components/Layout';
@@ -119,9 +119,12 @@ export default function Automations() {
 
   const [builderOpen, setBuilderOpen] = useState(false);
   const [editing, setEditing] = useState<Automation | null>(null);
+  /** Template pre-fill for a fresh rule (set when creating from the catalog). */
+  const [templateDraft, setTemplateDraft] = useState<Pick<AutomationDraft, 'name' | 'description' | 'enabled' | 'triggers' | 'actions' | 'cooldownSec'> | null>(null);
 
   const automationsQuery = useQuery({ queryKey: ['automations'], queryFn: () => api.automations() });
   const rows = useMemo(() => automationsQuery.data?.automations ?? [], [automationsQuery.data]);
+  const templatesQuery = useQuery({ queryKey: ['automation-templates'], queryFn: () => api.automationTemplates(), staleTime: 5 * 60_000 });
 
   // Run history is fetched lazily for the one expanded rule (chevron column).
   const [openRunsFor, setOpenRunsFor] = useState<string | null>(null);
@@ -157,8 +160,16 @@ export default function Automations() {
     onSuccess: invalidate,
   });
 
-  function openCreate() { setEditing(null); setBuilderOpen(true); }
-  function openEdit(row: Automation) { setEditing(row); setBuilderOpen(true); }
+  function openCreate() { setEditing(null); setTemplateDraft(null); setBuilderOpen(true); }
+  function openFromTemplate(t: AutomationTemplate) {
+    if (!canWrite) return;
+    setEditing(null);
+    // Deep-copy so the dialog's id regeneration never mutates the cached catalog.
+    const draft = JSON.parse(JSON.stringify(t.draft)) as Pick<AutomationDraft, 'name' | 'description' | 'enabled' | 'triggers' | 'actions' | 'cooldownSec'>;
+    setTemplateDraft(draft);
+    setBuilderOpen(true);
+  }
+  function openEdit(row: Automation) { setEditing(row); setTemplateDraft(null); setBuilderOpen(true); }
 
   const columns: DataTableColumn<Automation>[] = [
     {
@@ -302,6 +313,22 @@ export default function Automations() {
             <Workflow className="h-3.5 w-3.5" />
             Rules are evaluated by the automation worker every 15 seconds. A firing runs all of a rule's actions and records one run row (expand a row for history).
           </p>
+          {canWrite && templatesQuery.data?.templates.length ? (
+            <details className="mb-4 rounded-md border border-border bg-card">
+              <summary className="cursor-pointer select-none px-3 py-2 text-sm font-medium text-secondary hover:bg-muted/50">Templates — start from a ready-made rule (built-in + plugin-advertised)</summary>
+              <div className="grid grid-cols-1 gap-2 border-t border-border p-3 md:grid-cols-2 xl:grid-cols-3">
+                {templatesQuery.data.templates.map((t) => (
+                  <button key={`${t.source}:${t.id}`} type="button" onClick={() => openFromTemplate(t)} className="rounded-md border border-border bg-muted/30 p-3 text-left hover:border-focus-ring hover:bg-muted/60">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-sm font-medium text-foreground">{t.name}</span>
+                      <span className="shrink-0 rounded-full bg-muted px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide text-faint">{t.sourceName}</span>
+                    </div>
+                    {t.description && <p className="mt-1 line-clamp-3 text-xs text-secondary">{t.description}</p>}
+                  </button>
+                ))}
+              </div>
+            </details>
+          ) : null}
           <DataTable<Automation>
             columns={columns}
             rows={rows}
@@ -317,8 +344,9 @@ export default function Automations() {
       {builderOpen && (
         <RuleBuilderDialog
           existing={editing}
-          onClose={() => setBuilderOpen(false)}
-          onSaved={() => { setBuilderOpen(false); invalidate(); }}
+          initialDraft={templateDraft ?? undefined}
+          onClose={() => { setBuilderOpen(false); setTemplateDraft(null); }}
+          onSaved={() => { setBuilderOpen(false); setTemplateDraft(null); invalidate(); }}
         />
       )}
     </Layout>
