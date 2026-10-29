@@ -105,7 +105,7 @@ flowchart LR
 | `webapp/` | React 18 + Vite + Tailwind SPA (login, devices, plans, networks, hosts, routes, tunnels, Wi-Fi, logs, plugins, secrets, sites, users, roles, tokens) |
 | `packages/plugin-sdk/` | Shared TypeScript SDK for plugins (`@unm/plugin-sdk`): HTTP server scaffolding (incl. auto-mounted self-metrics `/metrics`), settings reading, API client, structured logger |
 | `packages/snmp-client/` | Shared net-snmp CLI wrapper used by the SNMP + LANCOM plugins |
-| `plugins/` | One microservice per vendor adapter — 20 plugins in total. The full list with supported vendors & devices lives in [docs/PLUGINS.md](docs/PLUGINS.md); `_template/` is the scaffold for new plugins |
+| `plugins/` | One microservice per vendor adapter — 24 plugins in total. The full list with supported vendors & devices lives in [docs/PLUGINS.md](docs/PLUGINS.md); `_template/` is the scaffold for new plugins |
 | `plugins/basic-auth/` | Identity provider plugin — local users + TOTP verification on behalf of the API (swappable via `AUTH_PLUGIN_ID`) |
 | `plugins/secrets-provider/` | Secrets provider plugin — encryption at rest (owns `MASTER_KEY`) + key/cert generation (swappable via `SECRETS_PLUGIN_ID`) |
 | `mcp/` | MCP server exposing the OpenAPI operations as tools (+ read-only SQL & plugin probes on a gated debug endpoint) |
@@ -113,6 +113,7 @@ flowchart LR
 | `scripts/` | Mock OPNsense appliance + TLS material, plan e2e test suite |
 | `docs/PLUGINS.md` | **Plugin catalog** — every shipped plugin with its supported vendors & devices |
 | `docs/PLUGIN-DEVELOPMENT.md` | **The plugin developer guide** — contract, SDK usage, settings loop, logging, discovery, deployment |
+| `docs/PERMISSIONS.md` | **Permission catalog & access control** — full RBAC reference: every permission, the API route → permission map, inline gates and webapp page guards |
 
 ## Getting started
 
@@ -208,19 +209,14 @@ The recommended layout is **same-origin**: one public hostname serves the webapp
 - **SNMP transport** — SNMP queries run in-process over native UDP (`@unm/snmp-client` on the `net-snmp` npm package); credentials (community strings, USM passphrases) are never passed as command-line arguments or written to logs. DES privacy is rejected at credential-validation time (Node ≥17 OpenSSL dropped it) — use AES.
 - **API tokens** — long-lived bearer tokens (`unm_…`) for agents/scripts, self-service on the Tokens page or `POST /v1/tokens`, with per-token permission narrowing.
 
-Permission catalog (current):
+The full catalog — all ~58 permissions, the API route → permission map, inline gates (secrets personal area, self-vs-other credential ops) and webapp page guards — is documented in [docs/PERMISSIONS.md](docs/PERMISSIONS.md). Headline entries:
 
 | Permission | Grants |
 |------------|--------|
-| `devices:read` | View devices, their plugins and telemetry |
-| `logs:read` | View plugin log entries (device and global) — separate from `devices:read` because logs can carry critical details |
-| `configs:apply` | Submit configuration jobs / execute plans (requires 2FA) |
-| `plugins:manage` | Change global plugin settings |
-| `secrets:read` / `secrets:write` / `secrets:delete` | Manage secrets (metadata only — values stay encrypted) |
-| `sites:write` | Create, update and delete sites |
-| `tokens:manage` | Create, view and revoke your own API tokens |
-| `users:read` / `users:write` / `users:create` | View users; edit roles/permissions & manage roles; create users with initial password + TOTP enrollment |
-| `users:manage-credentials` / `users:self-credentials` | Reset passwords and manage 2FA of other users / own account |
+| `devices:read` / `devices:write` | View devices & telemetry; create/update/delete devices and plugin assignments |
+| `configs:apply` | Submit configuration jobs / execute plans (requires 2FA) — gates *all* plan writes |
+| `secrets:read` / `secrets:write` / `secrets:self-write` | Manage secrets globally vs. your own personal secret area (metadata only — values stay encrypted) |
+| `users:*` | View users; edit roles/permissions & manage roles; create users; reset passwords and manage 2FA of other users (`manage-credentials`) or your own account (`self-credentials`) |
 
 ### Network exposure — keep it off the public internet
 
