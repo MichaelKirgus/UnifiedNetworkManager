@@ -311,7 +311,9 @@ export const NETWORK_DELETE_SCHEMA: InputSchema = {
 export const DNS_SET_SCHEMA: InputSchema = {
   name: { type: 'string', required: true, minLength: 1, maxLength: 253, description: 'Hostname (RFC 1123; stored lowercase by UNM)' },
   ip: { type: 'string', required: true, pattern: '^\\d{1,3}(\\.\\d{1,3}){3}$|^[0-9a-fA-F:.]*:[0-9a-fA-F:.]*$', description: 'IPv4 or IPv6 address the hostname resolves to (record type A/AAAA is derived from the address shape)' },
-  description: { type: 'string', required: false, maxLength: 255, description: 'Optional free-text note for the entry. Only vendors with a native field persist it (RouterOS /ip/dns/static `comment`); other plugins ignore it.' },
+  ipv6: { type: 'string', required: false, pattern: '^[0-9a-fA-F:.]*:[0-9a-fA-F:.]*$', description: 'Optional second family — write BOTH v4 and v6 into one entry (LCOS DNS-List dual row). Vendors without a per-name multi-address model ignore it.' },
+  domain: { type: 'string', required: false, maxLength: 253, description: 'Optional domain suffix. Only vendors that split a record into bare-hostname + domain persist it (OPNsense unbound); other plugins ignore it.' },
+  description: { type: 'string', required: false, maxLength: 255, description: 'Optional free-text note for the entry. Only vendors with a native field persist it (RouterOS /ip/dns/static `comment`, OPNsense unbound); other plugins ignore it.' },
 };
 
 /** Canonical input schema for `dns.delete` (name-addressed, idempotent). */

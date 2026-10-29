@@ -891,16 +891,20 @@ async function ingestInventory(
     // name with several addresses yields multiple rows.
     const rawDnsEntries = Array.isArray(metrics['dnsEntries']) ? (metrics['dnsEntries'] as unknown[]) : null;
     if (rawDnsEntries !== null) {
-      const values: { deviceId: string; pluginId: string; name: string; ip: string; description: string | null; collectedAt: string }[] = [];
+      const values: { deviceId: string; pluginId: string; name: string; ip: string; domain: string | null; description: string | null; collectedAt: string }[] = [];
       for (const raw of rawDnsEntries) {
         if (!raw || typeof raw !== 'object') continue;
         const r = raw as Record<string, unknown>;
         const name = typeof r['name'] === 'string' ? (r['name'] as string).trim().toLowerCase() : '';
         const ip = typeof r['ip'] === 'string' ? (r['ip'] as string).trim() : '';
         if (!name || !ip) continue; // both are part of the conflict key
+        // Optional domain suffix (OPNsense unbound: bare hostname + separate
+        // domain field). Lowercased, trailing dot stripped — ''/absent → NULL.
+        const rawDomain = typeof r['domain'] === 'string' ? (r['domain'] as string).trim().toLowerCase() : '';
+        const domain = rawDomain !== '' ? rawDomain.replace(/\.$/, '') || null : null;
         // Optional vendor note (e.g. RouterOS `comment`) — ''/absent → NULL.
         const description = typeof r['description'] === 'string' && (r['description'] as string).trim() !== '' ? (r['description'] as string).trim() : null;
-        values.push({ deviceId, pluginId, name, ip, description, collectedAt });
+        values.push({ deviceId, pluginId, name, ip, domain, description, collectedAt });
       }
       const dnsByKey = new Map<string, typeof values[number]>();
       for (const v of values) {
@@ -909,9 +913,9 @@ async function ingestInventory(
       if (dnsByKey.size > 0) {
         await db.insert(schema.deviceDnsEntries).values(Array.from(dnsByKey.values())).onConflictDoUpdate({
           target: [schema.deviceDnsEntries.deviceId, schema.deviceDnsEntries.pluginId, schema.deviceDnsEntries.name, schema.deviceDnsEntries.ip],
-          // description is refreshed too — a note edited on the device (or its
-          // removal) must track the live table.
-          set: { collectedAt: sql`excluded."collectedAt"`, description: sql`excluded."description"` },
+          // description + domain are refreshed too — a note or domain edited on
+          // the device (or its removal) must track the live table.
+          set: { collectedAt: sql`excluded."collectedAt"`, description: sql`excluded."description"`, domain: sql`excluded."domain"` },
         });
       }
       // A DNS entry removed on the device must vanish from the page. Drop rows

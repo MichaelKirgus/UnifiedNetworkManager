@@ -24,7 +24,7 @@ function writeOk(res: { ok: boolean; data: unknown }): boolean {
 }
 
 /** Reads the live host records, or null when the read failed. */
-async function readHosts(ctx: { client: import('axios').AxiosInstance; dnsBackend: dns.DnsBackend }): Promise<Array<{ name: string; ip: string }> | null> {
+async function readHosts(ctx: { client: import('axios').AxiosInstance; dnsBackend: dns.DnsBackend }): Promise<Array<{ name: string; ip: string; domain?: string }> | null> {
   try {
     const res = await dns.searchHostRecords(ctx.client, ctx.dnsBackend);
     return res.ok && res.data ? dns.parseHostRecordRows(res.data) : null;
@@ -36,21 +36,29 @@ async function readHosts(ctx: { client: import('axios').AxiosInstance; dnsBacken
 /** Applies staged DNS changes and verifies the expected entries are present.
  * `verified` is only true when the post-apply RE-READ confirmed the state —
  * a failed verification read must NOT claim verified (the plan executor maps
- * top-level ActionResult.verified to succeeded vs unverified). */
+ * top-level ActionResult.verified to succeeded vs unverified). When an entry
+ * carries a `domain`, the re-read row's domain must match too (unbound splits
+ * records into bare hostname + separate domain field). */
 async function applyAndVerify(
   ctx: { client: import('axios').AxiosInstance; dnsBackend: dns.DnsBackend },
-  expect: Array<{ name: string; ip: string }>,
+  expect: Array<{ name: string; ip: string; domain?: string }>,
 ): Promise<{ ok: boolean; verified: boolean; detail: string }> {
   const reconf = await dns.reconfigureDns(ctx.client, ctx.dnsBackend);
   if (!writeOk(reconf)) return { ok: false, verified: false, detail: `DNS reconfigure failed: ${JSON.stringify(reconf.data).slice(0, 200)}` };
   const after = await readHosts(ctx);
   if (after === null) return { ok: true, verified: false, detail: 'applied; verification read unavailable' };
   for (const want of expect) {
-    if (!after.some((r) => r.name === want.name && r.ip === want.ip)) {
-      return { ok: false, verified: false, detail: `entry ${want.name} → ${want.ip} not present after reconfigure` };
-    }
+    const match = after.some((r) => r.name === want.name && r.ip === want.ip && (want.domain === undefined || r.domain === want.domain));
+    if (!match) return { ok: false, verified: false, detail: `entry ${want.name}${want.domain ? `.${want.domain}` : ''} → ${want.ip} not present after reconfigure` };
   }
   return { ok: true, verified: true, detail: 'verified by re-read' };
+}
+
+/** Normalizes a raw row's domain field (unbound only; dnsmasq has none). */
+function normDomain(v: unknown): string | undefined {
+  if (typeof v !== 'string') return undefined;
+  const d = v.trim().toLowerCase().replace(/\.$/, '');
+  return d === '' ? undefined : d;
 }
 
 // --- dns.set --------------------------------------------------------------------
@@ -66,6 +74,9 @@ export const dnsSetAction: ActionDescriptor = {
   inputSchema: {
     name: { type: 'string' as const, required: true, minLength: 1, maxLength: 253, description: 'Hostname (RFC 1123; stored lowercase by UNM)' },
     ip: { type: 'string' as const, required: true, pattern: '^\\d{1,3}(\\.\\d{1,3}){3}$|^[0-9a-fA-F:.]*:[0-9a-fA-F:.]*$', description: 'IPv4 or IPv6 address the hostname resolves to (record type A/AAAA is derived from the shape)' },
+    // Unbound host overrides split a record into bare hostname + separate domain;
+    // dnsmasq has no such field (ignored there).
+    domain: { type: 'string' as const, required: false, maxLength: 253, description: 'Optional domain suffix — persisted on unbound backends (native field), ignored on dnsmasq' },
     // Unbound host overrides carry a native free-text `description` and persist
     // it; dnsmasq rows have no such field (ignored there).
     description: { type: 'string' as const, required: false, maxLength: 255, description: 'Optional note — persisted on unbound backends (native field), ignored on dnsmasq' },
@@ -74,6 +85,9 @@ export const dnsSetAction: ActionDescriptor = {
     const name = String(input.name ?? '').trim().toLowerCase();
     const ip = String(input.ip ?? '').trim();
     if (!name || !ip) return { success: false, error: 'both `name` and `ip` are required' };
+    // Domain only exists on the unbound backend — dnsmasq records have none.
+    const rawDomain = typeof input.domain === 'string' ? input.domain.trim().toLowerCase().replace(/\.$/, '') : '';
+    const domain = ctx.dnsBackend === 'unbound' && rawDomain !== '' ? rawDomain : undefined;
 
     // Raw rows — we need the uuids for in-place updates (parseHostRecordRows drops them).
     let rawRows: Array<Record<string, unknown>> = [];
@@ -92,27 +106,33 @@ export const dnsSetAction: ActionDescriptor = {
       typeof r['ip'] === 'string' && r['ip'].trim() !== '' ? r['ip'].trim()
         : typeof r['server'] === 'string' && r['server'].trim() !== '' ? r['server'].trim()
           : typeof r['address'] === 'string' ? (r['address'] as string).trim() : '';
+    const rowDomain = (r: Record<string, unknown>): string | undefined => normDomain(r['domain']);
 
-    // Idempotency — identical entry already present.
-    if (rawRows.some((r) => rowName(r) === name && rowIp(r) === ip)) {
+    // Idempotency — identical entry already present. When no domain is requested
+    // (the common UI path), match on name+ip alone so re-setting an unbound entry
+    // that carries a domain still skips instead of duplicating it.
+    const sameEntry = (r: Record<string, unknown>): boolean =>
+      rowName(r) === name && rowIp(r) === ip && (domain === undefined || rowDomain(r) === domain);
+    if (rawRows.some(sameEntry)) {
       // The desired state was CONFIRMED present by the live read (verified).
-      return { success: true, verified: true, details: { skipped: `entry ${name} → ${ip} already exists` } };
+      return { success: true, verified: true, details: { skipped: `entry ${name}${domain ? `.${domain}` : ''} → ${ip} already exists` } };
     }
 
     const details: Record<string, unknown> = {};
-    // Same name with a DIFFERENT address → update in place (delete old row(s), add new).
-    for (const r of rawRows.filter((r) => rowName(r) === name)) {
+    // Same name with a DIFFERENT address/domain → update in place (delete the
+    // rows that do NOT match the desired entry, then add it).
+    for (const r of rawRows.filter((r) => rowName(r) === name && !sameEntry(r))) {
       const uuid = typeof r['uuid'] === 'string' ? r['uuid'] : null;
       if (!uuid) continue;
       const del = await dns.deleteHostRecord(ctx.client, ctx.dnsBackend, uuid);
       if (writeOk(del)) details.updatedFrom = rowIp(r);
     }
 
-    // Unbound persists the native description; dnsmasq ignores it.
-    const addRes = await dns.addHostRecord(ctx.client, ctx.dnsBackend, { name, ip, ...(typeof input.description === 'string' && input.description.trim() !== '' ? { description: input.description.trim() } : {}) });
+    // Unbound persists the native domain + description; dnsmasq ignores both.
+    const addRes = await dns.addHostRecord(ctx.client, ctx.dnsBackend, { name, ip, ...(domain !== undefined ? { domain } : {}), ...(typeof input.description === 'string' && input.description.trim() !== '' ? { description: input.description.trim() } : {}) });
     if (!writeOk(addRes)) return { success: false, error: `DNS host add failed: ${JSON.stringify(addRes.data).slice(0, 300)}` };
 
-    const v = await applyAndVerify(ctx, [{ name, ip }]);
+    const v = await applyAndVerify(ctx, [{ name, ip, ...(domain !== undefined ? { domain } : {}) }]);
     if (!v.ok) return { success: false, error: v.detail };
     // `verified` is TOP-LEVEL on ActionResult (SDK contract).
     return { success: true, applied: true, verified: v.verified, details };

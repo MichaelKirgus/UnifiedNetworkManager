@@ -85,7 +85,9 @@ function DnsDeviceChip({
         pluginName={member.pluginName}
         siteName={member.siteName}
         interfaces={[]}
-        extraTooltip={[...member.ips, ...(member.descriptions ?? [])]}
+        // Domains are shown as the full name (name.domain) so the tooltip reads
+        // like the actual record; most devices have none and contribute nothing.
+        extraTooltip={[...member.ips, ...(member.domains ?? []).map((d) => `${row.name}.${d}`), ...(member.descriptions ?? [])]}
       />
       {(canDelete || canEdit) && (
         <span className="absolute -right-1.5 -top-1.5 flex gap-0.5">
@@ -423,6 +425,26 @@ export default function Dns() {
           ))}
         </span>
       ),
+    },
+    {
+      // Domain suffix — only vendors that split a record into bare hostname +
+      // domain populate it (OPNsense unbound); for everyone else the name IS
+      // already the full name and this column stays empty.
+      header: 'Domain',
+      key: 'domains',
+      width: 180,
+      exportValue: (row) => (row.domains ?? []).join(' '),
+      render: (row) => {
+        const domains = row.domains ?? [];
+        if (domains.length === 0) return <span className="text-faint">—</span>;
+        return (
+          <span className="flex flex-wrap gap-1">
+            {domains.map((d) => (
+              <span key={d} className="rounded bg-muted px-1.5 py-0.5 font-mono text-xs text-secondary">{d}</span>
+            ))}
+          </span>
+        );
+      },
     },
     {
       // All addresses of this name anywhere — IPv4 first. Drift across devices

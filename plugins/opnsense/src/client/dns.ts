@@ -36,7 +36,7 @@ export async function detectDnsBackend(client: AxiosInstance): Promise<DnsBacken
 export async function addHostRecord(
   client: AxiosInstance,
   backend: DnsBackend,
-  record: { name: string; ip: string; description?: string }
+  record: { name: string; ip: string; domain?: string; description?: string }
 ): Promise<OpnsenseApiResult> {
   if (backend === 'unbound') {
     // Unbound host-override item shape (verified live on OPNsense 26.4 via the
@@ -46,7 +46,7 @@ export async function addHostRecord(
     // also carries a native free-text `description`.
     const item: Record<string, unknown> = {
       hostname: record.name,
-      domain: '',
+      domain: (record.domain ?? '').toLowerCase(),
       rr: record.ip.includes(':') ? 'AAAA' : 'A',
       server: record.ip,
     };
@@ -92,10 +92,10 @@ export async function searchHostRecords(
  * without both fields are skipped (defensive — the field names have shifted
  * between OPNsense versions).
  */
-export function parseHostRecordRows(data: unknown): Array<{ name: string; ip: string; description?: string }> {
+export function parseHostRecordRows(data: unknown): Array<{ name: string; ip: string; domain?: string; description?: string }> {
   const d = data as { rows?: unknown } | null;
   if (!d || !Array.isArray(d.rows)) return [];
-  const out: Array<{ name: string; ip: string; description?: string }> = [];
+  const out: Array<{ name: string; ip: string; domain?: string; description?: string }> = [];
   for (const r of d.rows) {
     if (!r || typeof r !== 'object') continue;
     const row = r as Record<string, unknown>;
@@ -109,8 +109,11 @@ export function parseHostRecordRows(data: unknown): Array<{ name: string; ip: st
             ? (row['address'] as string).trim()
             : '';
     if (!name || !ip) continue;
+    // Unbound rows split the record into bare hostname + separate `domain`
+    // (verified live on OPNsense 26.4); dnsmasq has no domain field → undefined.
+    const domain = typeof row['domain'] === 'string' && row['domain'].trim() !== '' ? row['domain'].trim().toLowerCase().replace(/\.$/, '') : undefined;
     const description = typeof row['description'] === 'string' && row['description'].trim() !== '' ? row['description'].trim() : undefined;
-    out.push(description !== undefined ? { name: name.toLowerCase(), ip, description } : { name: name.toLowerCase(), ip });
+    out.push({ name: name.toLowerCase(), ip, ...(domain !== undefined ? { domain } : {}), ...(description !== undefined ? { description } : {}) });
   }
   return out;
 }

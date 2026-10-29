@@ -621,6 +621,9 @@ export async function initDb(): Promise<void> {
   // Optional free-text note per entry (e.g. RouterOS /ip/dns/static `comment`).
   // NULL = the vendor has no native field for it. Idempotent — pre-existing rows keep NULL.
   await pool.query(`ALTER TABLE device_dns_entries ADD COLUMN IF NOT EXISTS description TEXT`);
+  // Optional domain suffix per entry (OPNsense unbound splits records into bare
+  // hostname + domain). NULL = the vendor has no separate field (name is full).
+  await pool.query(`ALTER TABLE device_dns_entries ADD COLUMN IF NOT EXISTS "domain" TEXT`);
 
   // Firewall rules inventory table (Firewall page) — same lifecycle as tunnels/routes.
   // One row per firewall rule (filter + NAT kinds) on one device, normalized by the

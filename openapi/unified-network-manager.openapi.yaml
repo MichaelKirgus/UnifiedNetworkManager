@@ -8847,6 +8847,10 @@ components:
           minItems: 1
           items: { type: string }
           description: "All addresses of this name anywhere, IPv4 first. Record type per address is derived from its shape (v4 = A record, v6 = AAAA)."
+        domains:
+          type: array
+          items: { type: string }
+          description: "Distinct non-empty domain suffixes for the name across all devices (empty when no vendor splits hostname + domain — only OPNsense unbound does)"
         descriptions:
           type: array
           items: { type: string }
@@ -8869,6 +8873,10 @@ components:
                 minItems: 1
                 items: { type: string }
                 description: "The addresses THIS device holds for the name (drift is visible per chip)"
+              domains:
+                type: array
+                items: { type: string }
+                description: "Distinct non-empty domain suffixes configured on this device for the name (empty when the vendor has no separate field)"
               descriptions:
                 type: array
                 items: { type: string }

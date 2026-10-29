@@ -566,6 +566,8 @@ interface DnsDeviceMember {
   pluginId: string;
   /** The addresses THIS device holds for the name (drift is visible per chip). */
   ips: string[];
+  /** Distinct non-empty domain suffixes configured on this device for the name (may be empty — most vendors have no separate field). */
+  domains: string[];
   /** Distinct non-empty notes configured on this device for the name (may be empty). */
   descriptions: string[];
 }
@@ -576,6 +578,8 @@ export interface MergedDnsEntry {
   name: string;
   /** All addresses of this name anywhere, IPv4 first. Record type per address is derived client-side from its shape (v4 = A, v6 = AAAA). */
   ips: string[];
+  /** Distinct non-empty domain suffixes for the name across all devices (may be empty — most vendors have no separate field). */
+  domains: string[];
   /** Distinct non-empty notes for the name across all devices (may be empty). */
   descriptions: string[];
   /** Every device+plugin instance that holds the entry (one per row in storage). */
@@ -594,30 +598,33 @@ function sortDnsIps(ips: Iterable<string>): string[] {
  * drift is visible, not hidden (each chip lists the addresses its device holds).
  */
 export function mergeDnsRows(rows: typeof schema.deviceDnsEntries.$inferSelect[]): MergedDnsEntry[] {
-  const byName = new Map<string, { ips: Set<string>; descriptions: Set<string>; members: Map<string, DnsDeviceMember> }>();
+  const byName = new Map<string, { ips: Set<string>; domains: Set<string>; descriptions: Set<string>; members: Map<string, DnsDeviceMember> }>();
   for (const r of rows) {
     let entry = byName.get(r.name);
     if (!entry) {
-      entry = { ips: new Set(), descriptions: new Set(), members: new Map() };
+      entry = { ips: new Set(), domains: new Set(), descriptions: new Set(), members: new Map() };
       byName.set(r.name, entry);
     }
     entry.ips.add(r.ip);
+    if (r.domain) entry.domains.add(r.domain);
     if (r.description) entry.descriptions.add(r.description);
     const key = `${r.deviceId}|${r.pluginId}`;
     let member = entry.members.get(key);
     if (!member) {
-      member = { deviceId: r.deviceId, pluginId: r.pluginId, ips: [], descriptions: [] };
+      member = { deviceId: r.deviceId, pluginId: r.pluginId, ips: [], domains: [], descriptions: [] };
       entry.members.set(key, member);
     }
     if (!member.ips.includes(r.ip)) member.ips.push(r.ip);
+    if (r.domain && !member.domains.includes(r.domain)) member.domains.push(r.domain);
     if (r.description && !member.descriptions.includes(r.description)) member.descriptions.push(r.description);
   }
   return Array.from(byName.entries())
     .map(([name, e]) => ({
       name,
       ips: sortDnsIps(e.ips),
+      domains: [...e.domains].sort((a, b) => a.localeCompare(b)),
       descriptions: [...e.descriptions].sort((a, b) => a.localeCompare(b)),
-      devices: [...e.members.values()].map((m) => ({ ...m, ips: sortDnsIps(m.ips) })),
+      devices: [...e.members.values()].map((m) => ({ ...m, ips: sortDnsIps(m.ips), domains: m.domains.sort((a, b) => a.localeCompare(b)) })),
     }))
     .sort((a, b) => a.name.localeCompare(b.name));
 }

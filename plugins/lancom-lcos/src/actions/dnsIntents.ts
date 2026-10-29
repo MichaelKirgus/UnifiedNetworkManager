@@ -73,16 +73,33 @@ async function readDnsRows(ctx: ActionContext): Promise<DnsRow[] | null> {
 
 /** True when a CLI `dir -a` row carries the given name + (optional) address. */
 function cliRowMatches(rows: string[], name: string, ip: string | null): boolean {
-  for (const row of rows) {
-    const m = /^"([^"]+)"|^\S+/.exec(row.trim());
+  for (const raw of rows) {
+    const m = /^"([^"]+)"|^\S+/.exec(raw.trim());
     if (!m) continue;
     if ((m[1] ?? m[0]).toUpperCase() !== name.toUpperCase()) continue;
-    // Columns after the quoted name: Rtg-tag, IP-Address, IPV6-Address.
-    const rest = row.slice(m[0].length).trim().split(/\s+/);
-    const v4 = rest.find((t) => /^\d{1,3}(\.\d{1,3}){3}$/.test(t)) ?? '';
-    if (ip === null || v4 === ip) return true;
+    if (ip === null) return true;
+    // LCOS wraps long rows across lines (parseDirARows merges them with a space),
+    // so an address can be split mid-token — strip ALL whitespace before matching.
+    // Works for both v4 and v6 (v6 is case-insensitive on the wire).
+    return raw.replace(/\s+/g, '').toLowerCase().includes(ip.toLowerCase());
   }
   return false;
+}
+
+/**
+ * Builds the CLI `add` value list for a DNS-List row from its two address
+ * columns. Column order: Host-name Rtg-tag IP-Address(v4) IPV6-Address(v6).
+ * Verified live on WLC01 (LCOS vRouter 10.94, 2026-10): an EMPTY quoted value
+ * is rejected (`Value invalid: "`), so the unset family is expressed per shape —
+ *   both:    add "NAME" 0 <v4> <v6>        (dual row in ONE command)
+ *   v4-only: add "NAME" 0 <v4>             (v6 column defaults to ::)
+ *   v6-only: add "NAME" 0 0.0.0.0 <v6>     (explicit zero-v4 placeholder + v6)
+ */
+function dnsAddValues(name: string, v4: string | null, v6: string | null): string[] {
+  if (v4 && v6) return [q(name), '0', v4, v6];
+  if (v4) return [q(name), '0', v4];
+  if (v6) return [q(name), '0', '0.0.0.0', v6];
+  throw new Error('dnsAddValues: at least one address is required');
 }
 
 // --- dns.set --------------------------------------------------------------------
@@ -100,6 +117,10 @@ export const dnsSetAction: ActionDescriptor = {
   inputSchema: {
     name: { type: 'string' as const, required: true, minLength: 1, maxLength: 253, description: 'Hostname (stored lowercase by UNM; LCOS preserves the configured case)' },
     ip: { type: 'string' as const, required: true, pattern: '^\\d{1,3}(\\.\\d{1,3}){3}$|^[0-9a-fA-F:.]*:[0-9a-fA-F:.]*$', description: 'IPv4 or IPv6 address the hostname resolves to (one row per family on LCOS)' },
+    // Optional second family — lets a single call write BOTH v4 and v6 into one
+    // DNS-List row. When omitted, the sibling address of an existing row is
+    // preserved (a v4-only set never wipes the row's v6, and vice versa).
+    ipv6: { type: 'string' as const, required: false, pattern: '^[0-9a-fA-F:.]*:[0-9a-fA-F:.]*$', description: 'Optional IPv6 address to store alongside `ip` in the same row (dual A+AAAA entry)' },
     // The DNS-List table has no native note field — accepted for contract
     // symmetry, ignored on write.
     description: { type: 'string' as const, required: false, maxLength: 255, description: 'Optional note — not stored (LCOS has no native field for it)' },
@@ -116,39 +137,45 @@ export const dnsSetAction: ActionDescriptor = {
     const rows = await readDnsRows(ctx);
     if (rows === null) return { success: false, error: 'could not read Setup/DNS/DNS-List via SNMP — state unknown, refusing to write' };
 
-    // Idempotency — identical entry already present (v4 in the IP column or v6 in the IPV6 column).
+    // 2. Build the DESIRED row from the requested address(es), preserving any
+    // sibling family already on the device. The DNS-List table is single-keyed
+    // by name with one v4 + one v6 column; a second `add` for an existing name
+    // REPLACES the whole row (verified live on WLC01 2026-10), so we must write
+    // both families in ONE command or the untouched family is wiped.
+    const desired: { v4: string | null; v6: string | null } = ip.includes(':') ? { v4: null, v6: ip } : { v4: ip, v6: null };
+    const extra = typeof input.ipv6 === 'string' ? input.ipv6.trim() : '';
+    if (extra && extra !== ip) desired.v6 = extra; // explicit second family wins
     const existing = rows.find((r) => r.name.toLowerCase() === name.toLowerCase());
-    if (existing && ((ip.includes(':') ? existing.ipv6 : existing.ip) === ip)) {
-      // Idempotent skip — the desired state was CONFIRMED present, so it is
-      // self-evidently verified (top-level `verified`, SDK contract).
-      return { success: true, verified: true, details: { skipped: `entry ${name} → ${ip} already exists` } };
+    if (existing) {
+      if (!desired.v4 && existing.ip) desired.v4 = existing.ip;   // keep the row's v4
+      if (!desired.v6 && existing.ipv6) desired.v6 = existing.ipv6; // keep the row's v6
     }
 
-    // 2. Same name with a DIFFERENT address → replace in place (single-key table).
+    // Idempotency — desired state already matches what is on the device.
+    if (existing && (existing.ip ?? '') === (desired.v4 ?? '') && (existing.ipv6 ?? '') === (desired.v6 ?? '')) {
+      // The desired state was CONFIRMED present → self-evidently verified.
+      return { success: true, verified: true, details: { skipped: `entry ${name} already holds ${[desired.v4, desired.v6].filter(Boolean).join(' + ')}` } };
+    }
+
+    // 3. Write the row — del first when replacing (proven across firmware), then a
+    // single add carrying BOTH families so neither is lost.
     if (existing) {
       const del = await cliDelRow(ctx, creds, 'DNS/DNS-List', existing.name);
       if (!del.ok) return { success: false, error: `Failed to remove old entry ${existing.name}: ${del.detail}` };
     }
+    const r = await cliAddRow(ctx, creds, 'DNS/DNS-List', dnsAddValues(name, desired.v4, desired.v6), name);
+    if (!r.ok) return { success: false, error: `Failed to add DNS entry ${name} → ${[desired.v4, desired.v6].filter(Boolean).join(' + ')}: ${r.detail}` };
 
-    // 3. Add the row — column order Host-name Rtg-tag IP-Address IPV6-Address.
-    // Verified live on WLC01 (LCOS vRouter 10.94, 2026-10): an EMPTY quoted
-    // value ("") is rejected with `Value invalid: "`, so the unset family is
-    // expressed differently per direction —
-    //   v4-only: add "NAME" 0 <v4>            (3 values; v6 column defaults to ::)
-    //   v6-only: add "NAME" 0 0.0.0.0 <v6>    (explicit zero-v4 placeholder + v6)
-    const isV6 = ip.includes(':');
-    const values = [q(name), '0', ...(isV6 ? ['0.0.0.0', ip] : [ip])];
-    const r = await cliAddRow(ctx, creds, 'DNS/DNS-List', values, name);
-    if (!r.ok) return { success: false, error: `Failed to add DNS entry ${name} → ${ip}: ${r.detail}` };
-
-    // 4. Verify by CLI re-read (cliAddRow already confirmed the row exists).
+    // 4. Verify by CLI re-read — every requested address must be present.
     const after = await cliTableRows(ctx, creds, 'DNS/DNS-List');
-    if (!cliRowMatches(after, name, ip)) {
-      return { success: false, error: `entry ${name} → ${ip} not present in DNS-List after add` };
+    for (const addr of [desired.v4, desired.v6]) {
+      if (addr && !cliRowMatches(after, name, addr)) {
+        return { success: false, error: `entry ${name} → ${addr} not present in DNS-List after add` };
+      }
     }
     // `verified` is TOP-LEVEL on ActionResult (SDK contract) — the plan
     // executor reads result.verified to decide succeeded vs unverified.
-    return { success: true, applied: true, verified: true, details: { replacedFrom: existing ? (existing.ip || existing.ipv6) : null } };
+    return { success: true, applied: true, verified: true, details: { replacedFrom: existing ? [existing.ip, existing.ipv6].filter(Boolean).join(' + ') || null : null } };
   },
 };
 
@@ -165,8 +192,8 @@ export const dnsDeleteAction: ActionDescriptor = {
   deviceCount: 'N' as const,
   timeoutMs: 120_000,
   inputSchema: {
-    name: { type: 'string' as const, required: true, minLength: 1, maxLength: 253, description: 'Hostname to remove (removes the whole row — all its addresses)' },
-    ip: { type: 'string' as const, pattern: '^\\d{1,3}(\\.\\d{1,3}){3}$|^[0-9a-fA-F:.]*:[0-9a-fA-F:.]*$', description: 'Optional — only delete when the row actually carries this address (guards against deleting a different entry with the same name)' },
+    name: { type: 'string' as const, required: true, minLength: 1, maxLength: 253, description: 'Hostname to remove (without `ip`: removes the whole row — all its addresses)' },
+    ip: { type: 'string' as const, pattern: '^\\d{1,3}(\\.\\d{1,3}){3}$|^[0-9a-fA-F:.]*:[0-9a-fA-F:.]*$', description: 'Optional — remove only THIS address. On a dual (v4+v6) row the surviving family is kept; without it the whole row is removed.' },
     // Accepted for contract symmetry; deletion matches on name(+ip) only.
     description: { type: 'string' as const, required: false, maxLength: 255, description: 'Accepted for contract symmetry — not used by the delete' },
   },
@@ -192,19 +219,36 @@ export const dnsDeleteAction: ActionDescriptor = {
       return { success: true, verified: true, details: { skipped: `entry ${existing.name} does not carry ${ip} (has ${[existing.ip, existing.ipv6].filter(Boolean).join(', ') || 'no address'})` } };
     }
 
-    // 2. Delete the whole row by name from the root prompt (verified inside cliDelRow).
+    // 2. Decide the outcome. Without an ip scope the WHOLE row goes. With one,
+    // a dual (v4+v6) row keeps its surviving family — we must REWRITE it with
+    // only that address, because `del` removes the entire single-keyed row and
+    // would wipe the sibling too.
+    const survivor: { v4: string | null; v6: string | null } = ip === null
+      ? { v4: null, v6: null }
+      : (ip.includes(':') ? { v4: existing.ip || null, v6: null } : { v4: null, v6: existing.ipv6 || null });
+
+    // 3. Delete the row by name from the root prompt (verified inside cliDelRow).
     const r = await cliDelRow(ctx, creds, 'DNS/DNS-List', existing.name);
     if (!r.ok) return { success: false, error: `Failed to delete DNS entry ${existing.name}: ${r.detail}` };
 
-    // 3. Verify absence by CLI re-read (cliDelRow already confirmed).
-    const after = await cliTableRows(ctx, creds, 'DNS/DNS-List');
-    if (after.some((row) => {
-      const m = /^"([^"]+)"|^\S+/.exec(row.trim());
-      return !!m && (m[1] ?? m[0]).toUpperCase() === existing.name.toUpperCase();
-    })) {
-      return { success: false, error: `entry ${existing.name} still present in DNS-List after delete` };
+    // 4. Re-add the surviving family when one remains (dual row → single-family).
+    if (survivor.v4 || survivor.v6) {
+      const add = await cliAddRow(ctx, creds, 'DNS/DNS-List', dnsAddValues(existing.name, survivor.v4, survivor.v6), existing.name);
+      if (!add.ok) return { success: false, error: `Failed to restore surviving address of ${existing.name}: ${add.detail}` };
     }
-    return { success: true, applied: true, verified: true, details: { removed: 1 } };
+
+    // 5. Verify by CLI re-read — the removed address is gone; a survivor (if any) remains.
+    const after = await cliTableRows(ctx, creds, 'DNS/DNS-List');
+    if (ip !== null && cliRowMatches(after, name, ip)) {
+      return { success: false, error: `entry ${existing.name} → ${ip} still present in DNS-List after delete` };
+    }
+    for (const addr of [survivor.v4, survivor.v6]) {
+      if (addr && !cliRowMatches(after, name, addr)) {
+        return { success: false, error: `entry ${existing.name} → ${addr} lost during family-scoped delete` };
+      }
+    }
+    // `verified` is TOP-LEVEL on ActionResult (SDK contract).
+    return { success: true, applied: true, verified: true, details: ip === null ? { removed: 1 } : { removedAddress: ip, kept: [survivor.v4, survivor.v6].filter(Boolean).join(' + ') || null } };
   },
 };
 

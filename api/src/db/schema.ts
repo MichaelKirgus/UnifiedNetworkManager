@@ -846,6 +846,12 @@ export const deviceDnsEntries = pgTable(
     // IPv4 or IPv6 address the hostname resolves to. Record type (A/AAAA) is
     // derived from the address shape — no separate column needed.
     ip: text('ip').notNull(),
+    // Optional domain suffix as configured on the device. Only vendors that
+    // split a record into bare-hostname + domain emit it (OPNsense unbound
+    // host overrides); for them `name` is the bare hostname and the full name
+    // is `name`.`domain`. NULL = vendor has no separate domain field (the name
+    // already IS the full name — LCOS, RouterOS, OpenWrt).
+    domain: text('domain'),
     // Optional free-text note as configured on the device (e.g. RouterOS
     // /ip/dns/static `comment`). NULL = vendor has no native field for it.
     description: text('description'),

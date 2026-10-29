@@ -44,7 +44,9 @@ export interface InventorySnapshot {
    * unbound local-zone overrides) — feeds UNM's cross-device DNS page. Unbound
    * rows carry a native free-text `description` when set; dnsmasq has none.
    * null = collection failed this cycle → /monitoring must NOT emit the key. */
-  dnsEntries: Array<{ name: string; ip: string; description?: string }> | null;
+  // `domain` is set only by the unbound backend (bare hostname + separate
+  // domain field); dnsmasq rows carry no domain.
+  dnsEntries: Array<{ name: string; ip: string; domain?: string; description?: string }> | null;
   /** True when the SSH ZFS enrichment SUCCEEDED for this snapshot (a bound ssh
    * slot answered with a real pool listing). Drives notification mirroring of
    * pool states — false means "no fresh authoritative ZFS data", so live pool

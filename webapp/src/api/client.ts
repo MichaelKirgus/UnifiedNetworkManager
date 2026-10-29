@@ -1574,6 +1574,8 @@ export interface DnsDeviceMember {
   pluginId: string;
   /** The addresses THIS device holds for the name (drift is visible per chip). Record type per address is derived from its shape (v4 = A, v6 = AAAA). */
   ips: string[];
+  /** Distinct non-empty domain suffixes configured on this device for the name (empty when the vendor has no separate field — e.g. only OPNsense unbound splits hostname + domain). */
+  domains?: string[];
   /** Distinct non-empty notes configured on this device for the name. */
   descriptions?: string[];
   deviceName?: string | null;
@@ -1590,6 +1592,8 @@ export interface DnsRow {
   name: string;
   /** All addresses of this name anywhere, IPv4 first. Record type per address is derived from its shape (v4 = A, v6 = AAAA). */
   ips: string[];
+  /** Distinct non-empty domain suffixes for the name across all devices (empty when no device splits hostname + domain — only OPNsense unbound does). */
+  domains?: string[];
   /** Distinct non-empty notes for the name across all devices. */
   descriptions?: string[];
   devices: DnsDeviceMember[];
