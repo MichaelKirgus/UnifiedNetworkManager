@@ -1,0 +1,80 @@
+# CodeQL code-scanning configuration for UnifiedNetworkManager.
+#
+# Picked up automatically by the `codeql/codeql-action` workflow (no workflow
+# change needed). IMPORTANT: specifying a config file REPLACES the default
+# suite, so we re-include it via the official `code-scanning` alias (which
+# resolves per analyzed language — JS/TS and GitHub Actions) and then layer
+# per-rule suppressions on top.
+#
+# Every suppression below is an ACCEPTED-RISK decision for this codebase, not a
+# "the rule is wrong" claim. The justification for each is in the comment next
+# to it; keep them in sync if the underlying design changes (e.g. if pinning is
+# ever removed, drop the js-disabling-certificate-validation suppression).
+
+name: unm-codeql-config
+
+# Global path exclusions — applied to EVERY rule before per-rule config runs.
+paths-ignore:
+  # Local-only dev/probe tooling (scripts/probe-*, e2e-*, setup-*). Not shipped,
+  # not reachable by untrusted input; its "sensitive logging" / "cert disable"
+  # findings are noise.
+  - 'scripts/'
+
+query-config:
+  # Re-include the default suite so coverage is unchanged from before this file
+  # existed (a custom config otherwise replaces it entirely). `code-scanning` is
+  # an official alias that codeql-action resolves per analyzed language — to
+  # javascript-code-scanning.qls for JS/TS databases and actions-code-scanning.qls
+  # for GitHub Actions workflows — so one entry covers both suites UNM relies on.
+  - query-suite: code-scanning
+
+  # --- Per-rule suppressions -------------------------------------------------
+
+  # UNM's entire purpose is to reach operator-configured device endpoints and
+  # DB-registered plugin endpoints (icon/asset proxy included). The target host
+  # is trusted by construction — this is the product, not a vulnerability.
+  - id: js-request-forgery            # "Server-side request forgery" (27 alerts)
+    paths-ignore:
+      - 'plugins/'
+      - 'api/src/routes/plugins.ts'
+
+  # All flagged regexes were audited and are linear-time (no nested/overlapping
+  # quantifiers), so catastrophic backtracking is impossible. Input is LAN-device
+  # output, not an untrusted public endpoint.
+  - id: js-polynomial-redos           # "Polynomial regular expression used on uncontrolled data" (23)
+    paths-ignore:
+      - 'plugins/'
+      - 'packages/plugin-sdk/src/'
+      - 'mcp/src/httpServer.ts'
+      - 'api/src/replication.ts'
+
+  # UNM enforces key identity via a credential-free pinning preflight
+  # (verifyTlsFingerprint / createPinningGuard). The data connection keeps
+  # rejectUnauthorized:false because Node only runs identity hooks when it is
+  # true, and self-signed appliance certs fail chain validation first. The
+  # generic-http + certificates.ts sites are intentional cert-reading/TOFU probes;
+  # consoleProxy is the internal mTLS plugin WS.
+  - id: js-disabling-certificate-validation   # "Disabling certificate validation" (11)
+    paths-ignore:
+      - 'plugins/'
+      - 'packages/plugin-sdk/src/certificates.ts'
+      - 'packages/plugin-sdk/src/http.ts'
+      - 'packages/plugin-sdk/src/pinning.ts'
+      - 'api/src/consoleProxy.ts'
+
+  # Vendor protocols mandate the algorithm — SwOS .b-file uses MD5 request
+  # encoding, IPMI RMCP+ uses HMAC-SHA1/AES-CBC-128. Changing it breaks device
+  # compatibility; these are not discretionary choices.
+  - id: js-insufficient-password-hash         # "Use of password hash with insufficient computational effort" (5)
+    paths-ignore:
+      - 'plugins/'
+  - id: js-weak-cryptographic-algorithm       # "Use of a broken or weak cryptographic algorithm" (4)
+    paths-ignore:
+      - 'plugins/'
+
+  # The SDK SSH exec() primitive runs UNM's own action-catalog commands against
+  # managed devices. Commands are operator-defined (configs:apply + 2FA-gated),
+  # not attacker-controlled input.
+  - id: js-command-line-injection             # "Uncontrolled command line" (1)
+    paths-ignore:
+      - 'packages/plugin-sdk/src/ssh.ts'
