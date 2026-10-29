@@ -12226,7 +12226,7 @@ components:
           required: [kind, time]
           properties:
             kind: { type: string, enum: [dailyAt] }
-            time: { type: string, pattern: '^([01]\\d|2[0-3]):[0-5]\\d$', description: '"HH:MM" 24h (server local time)' }
+            time: { type: string, pattern: "^([01]\\d|2[0-3]):[0-5]\\d$", description: '"HH:MM" 24h (server local time)' }
 
     AutomationTriggerBlock:
       oneOf:
