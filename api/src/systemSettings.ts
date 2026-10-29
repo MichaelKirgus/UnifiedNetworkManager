@@ -1080,7 +1080,7 @@ export async function updateSetting(key: string, rawValue: unknown): Promise<Set
     try {
       await d.onChange();
     } catch (err) {
-      console.error(`[settings] onChange hook for "${key}" failed:`, err);
+      console.error(`[settings] onChange hook for "${key}" failed: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
   return viewFor(d, await getEffectiveValues());
@@ -1100,7 +1100,7 @@ export async function resetSetting(key: string): Promise<SettingView> {
     try {
       await d.onChange();
     } catch (err) {
-      console.error(`[settings] onChange hook for "${key}" failed:`, err);
+      console.error(`[settings] onChange hook for "${key}" failed: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
   return viewFor(d, await getEffectiveValues());

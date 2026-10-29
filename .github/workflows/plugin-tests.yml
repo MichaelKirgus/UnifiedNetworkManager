@@ -10,6 +10,10 @@ on:
     branches: [main]
   pull_request:
 
+# Least-privilege token scope — CI only reads the checkout, never writes.
+permissions:
+  contents: read
+
 jobs:
   plugin-tests:
     runs-on: ubuntu-latest

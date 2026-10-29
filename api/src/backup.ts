@@ -396,7 +396,11 @@ export function parseArchive(buf: Buffer): BackupArchive {
 
 export function localBackupPath(id: string): string {
   if (!/^[a-zA-Z0-9-]+$/.test(id)) throw new BackupError('Invalid backup id', 500);
-  return path.join(BACKUP_DIR, `${id}${BACKUP_FILE_EXT}`);
+  const resolved = path.resolve(BACKUP_DIR, `${id}${BACKUP_FILE_EXT}`);
+  // Containment guard: the joined path must stay inside BACKUP_DIR. The allowlist
+  // regex above already forbids separators/`..`, this makes it explicit for auditors.
+  if (!resolved.startsWith(path.resolve(BACKUP_DIR) + path.sep)) throw new BackupError('Invalid backup id', 500);
+  return resolved;
 }
 
 export async function storeLocalBackup(id: string, buffer: Buffer): Promise<void> {
@@ -428,7 +432,10 @@ export async function deleteLocalBackup(id: string): Promise<void> {
 
 function pendingPath(pendingId: string): string {
   if (!/^[a-zA-Z0-9-]+$/.test(pendingId)) throw new BackupError('Invalid pending id', 500);
-  return path.join(PENDING_DIR, `${pendingId}${BACKUP_FILE_EXT}`);
+  const resolved = path.resolve(PENDING_DIR, `${pendingId}${BACKUP_FILE_EXT}`);
+  // Containment guard: the joined path must stay inside PENDING_DIR (see localBackupPath).
+  if (!resolved.startsWith(path.resolve(PENDING_DIR) + path.sep)) throw new BackupError('Invalid pending id', 500);
+  return resolved;
 }
 
 export async function storePendingUpload(pendingId: string, buffer: Buffer): Promise<void> {

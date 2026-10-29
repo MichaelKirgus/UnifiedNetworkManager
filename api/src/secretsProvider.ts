@@ -159,7 +159,7 @@ export async function resolveSecretsProvider(providerId?: string): Promise<Provi
     record = await findProviderById(configuredId);
     if (record && !isOnline(record, now)) {
       // eslint-disable-next-line no-console
-      console.warn(`[secrets] configured provider ${configuredId} is offline; falling back to secrets-provider`);
+      console.warn('[secrets] configured provider is offline; falling back to secrets-provider');
       record = null;
     }
   }
