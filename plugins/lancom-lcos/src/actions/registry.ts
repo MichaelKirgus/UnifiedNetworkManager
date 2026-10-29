@@ -148,7 +148,9 @@ export function replaceLcfCell(
   expectedOld: string | null,
   newValue: string
 ): { text: string; replaced: boolean } | { error: string } {
-  const esc = (s: string) => s.replace(/\./g, '\\.');
+  // Escape ALL regex metacharacters — the OID is interpolated into a RegExp below.
+  // Escaping only dots would let an OID containing e.g. `(` or `\` alter the pattern.
+  const esc = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   const lines = raw.split('\r\n');
   const re = new RegExp(`^(\\s*\\(${esc(oid)}\\)\\s*=\\s*)(.*)$`);
   let found = -1;

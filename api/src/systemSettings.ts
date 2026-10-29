@@ -639,7 +639,9 @@ export const SETTING_DESCRIPTORS: SettingDescriptor[] = [
     category: 'Certificate Authority',
     default: '1.2',
     envVar: 'UNM_CA_TLS_MIN_VERSION',
-    pattern: '^(1\.2|1\.3)$',
+    // Double-escape: the string literal must contain a backslash so that
+    // `new RegExp(pattern)` sees `\.` (literal dot) rather than `.` (any char).
+    pattern: '^(1\\.2|1\\.3)$',
     onChange: () => require('./ca/stepCaConfig').writeStepCaConfig(),
     help:
       'Minimum TLS version the CA\'s own listener negotiates (and the floor UNM documents for plugin listeners). 1.2 is the default; 1.3 requires all clients to support it.',
