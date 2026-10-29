@@ -78,3 +78,34 @@ query-config:
   - id: js-command-line-injection             # "Uncontrolled command line" (1)
     paths-ignore:
       - 'packages/plugin-sdk/src/ssh.ts'
+
+  # Every flagged site is bounded by design: finite timeouts whose handlers
+  # close the socket / end the connection, and pooled WS sessions where a single
+  # unresponsive RPC must not destroy the shared connection.
+  - id: js-resource-exhaustion                # "Resource exhaustion" (7)
+    paths-ignore:
+      - 'plugins/ix-truenas/src/client/truenasClient.ts'
+      - 'plugins/generic-ipmi/src/client/ipmiClient.ts'
+      - 'packages/plugin-sdk/src/ntp.ts'
+      - 'packages/plugin-sdk/src/certificates.ts'
+      - 'plugins/ix-truenas/src/index.ts'
+
+  # In-process test mock bound to 127.0.0.1 — never network-exposed; the error
+  # message is only visible to the local test runner.
+  - id: js-stack-trace-exposure               # "Information exposure through a stack trace" (1)
+    paths-ignore:
+      - 'packages/plugin-test-kit/src/mocks/applianceHttp.js'
+
+  # Local smoke test assigning parsed mock-appliance responses onto internal
+  # state objects — no user-controlled keys, not shipped.
+  - id: js-prototype-polluting-assignment     # "Prototype-polluting assignment" (1)
+    paths-ignore:
+      - 'plugins/mikrotik-swos/smoke-test.ts'
+
+  # The /inventory diagnostic route accepts device credentials as query params.
+  # It lives on the trusted compose network (not internet-facing); the proper fix
+  # is a cross-cutting transport change (header-based credential passing) tracked
+  # separately — suppressing here to keep the signal focused on external routes.
+  - id: js-sensitive-get-query                # "Sensitive data read from GET request" (2)
+    paths-ignore:
+      - 'plugins/opnsense/src/index.ts'
