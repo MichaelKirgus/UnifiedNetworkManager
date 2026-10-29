@@ -10,7 +10,7 @@ throughput, PoE consumption, plus port/VLAN/LACP/PoE configuration actions.
 | --- | --- | --- |
 | Monitoring | — | System health (PSUs, fans, temperature), per-port link/throughput, PoE power draw. |
 | Inventory | — | Ports and routes for the Networks/Hosts pages. |
-| Configuration actions | — | 12 catalog actions: port speed/duplex mode, PoE mode/priority, LACP membership, VLAN PVID/mode sets. |
+| Configuration actions | — | 8 catalog actions: port speed/duplex mode, PoE mode/priority, LACP membership, VLAN PVID/mode sets and system timezone (plus a ports-state read). |
 | Planning / rollouts | — | Multi-device intents for fleet switch configuration. |
 
 ## Credential slots

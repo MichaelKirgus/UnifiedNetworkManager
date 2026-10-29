@@ -10,7 +10,7 @@ configuration actions and security checks.
 | --- | --- | --- |
 | Monitoring | — | System state, LAN/WAN throughput, VPN tunnels, firewall counters, temperature sensors. |
 | Inventory | — | Networks (LAN/VLAN), tunnels, routes for the Networks/Hosts pages; static DNS entries (`dnsEntries`) from `Setup/DNS/DNS-List` via SNMP walk (`.1.3.6.1.4.1.2356.11.2.17.5`, column-first length-prefixed index — Host-name / IP-Address / IPV6-Address / Rtg-tag). |
-| Configuration actions | — | 22 catalog actions: firewall rules read, routing/DHCP/VLAN/IPv6 network reads, config backup/restore, WLAN radio channel/power, NTP/DNS server sets. |
+| Configuration actions | — | 26 catalog actions: system name/timezone/clock sync + LAN interface state, config backup/restore, WLAN radio channel/power sets, NTP/DNS server sets (incl. DNS entry set/delete/rename), network create/delete + VLAN/IPv6/L2-topology reads, firewall / static-routing / DHCP reads. |
 | Planning / rollouts | — | Multi-device intents for fleet configuration (`network.create`, `network.delete`, `dns.set`, `dns.delete`, `dns.rename`). DNS writes go through the CLI over SSH (v4: `add "NAME" 0 <ip>`; v6: `add "NAME" 0 0.0.0.0 <ipv6>`; dual A+AAAA in ONE row: `add "NAME" 0 <ip> <ipv6>` — a second `add` for an existing name REPLACES the whole row, so the intents are merge-aware and always write both families in one command; delete/rename: `del Setup/DNS/DNS-List/<name>` + re-add); reads stay on SNMP. |
 | Updates | — | Firmware status + update through the LCOS update mechanism. |
 | Security checks | **SSH slot bound** | Read-only SSH checks at inventory cadence. |

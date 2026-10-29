@@ -10,7 +10,7 @@ and RF environment monitoring, plus a wide action catalog for radio/VLAN/LACP/Po
 | --- | --- | --- |
 | Monitoring | — | Radio state, per-SSID client counts, channel/utilization, RF environment (interference, noise floor). |
 | Inventory | — | Interfaces, ports, WLC assignment for the Networks/Hosts pages. |
-| Configuration actions | — | 52 catalog actions: radio channel/power sets, SSID VLAN mapping, VLAN/LACP/PoE config, WLC address, NTP/SNMP/STP settings. |
+| Configuration actions | — | 38 catalog actions: radio channel/power sets, SSID VLAN mapping + WLAN network add, IP interface addressing/gateway/DNS/802.1X, VLAN/LACP/PoE config, WLC address, NTP/SNMP/STP settings, system name/comment/clock sync, config persist/backup/restore. |
 | Planning / rollouts | — | Multi-device intents for fleet-wide AP configuration. |
 | Updates | — | Firmware status + update through the LCOS-LX update mechanism. |
 
