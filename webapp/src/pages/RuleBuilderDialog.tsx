@@ -1007,7 +1007,10 @@ export default function RuleBuilderDialog({ existing, initialDraft, onClose, onS
     };
   }
 
-  const save = useMutation({ mutationFn: () => (existing ? api.updateAutomation(existing.id, buildDraft()) : api.createAutomation(buildDraft())) });
+  const save = useMutation({
+    mutationFn: () => (existing ? api.updateAutomation(existing.id, buildDraft()) : api.createAutomation(buildDraft())),
+    onSuccess: onSaved,
+  });
 
   function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
