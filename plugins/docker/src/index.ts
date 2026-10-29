@@ -106,7 +106,13 @@ const identity = resolvePluginIdentity({
   // API exposes no host-GPU endpoint. Gated by the new `collectGpus` option,
   // DEFAULT OFF: most Docker hosts are GPU-less servers/VMs, so off = zero SSH
   // traffic and the key is omitted entirely (no wipe).
-  version: '0.9.0',
+  // 0.10.0 — canonical intent containers.image.set: change a container's image
+  // tag or switch it to another image entirely. Each matched container is
+  // RECREATED via the Engine API with its full configuration preserved (env,
+  // labels incl. compose project/service, ports, binds/volumes, restart policy,
+  // static IPs + aliases); named volumes are never touched and stopped
+  // containers stay stopped. Compose members are recreated in depends_on order.
+  version: '0.10.0',
   vendors: ['generic'],
   capabilities: ['monitoring', 'configuration', 'planning', 'deviceState', 'probe'],
 });

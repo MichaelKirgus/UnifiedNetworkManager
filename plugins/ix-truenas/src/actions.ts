@@ -13,7 +13,7 @@
  */
 
 import { randomBytes } from 'node:crypto';
-import { ActionDescriptor, ActionResult, compareVersions, configBackupFileName, createFileRepoClient, createRegistry, dynamicSshHostVerifier, FileRepoClient, INTENT_L2_TOPOLOGY_READ, INTENT_NETWORK_CREATE, INTENT_NETWORK_DELETE, L2Topology, pickNumber, pickString, pollUntil, PreflightInterfaceOption, PreflightResult, resolveSshCredentials, SshError } from '@unm/plugin-sdk';
+import { ActionDescriptor, ActionResult, compareVersions, configBackupFileName, createFileRepoClient, createRegistry, dynamicSshHostVerifier, FileRepoClient, INTENT_CONTAINERS_IMAGE_SET, INTENT_L2_TOPOLOGY_READ, INTENT_NETWORK_CREATE, INTENT_NETWORK_DELETE, L2Topology, pickNumber, pickString, pollUntil, PreflightInterfaceOption, PreflightResult, resolveSshCredentials, SshError } from '@unm/plugin-sdk';
 import { TruenasClient, TruenasCredentials, TruenasRpcError } from './client/truenasClient';
 import { hostSshPort, sshPool } from './ssh';
 import { invalidateDockerEnrichment, normalizeVmDevice, sshHostOf } from './enrichment';
@@ -6166,6 +6166,193 @@ const containersUpdateAction: ActionDescriptor<TruenasActionContext> = {
   },
 };
 
+// --- containers.image.set -----------------------------------------------------
+// Canonical fleet intent (SDK INTENT_CONTAINERS_IMAGE_SET): point one or more
+// containers at a different image — a tag bump ("app:v1.4.2" → "app:v1.4.3") or
+// an entirely new image ("redis:7" → "valkey:8"). TrueNAS 26 stores custom apps
+// as a STRUCTURED config ({networks, services}), so the matched `image:` fields
+// are rewritten in pure JS (no YAML parsing) and applied through the same
+// app.update path the compose editor uses — the appliance redeploys the app.
+// Catalog apps have no editable compose config → skipped with a note (their
+// version bumps stay on containers.upgrade).
+
+/** One image-change mapping as accepted by the canonical intent (defensive parse). */
+interface ImageSetMappingTn {
+  /** Optional container/service name scoping the match. */
+  name?: string;
+  /** Current image ref — the match key. */
+  from: string;
+  /** New full image ref. */
+  to: string;
+}
+
+function parseMappingsTn(input: Record<string, unknown>): ImageSetMappingTn[] {
+  const raw = input['mappings'];
+  if (!Array.isArray(raw)) return [];
+  const out: ImageSetMappingTn[] = [];
+  for (const m of raw) {
+    if (!m || typeof m !== 'object') continue;
+    const o = m as Record<string, unknown>;
+    const from = typeof o['from'] === 'string' ? o['from'].trim() : '';
+    const to = typeof o['to'] === 'string' ? o['to'].trim() : '';
+    if (from.length < 2 || to.length < 2) continue;
+    out.push({ ...(typeof o['name'] === 'string' && o['name'].trim() !== '' ? { name: o['name'].trim() } : {}), from, to });
+  }
+  return out;
+}
+
+/** Reads every app's structured config in ONE query (the same call the compose
+ *  editor uses — on a busy appliance this is slow, so it gets an explicit budget). */
+async function readAllAppConfigs(ctx: TruenasActionContext): Promise<Map<string, { cfg: Record<string, unknown>; customApp: boolean | null }>> {
+  const out = new Map<string, { cfg: Record<string, unknown>; customApp: boolean | null }>();
+  try {
+    const rows = await ctx.client.call<Record<string, unknown>[]>('app.query', [[], { extra: { retrieve_config: true } }], ctx.creds, 45_000);
+    for (const r of rows ?? []) {
+      const n = pickString(r, ['name']);
+      if (!n) continue;
+      const c = r['config'];
+      if (!c || typeof c !== 'object' || Array.isArray(c)) continue;
+      out.set(n, { cfg: c as Record<string, unknown>, customApp: typeof r['custom_app'] === 'boolean' ? (r['custom_app'] as boolean) : null });
+    }
+  } catch (e) {
+    throw new Error(`Could not read app configs: ${e instanceof Error ? e.message : String(e)}`);
+  }
+  return out;
+}
+
+/** The services map of a structured config ({services: {<svc>: {image, …}}}). */
+function servicesOfCfg(cfg: Record<string, unknown>): Map<string, Record<string, unknown>> {
+  const s = cfg['services'];
+  if (!s || typeof s !== 'object' || Array.isArray(s)) return new Map();
+  const out = new Map<string, Record<string, unknown>>();
+  for (const [k, v] of Object.entries(s as Record<string, unknown>)) {
+    if (v && typeof v === 'object' && !Array.isArray(v)) out.set(k, v as Record<string, unknown>);
+  }
+  return out;
+}
+
+const containersImageSetAction: ActionDescriptor<TruenasActionContext> = {
+  id: INTENT_CONTAINERS_IMAGE_SET,
+  label: 'Change container image(s)',
+  description:
+    'Points the selected containers at a different image — a tag bump (e.g. "app:v1.4.2" → "app:v1.4.3") or an entirely new image ("redis:7" → "valkey:8"). Custom apps are reconfigured via app.update and redeployed; catalog (app-store) apps have no editable compose config and are skipped with a note — use Update for their version bumps. Idempotent — a service already on the target ref is skipped.',
+  module: 'Containers',
+  riskLevel: 'write' as const,
+  // Single-device action (one step per device) — registered in CANONICAL_INTENTS
+  // so the plan API fans it out across a batch like every other fleet intent.
+  deviceCount: 1 as const,
+  timeoutMs: 900_000, // redeploy jobs include image pulls
+  inputSchema: {
+    mappings: {
+      type: 'array',
+      required: true,
+      items: {
+        type: 'object',
+        properties: {
+          name: { type: 'string', required: false, minLength: 1, maxLength: 200, description: 'Optional container/service name to scope the match (omit = every service using `from`)' },
+          from: { type: 'string', required: true, minLength: 2, maxLength: 512, description: 'Current image reference of the container(s) to change' },
+          to: { type: 'string', required: true, minLength: 2, maxLength: 512, description: 'New full image reference (tag bump or a different image entirely)' },
+        },
+      },
+      description: 'Image changes to apply on this device — one entry per container/service',
+    },
+  },
+  async execute(ctx: TruenasActionContext, input: Record<string, unknown>): Promise<ActionResult> {
+    const mappings = parseMappingsTn(input);
+    if (mappings.length === 0) return { success: false, details: { error: 'No image mappings provided' } };
+
+    // One query for every app's structured config — matching is done against the
+    // CONFIG (what will be deployed), not the live container state.
+    let configs: Map<string, { cfg: Record<string, unknown>; customApp: boolean | null }>;
+    try {
+      configs = await readAllAppConfigs(ctx);
+    } catch (e) {
+      return { success: false, details: { error: e instanceof Error ? e.message : String(e) } };
+    }
+
+    // Resolve every mapping to (app → service key → target ref). A service
+    // matches when its configured image equals `from` and — if the mapping names
+    // a container — the service key or `<app>-<service>` docker name equals it.
+    const targets = new Map<string, { svcKey: string; to: string }[]>(); // appName → hits
+    const missing: Record<string, string> = {};
+    for (const m of mappings) {
+      let hits = 0;
+      for (const [appName, entry] of configs.entries()) {
+        for (const [svcKey, svc] of servicesOfCfg(entry.cfg).entries()) {
+          const img = pickString(svc, ['image']);
+          if (typeof img !== 'string' || img.trim() !== m.from) continue;
+          if (m.name && svcKey !== m.name && `${appName}-${svcKey}` !== m.name) continue;
+          hits++;
+          targets.set(appName, [...(targets.get(appName) ?? []), { svcKey, to: m.to }]);
+        }
+      }
+      if (hits === 0) missing[`${m.from} → ${m.to}${m.name ? ` (${m.name})` : ''}`] = 'no custom app service with that image found';
+    }
+
+    // Idempotency + catalog-app split: a service already at its target is
+    // skipped; a CATALOG app cannot be reconfigured (its compose comes from the
+    // template) — reported as skipped, not failed.
+    const toApply = new Map<string, { svcKey: string; to: string }[]>(); // appName → services still needing the change
+    const skipped: Record<string, string> = {};
+    for (const [appName, hits] of targets.entries()) {
+      const entry = configs.get(appName);
+      if (!entry) continue;
+      if (entry.customApp === false) {
+        for (const h of hits) skipped[`${appName}/${h.svcKey}`] = 'catalog app — no editable compose config (use Update for version bumps)';
+        continue;
+      }
+      const svcs = servicesOfCfg(entry.cfg);
+      const still: { svcKey: string; to: string }[] = [];
+      for (const h of hits) {
+        if (pickString(svcs.get(h.svcKey) ?? {}, ['image']) === h.to) skipped[`${appName}/${h.svcKey}`] = `already configured with ${h.to}`;
+        else still.push(h);
+      }
+      if (still.length > 0) toApply.set(appName, still);
+    }
+
+    const errors: Record<string, string> = {};
+    let updatedApps = 0;
+    // Apply per app — one app.update redeploys the whole app with every matched
+    // service rewritten. Sequential: a redeploy restarts the app's containers.
+    for (const [appName, hits] of toApply.entries()) {
+      const entry = configs.get(appName);
+      if (!entry) continue;
+      try {
+        const svcs = servicesOfCfg(entry.cfg);
+        for (const h of hits) {
+          const svc = svcs.get(h.svcKey);
+          if (svc) svc['image'] = h.to;
+        }
+        // Re-serialize the structured config to editable YAML — the same round-trip
+        // the compose editor uses (read → serialize → app.update).
+        const yamlStr = serializeComposeYaml(entry.cfg);
+        if (yamlStr.trim() === '') throw new Error('no editable compose config found');
+        await dispatchWrite(ctx, 'app.update', [appName, { custom_compose_config_string: yamlStr }], { verify: appStateVerify(ctx, appName, new Set(['RUNNING']), new Set()) });
+        updatedApps++;
+      } catch (e) {
+        errors[appName] = e instanceof Error ? e.message : String(e);
+      }
+    }
+
+    // Verify: re-read the configs — every rewritten service must now carry its target.
+    let verified: boolean | undefined;
+    if (Object.keys(errors).length === 0 && updatedApps > 0) {
+      try {
+        const after = await readAllAppConfigs(ctx);
+        verified = true;
+        for (const [appName, hits] of toApply.entries()) {
+          const svcs = servicesOfCfg(after.get(appName)?.cfg ?? {});
+          for (const h of hits) if (pickString(svcs.get(h.svcKey) ?? {}, ['image']) !== h.to) verified = false;
+        }
+      } catch { /* verification read failed — applied but unverified */ }
+    } else if (Object.keys(errors).length === 0 && updatedApps === 0) {
+      verified = true; // nothing to apply — every match was already at its target
+    }
+
+    return { success: Object.keys(errors).length === 0, applied: updatedApps > 0, verified, details: { updatedApps, skipped, missing, ...(Object.keys(errors).length > 0 ? { errors } : {}) } };
+  },
+};
+
 // --- Catalog (app store) + install -------------------------------------------------
 // TrueNAS 25.04+/26 renamed the community-apps API: `communityapps.*` is gone,
 // replaced by `catalog.trains`, `catalog.apps({trains:[...]})` and
@@ -7039,6 +7226,7 @@ export const registry = createRegistry<TruenasActionContext>([
   composeConfigReadAction,
   containersLogsReadAction,
   containersUpdateAction,
+  containersImageSetAction,
   catalogTemplatesListAction,
   templateDetailsReadAction,
   containersInstallAction,

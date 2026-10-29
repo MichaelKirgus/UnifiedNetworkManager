@@ -244,6 +244,64 @@ export function dockerDelete<T = unknown>(o: DockerClientOptions, path: string):
   return dockerRequest<T>(o, 'DELETE', path, undefined, ACTION_TIMEOUT_MS);
 }
 
+/** POST /images/create streams NDJSON progress lines (one JSON object per line),
+ * NOT a single JSON document — the generic `request()` helper would reject it as
+ * "non-JSON" on socket transport. This dedicated streaming variant collects the
+ * body as text and scans for an `err` entry: the daemon reports pull failures
+ * INSIDE a 2xx stream, so status alone is not enough. */
+export async function pullImageStream(o: DockerClientOptions, path: string, timeoutMs = 300_000): Promise<{ ok: boolean; error?: string }> {
+  let bound: BoundClient;
+  try {
+    bound = buildBound(o);
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) };
+  }
+
+  const parseNdjson = (status: number, text: string): { ok: boolean; error?: string } => {
+    if (status >= 200 && status < 300) {
+      for (const line of text.split('\n')) {
+        const s = line.trim();
+        if (!s) continue;
+        try {
+          const j = JSON.parse(s) as Record<string, unknown>;
+          if (Array.isArray(j['err'])) return { ok: false, error: (j['err'] as string[]).join(' ') };
+          const d = j['errorDetail'];
+          if (d && typeof d === 'object') {
+            const dd = d as Record<string, unknown>;
+            return { ok: false, error: typeof dd['message'] === 'string' ? dd['message'] : JSON.stringify(dd) };
+          }
+        } catch { /* non-JSON line — ignore */ }
+      }
+      return { ok: true };
+    }
+    try {
+      const j = JSON.parse(text) as Record<string, unknown>;
+      if (typeof j['message'] === 'string') return { ok: false, error: `HTTP ${status}: ${j['message']}` };
+    } catch { /* fall through */ }
+    return { ok: false, error: `HTTP ${status}` };
+  };
+
+  try {
+    if (bound.kind === 'socket') {
+      const out = await new Promise<{ status: number; text: string }>((resolve, reject) => {
+        const req = http.request({ socketPath: bound.socketPath!, path, method: 'POST', timeout: timeoutMs }, (res) => {
+          let t = '';
+          res.on('data', (c) => (t += c));
+          res.on('end', () => resolve({ status: res.statusCode ?? 0, text: t }));
+        });
+        req.on('timeout', () => req.destroy(new Error(`pull timed out after ${timeoutMs} ms`)));
+        req.on('error', reject);
+        req.end();
+      });
+      return parseNdjson(out.status, out.text);
+    }
+    const res = await bound.axios!.request<string>({ method: 'POST', url: path, timeout: timeoutMs, responseType: 'text' });
+    return parseNdjson(res.status, typeof res.data === 'string' ? res.data : JSON.stringify(res.data));
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
 /** GET /containers/json?all=true — the full container list with network + mount detail. */
 export function listContainers(o: DockerClientOptions): Promise<DockerApiResult<unknown[]>> {
   return dockerGet<unknown[]>(o, '/containers/json?all=true&limit=500');

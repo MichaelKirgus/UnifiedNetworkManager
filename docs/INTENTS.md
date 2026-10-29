@@ -24,6 +24,7 @@ plugin pick it up.
 | `dns.set` | `INTENT_DNS_SET` | Add/update a static DNS host entry (hostname → IP), idempotent upsert | `'N'` — one step per device, any count |
 | `dns.delete` | `INTENT_DNS_DELETE` | Remove the named static DNS entry (idempotent no-op when absent) | `'N'` |
 | `l2.topology.read` | `INTENT_L2_TOPOLOGY_READ` | Read-only L2 hierarchy — attach-point source for preflight | `1` — single-device read helper, NOT a fan-out intent |
+| `containers.image.set` | `INTENT_CONTAINERS_IMAGE_SET` | Point containers at different images (tag bump or full image swap) | `1` — single-device step; in `CANONICAL_INTENTS`, so plan creation fans it out across devices AND the bulk step endpoint accepts multi-device steps |
 
 Reserved (not yet implemented): `tunnel.create`, `tunnel.delete`.
 
@@ -32,6 +33,17 @@ Reserved (not yet implemented): `tunnel.create`, `tunnel.delete`.
 > multi-device intents like tunnels will use e.g. `2`). The API treats canonical
 > intent ids as fan-out regardless of a stale persisted number, but plugins MUST
 > declare `'N'` for the two network intents and `1` for `l2.topology.read`.
+>
+> **Single-device canonical intents (`deviceCount: 1`) — `containers.image.set`.**
+> The step endpoints only accept actions with `deviceCount === 1`, so a fan-out
+> intent that also wants to be addable via "Add step" / the bulk endpoint must
+> declare `1` AND register in `CANONICAL_INTENTS` (which exempts it from the
+> exact-count check at plan creation). That combination gives both: one-step-per-
+> device fan-out across a batch, and multi-device steps through the bulk route.
+> (`l2.topology.read` is different — it is NOT in `CANONICAL_INTENTS`, so it
+> never fans out.) Plugins that pass their registry catalog verbatim (docker,
+> ix-truenas) must declare `1 as const`; opnsense forces this via its custom
+> `listCatalog()`.
 
 ## Naming conventions (binding)
 
@@ -114,6 +126,42 @@ reconfigures; **openwrt** updates the section's hostname option in place
 **routeros** PUTs each record's `name` by `.id` (the `comment` is untouched);
 **lcos** dels the single-keyed row and re-adds it under the new name with BOTH
 address families in one CLI command.
+
+## `containers.image.set` — field contract
+
+Points one or more containers at a different image reference — a tag bump
+(`app:v1.4.2` → `app:v1.4.3`) or an entirely new image (`redis:7` → `valkey:8`).
+The Containers page offers it as a row action and a bulk action; the webapp sends
+one mapping per container/service (with its current reference as `from`), so the
+plugin can match exactly what is running today.
+
+| Field | Type / constraint | Meaning | Supported by |
+|---|---|---|---|
+| `mappings` | array of objects, required | One entry per container/service to change on THIS device (the step's single target). | docker, ix-truenas |
+| `mappings[].name` | string, optional, 1..200 | Scopes the match to one member — the docker name / service key. Omit = every container using `from`. The webapp always sends it (one row per member). | docker, ix-truenas |
+| `mappings[].from` | string, required, 2..512 | Current image reference of the target container(s) — the match key. A mapping that matches nothing is reported in `details.missing`, not an error by itself (the step fails only when NOTHING matched). | docker, ix-truenas |
+| `mappings[].to` | string, required, 2..512 | New full image reference (tag bump or a different image entirely). | docker, ix-truenas |
+
+Per-vendor mechanics: **docker** matches live containers by exact `Image` (+
+optional name), pulls each distinct new ref once, then RECREATES every matched
+container via the Engine API — create with the original's full Config/HostConfig
+on a temp name, stop+remove the old one (frees static IPs; named volumes are
+NEVER touched), re-attach all user-defined networks with their static IPs and
+aliases, rename back to the original name, start when it was running. Recreations
+run sequentially in compose `depends_on` order so dependencies come up first.
+Caveat: this changes what is RUNNING — any compose file on disk is not updated.
+**ix-truenas** matches against each app's structured config (`app.query` with
+`retrieve_config`) and rewrites the matched services' `image` fields, then
+redeploys via `app.update { custom_compose_config_string }` (the same round-trip
+the compose editor uses). CATALOG apps have no editable compose — their matches
+are reported in `details.skipped`, not failed.
+
+Idempotency & verification: a container/service already at its target ref is
+skipped (`details.skipped`); an all-skip run succeeds with `applied: false`.
+Docker verifies by polling the live list until each recreated container reports
+the new image (and running state when it was running) — otherwise the step lands
+in `unverified`. TrueNAS verifies by re-reading every app's config and checking
+each rewritten service carries its target.
 
 ## `l2.topology.read` — result contract
 

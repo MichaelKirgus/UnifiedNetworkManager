@@ -10,7 +10,7 @@ VMs, containers/apps, shares, firmware updates and full configuration backup/res
 | --- | --- | --- |
 | Monitoring | — | System status, pool/dataset gauges, service health; alert mirroring into UNM notifications (`notifyAlerts`). |
 | Inventory | — | Pools, datasets, zvols, snapshots, interfaces, VMs (when `collectVms`), apps/catalog (when `collectApps`). |
-| Configuration actions | — | 90 catalog actions across system, pools, interfaces, config backup/restore, firmware, bootenv, alerts, containers, VMs, storage, shares, images and catalog. |
+| Configuration actions | — | 91 catalog actions across system, pools, interfaces, config backup/restore, firmware, bootenv, alerts, containers (incl. change image `containers.image.set`), VMs, storage, shares, images and catalog. |
 | Planning / rollouts | — | Multi-device intents for fleet operations. |
 | Updates | — | Firmware status + apply through the appliance's own update pipeline. |
 | Device state (Config page) | — | Live `GET /state` document with context-aware actions. |

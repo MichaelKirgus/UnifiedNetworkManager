@@ -1,6 +1,6 @@
 import { useQueries, useQuery, useQueryClient } from '@tanstack/react-query';
 import clsx from 'clsx';
-import { ArrowUpCircle, CheckCircle2, ChevronDown, ChevronRight, ChevronUp, Container, Download, EyeOff, FileCode2, FolderOpen, Loader2, Play, Plus, RotateCw, ScrollText, Square, Terminal as TerminalIcon, Trash2, X } from 'lucide-react';
+import { ArrowUpCircle, CheckCircle2, ChevronDown, ChevronRight, ChevronUp, Container, Download, EyeOff, FileCode2, FolderOpen, Loader2, Play, Plus, RotateCw, ScrollText, Square, Tag, Terminal as TerminalIcon, Trash2, X } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState, type FormEvent, type MouseEvent as ReactMouseEvent, type ReactNode } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { ConsoleDialog } from '../components/ConsoleDialog';
@@ -446,6 +446,226 @@ function PullImageDialog({ deviceId, deviceName, pluginId, onClose }: { deviceId
         <div onClick={(e) => e.stopPropagation()}>
           <ReauthDialog
             contextLabel={`Pull image on ${deviceName ?? deviceId}`}
+            onClose={() => setReauth(false)}
+            onSuccess={async () => { setReauth(false); await submit(); }}
+          />
+        </div>
+      )}
+    </>
+  );
+}
+
+/** One editable row of the ChangeImageDialog: a container/service of one app,
+ * with its current image reference and the (editable) new target reference. */
+interface ImageSetRow {
+  key: string;
+  appName: string;
+  deviceName?: string | null;
+  pluginId: string;
+  deviceId: string;
+  /** Docker name / service key — sent as `mapping.name` so the plugin scopes
+   * the match to exactly this member (TrueNAS also matches `<app>-<service>`). */
+  service: string;
+  /** Current image reference (the plugin's match key, `mapping.from`). */
+  from: string;
+  /** New target reference — editable, pre-filled with the current one. */
+  to: string;
+}
+
+/** Builds the dialog rows for a set of selected apps: every member container
+ * that has a known image reference becomes one row (single-container apps fall
+ * back to the app-level image). Rows without an image are skipped — the plugin
+ * cannot match them anyway. */
+function buildImageSetRows(apps: ContainerRow[]): ImageSetRow[] {
+  const out: ImageSetRow[] = [];
+  for (const app of apps) {
+    const services = servicesOf(app);
+    if (services.length > 0) {
+      services.forEach((s, i) => {
+        const image = s.image ?? '';
+        if (!image || image.trim() === '') return;
+        out.push({
+          key: `${app.deviceId}|${app.pluginId}|${app.name}#${i}`,
+          appName: app.name,
+          deviceName: app.deviceName,
+          pluginId: app.pluginId,
+          deviceId: app.deviceId,
+          service: s.service ?? app.name,
+          from: image,
+          to: image,
+        });
+      });
+    } else if (app.image && app.image.trim() !== '') {
+      out.push({
+        key: `${app.deviceId}|${app.pluginId}|${app.name}#0`,
+        appName: app.name,
+        deviceName: app.deviceName,
+        pluginId: app.pluginId,
+        deviceId: app.deviceId,
+        service: app.name,
+        from: app.image,
+        to: app.image,
+      });
+    }
+  }
+  return out;
+}
+
+/**
+ * ChangeImageDialog — point one or more containers at a different image via the
+ * canonical `containers.image.set` intent (plan workflow, 2FA-gated). Each row is
+ * one container/service of a selected app: its current reference plus an editable
+ * target. A tag bump ("app:v1.4.2" → "app:v1.4.3") and a full image swap
+ * ("redis:7" → "valkey:8") both work — the plugin recreates each matched
+ * container on the new ref with its configuration preserved (named volumes are
+ * never touched; stopped containers stay stopped). Unchanged rows are not sent.
+ * Steps are grouped per (plugin, device) so one plan covers a whole fleet
+ * selection; TrueNAS catalog apps have no editable compose and are skipped by
+ * the plugin itself.
+ */
+function ChangeImageDialog({ apps, onTrack, onClose }: { apps: ContainerRow[]; onTrack: (planId: string, deviceIds: string[], names: string[]) => void; onClose: () => void }) {
+  const { mode } = useExecutionMode();
+  const isPlanMode = mode === 'plan';
+  const isReadOnly = mode === 'readonly';
+  const [rows, setRows] = useState<ImageSetRow[]>(() => buildImageSetRows(apps));
+  const [error, setError] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [reauth, setReauth] = useState(false);
+  // Plan mode: the plans were saved without executing.
+  const [savedCount, setSavedCount] = useState(0);
+
+  const changedRows = rows.filter((r) => r.to.trim() !== '' && r.to.trim() !== r.from);
+
+  function setRowTo(key: string, to: string) {
+    setRows((prev) => prev.map((r) => (r.key === key ? { ...r, to } : r)));
+  }
+
+  async function submit() {
+    if (isReadOnly) return; // Read-Only — the button is disabled; safety net.
+    setSaving(true);
+    setError(null);
+    try {
+      // Group changed rows per (plugin, device) — one plan step each.
+      const groups = new Map<string, { pluginId: string; deviceId: string; mappings: Array<{ name?: string; from: string; to: string }>; apps: Set<string> }>();
+      for (const r of changedRows) {
+        const k = `${r.pluginId}|${r.deviceId}`;
+        let g = groups.get(k);
+        if (!g) { g = { pluginId: r.pluginId, deviceId: r.deviceId, mappings: [], apps: new Set() }; groups.set(k, g); }
+        g.mappings.push({ name: r.service, from: r.from, to: r.to.trim() });
+        g.apps.add(r.appName);
+      }
+      if (groups.size === 0) { setError('No changes — every target reference is unchanged.'); setSaving(false); return; }
+
+      let saved = 0;
+      for (const g of groups.values()) {
+        const planId = await createAndExecutePlan(g.pluginId, 'containers.image.set', [{ deviceId: g.deviceId, input: { mappings: g.mappings } }], mode);
+        if (isPlanMode) { saved += 1; continue; }
+        onTrack(planId, [g.deviceId], Array.from(g.apps));
+      }
+      if (isPlanMode && saved > 0) { setSavedCount(saved); return; }
+      onClose();
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 401) setReauth(true);
+      else setError(err instanceof Error ? err.message : String(err));
+      setSaving(false);
+    }
+  }
+
+  // Plan mode: the plans were saved without executing — offer to close.
+  if (savedCount > 0) {
+    return (
+      <DialogShell
+        title="Change image"
+        onClose={onClose}
+        maxWidth="max-w-3xl"
+        footer={
+          <button type="button" onClick={onClose} className="rounded-md bg-primary px-3 py-1.5 text-sm font-medium text-white hover:bg-primary-hover">
+            Close
+          </button>
+        }
+      >
+        <div className="flex items-start gap-2 rounded-md border border-success-border bg-success px-3 py-2 text-xs text-success-fg">
+          <CheckCircle2 size={14} className="mt-0.5 shrink-0" />
+          {savedCount} plan{savedCount === 1 ? '' : 's'} saved without executing — the containers were NOT changed. Open the Plans center to run them later (or schedule them).
+        </div>
+      </DialogShell>
+    );
+  }
+
+  return (
+    <>
+      <DialogShell
+        title={`Change image${apps.length > 1 ? ` (${apps.length} apps)` : ''}`}
+        subtitle="Each changed container is recreated on the new image with its configuration preserved — env, ports, restart policy, static IPs. Named volumes are never touched and stopped containers stay stopped."
+        onClose={onClose}
+        maxWidth="max-w-3xl"
+      >
+        <div>
+          {isReadOnly && (
+            <div className="mb-3 flex items-start gap-2 rounded-md border border-warning-border bg-warning px-3 py-2 text-xs text-warning-fg">
+              <EyeOff className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+              Read-only mode is active — this change cannot be saved or applied. Switch to Plan or Execute in the top bar.
+            </div>
+          )}
+          {error && (
+            <div className="mb-3 rounded-md border border-danger-border bg-danger px-3 py-2 text-xs text-danger-fg">{error}</div>
+          )}
+          {rows.length === 0 ? (
+            <div className="py-6 text-center text-sm text-secondary">None of the selected apps report an image reference yet — nothing to change.</div>
+          ) : (
+            <div className="max-h-[52vh] overflow-y-auto rounded-md border border-border">
+              {rows.map((r) => {
+                const changed = r.to.trim() !== '' && r.to.trim() !== r.from;
+                return (
+                  <div key={r.key} className="flex items-center gap-3 border-b border-border px-3 py-2 last:border-b-0">
+                    <div className="w-44 min-w-0 shrink-0">
+                      <div className="truncate text-xs font-medium" title={`${r.appName}${r.deviceName ? ` · ${r.deviceName}` : ''}`}>{r.appName}</div>
+                      {rows.some((x) => x.appName !== r.appName) && (
+                        <div className="truncate text-[11px] text-faint">{r.service}{r.deviceName ? ` · ${r.deviceName}` : ''}</div>
+                      )}
+                    </div>
+                    <span className="min-w-0 flex-1 truncate font-mono text-xs text-secondary" title={r.from}>{r.from}</span>
+                    {changed && <span className="shrink-0 text-faint">→</span>}
+                    <input
+                      value={r.to}
+                      onChange={(e) => setRowTo(r.key, e.target.value)}
+                      spellCheck={false}
+                      disabled={isReadOnly}
+                      aria-label={`New image for ${r.appName}/${r.service}`}
+                      className={clsx(
+                        'w-72 shrink-0 rounded-md border bg-background px-2 py-1 font-mono text-xs focus:outline-none',
+                        changed ? 'border-accent-sky-border focus:border-focus-ring' : 'border-border focus:border-focus-ring',
+                        isReadOnly && 'opacity-50',
+                      )}
+                    />
+                  </div>
+                );
+              })}
+            </div>
+          )}
+          <div className="mt-3 flex items-center justify-end gap-2">
+            <button type="button" onClick={onClose} disabled={saving} className="rounded-md border border-border px-3 py-1.5 text-sm font-medium text-secondary hover:bg-background disabled:opacity-40">
+              Cancel
+            </button>
+            <button
+              type="button"
+              onClick={() => void submit()}
+              disabled={saving || isReadOnly || changedRows.length === 0}
+              title={isReadOnly ? 'Read-only mode — switch to Plan or Execute to make changes' : changedRows.length === 0 ? 'Change at least one target image first' : undefined}
+              className="inline-flex items-center gap-1.5 rounded-md bg-primary px-3 py-1.5 text-sm font-medium text-white hover:bg-primary-hover disabled:opacity-40"
+            >
+              {saving && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+              <Tag size={14} />
+              {isPlanMode ? `Save as plan${changedRows.length > 1 ? 's' : ''}` : `Change ${changedRows.length || ''} image${changedRows.length === 1 ? '' : 's'}`}
+            </button>
+          </div>
+        </div>
+      </DialogShell>
+
+      {reauth && (
+        <div onClick={(e) => e.stopPropagation()}>
+          <ReauthDialog
+            contextLabel="Change container image(s)"
             onClose={() => setReauth(false)}
             onSuccess={async () => { setReauth(false); await submit(); }}
           />
@@ -1293,6 +1513,8 @@ export default function Containers() {
 
   /** Custom app whose compose YAML is being edited. */
   const [yamlApp, setYamlApp] = useState<ContainerRow | null>(null);
+  /** Selected apps whose container images are being changed (null = closed). */
+  const [imageApps, setImageApps] = useState<ContainerRow[] | null>(null);
   const [logsApp, setLogsApp] = useState<ContainerRow | null>(null);
   /** Device target of the "Pull image" dialog (null = closed). */
   const [pullTarget, setPullTarget] = useState<{ deviceId: string; deviceName?: string | null; pluginId: string } | null>(null);
@@ -1921,6 +2143,9 @@ export default function Containers() {
           { id: 'containers.stop', label: 'Stop', icon: <Square size={13} />, available: hasAction(r.pluginId, 'containers.stop'), eligible: RUNNING_STATES.has(r.state), danger: true, write: true },
           { id: 'containers.restart', label: 'Restart', icon: <RotateCw size={14} />, available: hasAction(r.pluginId, 'containers.restart'), eligible: true, write: true },
           { id: 'containers.upgrade', label: 'Update', icon: <ArrowUpCircle size={14} />, available: hasAction(r.pluginId, 'containers.upgrade'), eligible: r.upgradeAvailable === true, write: true },
+          // Change image — tag bump or full image swap via the canonical
+          // containers.image.set intent (recreate on docker, compose rewrite on TrueNAS).
+          { id: 'containers.image.set', label: 'Change image', icon: <Tag size={14} />, available: hasAction(r.pluginId, 'containers.image.set'), eligible: true, write: true },
           // Compose editing is offered whenever the plugin advertises BOTH the
           // read and write side of the contract (TrueNAS custom apps today).
           { id: 'compose.config.read+containers.update', label: 'Edit compose YAML', icon: <FileCode2 size={14} />, available: hasAction(r.pluginId, 'compose.config.read') && hasAction(r.pluginId, 'containers.update'), eligible: true, write: true },
@@ -1943,6 +2168,7 @@ export default function Containers() {
                   disabled={!enabled}
                   onClick={() => {
                     if (a.id === 'compose.config.read+containers.update') setYamlApp(r);
+                    else if (a.id === 'containers.image.set') setImageApps([r]);
                     else if (a.id === 'containers.logs.read') setLogsApp(r);
                     else void singleApp(r, a.id, a.label);
                   }}
@@ -2186,6 +2412,17 @@ export default function Containers() {
                   { label: 'Restart', onClick: containerBulk('containers.restart', 'Restart selected', () => true, '') },
                   { label: 'Update', onClick: containerBulk('containers.upgrade', 'Update selected', (r) => r.upgradeAvailable === true, 'No selected apps have an update available.') },
                   {
+                    // Change image — opens the dialog for every selected app whose plugin
+                    // advertises containers.image.set; rows without a known image are skipped.
+                    label: 'Change image',
+                    enabled: (rows) => rows.some((n) => n.row && hasAction(n.row.pluginId, 'containers.image.set')),
+                    onClick: (rows) => {
+                      const apps = rows.filter((n) => n.row && hasAction(n.row.pluginId, 'containers.image.set')).map((n) => n.row!);
+                      if (apps.length === 0) return;
+                      setImageApps(apps);
+                    },
+                  },
+                  {
                     label: 'Delete',
                     confirm: (count) => `Permanently delete ${count} app(s) and their docker resources? This is destructive.`,
                     onClick: containerBulk('containers.delete', 'Delete selected', () => true, ''),
@@ -2329,6 +2566,8 @@ export default function Containers() {
 
       {/* Custom-app compose YAML editor. */}
       {yamlApp && <YamlEditorDialog app={yamlApp} onClose={() => setYamlApp(null)} />}
+      {/* Change image — canonical containers.image.set intent (plan workflow). */}
+      {imageApps && <ChangeImageDialog apps={imageApps} onTrack={trackPlan} onClose={() => setImageApps(null)} />}
       {logsApp && <LogsDialog app={logsApp} onClose={() => setLogsApp(null)} />}
 
       {/* Filesystem browser — browse a container volume's HOST location over SFTP (capability 'filesystem'). */}
