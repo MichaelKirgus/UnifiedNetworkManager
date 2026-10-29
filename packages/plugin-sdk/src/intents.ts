@@ -38,9 +38,12 @@ export const INTENT_NETWORK_DELETE = 'network.delete' as const;
  */
 export const INTENT_DNS_SET = 'dns.set' as const;
 export const INTENT_DNS_DELETE = 'dns.delete' as const;
+/** Rename a static DNS entry in place — every address (and any per-record
+ * domain/description) of the old name moves to the new name. */
+export const INTENT_DNS_RENAME = 'dns.rename' as const;
 
 /** All canonical intent ids, in rollout order. */
-export const CANONICAL_INTENTS: readonly string[] = [INTENT_NETWORK_CREATE, INTENT_NETWORK_DELETE, INTENT_DNS_SET, INTENT_DNS_DELETE];
+export const CANONICAL_INTENTS: readonly string[] = [INTENT_NETWORK_CREATE, INTENT_NETWORK_DELETE, INTENT_DNS_SET, INTENT_DNS_DELETE, INTENT_DNS_RENAME];
 
 // ---------------------------------------------------------------------------
 // L2 topology — the cross-vendor abstraction for interface layering
@@ -323,12 +326,26 @@ export const DNS_DELETE_SCHEMA: InputSchema = {
   description: { type: 'string', required: false, maxLength: 255, description: 'Optional — accepted for contract symmetry; deletion is by name(+ip) and never matches on the note.' },
 };
 
+/**
+ * Canonical input schema for `dns.rename` (name-addressed, idempotent). Renames
+ * a static DNS entry IN PLACE: every address of the old name moves to the new
+ * name, preserving per-record data the vendor stores alongside it (OPNsense
+ * unbound domain + description, RouterOS comment, LCOS dual v4+v6 row). A
+ * plugin that already holds `newName` with a different address reports an error
+ * rather than merging — the caller must delete or rename that entry first.
+ */
+export const DNS_RENAME_SCHEMA: InputSchema = {
+  name: { type: 'string', required: true, minLength: 1, maxLength: 253, description: 'Current hostname to rename (stored lowercase by UNM)' },
+  newName: { type: 'string', required: true, minLength: 1, maxLength: 253, description: 'New hostname for the entry' },
+};
+
 /** Canonical intent → input schema lookup (the superset contract). */
 export const CANONICAL_INTENT_SCHEMAS: Record<string, InputSchema> = {
   [INTENT_NETWORK_CREATE]: NETWORK_CREATE_SCHEMA,
   [INTENT_NETWORK_DELETE]: NETWORK_DELETE_SCHEMA,
   [INTENT_DNS_SET]: DNS_SET_SCHEMA,
   [INTENT_DNS_DELETE]: DNS_DELETE_SCHEMA,
+  [INTENT_DNS_RENAME]: DNS_RENAME_SCHEMA,
 };
 
 // ---------------------------------------------------------------------------

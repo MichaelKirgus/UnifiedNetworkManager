@@ -14,9 +14,13 @@ import { api, ApiError, DnsRow } from '../api/client';
 /** Canonical intent ids the dns-capable plugins advertise (plugin-sdk). */
 const INTENT_DELETE = 'dns.delete';
 const INTENT_SET = 'dns.set';
+const INTENT_RENAME = 'dns.rename';
 
 /** IPv4 or IPv6 literal (same pattern the plugins' dns.set schema enforces). */
 const IP_PATTERN = /^\d{1,3}(\.\d{1,3}){3}$|^[0-9a-fA-F:.]*:[0-9a-fA-F:.]*$/;
+
+/** Bare hostname (RFC 1123) — what dns.rename's `newName` accepts. */
+const HOSTNAME_PATTERN = /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$/i;
 
 /** Record type derived from the address shape — v4 = A record, v6 = AAAA. */
 function ipType(ip: string): 'A' | 'AAAA' {
@@ -209,6 +213,64 @@ function EditDnsIpsDialog({
   );
 }
 
+/** Dialog to rename a DNS entry GLOBALLY — the new name is applied on every
+ * device that holds the entry and supports dns.rename (one plan per plugin).
+ * Each plugin renames in place, preserving per-record data (unbound domain +
+ * description, RouterOS comment, LCOS dual v4+v6 row). */
+function RenameDnsDialog({
+  row,
+  busy,
+  onClose,
+  onRename,
+}: {
+  row: DnsRow;
+  busy: boolean;
+  onClose: () => void;
+  onRename: (newName: string) => void;
+}) {
+  const [draft, setDraft] = useState(row.name);
+  const normalized = draft.trim().toLowerCase();
+  const error =
+    normalized === '' ? 'A name is required' : !HOSTNAME_PATTERN.test(normalized) ? 'Not a valid hostname (RFC 1123)' : null;
+  const changed = normalized !== row.name;
+
+  return (
+    <DialogShell
+      title={`Rename DNS entry — ${row.name}`}
+      subtitle={`${row.devices.length} device(s) hold this entry — the new name is applied on all of them`}
+      icon={<Pencil className="h-4 w-4 text-primary" />}
+      onClose={onClose}
+      maxWidth="max-w-md"
+      footer={
+        <div className="flex items-center justify-end gap-2">
+          <button type="button" onClick={onClose} disabled={busy} className="rounded-md border border-border px-3 py-1.5 text-sm hover:bg-muted">Cancel</button>
+          <button
+            type="button"
+            onClick={() => onRename(normalized)}
+            disabled={!changed || !!error || busy}
+            className={clsx('rounded-md bg-primary px-3 py-1.5 text-sm font-medium text-white hover:bg-primary-hover', (!changed || !!error || busy) && 'cursor-not-allowed opacity-40')}
+          >
+            {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : `Rename to ${normalized}`}
+          </button>
+        </div>
+      }
+    >
+      <p className="mb-3 text-xs text-muted-foreground">
+        Every address of this entry moves to the new name on each device that supports renaming — per-record data (domains, notes) is preserved. Devices without rename support are left untouched.
+      </p>
+      <label className="mb-1 block text-xs font-medium text-muted-foreground">New hostname</label>
+      <input
+        value={draft}
+        onChange={(e) => setDraft(e.target.value)}
+        onKeyDown={(e) => { if (e.key === 'Enter' && changed && !error) onRename(normalized); }}
+        autoFocus
+        className={clsx('w-full rounded-md border bg-background px-2 py-1.5 font-mono text-sm', error ? 'border-danger-border' : 'border-border')}
+      />
+      {error && <p className="mt-1 text-xs text-danger-fg">{error}</p>}
+    </DialogShell>
+  );
+}
+
 export default function Dns() {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
@@ -252,6 +314,8 @@ export default function Dns() {
   const [reauth, setReauth] = useState<{ label: string; retry: () => void | Promise<void> } | null>(null);
   // Per-device IP editor target (row + the device chip being edited).
   const [editing, setEditing] = useState<{ row: DnsRow; member: DnsRow['devices'][number] } | null>(null);
+  // Global rename target (the whole row — applied on every supporting device).
+  const [renaming, setRenaming] = useState<DnsRow | null>(null);
   // Plans kicked off in Execute mode — polled until they settle so the touched
   // devices force-refresh and the table catches up.
   const [pendingPlans, setPendingPlans] = useState<Record<string, { deviceIds: string[]; names: string[] }>>({});
@@ -372,6 +436,87 @@ export default function Dns() {
     }
   }
 
+  /** Rename a DNS entry GLOBALLY — one dns.rename plan per supporting plugin,
+   * fanned out to every device of the row that holds it. */
+  async function renameRow(row: DnsRow, newName: string) {
+    const attempt = async () => {
+      if (isReadOnly) { setNotice({ kind: 'info', text: READONLY_MESSAGE }); return; }
+      const byPlugin = new Map<string, string[]>();
+      for (const m of row.devices) {
+        if (!hasAction(m.pluginId, INTENT_RENAME)) continue;
+        const list = byPlugin.get(m.pluginId) ?? [];
+        list.push(m.deviceId);
+        byPlugin.set(m.pluginId, list);
+      }
+      if (byPlugin.size === 0) {
+        setNotice({ kind: 'info', text: `No device holding "${row.name}" supports dns.rename.` });
+        return;
+      }
+      const created: string[] = [];
+      for (const [pluginId, deviceIds] of byPlugin.entries()) {
+        const planId = await createAndExecutePlan(
+          pluginId, INTENT_RENAME,
+          deviceIds.map((deviceId) => ({ deviceId, input: { name: row.name, newName } })),
+          mode,
+        );
+        created.push(planId);
+      }
+      setRenaming(null);
+      if (isPlanMode) {
+        setNotice({ kind: 'ok', text: `Rename "${row.name}" → "${newName}": saved as ${created.length} plan(s) — not executed. Open the Plans center to run them later.` });
+        return;
+      }
+      for (const planId of created) trackPlan(planId, row.devices.map((d) => d.deviceId), [`${row.name} → ${newName}`]);
+    };
+    try {
+      await attempt();
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 401) setReauth({ label: `Rename DNS entry ${row.name}`, retry: attempt });
+      else { setNotice({ kind: 'error', text: `Rename failed: ${err instanceof Error ? err.message : String(err)}` }); setRenaming(null); }
+    }
+  }
+
+  /** Bulk delete — every selected row, fanned out per plugin to all devices of
+   * each row that support dns.delete (one plan per plugin). */
+  async function bulkDeleteRows(rows: DnsRow[]) {
+    const attempt = async () => {
+      if (isReadOnly) { setNotice({ kind: 'info', text: READONLY_MESSAGE }); return; }
+      // Group by plugin across ALL selected rows — one plan per plugin.
+      const byPlugin = new Map<string, Array<{ deviceId: string; input: Record<string, unknown> }>>();
+      let stepsTotal = 0;
+      for (const row of rows) {
+        for (const m of row.devices) {
+          if (!hasAction(m.pluginId, INTENT_DELETE)) continue;
+          const list = byPlugin.get(m.pluginId) ?? [];
+          list.push({ deviceId: m.deviceId, input: { name: row.name } });
+          byPlugin.set(m.pluginId, list);
+          stepsTotal++;
+        }
+      }
+      if (stepsTotal === 0) {
+        setNotice({ kind: 'info', text: `No device holding the selected entries supports dns.delete.` });
+        return;
+      }
+      const created: string[] = [];
+      for (const [pluginId, steps] of byPlugin.entries()) {
+        const planId = await createAndExecutePlan(pluginId, INTENT_DELETE, steps, mode);
+        created.push(planId);
+      }
+      if (isPlanMode) {
+        setNotice({ kind: 'ok', text: `Delete ${rows.length} DNS entr${rows.length === 1 ? 'y' : 'ies'} (${stepsTotal} device step(s)): saved as ${created.length} plan(s) — not executed.` });
+        return;
+      }
+      const allDeviceIds = [...new Set(rows.flatMap((r) => r.devices.map((d) => d.deviceId)))];
+      for (const planId of created) trackPlan(planId, allDeviceIds, rows.map((r) => r.name));
+    };
+    try {
+      await attempt();
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 401) setReauth({ label: `Delete ${rows.length} DNS entries`, retry: attempt });
+      else setNotice({ kind: 'error', text: `Bulk delete failed: ${err instanceof Error ? err.message : String(err)}` });
+    }
+  }
+
   /** Delete ONE address of the name on ONE device (chip-level X). */
   async function deleteChip(row: DnsRow, member: DnsRow['devices'][number]) {
     const attempt = async () => {
@@ -487,31 +632,53 @@ export default function Dns() {
       ),
     },
     {
-      // Whole-entry delete — fans out to every supporting device of the row.
+      // Row-level actions: rename (pencil) + whole-entry delete (trash), each
+      // fanned out to every supporting device of the row.
       header: 'Actions',
       key: 'actions',
       width: 90,
       render: (row) => {
         const anyDelete = row.devices.some((m) => hasAction(m.pluginId, INTENT_DELETE));
-        if (!anyDelete) return <span className="text-faint">—</span>;
+        const anyRename = row.devices.some((m) => hasAction(m.pluginId, INTENT_RENAME));
+        if (!anyDelete && !anyRename) return <span className="text-faint">—</span>;
+        const busy = Object.keys(pendingPlans).length > 0;
         return (
-          <button
-            type="button"
-            aria-label={`Delete ${row.name} on all devices`}
-            title={isReadOnly ? READONLY_MESSAGE : `Remove "${row.name}" from every device that holds it (${row.devices.length})`}
-            disabled={isReadOnly || Object.keys(pendingPlans).length > 0}
-            onClick={() => {
-              if (window.confirm(`Delete DNS entry "${row.name}" on ${row.devices.length} device(s)?\n\nThis removes the static host record from each device's DNS configuration.`)) {
-                void deleteRow(row);
-              }
-            }}
-            className={clsx(
-              'rounded-md p-1.5 text-danger-fg hover:bg-muted',
-              (isReadOnly || Object.keys(pendingPlans).length > 0) && 'cursor-not-allowed opacity-30',
+          <span className="flex items-center gap-1">
+            {anyRename && (
+              <button
+                type="button"
+                aria-label={`Rename ${row.name} on all devices`}
+                title={isReadOnly ? READONLY_MESSAGE : `Rename "${row.name}" on every device that holds it (${row.devices.length}) — addresses and per-record data are preserved`}
+                disabled={isReadOnly || busy}
+                onClick={() => setRenaming(row)}
+                className={clsx(
+                  'rounded-md p-1.5 text-secondary hover:bg-muted',
+                  (isReadOnly || busy) && 'cursor-not-allowed opacity-30',
+                )}
+              >
+                <Pencil size={14} />
+              </button>
             )}
-          >
-            <Trash2 size={14} />
-          </button>
+            {anyDelete && (
+              <button
+                type="button"
+                aria-label={`Delete ${row.name} on all devices`}
+                title={isReadOnly ? READONLY_MESSAGE : `Remove "${row.name}" from every device that holds it (${row.devices.length})`}
+                disabled={isReadOnly || busy}
+                onClick={() => {
+                  if (window.confirm(`Delete DNS entry "${row.name}" on ${row.devices.length} device(s)?\n\nThis removes the static host record from each device's DNS configuration.`)) {
+                    void deleteRow(row);
+                  }
+                }}
+                className={clsx(
+                  'rounded-md p-1.5 text-danger-fg hover:bg-muted',
+                  (isReadOnly || busy) && 'cursor-not-allowed opacity-30',
+                )}
+              >
+                <Trash2 size={14} />
+              </button>
+            )}
+          </span>
         );
       },
     },
@@ -563,6 +730,15 @@ export default function Dns() {
           rows={dnsQuery.data}
           rowKey={(row) => row.name}
           storageKey="dns"
+          selectable
+          bulkActions={[
+            {
+              label: 'Delete selected',
+              confirm: (count) => `Delete ${count} DNS entr${count === 1 ? 'y' : 'ies'} on every device that holds them?\n\nThis removes each static host record from the devices' DNS configuration.`,
+              enabled: (rows) => rows.some((r) => r.devices.some((m) => hasAction(m.pluginId, INTENT_DELETE))),
+              onClick: (rows) => void bulkDeleteRows(rows),
+            },
+          ]}
           autoRefresh={{ intervalMs: 30_000, queries: [dnsQuery] }}
           searchPlaceholder="Search DNS entries…"
           emptyMessage="No static DNS entries collected yet — assign a dns-capable plugin (OPNsense, OpenWrt, RouterOS or LCOS) to a device and wait for the next poll."
@@ -577,6 +753,16 @@ export default function Dns() {
           busy={Object.keys(pendingPlans).length > 0}
           onClose={() => setEditing(null)}
           onSave={(newIps) => void saveMemberIps(editing.row, editing.member, newIps)}
+        />
+      )}
+
+      {/* Global rename (all devices holding the entry). */}
+      {renaming && (
+        <RenameDnsDialog
+          row={renaming}
+          busy={Object.keys(pendingPlans).length > 0}
+          onClose={() => setRenaming(null)}
+          onRename={(newName) => void renameRow(renaming, newName)}
         />
       )}
 

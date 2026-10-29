@@ -12,7 +12,7 @@ storage inventory and security checks.
 | Inventory | — | Hostname/version, ARP + NDP tables, configured networks (IP/CIDR/VLAN), DHCP leases, PPPoE tunnels, routes, firewall rules, services, gateways. 15-min window. |
 | Static DNS entries | — | The dnsmasq/unbound host-record table (`dnsEntries` metric) for the DNS page; backend auto-detected per appliance. |
 | Configuration actions | — | Single-device actions from the action catalog (reboot, service restarts, …). |
-| Planning / rollouts | — | Multi-device intents: `network.create`, `network.delete`, `dns.set`, `dns.delete` (see write paths below). |
+| Planning / rollouts | — | Multi-device intents: `network.create`, `network.delete`, `dns.set`, `dns.delete`, `dns.rename` (see write paths below). |
 | Firmware + package updates | — | Live status from the appliance's own update engine; minor point releases and major upgrades applied through OPNsense's update jobs. |
 | ZFS storage inventory | **SSH slot bound** AND appliance runs ZFS | Pools, datasets, zvols, scrub state, snapshots, per-disk health. The OPNsense API exposes no ZFS listing — only the mounted-root overview (`system_disk`). Without this slot you still get the mounted-filesystem rows. |
 | Security checks | **SSH slot bound** | File-integrity baselines, failed-login scans, rate-limit/account checks over SSH at inventory cadence. Read-only commands. |

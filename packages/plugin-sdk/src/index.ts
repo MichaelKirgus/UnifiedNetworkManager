@@ -38,7 +38,7 @@ export { validateInput, isValidInput, createRegistry } from './actions';
 export type { ValidationIssue, ActionDescriptor, ActionRegistry } from './actions';
 export { PlanningError, STEP_TOKEN_PATTERN, shiftStepTokens, finalizePlan, SYSTEM_STEP_WAIT, SYSTEM_STEP_INVENTORY_REFRESH, isSystemStepAction, appendSettleAndRefresh } from './planning';
 // Canonical fleet intents (cross-vendor network rollout contract). See intents.ts.
-export { INTENT_NETWORK_CREATE, INTENT_NETWORK_DELETE, INTENT_DNS_SET, INTENT_DNS_DELETE, CANONICAL_INTENTS, isCanonicalIntent, NETWORK_CREATE_SCHEMA, NETWORK_DELETE_SCHEMA, DNS_SET_SCHEMA, DNS_DELETE_SCHEMA, CANONICAL_INTENT_SCHEMAS } from './intents';
+export { INTENT_NETWORK_CREATE, INTENT_NETWORK_DELETE, INTENT_DNS_SET, INTENT_DNS_DELETE, INTENT_DNS_RENAME, CANONICAL_INTENTS, isCanonicalIntent, NETWORK_CREATE_SCHEMA, NETWORK_DELETE_SCHEMA, DNS_SET_SCHEMA, DNS_DELETE_SCHEMA, DNS_RENAME_SCHEMA, CANONICAL_INTENT_SCHEMAS } from './intents';
 export type { PreflightConfidence, PreflightValue, PreflightResult, PreflightRequest, PreflightPort, PreflightInterfaceOption, PreflightCapabilities } from './intents';
 // L2 topology abstraction (interface layering: ports → bundles/bridges). See intents.ts.
 export { INTENT_L2_TOPOLOGY_READ, suggestL2AttachPoint, suggestL2VlanPorts, portTrunkStatus } from './intents';

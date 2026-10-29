@@ -10,7 +10,7 @@
  * negotiated read transport (uci syntax is version-stable).
  */
 
-import { INTENT_DNS_SET, INTENT_DNS_DELETE } from '@unm/plugin-sdk';
+import { INTENT_DNS_SET, INTENT_DNS_DELETE, INTENT_DNS_RENAME } from '@unm/plugin-sdk';
 import type { ActionDescriptor } from './types';
 import { sshAvailable, noSshResult } from './types';
 import { okResult, failResult, runCommands, readUciPackage } from './helpers';
@@ -22,6 +22,8 @@ interface HostSection {
   key: string; // e.g. '@host[2]'
   name: string | null;
   ip: string | null;
+  /** Which uci option carries the hostname — `name` (@host) or `hostname` (@map). */
+  nameOption: 'name' | 'hostname';
 }
 
 /** Reads all dnsmasq host sections from the live uci state (null on read failure). */
@@ -31,10 +33,12 @@ async function readHostSections(ssh: SshBackend): Promise<HostSection[] | null> 
     const sections: HostSection[] = [];
     for (const [key, options] of Object.entries(tree['dhcp'] ?? {})) {
       if (!key.startsWith('@host[') && !key.startsWith('@map[')) continue;
+      const nameOption: 'name' | 'hostname' = typeof options['name'] === 'string' ? 'name' : 'hostname';
       sections.push({
         key,
-        name: typeof options['name'] === 'string' ? options['name'].trim().toLowerCase() : typeof options['hostname'] === 'string' ? options['hostname'].trim().toLowerCase() : null,
+        name: typeof options[nameOption] === 'string' ? (options[nameOption] as string).trim().toLowerCase() : null,
         ip: typeof options['ip'] === 'string' && options['ip'].trim() ? options['ip'].trim() : null,
+        nameOption,
       });
     }
     return sections;
@@ -165,4 +169,70 @@ export const dnsDeleteAction: ActionDescriptor = {
   },
 };
 
-export const dnsIntentActions: ActionDescriptor[] = [dnsSetAction, dnsDeleteAction];
+// --- dns.rename -------------------------------------------------------------------
+
+export const dnsRenameAction: ActionDescriptor = {
+  id: INTENT_DNS_RENAME,
+  label: 'Rename static DNS entry (hostname)',
+  description:
+    'Renames a dnsmasq host record in place — every address of the old name moves to the new name. Commits + restarts dnsmasq and verifies by re-reading. Idempotent — already renamed is a skip.',
+  module: 'DNS',
+  riskLevel: 'write',
+  // Canonical fleet intent — FANS OUT across the batch (one step per appliance).
+  deviceCount: 'N' as const,
+  timeoutMs: 90_000,
+  inputSchema: {
+    name: { type: 'string' as const, required: true, minLength: 1, maxLength: 253, description: 'Current hostname to rename (stored lowercase by UNM)' },
+    newName: { type: 'string' as const, required: true, minLength: 1, maxLength: 253, description: 'New hostname for the entry' },
+  },
+  execute: async (ctx, input) => {
+    if (!sshAvailable(ctx)) return noSshResult();
+    const ssh = ctx.backend.ssh!;
+
+    const name = String(input.name ?? '').trim().toLowerCase();
+    const newName = String(input.newName ?? '').trim().toLowerCase();
+    if (!name || !newName) return failResult('both `name` and `newName` are required');
+    if (name === newName) {
+      // Idempotent skip — nothing to rename.
+      return okResult({ skipped: `entry ${name} is already named "${newName}"` }, true);
+    }
+
+    // 1. Live state — refuse to write when the read fails (state unknown).
+    const sections = await readHostSections(ssh);
+    if (sections === null) return failResult('could not read current uci dhcp host records — state unknown, refusing to write');
+
+    const targets = sections.filter((s) => s.name === name);
+    if (targets.length === 0) {
+      // Absence was CONFIRMED by the live read (verified).
+      return okResult({ skipped: `no DNS entry named "${name}" on this device` }, true);
+    }
+
+    // Collision guard — a DIFFERENT section already holds the new name. Merging
+    // would silently mix two logical entries; refuse and let the caller decide.
+    if (sections.some((s) => s.name === newName)) {
+      return failResult(`entry "${newName}" already exists on this device — delete or rename it first`);
+    }
+
+    // 2. One batch: update each section's hostname option in place + commit + restart.
+    const cmds = targets.map((t) => uciSetCmd('dhcp', t.key, t.nameOption, newName));
+    const r = await runCommands(ssh, [...cmds, uciCommitCmd(), '/etc/init.d/dnsmasq restart >/dev/null 2>&1 || true']);
+    if (!r.ok) return failResult(`dns.rename failed: ${r.stderr.slice(0, 300)}`);
+
+    // 3. Verify by re-read — the old name is gone and every address sits under the new one.
+    const after = await readHostSections(ssh);
+    if (after === null) return okResult({ renamedFrom: name, records: targets.length }, false);
+    if (after.some((s) => s.name === name)) {
+      return failResult(`entry ${name} still present after rename`);
+    }
+    for (const t of targets) {
+      if (!t.ip || !after.some((s) => s.name === newName && s.ip === t.ip)) {
+        return failResult(`address ${t.ip ?? '(none)'} not present under "${newName}" after rename`);
+      }
+    }
+
+    // `verified` is TOP-LEVEL on ActionResult.
+    return okResult({ renamedFrom: name, records: targets.length }, true);
+  },
+};
+
+export const dnsIntentActions: ActionDescriptor[] = [dnsSetAction, dnsDeleteAction, dnsRenameAction];

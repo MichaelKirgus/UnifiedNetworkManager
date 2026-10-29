@@ -11,7 +11,7 @@ console on top.
 | Monitoring | — | CPU/memory/disk gauges, uptime, per-interface throughput rates (30 s cadence). |
 | Inventory | — | Interfaces + addresses, ARP table, DHCP leases, routes (incl. `/ip/dns/static` as `dnsEntries` for the DNS page), firewall rules (filter + NAT), wireless clients. TTL-cached snapshot (default 60 s). |
 | Configuration actions | — | Single-device actions from the action catalog over REST. |
-| Planning / rollouts | — | Multi-device intents: `network.create`, `network.delete`, `dns.set`, `dns.delete` with a `/preflight` resolver for per-device attach-point suggestions. Pure REST writes — no extra credentials needed. |
+| Planning / rollouts | — | Multi-device intents: `network.create`, `network.delete`, `dns.set`, `dns.delete`, `dns.rename` with a `/preflight` resolver for per-device attach-point suggestions. Pure REST writes — no extra credentials needed. |
 | Firmware status | — | Live RouterOS version vs the known release catalog (available-without-apply — RouterOS OS updates go through the web UI / package server; there is no safe programmatic update API). |
 | SSH console | — | Interactive CLI shell over SSH (port 22). Always effective: when no dedicated `ssh` slot is bound, the primary username/password login is reused (RouterOS shares one account across REST + SSH). Bind a separate user or an ed25519/rsa key via the optional slot. |
 | Security checks | — | Service-exposure scan (telnet/ftp/www) + failed-login analysis from `/log/print`, over the REST API at ~15-min cadence. No extra slots. |

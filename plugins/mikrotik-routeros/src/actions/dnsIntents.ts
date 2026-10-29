@@ -10,7 +10,7 @@
  * these canonical wrappers use the fleet-wide `name` + `ip` contract.
  */
 
-import { INTENT_DNS_SET, INTENT_DNS_DELETE } from '@unm/plugin-sdk';
+import { INTENT_DNS_SET, INTENT_DNS_DELETE, INTENT_DNS_RENAME } from '@unm/plugin-sdk';
 import { rosString } from '../routerosClient';
 import type { ActionContext, ActionDescriptor } from './types';
 
@@ -144,4 +144,73 @@ export const dnsDeleteAction: ActionDescriptor = {
   },
 };
 
-export const dnsIntentActions: ActionDescriptor[] = [dnsSetAction, dnsDeleteAction];
+// --- dns.rename -------------------------------------------------------------------
+
+export const dnsRenameAction: ActionDescriptor = {
+  id: INTENT_DNS_RENAME,
+  label: 'Rename static DNS entry (hostname)',
+  description:
+    'Renames a local DNS record in /ip/dns/static in place — every address of the old name moves to the new name. The record\'s `comment` is preserved by the in-place update. Idempotent — already renamed is a skip.',
+  module: 'DNS',
+  riskLevel: 'write',
+  // Canonical fleet intent — FANS OUT across the batch (one step per router).
+  deviceCount: 'N' as const,
+  timeoutMs: 60_000,
+  inputSchema: {
+    name: { type: 'string' as const, required: true, minLength: 1, maxLength: 253, description: 'Current hostname to rename (stored lowercase by UNM)' },
+    newName: { type: 'string' as const, required: true, minLength: 1, maxLength: 253, description: 'New hostname for the entry' },
+  },
+  execute: async (ctx, input) => {
+    const name = String(input.name ?? '').trim().toLowerCase();
+    const newName = String(input.newName ?? '').trim().toLowerCase();
+    if (!name || !newName) return { success: false, error: 'both `name` and `newName` are required' };
+    if (name === newName) {
+      // Idempotent skip — nothing to rename.
+      return { success: true, verified: true, details: { skipped: `entry ${name} is already named "${newName}"` } };
+    }
+
+    // 1. Live state — refuse to write when the read fails (state unknown).
+    const entries = await readDnsStatic(ctx);
+    if (entries === null) return { success: false, error: 'could not read /ip/dns/static — state unknown, refusing to write' };
+
+    const targets = entries.filter((e) => e.name === name);
+    if (targets.length === 0) {
+      // Absence was CONFIRMED by the live read (verified).
+      return { success: true, verified: true, details: { skipped: `no DNS entry named "${name}" on this device` } };
+    }
+
+    // Collision guard — a DIFFERENT record already holds the new name. Merging
+    // would silently mix two logical entries; refuse and let the caller decide.
+    if (entries.some((e) => e.name === newName)) {
+      return { success: false, error: `entry "${newName}" already exists on this device — delete or rename it first` };
+    }
+
+    // 2. In-place update of each record's name (RouterOS applies immediately; the
+    // comment field is untouched by a partial PUT).
+    for (const t of targets) {
+      if (!t.id) return { success: false, error: `entry ${name} has no .id — cannot address it for rename` };
+      try {
+        await ctx.client.put(`/ip/dns/static/${t.id}`, { name: newName });
+      } catch (e) {
+        return { success: false, error: `Renaming DNS host to ${newName} failed: ${e instanceof Error ? e.message : String(e)}` };
+      }
+    }
+
+    // 3. Verify by re-read — the old name is gone and every address sits under the new one.
+    const after = await readDnsStatic(ctx);
+    if (after === null) return { success: true, applied: true, verified: false, details: { renamedFrom: name, records: targets.length } };
+    if (after.some((e) => e.name === name)) {
+      return { success: false, error: `entry ${name} still present after rename` };
+    }
+    for (const t of targets) {
+      if (!after.some((e) => e.name === newName && e.ip === t.ip)) {
+        return { success: false, error: `address ${t.ip} not present under "${newName}" after rename` };
+      }
+    }
+
+    // `verified` is TOP-LEVEL on ActionResult.
+    return { success: true, applied: true, verified: true, details: { renamedFrom: name, records: targets.length } };
+  },
+};
+
+export const dnsIntentActions: ActionDescriptor[] = [dnsSetAction, dnsDeleteAction, dnsRenameAction];

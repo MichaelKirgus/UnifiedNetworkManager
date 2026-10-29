@@ -92,6 +92,29 @@ Vendor storage: OPNsense dnsmasq host records / unbound local-zone overrides
 sections (dnsmasq), RouterOS `/ip/dns/static`, LCOS `Setup/DNS/DNS-List` table
 (columns Host-name, Rtg-tag=0, IP-Address, IPV6-Address — CLI over SSH PTY).
 
+## `dns.rename` — field contract
+
+Renames a static DNS entry IN PLACE on every device that holds it (the DNS
+page's row-level pencil button fans this out like delete). Every address of the
+old name moves to the new name; per-record data is preserved by each vendor's
+native mechanism. Idempotent: `name === newName` or an absent old name is a
+skip (`verified`). A DIFFERENT record already holding `newName` is a hard error
+— merging two logical entries would silently mix their addresses, so the caller
+must delete or rename that entry first.
+
+| Field | Type / constraint | Meaning | Supported by |
+|---|---|---|---|
+| `name` | string, required, 1..253 (RFC 1123) | Current hostname to rename (UNM stores it lowercase). | opnsense, openwrt, routeros, lcos |
+| `newName` | string, required, 1..253 (RFC 1123) | New hostname. Compared case-insensitively; stored per vendor convention. | opnsense, openwrt, routeros, lcos |
+
+Per-vendor mechanics: **opnsense** re-adds each record under the new name with
+its `domain` + native `description` intact (unbound) or plain (dnsmasq), then
+reconfigures; **openwrt** updates the section's hostname option in place
+(`name` for `@host`, `hostname` for `@map`) + commit + dnsmasq restart;
+**routeros** PUTs each record's `name` by `.id` (the `comment` is untouched);
+**lcos** dels the single-keyed row and re-adds it under the new name with BOTH
+address families in one CLI command.
+
 ## `l2.topology.read` — result contract
 
 Empty input schema. Returns an `L2Topology`

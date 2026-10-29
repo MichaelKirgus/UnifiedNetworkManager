@@ -11,7 +11,7 @@ that unlocks `uci`-based configuration actions and security checks.
 | Monitoring | — | System state + per-interface throughput (ubus). |
 | Inventory | — | Interfaces, wireless, tunnels, services for the Networks/Hosts pages. |
 | Static DNS entries | **SSH slot bound** | The `uci show dhcp` @host/@map sections (`dnsEntries` metric) for the DNS page; omitted in LuCI-only mode (previous rows kept). |
-| Configuration actions | — | 61 catalog actions: firewall zones/rules, DNS hosts + reconfigure, DHCP static mappings, WireGuard tunnel create, OpenVPN site-to-site create, back-route creation and more. |
+| Configuration actions | — | Catalog actions: firewall zones/rules, DNS hosts + reconfigure (incl. the `dns.set` / `dns.delete` / `dns.rename` fleet intents), DHCP static mappings, WireGuard tunnel create, OpenVPN site-to-site create, back-route creation and more. |
 | Planning / rollouts | — | Multi-device intents for fleet configuration (firewall, DNS, DHCP, VPN). |
 | Updates | — | Firmware + package update status/apply through opkg. |
 | Security checks | **SSH slot bound** | Read-only SSH checks at inventory cadence. |

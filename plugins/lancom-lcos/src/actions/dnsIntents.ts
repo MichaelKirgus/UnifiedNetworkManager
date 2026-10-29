@@ -18,7 +18,7 @@
  * (del + add).
  */
 
-import { INTENT_DNS_SET, INTENT_DNS_DELETE } from '@unm/plugin-sdk';
+import { INTENT_DNS_SET, INTENT_DNS_DELETE, INTENT_DNS_RENAME } from '@unm/plugin-sdk';
 import type { SshCredentials } from '@unm/plugin-sdk';
 import { snmpWalkMulti } from '@unm/snmp-client';
 import { splitRow } from '@unm/lancom-shared';
@@ -252,4 +252,73 @@ export const dnsDeleteAction: ActionDescriptor = {
   },
 };
 
-export const dnsIntentActions: ActionDescriptor[] = [dnsSetAction, dnsDeleteAction];
+// --- dns.rename -------------------------------------------------------------------
+
+export const dnsRenameAction: ActionDescriptor = {
+  id: INTENT_DNS_RENAME,
+  label: 'Rename static DNS entry (hostname)',
+  description:
+    'Renames a Setup/DNS/DNS-List row in place — the whole single-keyed row (both address families of a dual v4+v6 entry) moves to the new name via del + one CLI add. Idempotent — already renamed is a skip.',
+  module: 'DNS',
+  riskLevel: 'write',
+  // Canonical fleet intent — FANS OUT across the batch (one step per router).
+  deviceCount: 'N' as const,
+  timeoutMs: 120_000,
+  inputSchema: {
+    name: { type: 'string' as const, required: true, minLength: 1, maxLength: 253, description: 'Current hostname to rename (stored lowercase by UNM)' },
+    newName: { type: 'string' as const, required: true, minLength: 1, maxLength: 253, description: 'New hostname for the entry' },
+  },
+  async execute(ctx, input): Promise<ActionResult> {
+    const creds = sshCreds(ctx);
+    if (!creds) return { success: false, error: NO_SSH_SLOT_ERROR };
+
+    const name = String(input.name ?? '').trim();
+    const newName = String(input.newName ?? '').trim().toLowerCase();
+    if (!name || !newName) return { success: false, error: 'both `name` and `newName` are required' };
+    if (name.toLowerCase() === newName) {
+      // Idempotent skip — nothing to rename.
+      return { success: true, verified: true, details: { skipped: `entry ${name} is already named "${newName}"` } };
+    }
+
+    // 1. Live state (SNMP). Refuse to write when unknown.
+    const rows = await readDnsRows(ctx);
+    if (rows === null) return { success: false, error: 'could not read Setup/DNS/DNS-List via SNMP — state unknown, refusing to write' };
+
+    const existing = rows.find((r) => r.name.toLowerCase() === name.toLowerCase());
+    if (!existing) {
+      // Idempotent skip — absence was CONFIRMED by the live read (verified).
+      return { success: true, verified: true, details: { skipped: `no DNS entry named "${name}" on this device` } };
+    }
+
+    // Collision guard — a DIFFERENT row already holds the new name. Merging two
+    // logical entries would silently mix their addresses; refuse and let the
+    // caller decide (delete or rename that one first).
+    if (rows.some((r) => r.name.toLowerCase() === newName && r !== existing)) {
+      return { success: false, error: `entry "${newName}" already exists on this device — delete or rename it first` };
+    }
+
+    // 2. Rename = del the old row + ONE add under the new name carrying BOTH
+    // families (the table is single-keyed; a second add would replace, not merge).
+    const del = await cliDelRow(ctx, creds, 'DNS/DNS-List', existing.name);
+    if (!del.ok) return { success: false, error: `Failed to remove old entry ${existing.name}: ${del.detail}` };
+    const r = await cliAddRow(ctx, creds, 'DNS/DNS-List', dnsAddValues(newName, existing.ip || null, existing.ipv6 || null), newName);
+    if (!r.ok) return { success: false, error: `Failed to re-add DNS entry as ${newName}: ${r.detail}` };
+
+    // 3. Verify by CLI re-read — the old name is gone; every address of the row
+    // now sits under the new name.
+    const after = await cliTableRows(ctx, creds, 'DNS/DNS-List');
+    if (cliRowMatches(after, existing.name, null)) {
+      return { success: false, error: `entry ${existing.name} still present in DNS-List after rename` };
+    }
+    for (const addr of [existing.ip, existing.ipv6]) {
+      if (addr && !cliRowMatches(after, newName, addr)) {
+        return { success: false, error: `address ${addr} not present under "${newName}" in DNS-List after rename` };
+      }
+    }
+
+    // `verified` is TOP-LEVEL on ActionResult.
+    return { success: true, applied: true, verified: true, details: { renamedFrom: existing.name, addresses: [existing.ip, existing.ipv6].filter(Boolean).join(' + ') || null } };
+  },
+};
+
+export const dnsIntentActions: ActionDescriptor[] = [dnsSetAction, dnsDeleteAction, dnsRenameAction];

@@ -10,7 +10,7 @@
  * delete of a missing name is a skip.
  */
 
-import { INTENT_DNS_SET, INTENT_DNS_DELETE } from '@unm/plugin-sdk';
+import { INTENT_DNS_SET, INTENT_DNS_DELETE, INTENT_DNS_RENAME } from '@unm/plugin-sdk';
 import * as dns from '../client/dns';
 import type { ActionDescriptor } from './types';
 
@@ -213,4 +213,94 @@ export const dnsDeleteAction: ActionDescriptor = {
   },
 };
 
-export const dnsIntentActions: ActionDescriptor[] = [dnsSetAction, dnsDeleteAction];
+// --- dns.rename -------------------------------------------------------------------
+
+export const dnsRenameAction: ActionDescriptor = {
+  id: INTENT_DNS_RENAME,
+  label: 'Rename static DNS entry (hostname)',
+  description:
+    'Renames a static DNS host entry in place — every address of the old name moves to the new name. On unbound backends each record\'s domain and native description are preserved; dnsmasq records carry no such fields. Idempotent — already renamed is a skip.',
+  module: 'DNS',
+  riskLevel: 'write',
+  // Canonical fleet intent — FANS OUT across the batch (one step per appliance).
+  deviceCount: 'N' as const,
+  timeoutMs: 120_000,
+  inputSchema: {
+    name: { type: 'string' as const, required: true, minLength: 1, maxLength: 253, description: 'Current hostname to rename (stored lowercase by UNM)' },
+    newName: { type: 'string' as const, required: true, minLength: 1, maxLength: 253, description: 'New hostname for the entry' },
+  },
+  execute: async (ctx, input) => {
+    const name = String(input.name ?? '').trim().toLowerCase();
+    const newName = String(input.newName ?? '').trim().toLowerCase();
+    if (!name || !newName) return { success: false, error: 'both `name` and `newName` are required' };
+    if (name === newName) {
+      // Idempotent skip — nothing to rename.
+      return { success: true, verified: true, details: { skipped: `entry ${name} is already named "${newName}"` } };
+    }
+
+    // Raw rows — we need the uuids + per-record domain/description (parseHostRecordRows drops them).
+    let rawRows: Array<Record<string, unknown>> = [];
+    try {
+      const res = await dns.searchHostRecords(ctx.client, ctx.dnsBackend);
+      if (!res.ok || !res.data) return { success: false, error: 'could not read current DNS host records — state unknown, refusing to write' };
+      rawRows = ((res.data as { rows?: unknown[] }).rows ?? []).filter((r): r is Record<string, unknown> => !!r && typeof r === 'object');
+    } catch (e) {
+      return { success: false, error: `DNS host read failed: ${e instanceof Error ? e.message : String(e)}` };
+    }
+
+    const rowName = (r: Record<string, unknown>): string =>
+      typeof r['name'] === 'string' ? r['name'].trim().toLowerCase() : typeof r['hostname'] === 'string' ? (r['hostname'] as string).trim().toLowerCase() : '';
+    const rowIp = (r: Record<string, unknown>): string =>
+      typeof r['ip'] === 'string' && r['ip'].trim() !== '' ? r['ip'].trim()
+        : typeof r['server'] === 'string' && r['server'].trim() !== '' ? r['server'].trim()
+          : typeof r['address'] === 'string' ? (r['address'] as string).trim() : '';
+
+    const targets = rawRows.filter((r) => rowName(r) === name);
+    if (targets.length === 0) {
+      // Absence was CONFIRMED by the live read (verified).
+      return { success: true, verified: true, details: { skipped: `no DNS entry named "${name}" on this device` } };
+    }
+
+    // Collision guard — a DIFFERENT record already holds the new name. Merging
+    // would silently mix two logical entries; refuse and let the caller decide.
+    const collision = rawRows.find((r) => rowName(r) === newName);
+    if (collision) {
+      return { success: false, error: `entry "${newName}" already exists on this device (${rowIp(collision)}) — delete or rename it first` };
+    }
+
+    // Rename each record in place: delete the old row, re-add with the new name.
+    // Unbound records carry a native domain + description — preserve both; dnsmasq
+    // rows have neither (the client ignores them there).
+    for (const t of targets) {
+      const uuid = typeof t['uuid'] === 'string' ? t['uuid'] : null;
+      if (!uuid) return { success: false, error: `entry ${name} has no uuid — cannot address it for rename` };
+      const del = await dns.deleteHostRecord(ctx.client, ctx.dnsBackend, uuid);
+      if (!writeOk(del)) return { success: false, error: `DNS host delete failed: ${JSON.stringify(del.data).slice(0, 300)}` };
+      const domain = normDomain(t['domain']);
+      const description = typeof t['description'] === 'string' && t['description'].trim() !== '' ? t['description'].trim() : undefined;
+      const addRes = await dns.addHostRecord(ctx.client, ctx.dnsBackend, { name: newName, ip: rowIp(t), ...(domain !== undefined ? { domain } : {}), ...(description !== undefined ? { description } : {}) });
+      if (!writeOk(addRes)) return { success: false, error: `DNS host re-add as ${newName} failed: ${JSON.stringify(addRes.data).slice(0, 300)}` };
+    }
+
+    // Verify by re-read — the old name is gone and every address now sits under
+    // the new name (with its domain intact on unbound).
+    const v = await applyAndVerify(ctx, targets.map((t) => {
+      const d = normDomain(t['domain']);
+      return { name: newName, ip: rowIp(t), ...(d !== undefined ? { domain: d } : {}) };
+    }));
+    if (!v.ok) return { success: false, error: v.detail };
+    let afterRaw: Array<Record<string, unknown>> | null = [];
+    try {
+      const res = await dns.searchHostRecords(ctx.client, ctx.dnsBackend);
+      if (res.ok && res.data) afterRaw = ((res.data as { rows?: unknown[] }).rows ?? []).filter((r): r is Record<string, unknown> => !!r && typeof r === 'object');
+    } catch { afterRaw = null; /* verification read unavailable — applied but unverified */ }
+    if (afterRaw !== null && afterRaw.some((r) => rowName(r) === name)) {
+      return { success: false, error: `entry ${name} still present after rename` };
+    }
+
+    // `verified` is TOP-LEVEL on ActionResult.
+    return { success: true, applied: true, verified: v.verified && afterRaw !== null, details: { renamedFrom: name, records: targets.length } };
+  },
+};
+
+export const dnsIntentActions: ActionDescriptor[] = [dnsSetAction, dnsDeleteAction, dnsRenameAction];
