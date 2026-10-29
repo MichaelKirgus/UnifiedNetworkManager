@@ -1566,6 +1566,35 @@ export interface RouteRow {
   collectedAt: string;
 }
 
+// --- Static DNS entries (cross-device inventory, see GET /dns) -----------------
+
+/** One device+plugin instance that holds a static DNS entry. */
+export interface DnsDeviceMember {
+  deviceId: string;
+  pluginId: string;
+  /** The addresses THIS device holds for the name (drift is visible per chip). Record type per address is derived from its shape (v4 = A, v6 = AAAA). */
+  ips: string[];
+  /** Distinct non-empty notes configured on this device for the name. */
+  descriptions?: string[];
+  deviceName?: string | null;
+  managementAddress?: string | null;
+  siteName?: string | null;
+  /** Display name of the reporting plugin instance. */
+  pluginName?: string | null;
+}
+
+/** One static DNS name as presented by GET /dns — merged across devices.
+ * `name` is lowercase (the grouping key); an entry present on several devices
+ * carries one chip per device+plugin instance. */
+export interface DnsRow {
+  name: string;
+  /** All addresses of this name anywhere, IPv4 first. Record type per address is derived from its shape (v4 = A, v6 = AAAA). */
+  ips: string[];
+  /** Distinct non-empty notes for the name across all devices. */
+  descriptions?: string[];
+  devices: DnsDeviceMember[];
+}
+
 /** One structured log entry emitted by a plugin (see GET /logs). */
 export interface LogEntry {
   id: string;
@@ -3766,6 +3795,14 @@ export const api = {
     if (params?.protocol) qs.set('protocol', params.protocol);
     const suffix = qs.toString() ? `?${qs.toString()}` : '';
     return apiFetch<RouteRow[]>(`/routes${suffix}`);
+  },
+  /** Static DNS entries across devices, grouped by lowercase name. */
+  dns: (params?: { deviceId?: string; siteId?: string }) => {
+    const qs = new URLSearchParams();
+    if (params?.deviceId) qs.set('deviceId', params.deviceId);
+    if (params?.siteId) qs.set('siteId', params.siteId);
+    const suffix = qs.toString() ? `?${qs.toString()}` : '';
+    return apiFetch<DnsRow[]>(`/dns${suffix}`);
   },
   wifi: (params?: { siteId?: string }) => {
     const qs = new URLSearchParams();

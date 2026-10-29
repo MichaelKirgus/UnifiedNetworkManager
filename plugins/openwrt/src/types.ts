@@ -53,6 +53,12 @@ export interface TunnelRow {
   extra?: Record<string, unknown>;
 }
 
+/** One static DNS host entry (uci dhcp @host/@map) → `metrics['dnsEntries']` (DNS page). */
+export interface DnsEntryRow {
+  name: string;
+  ip: string;
+}
+
 /** One route row → `metrics['routes']`. */
 export interface RouteRow {
   destination: string;
@@ -144,6 +150,8 @@ export interface InventorySnapshot {
   arp: HostRow[];
   ndp: HostRow[];
   dhcpLeases: HostRow[];
+  /** Static DNS host entries (uci dhcp @host/@map). null = read failed → key omitted, never wipes. */
+  dnsEntries: DnsEntryRow[] | null;
   routes: RouteRow[];
   tunnels: TunnelRow[];
   wifiSsids: WifiSsidRow[];

@@ -560,6 +560,143 @@ router.get('/hosts', requireAuth, requirePermission('hosts:read'), async (_req, 
   }
 });
 
+/** One device+plugin instance that holds a DNS entry. */
+interface DnsDeviceMember {
+  deviceId: string;
+  pluginId: string;
+  /** The addresses THIS device holds for the name (drift is visible per chip). */
+  ips: string[];
+  /** Distinct non-empty notes configured on this device for the name (may be empty). */
+  descriptions: string[];
+}
+
+/** One static DNS name as presented by GET /dns — merged across devices. */
+export interface MergedDnsEntry {
+  /** Lowercase hostname (grouping key). */
+  name: string;
+  /** All addresses of this name anywhere, IPv4 first. Record type per address is derived client-side from its shape (v4 = A, v6 = AAAA). */
+  ips: string[];
+  /** Distinct non-empty notes for the name across all devices (may be empty). */
+  descriptions: string[];
+  /** Every device+plugin instance that holds the entry (one per row in storage). */
+  devices: DnsDeviceMember[];
+}
+
+/** IPv4 before IPv6, then lexicographic — stable chip ordering. */
+function sortDnsIps(ips: Iterable<string>): string[] {
+  return [...ips].sort((a, b) => (a.includes(':') ? 1 : 0) - (b.includes(':') ? 1 : 0) || a.localeCompare(b));
+}
+
+/**
+ * Merges stored dns rows into one row per lowercase name: the same name on
+ * several devices is a single logical entry with multiple device chips. A name
+ * that maps to different addresses on different devices keeps ALL of them —
+ * drift is visible, not hidden (each chip lists the addresses its device holds).
+ */
+export function mergeDnsRows(rows: typeof schema.deviceDnsEntries.$inferSelect[]): MergedDnsEntry[] {
+  const byName = new Map<string, { ips: Set<string>; descriptions: Set<string>; members: Map<string, DnsDeviceMember> }>();
+  for (const r of rows) {
+    let entry = byName.get(r.name);
+    if (!entry) {
+      entry = { ips: new Set(), descriptions: new Set(), members: new Map() };
+      byName.set(r.name, entry);
+    }
+    entry.ips.add(r.ip);
+    if (r.description) entry.descriptions.add(r.description);
+    const key = `${r.deviceId}|${r.pluginId}`;
+    let member = entry.members.get(key);
+    if (!member) {
+      member = { deviceId: r.deviceId, pluginId: r.pluginId, ips: [], descriptions: [] };
+      entry.members.set(key, member);
+    }
+    if (!member.ips.includes(r.ip)) member.ips.push(r.ip);
+    if (r.description && !member.descriptions.includes(r.description)) member.descriptions.push(r.description);
+  }
+  return Array.from(byName.entries())
+    .map(([name, e]) => ({
+      name,
+      ips: sortDnsIps(e.ips),
+      descriptions: [...e.descriptions].sort((a, b) => a.localeCompare(b)),
+      devices: [...e.members.values()].map((m) => ({ ...m, ips: sortDnsIps(m.ips) })),
+    }))
+    .sort((a, b) => a.name.localeCompare(b.name));
+}
+
+// GET /dns - All static DNS entries across devices.
+// Query params: deviceId (exact), siteId (filter by device's site).
+// Rows are grouped by lowercase name; an entry present on several devices
+// carries one chip per device+plugin instance.
+router.get('/dns', requireAuth, requirePermission('dns:read'), async (_req, res: Response) => {
+  try {
+    const { deviceId, siteId } = _req.query as Record<string, string | undefined>;
+
+    // Device-level access control — scoped callers only see rows of their devices.
+    const allowed = await allowedDeviceIds(_req);
+    if (allowed !== null && allowed.size === 0) {
+      res.status(200).json([]);
+      return;
+    }
+    if (deviceId && allowed !== null && !allowed.has(deviceId)) {
+      res.status(200).json([]);
+      return;
+    }
+
+    let where;
+    if (deviceId && siteId) {
+      // Both filters: verify the device belongs to the site first.
+      const device = await db.query.devices.findFirst({ where: eq(schema.devices.id, deviceId) });
+      if (!device || device.siteId !== siteId) {
+        res.status(200).json([]);
+        return;
+      }
+      where = eq(schema.deviceDnsEntries.deviceId, deviceId);
+    } else if (deviceId) {
+      where = eq(schema.deviceDnsEntries.deviceId, deviceId);
+    } else if (siteId) {
+      let deviceIds = (await db.query.devices.findMany({ where: eq(schema.devices.siteId, siteId) })).map((d) => d.id);
+      if (allowed !== null) deviceIds = deviceIds.filter((id) => allowed.has(id));
+      if (deviceIds.length === 0) {
+        res.status(200).json([]);
+        return;
+      }
+      where = inArray(schema.deviceDnsEntries.deviceId, deviceIds);
+    } else if (allowed !== null) {
+      where = inArray(schema.deviceDnsEntries.deviceId, [...allowed]);
+    }
+
+    const rows = await db.query.deviceDnsEntries.findMany({
+      ...(where ? { where } : {}),
+      orderBy: [asc(schema.deviceDnsEntries.name), asc(schema.deviceDnsEntries.ip)],
+    });
+
+    const merged = mergeDnsRows(rows);
+
+    const [deviceViews, pluginNames] = await Promise.all([
+      loadDeviceViews(Array.from(new Set(merged.flatMap((m) => m.devices.map((d) => d.deviceId))))),
+      loadPluginNames(Array.from(new Set(merged.flatMap((m) => m.devices.map((d) => d.pluginId))))),
+    ]);
+
+    res.status(200).json(
+      merged.map((m) => ({
+        ...m,
+        devices: m.devices.map((d) => {
+          const device = deviceViews.get(d.deviceId);
+          return {
+            ...d,
+            deviceName: device?.name ?? null,
+            managementAddress: device?.managementAddress ?? null,
+            siteName: device?.siteName ?? null,
+            pluginName: pluginNames.get(d.pluginId) ?? null,
+          };
+        }),
+      }))
+    );
+  } catch (err) {
+    const e = err as { status?: number; message?: string };
+    res.status(e.status ?? 500).json({ error: e.message ?? 'Internal server error' });
+  }
+});
+
 // GET /tunnels - All configured tunnels across devices.
 // Query params: deviceId (exact), siteId (filter by device's site),
 // type ('wireguard'|'openvpn'|'ipsec'|'pppoe'|'gre').

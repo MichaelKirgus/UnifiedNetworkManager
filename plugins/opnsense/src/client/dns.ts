@@ -18,8 +18,12 @@ export type DnsBackend = 'dnsmasq' | 'unbound';
  */
 export async function detectDnsBackend(client: AxiosInstance): Promise<DnsBackend> {
   try {
-    const res = await get<{ enabled?: boolean }>(client, '/api/unbound/overview/is_enabled');
+    const res = await get<{ enabled?: boolean | string }>(client, '/api/unbound/overview/is_enabled');
     if (res.ok && res.data?.enabled === true) return 'unbound';
+    // Verified live on OPNsense 26.4: the flag is serialized as a STRING ("1"),
+    // not a boolean — a strict `=== true` check silently fell back to dnsmasq
+    // and every unbound-only fleet showed zero entries.
+    if (res.ok && String(res.data?.enabled ?? '') === '1') return 'unbound';
   } catch {
     /* fall through to dnsmasq */
   }
@@ -32,13 +36,24 @@ export async function detectDnsBackend(client: AxiosInstance): Promise<DnsBacken
 export async function addHostRecord(
   client: AxiosInstance,
   backend: DnsBackend,
-  record: { name: string; ip: string }
+  record: { name: string; ip: string; description?: string }
 ): Promise<OpnsenseApiResult> {
   if (backend === 'unbound') {
-    // Unbound host override: { hostname, address }.
-    return post(client, '/api/unbound/settings/add_host_override', { item: { hostname: record.name, address: record.ip } });
+    // Unbound host-override item shape (verified live on OPNsense 26.4 via the
+    // read-only get_host_override/<uuid>): hostname + optional domain, rr
+    // A/AAAA, and `server` as the address field. An empty domain yields a
+    // bare-name local-data entry — FQDNs go into `hostname` verbatim. The row
+    // also carries a native free-text `description`.
+    const item: Record<string, unknown> = {
+      hostname: record.name,
+      domain: '',
+      rr: record.ip.includes(':') ? 'AAAA' : 'A',
+      server: record.ip,
+    };
+    if (record.description) item['description'] = record.description;
+    return post(client, '/api/unbound/settings/add_host_override', { item });
   }
-  // dnsmasq host entry: { name, ip }.
+  // dnsmasq host entry: { name, ip }. No native description field.
   return post(client, '/api/dnsmasq/settings/add_host', { name: record.name, ip: record.ip });
 }
 
@@ -64,6 +79,40 @@ export async function searchHostRecords(
     return get(client, '/api/unbound/settings/search_host_override', query);
   }
   return get(client, '/api/dnsmasq/settings/search_host', query);
+}
+
+/**
+ * Normalizes host-record rows from EITHER backend into `{name, ip}` pairs.
+ * dnsmasq rows carry `name`/`ip`; unbound override rows (verified live on
+ * OPNsense 26.4) carry `hostname` + optional `domain`, with the address in
+ * `server`. The BARE hostname is used as the name — not the FQDN — so entries
+ * group consistently with other plugins that store bare names, and dns.set /
+ * dns.delete match uniformly across devices. Unbound rows also carry a native
+ * free-text `description` (dnsmasq has none) — emitted when non-empty. Rows
+ * without both fields are skipped (defensive — the field names have shifted
+ * between OPNsense versions).
+ */
+export function parseHostRecordRows(data: unknown): Array<{ name: string; ip: string; description?: string }> {
+  const d = data as { rows?: unknown } | null;
+  if (!d || !Array.isArray(d.rows)) return [];
+  const out: Array<{ name: string; ip: string; description?: string }> = [];
+  for (const r of d.rows) {
+    if (!r || typeof r !== 'object') continue;
+    const row = r as Record<string, unknown>;
+    const name = typeof row['name'] === 'string' ? row['name'].trim() : typeof row['hostname'] === 'string' ? (row['hostname'] as string).trim() : '';
+    const ip =
+      typeof row['ip'] === 'string' && row['ip'].trim() !== ''
+        ? row['ip'].trim()
+        : typeof row['server'] === 'string' && row['server'].trim() !== ''
+          ? row['server'].trim()
+          : typeof row['address'] === 'string'
+            ? (row['address'] as string).trim()
+            : '';
+    if (!name || !ip) continue;
+    const description = typeof row['description'] === 'string' && row['description'].trim() !== '' ? row['description'].trim() : undefined;
+    out.push(description !== undefined ? { name: name.toLowerCase(), ip, description } : { name: name.toLowerCase(), ip });
+  }
+  return out;
 }
 
 /** Activates staged DNS changes on the active backend. */

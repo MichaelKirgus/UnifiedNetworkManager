@@ -21,6 +21,8 @@ plugin pick it up.
 |---|---|---|---|
 | `network.create` | `INTENT_NETWORK_CREATE` | Create a named VLAN + optional L3 address (+DHCP/SSID on LCOS) | `'N'` — one step per device, any count |
 | `network.delete` | `INTENT_NETWORK_DELETE` | Remove the named network's rows (idempotent no-op when absent) | `'N'` |
+| `dns.set` | `INTENT_DNS_SET` | Add/update a static DNS host entry (hostname → IP), idempotent upsert | `'N'` — one step per device, any count |
+| `dns.delete` | `INTENT_DNS_DELETE` | Remove the named static DNS entry (idempotent no-op when absent) | `'N'` |
 | `l2.topology.read` | `INTENT_L2_TOPOLOGY_READ` | Read-only L2 hierarchy — attach-point source for preflight | `1` — single-device read helper, NOT a fan-out intent |
 
 Reserved (not yet implemented): `tunnel.create`, `tunnel.delete`.
@@ -38,7 +40,8 @@ Reserved (not yet implemented): `tunnel.create`, `tunnel.delete`.
   next to a v6 sibling and hides the address family. (The legacy `ip`+`netmask`
   alternative pair was removed from all plugins and from the SDK superset schema;
   `cidr` is the only IPv4 form.) Use bare `ip`-style names only in intents that
-  are genuinely family-agnostic — none of today's intents qualify.
+  are genuinely family-agnostic — today's exception: `dns.set.ip` /
+  `dns.delete.ip`, where a single entry may be v4 OR v6 and there is no sibling.
 - **Names are unique per device** (`name`, 1..64 chars) and double as the
   idempotency key for create/delete.
 - **Optional fields advertise capability.** A plugin MAY implement only a subset
@@ -69,6 +72,23 @@ so there is something to create (swos: `vlanId` alone suffices).
 |---|---|---|---|
 | `name` | string, required, 1..64 | Network name to remove. Idempotent: a missing name is a no-op (`skipped`). | all 7 |
 | `vlanId` | number, 1..4094 (optional) | **swos only** — takes precedence over the name match when set (switch VLAN rows are id-addressed). | swos |
+
+## `dns.set` / `dns.delete` — field contract
+
+Static DNS host entries (hostname → IP) kept in each device's local resolver
+config. UNM groups them by lowercase hostname on the **DNS page**; rollout and
+delete fan out like network intents.
+
+| Field | Type / constraint | Meaning | Supported by |
+|---|---|---|---|
+| `name` | string, required, 1..253 (RFC 1123) | Hostname — the idempotency key for set/delete. UNM stores it lowercase; plugins compare case-insensitively where the vendor upper-cases names. | opnsense, openwrt, routeros, lcos |
+| `ip` | string, required (set) / optional (delete), IPv4 or IPv6 | The address the hostname resolves to. Record type is derived from the shape (v4 = A, v6 = AAAA — no separate field). On `dns.set`: an existing entry with the same name but a different address is UPDATED in place. On `dns.delete`: when the name maps to several addresses, only this one is removed; omitted = remove all of them. | opnsense, openwrt, routeros, lcos |
+| `description` | string, optional, ≤255 | Free-text note for the entry. Only vendors with a native field persist it — **routeros** stores it in `/ip/dns/static`'s `comment`; opnsense / openwrt / lcos have no such column and ignore it (accepted for contract symmetry). On `dns.delete` it is never matched on. | routeros (stored); others (ignored) |
+
+Vendor storage: OPNsense dnsmasq host records / unbound local-zone overrides
+(dual backend auto-detected), OpenWrt UCI `dhcp` package `@host[N]`/`@map[N]`
+sections (dnsmasq), RouterOS `/ip/dns/static`, LCOS `Setup/DNS/DNS-List` table
+(columns Host-name, Rtg-tag=0, IP-Address, IPV6-Address — CLI over SSH PTY).
 
 ## `l2.topology.read` — result contract
 

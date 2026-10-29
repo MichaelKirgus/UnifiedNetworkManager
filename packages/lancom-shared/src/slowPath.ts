@@ -66,6 +66,14 @@ export interface SlowPathConfig<V> {
   errors: SlowPathErrors;
   /** Called whenever the runner concludes "not a device" (probe or empty walks). */
   onNotDevice?: () => void;
+  /**
+   * Bypass the TTL cache and re-walk NOW. Set by forced refreshes ("Check now" /
+   * POST /devices/refresh): an explicit user request for FRESH data must not be
+   * answered from a snapshot that is up to `inventoryTtlMs` (15 min) old — e.g. a
+   * DNS entry written via CLI seconds ago would otherwise stay invisible on the
+   * cross-device pages until the next scheduled inventory window.
+   */
+  force?: boolean;
 }
 
 /** The slow-path result envelope (matches every plugin's get*Inventory return). */
@@ -79,7 +87,8 @@ export interface SlowPathResult<V> {
 export async function runSlowPath<V>(caches: SnapshotCaches<V>, cfg: SlowPathConfig<V>): Promise<SlowPathResult<V>> {
   const { host, creds, opts, log } = cfg;
 
-  const cached = caches.inventory.get(host, opts.inventoryTtlMs);
+  // A forced refresh bypasses the TTL cache — see SlowPathConfig.force.
+  const cached = cfg.force ? undefined : caches.inventory.get(host, opts.inventoryTtlMs);
   if (cached) return { snapshot: cached, fromCache: true };
   const stale = caches.getStale(host); // expired-but-usable fallback
 

@@ -26,6 +26,7 @@ import type { LuciClient, LuciResult } from './luciClient';
 import { SshBackend, parseUciShow, uciSectionsByType, uciOpt, resolveOpenWrtSshCredentials } from './sshBackend';
 import type {
   BoardInfo,
+  DnsEntryRow,
   FilesystemRow,
   FirewallRuleRow,
   HostRow,
@@ -532,6 +533,22 @@ export class Backend {
     return [...rows.values()];
   }
 
+  /** Static DNS host entries (uci dhcp @host/@map) → DNS page. null when no SSH path or read failed. */
+  async dnsEntries(): Promise<DnsEntryRow[] | null> {
+    if (!this.sshBackend) return null;
+    const r = await this.sshBackend.exec('uci show dhcp 2>/dev/null || true').catch(() => null);
+    if (!r || r.code !== 0) return null;
+    const tree = parseUciShow(r.stdout);
+    const rows: DnsEntryRow[] = [];
+    for (const [key, options] of Object.entries(tree['dhcp'] ?? {})) {
+      if (!key.startsWith('@host[') && !key.startsWith('@map[')) continue;
+      const name = uciOpt(options, 'name') ?? uciOpt(options, 'hostname');
+      const ip = uciOpt(options, 'ip');
+      if (name && ip) rows.push({ name: name.trim().toLowerCase(), ip: ip.trim() });
+    }
+    return rows;
+  }
+
   /** Routes — LuCI mode derives from the interface dump; SSH uses `ip route`. */
   async routes(): Promise<RouteRow[]> {
     if (this.luciClient) {
@@ -722,11 +739,13 @@ export class Backend {
 
   /** Full inventory snapshot (15-min cadence). */
   async collectInventory(certificates: CertificateRow[]): Promise<InventorySnapshot> {
-    const [board, networks, neighborsRes, leases, routes, tunnels, wifi, firewall, services, filesystems] = await Promise.all([
+    const [board, networks, neighborsRes, leases, dnsEntries, routes, tunnels, wifi, firewall, services, filesystems] = await Promise.all([
       this.boardInfo().catch(() => null),
       this.networks().catch(() => [] as NetworkRow[]),
       this.neighbors().catch(() => ({ arp: [], ndp: [] })),
       this.dhcpLeases().catch(() => [] as HostRow[]),
+      // null on failure — load-bearing (absent key never wipes stored rows).
+      this.dnsEntries(),
       this.routes().catch(() => [] as RouteRow[]),
       this.tunnels().catch(() => [] as TunnelRow[]),
       this.wifiSsids().catch(() => [] as WifiSsidRow[]),
@@ -742,6 +761,7 @@ export class Backend {
       arp: neighborsRes.arp,
       ndp: neighborsRes.ndp,
       dhcpLeases: leases,
+      dnsEntries,
       routes,
       tunnels,
       wifiSsids: wifi,

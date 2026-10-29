@@ -30,8 +30,17 @@ export const INTENT_NETWORK_DELETE = 'network.delete' as const;
 // Reserved for the tunnel-abstraction round (WireGuard/IPsec/OpenSSL):
 //   INTENT_TUNNEL_CREATE = 'tunnel.create', INTENT_TUNNEL_DELETE = 'tunnel.delete'.
 
+/**
+ * Canonical intent ids for static DNS host entries (hostname → IP) — the
+ * cross-vendor abstraction behind UNM's DNS page: one entry rolled out to every
+ * device that keeps a local hosts table (OPNsense dnsmasq/unbound, OpenWrt UCI
+ * `dhcp` host sections, RouterOS `/ip/dns/static`, LCOS `Setup/DNS/DNS-List`).
+ */
+export const INTENT_DNS_SET = 'dns.set' as const;
+export const INTENT_DNS_DELETE = 'dns.delete' as const;
+
 /** All canonical intent ids, in rollout order. */
-export const CANONICAL_INTENTS: readonly string[] = [INTENT_NETWORK_CREATE, INTENT_NETWORK_DELETE];
+export const CANONICAL_INTENTS: readonly string[] = [INTENT_NETWORK_CREATE, INTENT_NETWORK_DELETE, INTENT_DNS_SET, INTENT_DNS_DELETE];
 
 // ---------------------------------------------------------------------------
 // L2 topology — the cross-vendor abstraction for interface layering
@@ -288,10 +297,36 @@ export const NETWORK_DELETE_SCHEMA: InputSchema = {
   name: { type: 'string', required: true, minLength: 1, maxLength: 64, description: 'Network name to remove' },
 };
 
+// ---------------------------------------------------------------------------
+// dns.set / dns.delete — "add/remove static DNS entry NAME → IP on all devices"
+// ---------------------------------------------------------------------------
+
+/**
+ * Canonical input schema for `dns.set` (idempotent upsert). Vendors keep the
+ * entry in different places but all address it by hostname: OPNsense dnsmasq
+ * host records / unbound local-zone overrides, OpenWrt UCI `dhcp` `@host`/`@map`
+ * sections, RouterOS `/ip/dns/static`, LCOS `Setup/DNS/DNS-List`. A plugin that
+ * already has the name with a DIFFERENT address updates it in place.
+ */
+export const DNS_SET_SCHEMA: InputSchema = {
+  name: { type: 'string', required: true, minLength: 1, maxLength: 253, description: 'Hostname (RFC 1123; stored lowercase by UNM)' },
+  ip: { type: 'string', required: true, pattern: '^\\d{1,3}(\\.\\d{1,3}){3}$|^[0-9a-fA-F:.]*:[0-9a-fA-F:.]*$', description: 'IPv4 or IPv6 address the hostname resolves to (record type A/AAAA is derived from the address shape)' },
+  description: { type: 'string', required: false, maxLength: 255, description: 'Optional free-text note for the entry. Only vendors with a native field persist it (RouterOS /ip/dns/static `comment`); other plugins ignore it.' },
+};
+
+/** Canonical input schema for `dns.delete` (name-addressed, idempotent). */
+export const DNS_DELETE_SCHEMA: InputSchema = {
+  name: { type: 'string', required: true, minLength: 1, maxLength: 253, description: 'Hostname to remove' },
+  ip: { type: 'string', pattern: '^\\d{1,3}(\\.\\d{1,3}){3}$|^[0-9a-fA-F:.]*:[0-9a-fA-F:.]*$', description: 'Optional — when the name maps to several addresses, remove only this one' },
+  description: { type: 'string', required: false, maxLength: 255, description: 'Optional — accepted for contract symmetry; deletion is by name(+ip) and never matches on the note.' },
+};
+
 /** Canonical intent → input schema lookup (the superset contract). */
 export const CANONICAL_INTENT_SCHEMAS: Record<string, InputSchema> = {
   [INTENT_NETWORK_CREATE]: NETWORK_CREATE_SCHEMA,
   [INTENT_NETWORK_DELETE]: NETWORK_DELETE_SCHEMA,
+  [INTENT_DNS_SET]: DNS_SET_SCHEMA,
+  [INTENT_DNS_DELETE]: DNS_DELETE_SCHEMA,
 };
 
 // ---------------------------------------------------------------------------

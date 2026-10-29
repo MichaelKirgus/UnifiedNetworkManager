@@ -4676,6 +4676,42 @@ paths:
         '401':
           description: Authentication required
 
+  /dns:
+    get:
+      tags: [Inventory]
+      summary: List all static DNS entries across devices
+      description: >-
+        Cross-device view of the normalized `device_dns_entries` inventory
+        table, populated by the telemetry worker from each dns-capable plugin's
+        static host-record tables (OPNsense dnsmasq/unbound hosts, OpenWrt uci
+        dhcp @host/@map sections, RouterOS /ip/dns/static, LCOS Setup/DNS/
+        DNS-List). Rows are upserted per poll; entries not refreshed within the
+        stale window are swept away. Response rows are grouped by LOWERCASE
+        name — an entry present on several devices carries one chip per
+        device+plugin instance (with the addresses that device holds).
+      parameters:
+        - in: query
+          name: deviceId
+          required: false
+          schema: { type: string }
+          description: Filter to one device
+        - in: query
+          name: siteId
+          required: false
+          schema: { type: string }
+          description: Filter to devices belonging to a site
+      responses:
+        '200':
+          description: DNS entry rows (grouped by lowercase name, device + plugin identity included)
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/DnsRow'
+        '401':
+          description: Authentication required
+
   /documented-hosts:
     get:
       tags: [Inventory]
@@ -8797,6 +8833,46 @@ components:
                 type: array
                 items: { type: string }
                 description: "Interface(s) on the observing device where the host was seen (e.g. [lan], [wlan0])"
+
+    DnsRow:
+      type: object
+      required: [name, ips, devices]
+      properties:
+        name: { type: string, description: "Lowercase hostname (the grouping key)" }
+        # One row per static DNS name ACROSS all devices and plugins: rows with
+        # the same lowercase name are merged. A name that maps to different
+        # addresses on different devices keeps ALL of them — drift is visible.
+        ips:
+          type: array
+          minItems: 1
+          items: { type: string }
+          description: "All addresses of this name anywhere, IPv4 first. Record type per address is derived from its shape (v4 = A record, v6 = AAAA)."
+        descriptions:
+          type: array
+          items: { type: string }
+          description: "Distinct non-empty notes configured for the name across all devices (empty when no vendor stored one)"
+        devices:
+          type: array
+          minItems: 1
+          items:
+            type: object
+            required: [deviceId, pluginId, ips]
+            properties:
+              deviceId: { type: string }
+              deviceName: { type: [string, 'null'], description: "Display name of the device holding this entry" }
+              managementAddress: { type: [string, 'null'] }
+              siteName: { type: [string, 'null'] }
+              pluginId: { type: string, description: "Plugin instance id (multi-instance ids carry a :instance suffix)" }
+              pluginName: { type: [string, 'null'], description: "Display name of the plugin instance that reported this entry" }
+              ips:
+                type: array
+                minItems: 1
+                items: { type: string }
+                description: "The addresses THIS device holds for the name (drift is visible per chip)"
+              descriptions:
+                type: array
+                items: { type: string }
+                description: "Distinct non-empty notes configured on this device for the name"
 
     DocumentedHostIp:
       type: object

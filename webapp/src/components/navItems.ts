@@ -27,6 +27,7 @@ import {
   Radar,
   FileKey2,
   Globe,
+  Globe2,
   DatabaseBackup,
   NotebookPen,
   Settings2,
@@ -63,6 +64,9 @@ export const NAV_ITEMS: NavItem[] = [
   // Cross-device inventory views (populated by the telemetry worker).
   { to: '/networks', label: 'Networks', icon: Network, requiresPermission: 'networks:read' },
   { to: '/hosts', label: 'Hosts', icon: Laptop, requiresPermission: 'hosts:read' },
+  // Cross-device static DNS entries — host records reported by dns-capable
+  // plugins (OPNsense, OpenWrt, RouterOS, LCOS), grouped by lowercase name.
+  { to: '/dns', label: 'DNS', icon: Globe2, requiresPermission: 'dns:read' },
   // User-maintained host documentation — permanent inventory records with
   // live "discovered" matching (distinct from the live ARP/NDP Hosts page).
   { to: '/documented-hosts', label: 'Documented Hosts', icon: NotebookPen, requiresPermission: 'documented-hosts:read' },

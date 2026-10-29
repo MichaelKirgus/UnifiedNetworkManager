@@ -87,6 +87,13 @@ export interface RosRouteRow {
   status: 'active' | 'inactive';
 }
 
+/** One /ip/dns/static row → `metrics['dnsEntries']` (DNS page). */
+export interface RosDnsEntryRow {
+  name: string; // lowercased for cross-device grouping
+  ip: string;
+  description?: string; // the record's `comment` field, when set
+}
+
 export interface RosWlanClientRow {
   mac: string;
   ip: string;
@@ -140,6 +147,8 @@ export interface RouterOsSnapshot {
   addresses: RosAddressRow[];
   arp: RosArpRow[];
   dhcpLeases: RosDhcpLeaseRow[];
+  /** Static DNS host records (/ip/dns/static) → DNS page. null = read failed (key omitted, never wipes). */
+  dnsEntries: RosDnsEntryRow[] | null;
   routes: RosRouteRow[];
   firewallRules: RosFirewallRuleRow[]; // /ip/firewall/filter + /ip/firewall/nat
   wlanClients: RosWlanClientRow[];
@@ -379,12 +388,13 @@ export async function collectSnapshot(client: RouterOsClient): Promise<RouterOsS
   // failing the whole poll. Total budget stays well under the API's 10 s cap:
   // per-request timeout × 2 (auto scheme fallback) ≈ 8 s worst case, and the
   // batch runs concurrently.
-  const [identityRes, ifaceRes, addrRes, arpRes, dhcpRes, routeRes, fwFilterRes, fwNatRes, fwAddrListRes, wlanRes, clockRes] = await Promise.allSettled([
+  const [identityRes, ifaceRes, addrRes, arpRes, dhcpRes, dnsStaticRes, routeRes, fwFilterRes, fwNatRes, fwAddrListRes, wlanRes, clockRes] = await Promise.allSettled([
     client.get('/system/identity'),
     client.get<Record<string, unknown>[]>('/interface'),
     client.get<Record<string, unknown>[]>('/ip/address'),
     client.get<Record<string, unknown>[]>('/arp'),
     client.get<Record<string, unknown>[]>('/ip/dhcp-server/lease'),
+    client.get<Record<string, unknown>[]>('/ip/dns/static'), // static DNS host records (DNS page)
     client.get<Record<string, unknown>[]>('/ip/route'),
     client.get<Record<string, unknown>[]>('/ip/firewall/filter'), // firewall filter rules (forward/input/output)
     client.get<Record<string, unknown>[]>('/ip/firewall/nat'), // NAT rules (srcnat/dstnat chains)
@@ -423,6 +433,7 @@ export async function collectSnapshot(client: RouterOsClient): Promise<RouterOsS
     addresses: [],
     arp: [],
     dhcpLeases: [],
+    dnsEntries: null,
     routes: [],
     firewallRules: [],
     wlanClients: [],
@@ -518,6 +529,24 @@ export async function collectSnapshot(client: RouterOsClient): Promise<RouterOsS
         intf: rosString(row, ['interface']) ?? null,
       });
     }
+  }
+
+  // --- static DNS hosts (/ip/dns/static) ---------------------------------------------
+  // null on failure — load-bearing: an absent key never wipes stored rows, while a
+  // present-but-empty array is authoritative (the REST table returns the full list).
+  if (dnsStaticRes.status === 'fulfilled' && Array.isArray(dnsStaticRes.value)) {
+    const entries: RosDnsEntryRow[] = [];
+    for (const raw of dnsStaticRes.value) {
+      if (!raw || typeof raw !== 'object') continue;
+      const row = raw as Record<string, unknown>;
+      const name = rosString(row, ['name']);
+      const ip = rosString(row, ['address']);
+      if (name && ip) {
+        const comment = (rosString(row, ['comment']) ?? '').trim();
+        entries.push({ name: name.trim().toLowerCase(), ip: ip.trim(), ...(comment !== '' ? { description: comment } : {}) });
+      }
+    }
+    snapshot.dnsEntries = entries;
   }
 
   // --- routes ------------------------------------------------------------------------
@@ -833,6 +862,10 @@ export function buildMetrics(s: RouterOsSnapshot, selectedModel?: string | null,
   if (s.dhcpLeases.length > 0) {
     m['dhcpLeases'] = s.dhcpLeases.map((x) => ({ mac: x.mac, ip: x.ip, hostname: x.hostname ?? undefined, expiry: x.expiry ?? undefined, intf: x.intf ?? undefined }));
   }
+
+  // dnsEntries[] → cross-device DNS page (present-but-empty is authoritative;
+  // null = read failed → key omitted so a transient error never wipes rows).
+  if (Array.isArray(s.dnsEntries)) m['dnsEntries'] = s.dnsEntries.map((x) => ({ name: x.name, ip: x.ip, ...(x.description !== undefined ? { description: x.description } : {}) }));
 
   // routes[] → cross-device Routes page (present-but-empty is authoritative).
   m['routes'] = s.routes.map((r) => ({ destination: r.destination, gateway: r.gateway || null, protocol: r.protocol, distance: r.distance ?? undefined, status: r.status }));

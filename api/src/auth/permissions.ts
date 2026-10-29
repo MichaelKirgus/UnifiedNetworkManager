@@ -45,6 +45,10 @@ export const PERMISSION_DESCRIPTIONS: Record<string, string> = {
   // read permission only gates viewing the Mail page.
   'mail:read': 'View the Mail page (domains, mailboxes and aliases across devices)',
   'routes:read': 'View the Routes page (static and dynamic routes across devices)',
+  // Cross-device static DNS entry inventory — host records reported by dns-capable
+  // plugins (OPNsense, OpenWrt, RouterOS, LCOS). Managed via the plan/config
+  // workflow; this read permission only gates viewing the page.
+  'dns:read': 'View the DNS page (static DNS entries across devices)',
   'firewall:read': 'View the Firewall page (filter + NAT rules across devices)',
   'certificates:read': 'View the Certificates page (TLS certs + SSH host keys across devices)',
   // Accepting a CHANGED certificate/host key re-pins it for strict pinning — a

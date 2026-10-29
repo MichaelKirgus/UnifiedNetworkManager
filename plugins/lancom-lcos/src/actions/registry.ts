@@ -32,6 +32,7 @@ import { SETUP, SETUP_TIME, SYS, WLAN_NET, WLAN_RADIO, WLAN_SETUP, lcosMinutesTo
 import { runLcosCliCommands, stripCommandEcho } from '../lcosCli';
 import { isLcfDocument, lcfScalar, parseLcf } from '../lcf';
 import { NETWORK_INTENT_ACTIONS } from './networkIntents';
+import { dnsIntentActions as DNS_INTENT_ACTIONS } from './dnsIntents';
 import { L2_TOPOLOGY_ACTIONS } from './l2Topology';
 import { GAP_READ_ACTIONS } from './gapReads';
 import { ActionContext, ActionDescriptor, ActionResult } from './types';
@@ -1135,6 +1136,8 @@ const ALL_ACTIONS: ActionDescriptor[] = [
   radioPowerSet,
   // Canonical fleet intents (network.create / network.delete + vlan.networks.read).
   ...NETWORK_INTENT_ACTIONS,
+  // Canonical DNS intents (dns.set / dns.delete) — SNMP read, CLI write.
+  ...DNS_INTENT_ACTIONS,
   // L2 topology read (interface layering: ports → bundles/bridges) — feeds the
   // per-device attach-point resolution of network.create.
   ...L2_TOPOLOGY_ACTIONS,

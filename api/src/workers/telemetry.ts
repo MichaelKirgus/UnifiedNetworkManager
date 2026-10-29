@@ -52,7 +52,7 @@ const INVENTORY_SWEEP_INTERVAL_MS = 10 * 60 * 1000;
 /** Metric keys that carry cross-device inventory (ingested into their own tables). */
 const INVENTORY_METRIC_KEYS = [
   'networks', 'arp', 'ndp', 'hosts', 'dhcpLeases', 'wlanClients', 'macTable', 'dockerHosts', 'vmHosts',
-  'tunnels', 'routes', 'firewallRules', 'certificates', 'services',
+  'tunnels', 'routes', 'dnsEntries', 'firewallRules', 'certificates', 'services',
   'wifiNetworks', 'wifiAirtime', 'wifiRadios', 'wifiNeighbors',
   'ports', 'filesystems', 'disks', 'containers', 'images', 'vms', 'gpus', 'updates',
   'mailDomains', 'mailMailboxes', 'mailAliases',
@@ -877,6 +877,57 @@ async function ingestInventory(
             eq(schema.routes.deviceId, deviceId),
             eq(schema.routes.pluginId, pluginId),
             or(...staleRoutes.map((k) => and(eq(schema.routes.destination, k.destination), eq(schema.routes.protocol, k.protocol))))
+          )
+        );
+      }
+    }
+
+    // --- dnsEntries (static DNS host entries) ---------------------------------
+    // Same present-vs-absent contract as routes: a PRESENT-but-empty array is
+    // authoritative ("this device has no static DNS entries right now") so stale
+    // rows are wiped; an ABSENT key means "plugin doesn't report DNS entries"
+    // and must not touch the table (24h sweep still applies). `name` is lowercased
+    // at ingest — the DNS page groups case-insensitively. Identity is name|ip so a
+    // name with several addresses yields multiple rows.
+    const rawDnsEntries = Array.isArray(metrics['dnsEntries']) ? (metrics['dnsEntries'] as unknown[]) : null;
+    if (rawDnsEntries !== null) {
+      const values: { deviceId: string; pluginId: string; name: string; ip: string; description: string | null; collectedAt: string }[] = [];
+      for (const raw of rawDnsEntries) {
+        if (!raw || typeof raw !== 'object') continue;
+        const r = raw as Record<string, unknown>;
+        const name = typeof r['name'] === 'string' ? (r['name'] as string).trim().toLowerCase() : '';
+        const ip = typeof r['ip'] === 'string' ? (r['ip'] as string).trim() : '';
+        if (!name || !ip) continue; // both are part of the conflict key
+        // Optional vendor note (e.g. RouterOS `comment`) — ''/absent → NULL.
+        const description = typeof r['description'] === 'string' && (r['description'] as string).trim() !== '' ? (r['description'] as string).trim() : null;
+        values.push({ deviceId, pluginId, name, ip, description, collectedAt });
+      }
+      const dnsByKey = new Map<string, typeof values[number]>();
+      for (const v of values) {
+        dnsByKey.set(`${v.deviceId}|${v.pluginId}|${v.name}|${v.ip}`, v);
+      }
+      if (dnsByKey.size > 0) {
+        await db.insert(schema.deviceDnsEntries).values(Array.from(dnsByKey.values())).onConflictDoUpdate({
+          target: [schema.deviceDnsEntries.deviceId, schema.deviceDnsEntries.pluginId, schema.deviceDnsEntries.name, schema.deviceDnsEntries.ip],
+          // description is refreshed too — a note edited on the device (or its
+          // removal) must track the live table.
+          set: { collectedAt: sql`excluded."collectedAt"`, description: sql`excluded."description"` },
+        });
+      }
+      // A DNS entry removed on the device must vanish from the page. Drop rows
+      // this snapshot no longer reports (only when the key is present at all).
+      const existingDnsKeys = await db
+        .select({ name: schema.deviceDnsEntries.name, ip: schema.deviceDnsEntries.ip })
+        .from(schema.deviceDnsEntries)
+        .where(and(eq(schema.deviceDnsEntries.deviceId, deviceId), eq(schema.deviceDnsEntries.pluginId, pluginId)));
+      const seenDnsKeys = new Set(values.map((v) => `${v.name}|${v.ip}`));
+      const staleDns = existingDnsKeys.filter((k) => !seenDnsKeys.has(`${k.name}|${k.ip}`));
+      if (staleDns.length > 0) {
+        await db.delete(schema.deviceDnsEntries).where(
+          and(
+            eq(schema.deviceDnsEntries.deviceId, deviceId),
+            eq(schema.deviceDnsEntries.pluginId, pluginId),
+            or(...staleDns.map((k) => and(eq(schema.deviceDnsEntries.name, k.name), eq(schema.deviceDnsEntries.ip, k.ip))))
           )
         );
       }
@@ -2505,10 +2556,12 @@ async function sweepStaleInventory(inventoryWindowMs: number): Promise<void> {
     await db.delete(schema.hosts).where(and(lt(schema.hosts.lastSeenAt, cutoff), notInArray(schema.hosts.deviceId, disabledIds)));
     await db.delete(schema.networks).where(and(lt(schema.networks.collectedAt, cutoff), notInArray(schema.networks.deviceId, disabledIds)));
     await db.delete(schema.devicePorts).where(and(lt(schema.devicePorts.collectedAt, cutoff), notInArray(schema.devicePorts.deviceId, disabledIds)));
+    await db.delete(schema.deviceDnsEntries).where(and(lt(schema.deviceDnsEntries.collectedAt, cutoff), notInArray(schema.deviceDnsEntries.deviceId, disabledIds)));
   } else {
     await db.delete(schema.hosts).where(lt(schema.hosts.lastSeenAt, cutoff));
     await db.delete(schema.networks).where(lt(schema.networks.collectedAt, cutoff));
     await db.delete(schema.devicePorts).where(lt(schema.devicePorts.collectedAt, cutoff));
+    await db.delete(schema.deviceDnsEntries).where(lt(schema.deviceDnsEntries.collectedAt, cutoff));
   }
   // Tunnels/routes/Wi-Fi rows carry no deviceId — they are only ever refreshed
   // by polling enabled devices, so the plain stale sweep applies to them.

@@ -9,9 +9,9 @@ configuration actions and security checks.
 | Capability | Requirement | Notes |
 | --- | --- | --- |
 | Monitoring | — | System state, LAN/WAN throughput, VPN tunnels, firewall counters, temperature sensors. |
-| Inventory | — | Networks (LAN/VLAN), tunnels, routes for the Networks/Hosts pages. |
+| Inventory | — | Networks (LAN/VLAN), tunnels, routes for the Networks/Hosts pages; static DNS entries (`dnsEntries`) from `Setup/DNS/DNS-List` via SNMP walk (`.1.3.6.1.4.1.2356.11.2.17.5`, column-first length-prefixed index — Host-name / IP-Address / IPV6-Address / Rtg-tag). |
 | Configuration actions | — | 22 catalog actions: firewall rules read, routing/DHCP/VLAN/IPv6 network reads, config backup/restore, WLAN radio channel/power, NTP/DNS server sets. |
-| Planning / rollouts | — | Multi-device intents for fleet configuration. |
+| Planning / rollouts | — | Multi-device intents for fleet configuration (`network.create`, `network.delete`, `dns.set`, `dns.delete`). DNS writes go through the CLI over SSH (v4: `add "NAME" 0 <ip>`; v6: `add "NAME" 0 0.0.0.0 <ipv6>` — an empty quoted value is rejected by LCOS; delete: `del Setup/DNS/DNS-List/<name>`); reads stay on SNMP. |
 | Updates | — | Firmware status + update through the LCOS update mechanism. |
 | Security checks | **SSH slot bound** | Read-only SSH checks at inventory cadence. |
 

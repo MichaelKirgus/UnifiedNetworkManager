@@ -52,7 +52,7 @@ import { DEVICE_MODELS, RELEASES } from './deviceModels';
 import { createClient, OpnsenseCredentials, OpnsensePorts, resolveBase } from './client/http';
 import * as firmware from './client/firmware';
 import { resolveEdition } from './client/editions';
-import { detectDnsBackend, DnsBackend } from './client/dns';
+import { detectDnsBackend, searchHostRecords, parseHostRecordRows, DnsBackend } from './client/dns';
 import { detectDhcpBackend, DhcpBackend, searchKeaLeases, searchDnsmasqLeases } from './client/dhcp';
 import { getInterfacesInfo, vlans } from './client/interfaces';
 import { searchGateways } from './client/routes';
@@ -475,7 +475,7 @@ async function collectInventory(
   // Raw interfaces_info entries — kept for the PPPoE tunnel detector (which
   // needs the interface TYPE fields that parseNetworkRows discards).
   let ifEntries: Record<string, unknown>[] = [];
-  const snap: InventorySnapshot = { collectedAt: Date.now(), arp: [], ndp: [], networks: [], dhcpLeases: [], tunnels: [], routes: [], firewallRules: null, services: null, gateways: [], filesystems: [], disks: [], certificates: [] };
+  const snap: InventorySnapshot = { collectedAt: Date.now(), arp: [], ndp: [], networks: [], dhcpLeases: [], tunnels: [], routes: [], firewallRules: null, services: null, gateways: [], filesystems: [], disks: [], certificates: [], dnsEntries: null };
   if (info?.ok && info.data && typeof info.data === 'object') {
     const d = info.data as Record<string, unknown>;
     if (d['name'] !== undefined) snap.hostname = String(d['name']);
@@ -550,6 +550,17 @@ async function collectInventory(
     }
   } catch {
     // best-effort — a failing lease endpoint must not sink the inventory cache
+  }
+
+  // Static DNS host entries (DNS page): backend auto-detected per appliance,
+  // then normalized to {name, ip}. null on failure so /monitoring omits the key
+  // and a transient error never wipes previously ingested rows.
+  try {
+    const dnsBackend = await detectDnsBackend(client);
+    const hostRes = await searchHostRecords(client, dnsBackend);
+    snap.dnsEntries = hostRes?.ok && hostRes.data ? parseHostRecordRows(hostRes.data) : null;
+  } catch {
+    // best-effort — keep the key absent (null) on failure
   }
 
   // Tunnels (WireGuard/OpenVPN/IPsec/PPPoE/GRE) — slow-changing like networks.
@@ -1425,6 +1436,12 @@ async function collectMetrics(
     // pages) in addition to being rendered as generic tables in the device view.
     if (inventory.networks.length > 0) metrics['networks'] = inventory.networks;
     if (inventory.dhcpLeases.length > 0) metrics['dhcpLeases'] = inventory.dhcpLeases;
+
+    // Static DNS host entries for the cross-device DNS page. Emitted whenever
+    // the read SUCCEEDED — present-but-empty is authoritative (the appliance
+    // has no hosts); null (read failed) keeps the key absent so a transient
+    // error never wipes previously ingested rows.
+    if (Array.isArray(inventory.dnsEntries)) metrics['dnsEntries'] = inventory.dnsEntries;
 
     // Storage inventory for the cross-device Storage page. Emitted ONLY when the
     // appliance actually has ZFS pools / USB storage — an absent key means "no

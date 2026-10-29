@@ -163,6 +163,9 @@ export async function collectMonitoring(
     if (inventory.arp.length > 0) metrics['arp'] = inventory.arp;
     if (inventory.ndp.length > 0) metrics['ndp'] = inventory.ndp;
     if (inventory.dhcpLeases.length > 0) metrics['dhcpLeases'] = inventory.dhcpLeases;
+    // Static DNS entries — ALWAYS emitted when the read succeeded (even empty:
+    // an authoritative wipe), omitted on failure (null → keep previous rows).
+    if (Array.isArray(inventory.dnsEntries)) metrics['dnsEntries'] = inventory.dnsEntries;
     if (inventory.routes.length > 0) metrics['routes'] = inventory.routes;
     if (inventory.tunnels.length > 0) {
       // Attach live byte rates from the traffic counters of each tunnel's interface.

@@ -244,7 +244,8 @@ export async function getLcosInventory(
   host: string,
   creds: SnmpCredentials,
   opts: LcosOptions,
-  log?: LcosLogSink
+  log?: LcosLogSink,
+  force = false
 ): Promise<{ snapshot: LcosSnapshot | null; fromCache: boolean; error?: string }> {
   // Probe gate: one cheap snmpget against a scalar every LX-Series AP exposes
   // (hardware-info sw version). Non-LANCOM devices answer "No Such Object" in
@@ -268,6 +269,7 @@ export async function getLcosInventory(
     log,
     probe,
     walks: () => INVENTORY_WALKS,
+    force,
     parse: (out) => parseLcosStatus(out, opts),
     // Quality gate: the serial number comes from the hardware-info WALK
     // (13.1.47), not the probe scalar — only cache when that walk succeeded.

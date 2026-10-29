@@ -171,6 +171,26 @@ export const DHCP = {
 } as const;
 
 /* ------------------------------------------------------------------ *
+ * DNS setup mirror — 11.2.17 (Setup/DNS group)
+ *
+ * The Setup/DNS config subtree IS SNMP-readable (verified live on GW_Ralf,
+ * LCOS 10.x, 2026-10): .2.17.5 is the static DNS host-entry table
+ * (CLI `cd /Setup/DNS/DNS-List` — banner OID [1.3.6.1.4.1.2356.11][2.17.5]).
+ * Column-first, index = length-prefixed hostname text (case preserved).
+ * Writes are NOT exposed via SNMP SET (like the WLAN setup tree) — writes go
+ * through the SSH CLI (`add`/`del Setup/DNS/DNS-List/<name>`).
+ * ------------------------------------------------------------------ */
+
+/** lcsSetupDnsHostTable (TABLE node 11.2.17.5) — static DNS host entries. */
+export const DNS_LIST = {
+  base: `${LCOS_BASE}.2.17.5`, // index: hostname text (length-prefixed, case preserved)
+  COL_NAME: 1, // DisplayString — Host-name (echoes the index)
+  COL_IP: 2, // DisplayString — IP-Address (dotted v4; '' when absent)
+  COL_IPV6: 3, // DisplayString — IPV6-Address ('::' when absent)
+  COL_RTG_TAG: 4, // Integer32 — Rtg-tag (0 = default routing table)
+} as const;
+
+/* ------------------------------------------------------------------ *
  * IPv6 status — 11.1.77 (Status/IPv6 runtime tree)
  *
  * LCOS keeps v4 and v6 in SEPARATE config trees (Setup/TCP-IP vs

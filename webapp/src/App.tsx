@@ -16,6 +16,8 @@ import Layers from './pages/Layers';
 import Networks from './pages/Networks';
 import NetworkRolloutPage from './pages/NetworkRolloutPage';
 import Hosts from './pages/Hosts';
+import Dns from './pages/Dns';
+import DnsRolloutPage from './pages/DnsRolloutPage';
 import DocumentedHosts from './pages/DocumentedHosts';
 import DocumentedNetworks from './pages/DocumentedNetworks';
 import DocumentedHostImportPage from './pages/DocumentedHostImportPage';
@@ -70,6 +72,10 @@ const PAGE_PERMISSIONS: Array<{ path: string; permission?: string | string[] }> 
   // Full-page rollout wizard — same read perm as the Networks page it lives on.
   { path: '/networks/rollout', permission: 'networks:read' },
   { path: '/hosts', permission: 'hosts:read' },
+  // Cross-device static DNS entry inventory (OPNsense/OpenWrt/RouterOS/LCOS).
+  { path: '/dns', permission: 'dns:read' },
+  // Full-page rollout wizard — same read perm as the DNS page it lives on.
+  { path: '/dns/rollout', permission: 'dns:read' },
   { path: '/documented-hosts', permission: 'documented-hosts:read' },
   // Full-page "import from live inventory" wizard — mutates documented rows, so it
   // is gated on the write perm (the endpoint requires documented-hosts:write).
@@ -204,6 +210,10 @@ export default function App() {
       {/* Full-page rollout wizard (replaces the old dialog) — same read perm as /networks. */}
       <Route path="/networks/rollout" element={<Page permission="networks:read"><NetworkRolloutPage /></Page>} />
       <Route path="/hosts" element={<Page permission="hosts:read"><Hosts /></Page>} />
+      {/* Cross-device static DNS entries — grouped by lowercase name. */}
+      <Route path="/dns" element={<Page permission="dns:read"><Dns /></Page>} />
+      {/* Full-page rollout wizard (same read perm as /dns). */}
+      <Route path="/dns/rollout" element={<Page permission="dns:read"><DnsRolloutPage /></Page>} />
       {/* User-maintained host documentation (permanent inventory + CSV import). */}
       <Route path="/documented-hosts" element={<Page permission="documented-hosts:read"><DocumentedHosts /></Page>} />
       {/* Full-page "import from live inventory" wizard (replaces the old modal) — write-gated. */}

@@ -828,6 +828,40 @@ export const routes = pgTable(
   }
 );
 
+// One row per static DNS host entry (hostname → address) on one device, as
+// reported by a plugin's `dnsEntries` metric. Powers the cross-device DNS page
+// with the same upsert-per-poll + delete-on-absent + 24h-sweep lifecycle as
+// tunnels/routes. Vendors normalize to {name, ip} at collection time (OPNsense
+// dnsmasq/unbound host records; OpenWrt uci dhcp @host/@map; RouterOS
+// /ip/dns/static; LCOS Setup/DNS/DNS-List). `name` is lowercased at ingest so
+// the page groups case-insensitively; one row per (device, name, ip) — a name
+// with several addresses yields multiple rows.
+export const deviceDnsEntries = pgTable(
+  'device_dns_entries',
+  {
+    deviceId: text('deviceId').notNull(),
+    pluginId: text('pluginId').notNull(),
+    // Hostname as configured on the device, lowercased at ingest (grouping key).
+    name: text('name').notNull(),
+    // IPv4 or IPv6 address the hostname resolves to. Record type (A/AAAA) is
+    // derived from the address shape — no separate column needed.
+    ip: text('ip').notNull(),
+    // Optional free-text note as configured on the device (e.g. RouterOS
+    // /ip/dns/static `comment`). NULL = vendor has no native field for it.
+    description: text('description'),
+    collectedAt: text('collectedAt').notNull(),
+  },
+  (table) => {
+    return {
+      pkDnsEntries: primaryKey({
+        name: 'device_dns_entries_pkey',
+        columns: [table.deviceId, table.pluginId, table.name, table.ip],
+      }),
+      idxDnsEntriesDevice: index('idx_device_dns_entries_device').on(table.deviceId),
+    };
+  }
+);
+
 // One row per firewall rule (filter + NAT kinds) on one device, as reported by a
 // plugin's `firewallRules` metric. Powers the cross-device Firewall page with the
 // same upsert-per-poll + delete-on-absent + 24h-sweep lifecycle as tunnels/routes.

@@ -19,6 +19,7 @@ import { OPENVPN_ACTIONS } from './openvpn';
 import { ROUTES_ACTIONS } from './routes';
 import { INTERFACE_ACTIONS } from './interfaces';
 import { networkIntentActions } from './networkIntents';
+import { dnsIntentActions } from './dnsIntents';
 import { DNS_ACTIONS, DHCP_ACTIONS } from './dnsDhcp';
 import { WIRELESS_ACTIONS } from './wireless';
 import { SECURITY_ACTIONS } from './security';
@@ -33,6 +34,8 @@ const ALL_ACTIONS: ActionDescriptor[] = [
   ...INTERFACE_ACTIONS,
   // Canonical fleet intents (network.create / network.delete / l2.topology.read).
   ...networkIntentActions,
+  // Canonical DNS intents (dns.set / dns.delete) — fan-out via plan workflow.
+  ...dnsIntentActions,
   ...DNS_ACTIONS,
   ...DHCP_ACTIONS,
   ...WIRELESS_ACTIONS,

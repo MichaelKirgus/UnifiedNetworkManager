@@ -602,6 +602,26 @@ export async function initDb(): Promise<void> {
   await pool.query(`
     CREATE INDEX IF NOT EXISTS idx_routes_device ON routes ("deviceId")`);
 
+  // DNS entries inventory table (DNS page) — same lifecycle as tunnels/routes.
+  // One row per static DNS host entry on one device; `name` is lowercased at
+  // ingest so the page groups case-insensitively. PK = deviceId+pluginId+name+ip
+  // so a name with several addresses yields multiple rows, and delete-on-absent
+  // at ingest keys on name|ip pairs (a plugin's snapshot never wipes another).
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS device_dns_entries (
+      "deviceId" TEXT NOT NULL,
+      "pluginId" TEXT NOT NULL,
+      name TEXT NOT NULL,
+      ip TEXT NOT NULL,
+      "collectedAt" TEXT NOT NULL,
+      PRIMARY KEY ("deviceId", "pluginId", name, ip)
+    )`);
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS idx_device_dns_entries_device ON device_dns_entries ("deviceId")`);
+  // Optional free-text note per entry (e.g. RouterOS /ip/dns/static `comment`).
+  // NULL = the vendor has no native field for it. Idempotent — pre-existing rows keep NULL.
+  await pool.query(`ALTER TABLE device_dns_entries ADD COLUMN IF NOT EXISTS description TEXT`);
+
   // Firewall rules inventory table (Firewall page) — same lifecycle as tunnels/routes.
   // One row per firewall rule (filter + NAT kinds) on one device, normalized by the
   // plugin to a unified shape. PK = deviceId+pluginId+ruleType+vendorRuleId so

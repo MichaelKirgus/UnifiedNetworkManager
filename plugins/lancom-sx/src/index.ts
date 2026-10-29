@@ -325,10 +325,13 @@ app.post('/monitoring', async (req, res) => {
     await assertPinned(req, managementAddress, 'auto', portsOf(settings));
 
     // Slow path: targeted parallel LCOS-SX walks (only the subtrees we use),
-    // TTL-cached per host with a quality gate against partial-failure data.
+    // TTL-cached per host with a quality gate against partial-failure data. A
+    // forced refresh ("Check now") bypasses the cache — otherwise an explicit
+    // re-poll could be answered from a snapshot up to inventoryTtlMs old and
+    // hide changes made seconds ago (e.g. a CLI-written DNS entry).
     const inventory = await getSxInventory(host, creds, opts, {
       log: (level, message, context) => logger.warn(message, { deviceId, context }),
-    });
+    }, body.forceUpdateCheck === true);
     const snapshot = inventory.snapshot;
 
     if (!snapshot) {
