@@ -15,8 +15,20 @@ Open-source network management and monitoring platform for mixed-vendor environm
 >
 > Also note: UNM is **not affiliated with any device vendor** — see [Trademark disclaimer](#trademark-disclaimer) at the bottom.
 
+## Screenshots
+
+One control plane for a mixed-vendor estate — here's what that looks like in practice.
+
+| | |
+| :---: | :---: |
+| <img src="docs/screenshots/unm_devices.png" alt="Devices page" width="480"/> | <img src="docs/screenshots/unm_topology.png" alt="Topology page" width="480"/> |
+| _**The Devices page** — every router, firewall, NAS and server in one table, with live per-device metrics (CPU, memory, bandwidth, latency) and the plugins managing each._ | _**Live topology** — hosts, VLANs and switches across your whole estate rendered as an interactive graph with a traffic overlay._ |
+| <img src="docs/screenshots/unm_plans.png" alt="Plans page" width="480"/> | <img src="docs/screenshots/unm_plugins.png" alt="Plugins page" width="480"/> |
+| _**Plans & configuration jobs** — audited, multi-step writes with per-step progress, verification status and a full error trail._ | _**The plugin fleet** — every discovered vendor adapter at a glance: capabilities, live self-metrics sparklines and mTLS transport state._ |
+
 ## Contents
 
+- [Screenshots](#screenshots)
 - [Features](#features)
 - [Architecture](#architecture)
 - [Repository layout](#repository-layout)
