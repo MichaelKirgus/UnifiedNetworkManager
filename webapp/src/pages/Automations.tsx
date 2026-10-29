@@ -1,7 +1,8 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { ChevronDown, ChevronRight, FlaskConical, Pencil, Plus, Trash2, Workflow } from 'lucide-react';
 import { api, Automation, AutomationActionBlock, AutomationDraft, AutomationRun, AutomationTemplate, AutomationTriggerBlock } from '../api/client';
+import { AUTOMATION_DRAFT_STORAGE_KEY } from './Updates';
 import { can } from '../auth/permissions';
 import { DataTable, DataTableColumn } from '../components/DataTable';
 import { Layout } from '../components/Layout';
@@ -125,6 +126,24 @@ export default function Automations() {
   const automationsQuery = useQuery({ queryKey: ['automations'], queryFn: () => api.automations() });
   const rows = useMemo(() => automationsQuery.data?.automations ?? [], [automationsQuery.data]);
   const templatesQuery = useQuery({ queryKey: ['automation-templates'], queryFn: () => api.automationTemplates(), staleTime: 5 * 60_000 });
+
+  // Consume a rule draft handed off from another page (Updates quick-create):
+  // open the builder pre-filled once, then clear the stash so it is one-shot.
+  useEffect(() => {
+    if (!canWrite) return;
+    let raw: string | null = null;
+    try { raw = sessionStorage.getItem(AUTOMATION_DRAFT_STORAGE_KEY); } catch { /* no storage */ }
+    if (raw === null) return;
+    try { sessionStorage.removeItem(AUTOMATION_DRAFT_STORAGE_KEY); } catch { /* ignore */ }
+    try {
+      const draft = JSON.parse(raw) as Pick<AutomationDraft, 'name' | 'description' | 'enabled' | 'triggers' | 'actions' | 'cooldownSec'>;
+      if (draft && Array.isArray(draft.triggers) && draft.triggers.length > 0 && Array.isArray(draft.actions) && draft.actions.length > 0) {
+        setTemplateDraft(draft);
+        setEditing(null);
+        setBuilderOpen(true);
+      }
+    } catch { /* malformed stash — drop it */ }
+  }, [canWrite]);
 
   // Run history is fetched lazily for the one expanded rule (chevron column).
   const [openRunsFor, setOpenRunsFor] = useState<string | null>(null);
