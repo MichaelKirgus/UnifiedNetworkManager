@@ -13,14 +13,12 @@ import { useExecutionMode } from '../executionMode';
  *  On every other page the top-bar Read-Only/Plan/Execute toggle renders disabled. */
 // The create-app / create-VM wizards are sub-paths of /containers and /vms,
 // so the prefix match below already covers them.
-const PLAN_ACTION_PATHS = ['/storage', '/shares', '/containers', '/vms', '/updates', '/services', '/mail'];
+const PLAN_ACTION_PATHS = ['/storage', '/shares', '/containers', '/vms', '/updates', '/services', '/mail', '/dns', '/networks'];
 
 function isPlanActionPath(pathname: string): boolean {
   if (PLAN_ACTION_PATHS.some((p) => pathname === p || pathname.startsWith(p + '/'))) return true;
   // Per-device Config page — its state sections trigger catalog actions.
-  if (/^\/devices\/[^/]+\/config$/.test(pathname)) return true;
-  // Fleet rollout wizard — creates (and optionally executes) plans per plugin.
-  return pathname === '/networks/rollout';
+  return /^\/devices\/[^/]+\/config$/.test(pathname);
 }
 
 export interface LayoutProps {
