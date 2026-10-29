@@ -209,14 +209,7 @@ The recommended layout is **same-origin**: one public hostname serves the webapp
 - **SNMP transport** — SNMP queries run in-process over native UDP (`@unm/snmp-client` on the `net-snmp` npm package); credentials (community strings, USM passphrases) are never passed as command-line arguments or written to logs. DES privacy is rejected at credential-validation time (Node ≥17 OpenSSL dropped it) — use AES.
 - **API tokens** — long-lived bearer tokens (`unm_…`) for agents/scripts, self-service on the Tokens page or `POST /v1/tokens`, with per-token permission narrowing.
 
-The full catalog — all ~58 permissions, the API route → permission map, inline gates (secrets personal area, self-vs-other credential ops) and webapp page guards — is documented in [docs/PERMISSIONS.md](docs/PERMISSIONS.md). Headline entries:
-
-| Permission | Grants |
-|------------|--------|
-| `devices:read` / `devices:write` | View devices & telemetry; create/update/delete devices and plugin assignments |
-| `configs:apply` | Submit configuration jobs / execute plans (requires 2FA) — gates *all* plan writes |
-| `secrets:read` / `secrets:write` / `secrets:self-write` | Manage secrets globally vs. your own personal secret area (metadata only — values stay encrypted) |
-| `users:*` | View users; edit roles/permissions & manage roles; create users; reset passwords and manage 2FA of other users (`manage-credentials`) or your own account (`self-credentials`) |
+The full catalog — all ~58 permissions, the API route → permission map, inline gates (secrets personal area, self-vs-other credential ops) and webapp page guards — is documented in [docs/PERMISSIONS.md](docs/PERMISSIONS.md).
 
 ### Network exposure — keep it off the public internet
 
