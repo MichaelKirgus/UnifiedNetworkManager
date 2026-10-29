@@ -100,6 +100,38 @@ export interface DeviceStatusTrigger {
   toStatuses: DeviceStatus[];
 }
 
+/**
+ * Fires on UPDATE transitions in device_updates (the Updates page's data): a
+ * row appearing (a new update became available), its latestVersion advancing,
+ * or the row disappearing (update applied / withdrawn). Hooked at
+ * ingestUpdates()' commit point, so it reflects the settled per-poll state —
+ * transition-only firing, never re-firing on every poll while an update stays
+ * listed. `condition` selects which transitions fire:
+ *   - 'available' → a row appeared (or advanced while a deferred window is open)
+ *   - 'resolved'  → a row disappeared (update applied or withdrawn)
+ * `defer` optionally holds each firing until the next occurrence of its
+ * schedule spec (e.g. a nightly maintenance window); `maxWaitHours` caps how
+ * long an event waits before firing immediately. While an 'available' window is
+ * pending, the row disappearing cancels it silently and a version advance
+ * refreshes the stored snapshot without moving the window start.
+ */
+export interface UpdateTrigger {
+  id: string;
+  type: 'updateAvailable';
+  scope?: DeviceScope;
+  pluginId?: string;
+  /** Only these device_updates.kind values (absent = all). Free-form — plugins may emit custom kinds. */
+  kinds?: string[];
+  /** Exact row names to match (absent/empty = all). */
+  names?: string[];
+  /** JS regex source matched against the row name (search semantics). */
+  namePattern?: string;
+  condition: 'available' | 'resolved';
+  /** Only rows whose rebootRequired flag EQUALS this value (rows with a null flag never match a filter — unknown ≠ safe to auto-apply). */
+  rebootRequired?: boolean;
+  defer?: { schedule: ScheduleSpec; maxWaitHours?: number };
+}
+
 /** Flow direction a flow trigger watches (either endpoint of an observed tuple). */
 export const FLOW_DIRECTIONS = ['any', 'src', 'dst'] as const;
 export type FlowDirection = (typeof FLOW_DIRECTIONS)[number];
@@ -158,7 +190,7 @@ export interface ContainerLogTrigger {
   pattern: string;
 }
 
-export type TriggerBlock = ScheduleTrigger | MetricTrigger | LogTrigger | DeviceStatusTrigger | FlowTrigger | ContainerLogTrigger;
+export type TriggerBlock = ScheduleTrigger | MetricTrigger | LogTrigger | DeviceStatusTrigger | FlowTrigger | ContainerLogTrigger | UpdateTrigger;
 
 // ── Action blocks ────────────────────────────────────────────────────────────
 
@@ -171,15 +203,27 @@ export type NotificationSeverity = (typeof NOTIFICATION_SEVERITIES)[number];
  * plan (the same path the webapp's CreatePlan dialog uses — see
  * utils/createPlanCore.ts). `input` is validated against the catalog entry's
  * inputSchema in the UI; the engine passes it through verbatim.
+ *
+ * With `resolveFromTrigger: 'update'`, pluginId/actionId/input are filled at
+ * fire time from the firing update row's apply path (device_updates.applyActionId
+ * / applyInput) — for rules that react to updateAvailable triggers without
+ * hardcoding a per-plugin action id. A row with no apply path skips the action
+ * with a logged reason (never guessed). `requireNoReboot` additionally skips
+ * execution when the firing row's rebootRequired flag is true.
  */
 export interface IntentAction {
   id: string;
   type: 'intent';
-  pluginId: string;
-  /** Catalog action id (plugins.actionDescriptors). */
-  actionId: string;
+  /** Required unless resolveFromTrigger fills it at fire time. */
+  pluginId?: string;
+  /** Catalog action id (plugins.actionDescriptors). Required unless resolveFromTrigger fills it. */
+  actionId?: string;
   devices: { scope?: DeviceScope; deviceIds?: string[] };
   input?: Record<string, unknown>;
+  /** Fill pluginId/actionId/input from the firing update row's apply path. */
+  resolveFromTrigger?: 'update';
+  /** Skip execution when the firing update row requires a reboot (default off). */
+  requireNoReboot?: boolean;
 }
 
 /**
@@ -270,7 +314,8 @@ export interface AutomationRun {
   triggerType: TriggerBlock['type'];
   /** Trigger context at firing time — device/metric/log details for display. */
   context: Record<string, unknown>;
-  status: 'succeeded' | 'failed' | 'partial';
+  /** 'skipped' = every action was deliberately skipped (e.g. requireNoReboot guard). */
+  status: 'succeeded' | 'failed' | 'partial' | 'skipped';
   error?: string | null;
   planIds: string[];
 }
@@ -287,4 +332,18 @@ export interface TriggerContext {
   logMessage?: string | null;
   /** Flow tuple + measured bytes, for flow triggers. */
   flow?: { ip: string; estBytes: number; windowSec: number; direction: string } | null;
+  /** Update row snapshot at firing time, for updateAvailable triggers ({{update.*}} tokens). */
+  update?: {
+    kind: string;
+    name: string;
+    currentVersion: string | null;
+    latestVersion: string | null;
+    rebootRequired: boolean | null;
+    /** The row's owning assignment — intent actions target exactly this device. */
+    deviceId: string;
+    pluginId: string;
+    /** Apply path declared by the plugin (null/absent = manual on device, never guessed). Absent for 'resolved' firings of rows that are already gone. */
+    applyActionId?: string | null;
+    applyInput?: Record<string, unknown>;
+  } | null;
 }

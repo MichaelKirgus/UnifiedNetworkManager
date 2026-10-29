@@ -139,6 +139,39 @@ function validateTrigger(t: TriggerBlock, where: string): string[] {
       if (t.tail !== undefined && (!Number.isInteger(t.tail) || t.tail < 20 || t.tail > 5000)) e.push(`${where}: tail must be an integer between 20 and 5000`);
       break;
     }
+    case 'updateAvailable': {
+      if (t.condition !== 'available' && t.condition !== 'resolved') e.push(`${where}: condition must be "available" or "resolved"`);
+      if (t.kinds !== undefined) {
+        if (!Array.isArray(t.kinds) || t.kinds.length === 0) e.push(`${where}: kinds must be a non-empty array`);
+        else if (t.kinds.some((k) => typeof k !== 'string' || !k.trim())) e.push(`${where}: kinds entries must be non-empty strings`);
+      }
+      if (t.names !== undefined && (!Array.isArray(t.names) || t.names.some((n) => typeof n !== 'string'))) {
+        e.push(`${where}: names must be an array of strings`);
+      }
+      if (t.namePattern !== undefined) {
+        if (typeof t.namePattern !== 'string') e.push(`${where}: namePattern must be a string`);
+        else if (!isValidRegex(t.namePattern)) e.push(`${where}: invalid regex "${t.namePattern}"`);
+      }
+      if (t.defer !== undefined) {
+        const s = t.defer.schedule;
+        if (!s || typeof s !== 'object') e.push(`${where}: defer.schedule is required`);
+        else if (s.kind === 'cron') {
+          if (typeof s.expr !== 'string' || !s.expr.trim()) e.push(`${where}: cron expr is required`);
+          else if (!isValidCronExpr(s.expr)) e.push(`${where}: invalid cron expression "${s.expr}"`);
+        } else if (s.kind === 'interval') {
+          if (!Number.isInteger(s.everyMinutes) || s.everyMinutes < 1) e.push(`${where}: everyMinutes must be an integer ≥ 1`);
+          else if (s.everyMinutes > 525_600) e.push(`${where}: everyMinutes is capped at one year (525600)`);
+        } else if (s.kind === 'dailyAt') {
+          if (typeof s.time !== 'string' || !/^([01]\d|2[0-3]):[0-5]\d$/.test(s.time)) e.push(`${where}: dailyAt time must be "HH:MM" (24h)`);
+        } else {
+          e.push(`${where}: unknown schedule kind`);
+        }
+        if (t.defer.maxWaitHours !== undefined && (!Number.isFinite(t.defer.maxWaitHours) || t.defer.maxWaitHours <= 0)) {
+          e.push(`${where}: defer.maxWaitHours must be a positive number`);
+        }
+      }
+      break;
+    }
     default:
       e.push(`${where}: unknown trigger type`);
   }
@@ -149,8 +182,11 @@ function validateAction(a: ActionBlock, where: string): string[] {
   const e: string[] = [];
   switch (a.type) {
     case 'intent': {
-      if (!a.pluginId || typeof a.pluginId !== 'string') e.push(`${where}: pluginId is required`);
-      if (!a.actionId || typeof a.actionId !== 'string') e.push(`${where}: actionId is required`);
+      const resolved = a.resolveFromTrigger === 'update';
+      if (a.resolveFromTrigger !== undefined && !resolved) e.push(`${where}: resolveFromTrigger must be "update"`);
+      // With resolveFromTrigger the row's apply path fills these at fire time.
+      if (!resolved && (!a.pluginId || typeof a.pluginId !== 'string')) e.push(`${where}: pluginId is required`);
+      if (!resolved && (!a.actionId || typeof a.actionId !== 'string')) e.push(`${where}: actionId is required`);
       if (a.input !== undefined && (typeof a.input !== 'object' || Array.isArray(a.input) || a.input === null)) e.push(`${where}: input must be an object`);
       break;
     }
@@ -340,6 +376,103 @@ export function evaluateFlowCondition(trigger: { comparator: MetricComparator; t
   }
 }
 
+// ── Update trigger helpers (pure) ───────────────────────────────────────────
+
+/** A device_updates row as the update-trigger evaluators see it. */
+export interface UpdateRowSnapshot {
+  kind: string;
+  name: string;
+  currentVersion: string | null;
+  latestVersion: string | null;
+  rebootRequired: boolean | null;
+  /** Apply path declared by the plugin (null = manual on device). Carried so deferred firings can resolve intent actions later. */
+  applyActionId?: string | null;
+  applyInput?: Record<string, unknown>;
+}
+
+/**
+ * Does an update row match a trigger's filters (kinds / names / namePattern /
+ * rebootRequired)? `condition` is NOT part of the match — it selects which
+ * TRANSITIONS fire, not which rows qualify. A `rebootRequired` filter never
+ * matches rows whose flag is null: unknown ≠ safe to auto-apply.
+ */
+export function updateRowMatches(trigger: { kinds?: string[]; names?: string[]; namePattern?: string; rebootRequired?: boolean }, row: UpdateRowSnapshot): boolean {
+  if (trigger.kinds && trigger.kinds.length > 0 && !trigger.kinds.includes(row.kind)) return false;
+  if (trigger.names && trigger.names.length > 0 && !trigger.names.includes(row.name)) return false;
+  if (trigger.namePattern) {
+    try {
+      if (!new RegExp(trigger.namePattern).test(row.name)) return false;
+    } catch {
+      return false; // invalid pattern — validation should have caught it at write time
+    }
+  }
+  if (trigger.rebootRequired !== undefined && row.rebootRequired !== trigger.rebootRequired) return false;
+  return true;
+}
+
+/** automation_state key for one pending deferral window, per update row. */
+export function updatePendingStateKey(deviceId: string, pluginId: string, kind: string, name: string): string {
+  return `pending:${deviceId}|${pluginId}|${kind}|${name}`;
+}
+
+/** One transition between two device_updates snapshots (same device+plugin). */
+export interface UpdateTransition {
+  kind: string;
+  name: string;
+  /** appeared = row is new; advanced = version changed in place; disappeared = row gone. */
+  transition: 'appeared' | 'advanced' | 'disappeared';
+  /** Row state AFTER the transition (for `disappeared`: the last known state). */
+  currentVersion: string | null;
+  latestVersion: string | null;
+  rebootRequired: boolean | null;
+  applyActionId?: string | null;
+  applyInput?: Record<string, unknown>;
+}
+
+/**
+ * Diffs two row sets of one (device, plugin) into transitions. A row that is
+ * present in both with an unchanged version produces NO event — update triggers
+ * are transition-only and must not re-fire on every poll while a row stays put.
+ */
+export function diffUpdateTransitions(prev: UpdateRowSnapshot[], next: UpdateRowSnapshot[]): UpdateTransition[] {
+  const keyOf = (r: UpdateRowSnapshot) => `${r.kind}|${r.name}`;
+  const prevByKey = new Map(prev.map((r) => [keyOf(r), r]));
+  const out: UpdateTransition[] = [];
+  for (const n of next) {
+    const p = prevByKey.get(keyOf(n));
+    if (!p) {
+      out.push({ kind: n.kind, name: n.name, transition: 'appeared', currentVersion: n.currentVersion, latestVersion: n.latestVersion, rebootRequired: n.rebootRequired, applyActionId: n.applyActionId ?? null, applyInput: n.applyInput });
+    } else if (p.latestVersion !== n.latestVersion || p.currentVersion !== n.currentVersion) {
+      out.push({ kind: n.kind, name: n.name, transition: 'advanced', currentVersion: n.currentVersion, latestVersion: n.latestVersion, rebootRequired: n.rebootRequired, applyActionId: n.applyActionId ?? null, applyInput: n.applyInput });
+    }
+  }
+  for (const p of prev) {
+    if (!next.some((n) => keyOf(n) === keyOf(p))) {
+      out.push({ kind: p.kind, name: p.name, transition: 'disappeared', currentVersion: p.currentVersion, latestVersion: p.latestVersion, rebootRequired: p.rebootRequired, applyActionId: p.applyActionId ?? null, applyInput: p.applyInput });
+    }
+  }
+  return out;
+}
+
+/** Outcome of checking a pending deferral window against the clock. */
+export type PendingWindowState = 'due' | 'max-wait-exceeded' | 'pending';
+
+/**
+ * Is a deferred update firing due now? `sinceIso` is when the transition was
+ * first observed (the window anchor). Due at the next occurrence of the defer
+ * schedule strictly after `sinceIso`; if `maxWaitHours` is set and that bound
+ * elapses first, the event fires immediately instead of waiting for the slot.
+ */
+export function pendingWindowState(defer: { schedule: ScheduleSpec; maxWaitHours?: number }, sinceIso: string, nowMs: number): PendingWindowState {
+  const next = nextScheduleRun(defer.schedule, sinceIso);
+  if (next !== null && next.getTime() <= nowMs) return 'due';
+  if (defer.maxWaitHours !== undefined && Number.isFinite(defer.maxWaitHours)) {
+    const waitedMs = nowMs - new Date(sinceIso).getTime();
+    if (Number.isFinite(waitedMs) && waitedMs >= defer.maxWaitHours * 3_600_000) return 'max-wait-exceeded';
+  }
+  return 'pending';
+}
+
 /**
  * Stable short hash of a container-log line, used for new-line deduplication.
  * FNV-1a over the first 512 chars (log lines are bounded by the tail read) —
@@ -406,7 +539,7 @@ export function renderTemplate(template: string, vars: Record<string, string | n
 }
 
 /** Builds the flat token map for a firing from its context. */
-export function templateVarsFor(automationName: string, ctx: { triggerType: TriggerBlock['type']; device?: { name: string; address?: string | null } | null; metricKey?: string | null; metricValue?: number | string | boolean | null; logMessage?: string | null; flowIp?: string | null; flowBytes?: number | null; firedAtIso: string }): Record<string, string> {
+export function templateVarsFor(automationName: string, ctx: { triggerType: TriggerBlock['type']; device?: { name: string; address?: string | null } | null; metricKey?: string | null; metricValue?: number | string | boolean | null; logMessage?: string | null; flowIp?: string | null; flowBytes?: number | null; updateKind?: string | null; updateName?: string | null; updateCurrentVersion?: string | null; updateLatestVersion?: string | null; firedAtIso: string }): Record<string, string> {
   const vars: Record<string, string> = {
     'automation.name': automationName,
     'trigger.type': ctx.triggerType,
@@ -424,6 +557,12 @@ export function templateVarsFor(automationName: string, ctx: { triggerType: Trig
   if (ctx.flowIp) {
     vars['flow.ip'] = ctx.flowIp;
     if (ctx.flowBytes !== undefined && ctx.flowBytes !== null) vars['flow.bytes'] = String(ctx.flowBytes);
+  }
+  if (ctx.updateKind || ctx.updateName) {
+    if (ctx.updateKind) vars['update.kind'] = ctx.updateKind;
+    if (ctx.updateName) vars['update.name'] = ctx.updateName;
+    if (ctx.updateCurrentVersion !== undefined && ctx.updateCurrentVersion !== null) vars['update.currentVersion'] = String(ctx.updateCurrentVersion);
+    if (ctx.updateLatestVersion !== undefined && ctx.updateLatestVersion !== null) vars['update.latestVersion'] = String(ctx.updateLatestVersion);
   }
   return vars;
 }

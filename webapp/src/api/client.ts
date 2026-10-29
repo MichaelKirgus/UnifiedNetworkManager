@@ -3257,13 +3257,34 @@ export interface AutomationContainerLogTrigger {
   pattern: string;
 }
 
+/**
+ * Fires on UPDATE transitions in device_updates (the Updates page's data): a row
+ * appearing, its version advancing, or the row disappearing. `condition` selects
+ * which transitions fire ('available' = appeared/advanced, 'resolved' = gone).
+ * `defer` holds each firing until the next occurrence of its schedule spec;
+ * `maxWaitHours` caps how long an event waits before firing immediately.
+ */
+export interface AutomationUpdateTrigger {
+  id: string;
+  type: 'updateAvailable';
+  scope?: AutomationDeviceScope;
+  pluginId?: string;
+  kinds?: string[];
+  names?: string[];
+  namePattern?: string;
+  condition: 'available' | 'resolved';
+  rebootRequired?: boolean;
+  defer?: { schedule: AutomationScheduleSpec; maxWaitHours?: number };
+}
+
 export type AutomationTriggerBlock =
   | AutomationScheduleTrigger
   | AutomationMetricTrigger
   | AutomationLogTrigger
   | AutomationDeviceStatusTrigger
   | AutomationFlowTrigger
-  | AutomationContainerLogTrigger;
+  | AutomationContainerLogTrigger
+  | AutomationUpdateTrigger;
 
 /** Severity values for automation notification actions (same set as the notification center). */
 export const AUTOMATION_NOTIFICATION_SEVERITIES = ['info', 'warning', 'critical'] as const;
@@ -3272,10 +3293,16 @@ export type AutomationNotificationSeverity = (typeof AUTOMATION_NOTIFICATION_SEV
 export interface AutomationIntentAction {
   id: string;
   type: 'intent';
-  pluginId: string;
-  actionId: string;
+  /** Required unless resolveFromTrigger fills it at fire time. */
+  pluginId?: string;
+  /** Catalog action id (plugins.actionDescriptors). Required unless resolveFromTrigger fills it. */
+  actionId?: string;
   devices: { scope?: AutomationDeviceScope; deviceIds?: string[] };
   input?: Record<string, unknown>;
+  /** Fill pluginId/actionId/input from the firing update row's apply path (updateAvailable triggers only). */
+  resolveFromTrigger?: 'update';
+  /** Skip execution when the firing update row requires a reboot. */
+  requireNoReboot?: boolean;
 }
 
 export interface AutomationWebhookAction {
@@ -3346,9 +3373,10 @@ export interface AutomationRun {
   id: string;
   automationId: string;
   firedAt: string;
-  triggerType: 'schedule' | 'metric' | 'log' | 'deviceStatus' | 'flow' | 'containerLog';
+  triggerType: 'schedule' | 'metric' | 'log' | 'deviceStatus' | 'flow' | 'containerLog' | 'updateAvailable';
   context: Record<string, unknown>;
-  status: 'succeeded' | 'failed' | 'partial';
+  /** 'skipped' = every action was deliberately skipped (e.g. requireNoReboot guard). */
+  status: 'succeeded' | 'failed' | 'partial' | 'skipped';
   error?: string | null;
   planIds: string[];
 }

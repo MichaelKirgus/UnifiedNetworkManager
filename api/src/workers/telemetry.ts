@@ -16,7 +16,8 @@ import {
   statusToSeverity,
 } from '../notifications';
 import { LEADER_KEYS } from './leader';
-import { onDeviceStatusTransition } from './automations';
+import { onDeviceStatusTransition, onUpdateTransitions } from './automations';
+import { diffUpdateTransitions } from '../automations/engine';
 import type { DeviceStatus } from '../automations/types';
 import {
   initWorker,
@@ -470,10 +471,21 @@ async function ingestUpdates(
       collectedAt,
     });
   }
-  if (values.length > 0) {
-    const byKey = new Map<string, typeof values[number]>();
-    for (const v of values) byKey.set(`${v.kind}|${v.name}`, v);
-    await db.insert(schema.deviceUpdates).values(Array.from(byKey.values())).onConflictDoUpdate({
+  // Capture the pre-poll row set BEFORE mutating — the automation worker's
+  // updateAvailable triggers fire on TRANSITIONS (appeared / advanced /
+  // disappeared), so we diff old vs new after the commit below.
+  const prevRows = await db.query.deviceUpdates.findMany({
+    where: and(eq(schema.deviceUpdates.deviceId, deviceId), eq(schema.deviceUpdates.pluginId, pluginId)),
+  });
+
+  // Dedupe within the poll (same kind|name reported twice = one row, last wins) —
+  // used for BOTH the insert and the transition diff below.
+  const byKey = new Map<string, typeof values[number]>();
+  for (const v of values) byKey.set(`${v.kind}|${v.name}`, v);
+  const deduped = Array.from(byKey.values());
+
+  if (deduped.length > 0) {
+    await db.insert(schema.deviceUpdates).values(deduped).onConflictDoUpdate({
       target: [schema.deviceUpdates.deviceId, schema.deviceUpdates.pluginId, schema.deviceUpdates.kind, schema.deviceUpdates.name],
       set: {
         currentVersion: sql`excluded."currentVersion"`,
@@ -489,7 +501,7 @@ async function ingestUpdates(
         collectedAt: sql`excluded."collectedAt"`,
       },
     });
-    const seenKeys = new Set(values.map((v) => `${v.kind}|${v.name}`));
+    const seenKeys = new Set(deduped.map((v) => `${v.kind}|${v.name}`));
     await db.delete(schema.deviceUpdates)
       .where(and(
         eq(schema.deviceUpdates.deviceId, deviceId),
@@ -503,6 +515,28 @@ async function ingestUpdates(
         eq(schema.deviceUpdates.deviceId, deviceId),
         eq(schema.deviceUpdates.pluginId, pluginId)
       ));
+  }
+
+  // Actions & Schedules — updateAvailable triggers fire on TRANSITIONS between
+  // this poll's row set and the previous one (appeared / advanced / disappeared).
+  // Fire-and-forget: automation failures must never disturb telemetry bookkeeping.
+  const parseApplyInput = (raw: string): Record<string, unknown> | undefined => {
+    try {
+      const parsed = JSON.parse(raw);
+      return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : undefined;
+    } catch {
+      return undefined;
+    }
+  };
+  const transitions = diffUpdateTransitions(
+    prevRows.map((r) => ({ kind: r.kind, name: r.name, currentVersion: r.currentVersion, latestVersion: r.latestVersion, rebootRequired: r.rebootRequired, applyActionId: r.applyActionId, applyInput: parseApplyInput(r.applyInput) })),
+    deduped.map((v) => ({ kind: v.kind, name: v.name, currentVersion: v.currentVersion, latestVersion: v.latestVersion, rebootRequired: v.rebootRequired, applyActionId: v.applyActionId, applyInput: parseApplyInput(v.applyInput) }))
+  );
+  if (transitions.length > 0) {
+    void onUpdateTransitions(deviceId, pluginId, transitions).catch((err) => {
+      // eslint-disable-next-line no-console
+      console.error('[telemetry] automation update-transition hook failed:', err);
+    });
   }
 }
 

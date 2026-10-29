@@ -29,14 +29,21 @@ function triggerSummary(t: AutomationTriggerBlock): string {
     }
     case 'containerLog':
       return `logs ${t.appName} ~ /${t.pattern}/`;
+    case 'updateAvailable': {
+      const kinds = t.kinds?.length ? `${t.kinds.join('/')} ` : '';
+      const defer = t.defer ? (t.defer.schedule.kind === 'dailyAt' ? `, deferred to ${t.defer.schedule.time}` : ', deferred') : '';
+      return `update ${t.condition} (${kinds}${t.namePattern ? `~ /${t.namePattern}/` : ''})${defer}`;
+    }
   }
 }
 
 /** Short human summary of an action block for the list's chip column. */
 function actionSummary(a: AutomationActionBlock): string {
   switch (a.type) {
-    case 'intent':
-      return `${a.actionId} on ${a.devices.deviceIds?.length ?? 'scope'} device(s)`;
+    case 'intent': {
+      const what = a.resolveFromTrigger === 'update' ? 'apply update (from trigger)' : `${a.actionId ?? '?'} on ${a.devices.deviceIds?.length ?? 'scope'} device(s)`;
+      return a.requireNoReboot ? `${what} (no-reboot only)` : what;
+    }
     case 'webhook':
       return `${(a.method ?? 'POST').toLowerCase()} ${a.url}`;
     case 'notification':
@@ -53,6 +60,7 @@ const TRIGGER_CHIP: Record<AutomationTriggerBlock['type'], string> = {
   deviceStatus: 'bg-status-warning/20 text-status-warning',
   flow: 'bg-accent-sky/60 text-accent-sky-fg',
   containerLog: 'bg-accent-teal/60 text-accent-teal-fg',
+  updateAvailable: 'bg-status-warning/20 text-status-warning',
 };
 
 /** Run-history panel rendered under an expanded rule row. */
@@ -74,8 +82,8 @@ function RunHistory({ runs, loading, formatDateTime }: { runs: AutomationRun[]; 
                 <td className="py-1 pr-3">
                   {run.status === 'succeeded' ? (
                     <span className="text-status-ok">{run.status}</span>
-                  ) : run.status === 'partial' ? (
-                    <span className="text-status-warning">{run.status}</span>
+                  ) : run.status === 'partial' || run.status === 'skipped' ? (
+                    <span className="text-status-warning" title={run.error ?? ''}>{run.status}{run.error ? ` — ${run.error}` : ''}</span>
                   ) : (
                     <span className="text-danger" title={run.error ?? ''}>{run.status}{run.error ? ` — ${run.error}` : ''}</span>
                   )}

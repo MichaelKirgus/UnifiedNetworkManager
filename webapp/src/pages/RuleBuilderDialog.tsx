@@ -545,8 +545,8 @@ function ContainerLogTriggerEditor({ block, onChange, plugins }: { block: Extrac
 function IntentActionEditor({ block, onChange, plugins }: { block: Extract<AutomationActionBlock, { type: 'intent' }>; onChange: (b: AutomationActionBlock) => void; plugins: Plugin[] }) {
   const devicesQuery = useQuery({ queryKey: ['devices'], queryFn: () => api.devices() });
   const actionsQuery = useQuery({
-    queryKey: ['pluginActions', block.pluginId],
-    queryFn: () => api.pluginActions(block.pluginId),
+    queryKey: ['pluginActions', block.pluginId ?? ''],
+    queryFn: () => api.pluginActions(block.pluginId as string),
     enabled: Boolean(block.pluginId),
   });
   const catalog: CatalogEntry[] = useMemo(() => actionsQuery.data?.actions ?? [], [actionsQuery.data]);
@@ -702,7 +702,7 @@ function InternalActionEditor({ block, onChange }: { block: Extract<AutomationAc
 
 // ── Block cards ───────────────────────────────────────────────────────────────
 
-const TRIGGER_LABEL: Record<AutomationTriggerBlock['type'], string> = { schedule: 'Schedule', metric: 'Metric condition', log: 'Log pattern', deviceStatus: 'Device status', flow: 'Flow traffic', containerLog: 'Container log' };
+const TRIGGER_LABEL: Record<AutomationTriggerBlock['type'], string> = { schedule: 'Schedule', metric: 'Metric condition', log: 'Log pattern', deviceStatus: 'Device status', flow: 'Flow traffic', containerLog: 'Container log', updateAvailable: 'Update available' };
 const ACTION_LABEL: Record<AutomationActionBlock['type'], string> = { intent: 'Run plan (intent)', webhook: 'Webhook', notification: 'Notification', internal: 'Internal operation' };
 
 /** Drop-zone ids for the two canvas columns. */

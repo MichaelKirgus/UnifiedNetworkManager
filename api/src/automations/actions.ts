@@ -26,6 +26,8 @@ import type { ActionBlock, TriggerContext } from './types';
 export interface ActionResult {
   ok: boolean;
   error?: string;
+  /** Set when the action was deliberately skipped (e.g. requireNoReboot guard) — not a failure. */
+  skipped?: string | null;
   /** Plan ids created by an intent action (empty for other types). */
   planIds: string[];
 }
@@ -67,22 +69,50 @@ export async function executeAction(automationId: string, automationName: string
     logMessage: ctx.logMessage ?? null,
     flowIp: ctx.flow?.ip ?? null,
     flowBytes: ctx.flow?.estBytes ?? null,
+    updateKind: ctx.update?.kind ?? null,
+    updateName: ctx.update?.name ?? null,
+    updateCurrentVersion: ctx.update?.currentVersion ?? null,
+    updateLatestVersion: ctx.update?.latestVersion ?? null,
     firedAtIso,
   });
 
   try {
     switch (action.type) {
       case 'intent': {
-        const deviceIds = await resolveScopeDeviceIds(action.devices.scope);
-        // Explicit device ids narrow/override the scope.
-        const finalIds = action.devices.deviceIds?.length ? action.devices.deviceIds : deviceIds;
-        if (finalIds.length === 0) return { ok: false, error: 'No devices matched the intent scope', planIds: [] };
+        // Guard — an update row that needs a reboot is never auto-applied.
+        if (action.requireNoReboot && ctx.update?.rebootRequired === true) {
+          return { ok: true, skipped: `update "${ctx.update.name}" requires a reboot`, planIds: [] };
+        }
+
+        let pluginId: string | undefined = action.pluginId;
+        let intentActionId: string | null = action.actionId ?? null;
+        let inputs: Record<string, unknown> = action.input ?? {};
+        let deviceIds: string[];
+
+        if (action.resolveFromTrigger === 'update') {
+          const u = ctx.update;
+          if (!u) return { ok: false, error: 'resolveFromTrigger=update but the trigger did not fire from an update row', planIds: [] };
+          pluginId = u.pluginId;
+          intentActionId = u.applyActionId ?? null;
+          // The row's prefill first — explicit action input overrides it.
+          inputs = { ...(u.applyInput ?? {}), ...inputs };
+          if (!intentActionId) return { ok: true, skipped: `update "${u.name}" has no apply path (manual on device)`, planIds: [] };
+          // The firing row's own assignment is the target — never a broader scope.
+          deviceIds = [u.deviceId];
+        } else {
+          if (!pluginId || !intentActionId) return { ok: false, error: 'pluginId and actionId are required (or use resolveFromTrigger)', planIds: [] };
+          const scoped = await resolveScopeDeviceIds(action.devices.scope);
+          // Explicit device ids narrow/override the scope.
+          deviceIds = action.devices.deviceIds?.length ? action.devices.deviceIds : scoped;
+        }
+
+        if (deviceIds.length === 0) return { ok: false, error: 'No devices matched the intent scope', planIds: [] };
         try {
           const { planId } = await createPlanCore({
-            pluginId: action.pluginId,
-            intentActionId: action.actionId,
-            inputs: action.input ?? {},
-            deviceIds: finalIds,
+            pluginId,
+            intentActionId,
+            inputs,
+            deviceIds,
             createdBy: 'system',
           });
           // Fire-and-forget execution — the plan executor runs it sequentially.

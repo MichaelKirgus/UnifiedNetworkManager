@@ -19,8 +19,9 @@ import { LEADER_KEYS } from './leader';
 import { initWorker, trackBeat } from './stats';
 import { getEffectiveSettingValue } from '../systemSettings';
 import { emitNotification } from '../notifications';
-import { evaluateFlowCondition, evaluateMetricCondition, evaluateSchedules, hashLogLine, parseJsonField, scopeMatchesDevice, splitLogLines } from '../automations/engine';
-import type { Automation, ContainerLogTrigger, DeviceStatus, FlowTrigger, LogTrigger, MetricTrigger, TriggerBlock, TriggerContext } from '../automations/types';
+import { evaluateFlowCondition, evaluateMetricCondition, evaluateSchedules, hashLogLine, parseJsonField, pendingWindowState, scopeMatchesDevice, splitLogLines, updatePendingStateKey, updateRowMatches } from '../automations/engine';
+import type { UpdateTransition } from '../automations/engine';
+import type { Automation, ContainerLogTrigger, DeviceStatus, FlowTrigger, LogTrigger, MetricTrigger, TriggerBlock, TriggerContext, UpdateTrigger } from '../automations/types';
 import { executeAction } from '../automations/actions';
 import { dispatchPluginAction } from '../utils/pluginDispatch';
 
@@ -67,13 +68,18 @@ export async function fireRule(automation: Automation, trigger: TriggerBlock, co
   const nowIso = new Date().toISOString();
   let okCount = 0;
   let failCount = 0;
+  let skipCount = 0;
   const errors: string[] = [];
   const planIds: string[] = [];
 
   for (const action of automation.actions) {
     try {
       const res = await executeAction(automation.id, automation.name, action, ctx);
-      if (res.ok) okCount++;
+      if (res.skipped) {
+        // Deliberate skip (e.g. requireNoReboot guard) — not a failure.
+        skipCount++;
+        errors.push(`${action.type}: skipped (${res.skipped})`);
+      } else if (res.ok) okCount++;
       else {
         failCount++;
         errors.push(`${action.type}: ${res.error ?? 'failed'}`);
@@ -86,7 +92,7 @@ export async function fireRule(automation: Automation, trigger: TriggerBlock, co
     }
   }
 
-  const status = failCount === 0 ? 'succeeded' : okCount === 0 ? 'failed' : 'partial';
+  const status = failCount === 0 ? (skipCount > 0 && okCount === 0 ? 'skipped' : 'succeeded') : okCount === 0 ? 'failed' : 'partial';
   try {
     await db.insert(schema.automationRuns).values({
       id: uuidv4(),
@@ -265,6 +271,17 @@ async function tick(): Promise<void> {
     } catch (err) {
       // eslint-disable-next-line no-console
       console.error('[automations] container-log trigger evaluation failed:', err);
+    }
+  }
+
+  // Update triggers — due-check the pending deferral windows opened by transitions.
+  const updateRules = rules.filter((r) => r.enabled && r.triggers.some((t) => t.type === 'updateAvailable' && (t as UpdateTrigger).defer));
+  if (updateRules.length > 0) {
+    try {
+      await evaluatePendingUpdateWindows(updateRules, nowMs);
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.error('[automations] pending update window evaluation failed:', err);
     }
   }
 
@@ -882,6 +899,250 @@ export async function onDeviceStatusTransition(deviceId: string, prev: DeviceSta
   } catch (err) {
     // eslint-disable-next-line no-console
     console.error('[automations] onDeviceStatusTransition failed:', err);
+  }
+}
+
+// ── Update triggers (device_updates transitions + deferral windows) ─────────
+
+/** Row snapshot carried by a pending deferral window (automation_state JSON). */
+interface PendingUpdateSnapshot {
+  deviceId: string;
+  pluginId: string;
+  kind: string;
+  name: string;
+  currentVersion: string | null;
+  latestVersion: string | null;
+  rebootRequired: boolean | null;
+  applyActionId?: string | null;
+  applyInput?: Record<string, unknown>;
+}
+
+/** One pending deferral window: when the transition was first seen + its row snapshot. */
+interface PendingUpdateWindow {
+  sinceIso: string; // anchor for the defer schedule (does NOT move on version advances)
+  snapshot: PendingUpdateSnapshot;
+}
+
+/** Builds the TriggerContext for an updateAvailable firing from a row snapshot. */
+function buildUpdateTriggerContext(t: UpdateTrigger, deviceName: string | null, snap: PendingUpdateSnapshot): TriggerContext {
+  return {
+    trigger: t,
+    device: { id: snap.deviceId, name: deviceName ?? snap.deviceId, address: null },
+    update: {
+      kind: snap.kind,
+      name: snap.name,
+      currentVersion: snap.currentVersion,
+      latestVersion: snap.latestVersion,
+      rebootRequired: snap.rebootRequired,
+      deviceId: snap.deviceId,
+      pluginId: snap.pluginId,
+      applyActionId: snap.applyActionId ?? null,
+      applyInput: snap.applyInput,
+    },
+  };
+}
+
+/** automation_runs context for an updateAvailable firing. */
+function updateRunContext(deviceId: string, pluginId: string, tr: UpdateTransition): Record<string, unknown> {
+  return {
+    kind: 'updateAvailable',
+    deviceId,
+    pluginId,
+    transition: tr.transition,
+    update: { kind: tr.kind, name: tr.name, currentVersion: tr.currentVersion, latestVersion: tr.latestVersion, rebootRequired: tr.rebootRequired },
+  };
+}
+
+/** True when the rule is inside its cooldown window at `nowMs`. */
+function inCooldown(rule: Automation, nowMs: number): boolean {
+  if (rule.cooldownSec <= 0 || !rule.lastFiredAt) return false;
+  const last = new Date(rule.lastFiredAt).getTime();
+  return Number.isFinite(last) && nowMs - last < rule.cooldownSec * 1000;
+}
+
+/**
+ * Called from the telemetry worker's ingestUpdates() commit point with the
+ * TRANSITIONS between this poll's device_updates rows and the previous ones.
+ * Fires every enabled rule whose updateAvailable trigger matches (condition,
+ * pluginId, scope, kinds/names/namePattern/rebootRequired) — immediately when
+ * no `defer` is set, or by opening/refreshing a pending deferral window in
+ * automation_state otherwise. Never throws: automation failures must not
+ * disturb telemetry bookkeeping.
+ */
+export async function onUpdateTransitions(deviceId: string, pluginId: string, transitions: UpdateTransition[]): Promise<void> {
+  try {
+    const enabled = await getEffectiveSettingValue('automationsEnabled');
+    if (enabled !== true) return;
+
+    const rules = await loadRules();
+    const devRow = await db.query.devices.findFirst({ where: eq(schema.devices.id, deviceId) });
+    if (!devRow) return; // deleted mid-flight — nothing to fire for
+    const scopeDev = toScopeDevice(devRow);
+
+    const nowMs = Date.now();
+    for (const rule of rules) {
+      if (!rule.enabled) continue;
+      for (const t of rule.triggers) {
+        if (t.type !== 'updateAvailable') continue;
+        if (t.pluginId && t.pluginId !== pluginId) continue;
+        if (!scopeMatchesDevice(t.scope, scopeDev)) continue;
+        for (const tr of transitions) {
+          // `condition` selects which TRANSITIONS fire: available = appeared/advanced, resolved = disappeared.
+          const fires = t.condition === 'available' ? (tr.transition === 'appeared' || tr.transition === 'advanced') : tr.transition === 'disappeared';
+          if (!fires) continue;
+          if (!updateRowMatches(t, tr)) continue;
+          try {
+            await handleUpdateTransition(rule, t, deviceId, pluginId, tr, scopeDev.name, nowMs);
+          } catch (err) {
+            // eslint-disable-next-line no-console
+            console.error(`[automations] updateAvailable handling for rule ${rule.id} failed:`, err);
+          }
+        }
+      }
+    }
+  } catch (err) {
+    // eslint-disable-next-line no-console
+    console.error('[automations] onUpdateTransitions failed:', err);
+  }
+}
+
+/** Fires immediately or opens/refreshes/cancels the pending deferral window for one transition. */
+async function handleUpdateTransition(
+  rule: Automation,
+  t: UpdateTrigger,
+  deviceId: string,
+  pluginId: string,
+  tr: UpdateTransition,
+  deviceName: string,
+  nowMs: number
+): Promise<void> {
+  const snapshot: PendingUpdateSnapshot = {
+    deviceId,
+    pluginId,
+    kind: tr.kind,
+    name: tr.name,
+    currentVersion: tr.currentVersion,
+    latestVersion: tr.latestVersion,
+    rebootRequired: tr.rebootRequired,
+    applyActionId: tr.applyActionId ?? null,
+    applyInput: tr.applyInput,
+  };
+
+  if (!t.defer) {
+    // Immediate firing — cooldown has the same semantics as other event triggers.
+    if (inCooldown(rule, nowMs)) return;
+    await fireRule(rule, t, updateRunContext(deviceId, pluginId, tr), buildUpdateTriggerContext(t, deviceName, snapshot));
+    return;
+  }
+
+  // Deferred — one pending window per (rule, trigger, update row).
+  const key = updatePendingStateKey(deviceId, pluginId, tr.kind, tr.name);
+  const existingRaw = await readState(rule.id, t.id, key);
+  if (existingRaw) {
+    let win: PendingUpdateWindow | null = null;
+    try {
+      const parsed = JSON.parse(existingRaw) as Partial<PendingUpdateWindow>;
+      if (parsed && typeof parsed.sinceIso === 'string' && parsed.snapshot && typeof parsed.snapshot === 'object') win = parsed as PendingUpdateWindow;
+    } catch { /* corrupt — replaced below */ }
+
+    if (!win) {
+      await writeState(rule.id, t.id, key, JSON.stringify({ sinceIso: new Date(nowMs).toISOString(), snapshot } satisfies PendingUpdateWindow));
+      return;
+    }
+
+    if (tr.transition === 'disappeared') {
+      if (t.condition === 'available') {
+        // The update vanished while we waited — cancel the window silently.
+        await writeState(rule.id, t.id, key, null);
+        return;
+      }
+      win.snapshot = snapshot; // resolved + defer: refresh with last known state
+    } else if (t.condition === 'resolved') {
+      // The update came back while a "resolved" window was pending — stale, cancel.
+      await writeState(rule.id, t.id, key, null);
+      return;
+    } else {
+      win.snapshot = snapshot; // version advance: refresh snapshot, keep sinceIso (slot doesn't move)
+    }
+    await writeState(rule.id, t.id, key, JSON.stringify(win));
+  } else {
+    await writeState(rule.id, t.id, key, JSON.stringify({ sinceIso: new Date(nowMs).toISOString(), snapshot } satisfies PendingUpdateWindow));
+  }
+}
+
+/** One evaluator tick over all pending deferral windows of the given rules. */
+async function evaluatePendingUpdateWindows(rules: Automation[], nowMs: number): Promise<void> {
+  const deviceRows = await db.query.devices.findMany();
+  const namesById = new Map(deviceRows.map((d) => [d.id, d.name]));
+
+  for (const rule of rules) {
+    if (!rule.enabled) continue;
+    for (const t of rule.triggers) {
+      if (t.type !== 'updateAvailable' || !t.defer) continue;
+      try {
+        await evaluateOnePendingUpdateTrigger(rule, t, namesById, nowMs);
+      } catch (err) {
+        // eslint-disable-next-line no-console
+        console.error(`[automations] pending update window evaluation for rule ${rule.id} failed:`, err);
+      }
+    }
+  }
+}
+
+/** Checks every pending window of one deferred trigger; fires the due ones. */
+async function evaluateOnePendingUpdateTrigger(
+  rule: Automation,
+  t: UpdateTrigger,
+  namesById: Map<string, string>,
+  nowMs: number
+): Promise<void> {
+  if (!t.defer) return; // only deferred triggers keep pending windows
+  const rows = await db.query.automationState.findMany({
+    where: and(eq(schema.automationState.automationId, rule.id), eq(schema.automationState.triggerId, t.id)),
+  });
+
+  for (const row of rows) {
+    if (!row.stateKey.startsWith('pending:')) continue;
+    let win: PendingUpdateWindow | null = null;
+    try {
+      const parsed = JSON.parse(row.value) as Partial<PendingUpdateWindow>;
+      if (parsed && typeof parsed.sinceIso === 'string' && parsed.snapshot && typeof parsed.snapshot === 'object') win = parsed as PendingUpdateWindow;
+    } catch { /* corrupt row — drop it */ }
+    if (!win) {
+      await writeState(rule.id, t.id, row.stateKey, null);
+      continue;
+    }
+
+    // An 'available' window whose update row vanished (applied/withdrawn) is cancelled silently.
+    if (t.condition === 'available') {
+      const stillThere = await db.query.deviceUpdates.findFirst({
+        where: and(
+          eq(schema.deviceUpdates.deviceId, win.snapshot.deviceId),
+          eq(schema.deviceUpdates.pluginId, win.snapshot.pluginId),
+          eq(schema.deviceUpdates.kind, win.snapshot.kind),
+          eq(schema.deviceUpdates.name, win.snapshot.name)
+        ),
+      });
+      if (!stillThere) {
+        await writeState(rule.id, t.id, row.stateKey, null);
+        continue;
+      }
+    }
+
+    const state = pendingWindowState(t.defer, win.sinceIso, nowMs);
+    if (state === 'pending') continue; // not due yet — keep waiting
+
+    // Due (or max-wait exceeded) but the rule is in cooldown: keep the window and
+    // retry next tick — the slot anchor (sinceIso) doesn't move.
+    if (inCooldown(rule, nowMs)) continue;
+
+    await fireRule(
+      rule,
+      t,
+      updateRunContext(win.snapshot.deviceId, win.snapshot.pluginId, { kind: win.snapshot.kind, name: win.snapshot.name, transition: 'appeared', currentVersion: win.snapshot.currentVersion, latestVersion: win.snapshot.latestVersion, rebootRequired: win.snapshot.rebootRequired }),
+      buildUpdateTriggerContext(t, namesById.get(win.snapshot.deviceId) ?? null, win.snapshot)
+    );
+    await writeState(rule.id, t.id, row.stateKey, null); // fired — clear the window
   }
 }
 
