@@ -18,6 +18,7 @@ import NetworkRolloutPage from './pages/NetworkRolloutPage';
 import Hosts from './pages/Hosts';
 import Dns from './pages/Dns';
 import DnsRolloutPage from './pages/DnsRolloutPage';
+import Dhcp from './pages/Dhcp';
 import DocumentedHosts from './pages/DocumentedHosts';
 import DocumentedNetworks from './pages/DocumentedNetworks';
 import DocumentedHostImportPage from './pages/DocumentedHostImportPage';
@@ -76,6 +77,8 @@ const PAGE_PERMISSIONS: Array<{ path: string; permission?: string | string[] }> 
   { path: '/dns', permission: 'dns:read' },
   // Full-page rollout wizard — same read perm as the DNS page it lives on.
   { path: '/dns/rollout', permission: 'dns:read' },
+  // Cross-device DHCP inventory (server networks + static reservations).
+  { path: '/dhcp', permission: 'dhcp:read' },
   { path: '/documented-hosts', permission: 'documented-hosts:read' },
   // Full-page "import from live inventory" wizard — mutates documented rows, so it
   // is gated on the write perm (the endpoint requires documented-hosts:write).
@@ -214,6 +217,8 @@ export default function App() {
       <Route path="/dns" element={<Page permission="dns:read"><Dns /></Page>} />
       {/* Full-page rollout wizard (same read perm as /dns). */}
       <Route path="/dns/rollout" element={<Page permission="dns:read"><DnsRolloutPage /></Page>} />
+      {/* Cross-device DHCP inventory — server networks + static reservations. */}
+      <Route path="/dhcp" element={<Page permission="dhcp:read"><Dhcp /></Page>} />
       {/* User-maintained host documentation (permanent inventory + CSV import). */}
       <Route path="/documented-hosts" element={<Page permission="documented-hosts:read"><DocumentedHosts /></Page>} />
       {/* Full-page "import from live inventory" wizard (replaces the old modal) — write-gated. */}

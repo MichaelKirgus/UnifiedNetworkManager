@@ -132,6 +132,26 @@ function makeRouterOsMock(port: number): http.Server & { state: MockState } {
             'expires-after': '1d2h3m4s',
             interface: 'ether1',
           },
+          // Static binding — the lease table mixes static + dynamic rows (DHCP page).
+          { '.id': '*2', 'mac-address': 'AA:BB:CC:DD:EE:88', address: '192.168.1.50', 'host-name': 'printer', status: 'bound' },
+        ]);
+        return;
+
+      case '/rest/ip/dhcp-server':
+        json(200, [
+          { '.id': '*1', name: 'dhcp-ether1', interface: 'ether1', 'address-pool': 'dhcp-ether1', 'lease-time': '30m' },
+        ]);
+        return;
+
+      case '/rest/ip/pool':
+        json(200, [
+          { '.id': '*1', name: 'dhcp-ether1', ranges: '192.168.1.10-192.168.1.200' },
+        ]);
+        return;
+
+      case '/rest/ip/dhcp-server/network':
+        json(200, [
+          { '.id': '*1', 'address-range': '192.168.1.10-192.168.1.200', interface: 'ether1', gateway: '192.168.1.1', 'dns-server': '1.1.1.1,9.9.9.9' },
         ]);
         return;
 
@@ -238,7 +258,14 @@ async function main(): Promise<void> {
   const arp: Record<string, any>[] = Array.isArray(m['arp']) ? m['arp'] : [];
   check('arp[] row', arp.length === 1 && arp[0].mac === 'aa:bb:cc:dd:ee:99' && arp[0].ip === '192.168.1.50' && arp[0].intf === 'ether1', arp);
   const leases: Record<string, any>[] = Array.isArray(m['dhcpLeases']) ? m['dhcpLeases'] : [];
-  check('dhcpLeases[] row (hostname + ISO expiry)', leases.length === 1 && leases[0].hostname === 'laptop' && typeof leases[0].expiry === 'string' && !Number.isNaN(Date.parse(leases[0].expiry)), leases);
+  check('dhcpLeases[] rows (dynamic + static binding)', leases.length === 2 && leases[0].hostname === 'laptop' && typeof leases[0].expiry === 'string' && !Number.isNaN(Date.parse(leases[0].expiry)), leases);
+
+  // DHCP page inventory: configured server networks (/ip/dhcp-server × /ip/pool) +
+  // static lease bindings (the whole lease table, status-badged).
+  const dhcpNets: Record<string, any>[] = Array.isArray(m['dhcpNetworks']) ? m['dhcpNetworks'] : [];
+  check('dhcpNetworks[] row (pool range + options)', dhcpNets.length === 1 && dhcpNets[0].name === 'dhcp-ether1' && dhcpNets[0].rangeStart === '192.168.1.10' && dhcpNets[0].rangeEnd === '192.168.1.200' && dhcpNets[0].cidr === '192.168.1.0/24' && dhcpNets[0].leaseTimeSeconds === 1800 && dhcpNets[0].gateway === '192.168.1.1' && dhcpNets[0].dnsServers === '1.1.1.1,9.9.9.9', dhcpNets);
+  const dhcpRes: Record<string, any>[] = Array.isArray(m['dhcpReservations']) ? m['dhcpReservations'] : [];
+  check('dhcpReservations[] rows (static binding + dynamic lease)', dhcpRes.length === 2 && dhcpRes.some((r) => r.mac === 'aa:bb:cc:dd:ee:88' && r.ip === '192.168.1.50' && r.status === 'bound') && dhcpRes.some((r) => r.mac === 'aa:bb:cc:dd:ee:77'), dhcpRes);
   const routes: Record<string, any>[] = Array.isArray(m['routes']) ? m['routes'] : [];
   check('routes[] (static default + connected)', routes.length === 2 && routes.some((r) => r.destination === '0.0.0.0/0' && r.protocol === 'static' && r.gateway === '10.0.0.254') && routes.some((r) => r.destination === '192.168.1.0/24' && r.protocol === 'connected'), routes);
   check('wlanClients absent (no WiFi on box)', m['wlanClients'] === undefined, m['wlanClients']);

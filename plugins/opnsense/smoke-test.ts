@@ -22,17 +22,86 @@ function json(res: http.ServerResponse, status: number, body: unknown): void {
   res.end(JSON.stringify(body));
 }
 
+/** Flips the mock between dnsmasq and Kea DHCP backends (the smoke test drives
+ * both read paths against the same appliance). */
+let mockDhcpBackend: 'dnsmasq' | 'kea' = 'dnsmasq';
+
+/** Captured write payloads — assertions verify the plugin sends model-correct bodies. */
+const capturedWrites: Record<string, unknown> = {};
+
+function readBody(req: http.IncomingMessage): Promise<Record<string, unknown>> {
+  return new Promise((resolve) => {
+    let raw = '';
+    req.on('data', (c) => { raw += c; });
+    req.on('end', () => { try { resolve(raw ? JSON.parse(raw) : {}); } catch { resolve({}); } });
+  });
+}
+
 const mock = http.createServer((req, res) => {
   // Strip query strings — some endpoints are called with params (e.g. interfaces_info?details=true).
   const url = (req.url ?? '/').split('?')[0];
   console.log(`[mock] ${req.method} ${url}`);
 
+  // --- DHCP write surface (staged mutations) -----------------------------------
+  if (url === '/api/kea/dhcpv4/add_reservation') {
+    return void readBody(req).then((body) => { capturedWrites['keaAdd'] = body; json(res, 200, {}); });
+  }
+  const keaSetMatch = url.match(/^\/api\/kea\/dhcpv4\/set_reservation\/([^/]+)$/);
+  if (keaSetMatch) {
+    return void readBody(req).then((body) => { capturedWrites['keaSet'] = { uuid: decodeURIComponent(keaSetMatch[1]), body }; json(res, 200, {}); });
+  }
+  if (url === '/api/kea/dhcpv4/get_reservation/res-uuid-1') {
+    // REAL firmware shape: the subnet relation comes back as a map
+    // { <subnetUuid>: { value, selected } } — not a plain string.
+    return json(res, 200, { reservation: {
+      uuid: 'res-uuid-1',
+      subnet: {
+        'subnet-uuid-lan': { value: '192.168.1.0/24', selected: 1 },
+        'subnet-uuid-other': { value: '10.0.0.0/24', selected: 0 },
+      },
+      hw_address: 'aa:bb:cc:dd:ee:99', ip_address: '192.168.1.10', hostname: 'printer',
+    } });
+  }
+  if (url === '/api/services/dhcp/staticmap/add') {
+    return void readBody(req).then((body) => { capturedWrites['dnsmasqAdd'] = body; json(res, 200, {}); });
+  }
+  const smDelMatch = url.match(/^\/api\/services\/dhcp\/staticmap\/del\/([^/]+)$/);
+  if (smDelMatch) {
+    return void readBody(req).then((body) => { capturedWrites['dnsmasqDel'] = { uuid: decodeURIComponent(smDelMatch[1]), body }; json(res, 200, {}); });
+  }
+
   // Edition probe: CE → 403 (no opncentral/sync).
   if (url.startsWith('/api/opncentral/')) return json(res, 403, { error: 'forbidden' });
   // DNS backend probe: unbound not enabled → dnsmasq.
   if (url === '/api/unbound/overview/is_enabled') return json(res, 200, { enabled: false });
-  // DHCP backend probe: kea not running → dnsmasq.
-  if (url === '/api/kea/service/status') return json(res, 200, { running: false });
+  // DHCP backend probe — driven by mockDhcpBackend so the smoke test can flip it.
+  if (url === '/api/kea/service/status') return json(res, 200, { running: mockDhcpBackend === 'kea' });
+
+  // --- Configured DHCP surface (DHCP page) — dnsmasq backend -------------------
+  if (mockDhcpBackend === 'dnsmasq') {
+    // Ranges: the real search_range recordset shape ({ interface, start_addr, end_addr, uuid }).
+    if (url === '/api/dnsmasq/settings/search_range') return json(res, 200, { rows: [
+      { uuid: 'range-uuid-lan', interface: 'lan', start_addr: '192.168.1.50', end_addr: '192.168.1.200' },
+    ] });
+    // Static maps (services/dhcp controller) — per-interface, uuid-keyed.
+    if (url === '/api/services/dhcp/staticmap/search') return json(res, 200, { rows: [
+      { uuid: 'sm-uuid-1', interface: 'lan', mac: 'AA:BB:CC:DD:EE:99', ipaddr: '192.168.1.10', hostname: 'printer' },
+    ] });
+  }
+
+  // --- Configured DHCP surface (DHCP page) — Kea backend -----------------------
+  if (mockDhcpBackend === 'kea') {
+    // Current firmware: the full config carries NO subnets (only general/lexpire/ha).
+    if (url === '/api/kea/dhcpv4/get') return json(res, 200, { dhcpv4: { general: { enabled: '1' }, lexpire: {}, ha: {} } });
+    // Subnets live in the search_subnet recordset — pools is ONE "start-end" STRING.
+    if (url === '/api/kea/dhcpv4/search_subnet') return json(res, 200, { rows: [
+      { uuid: 'subnet-uuid-lan', subnet_id: '1', subnet: '192.168.1.0/24', pools: '192.168.1.50-192.168.1.200', description: 'LAN' },
+    ] });
+    // Kea reservations (search_reservation recordset) — hw_address/ip_address fields.
+    if (url === '/api/kea/dhcpv4/search_reservation') return json(res, 200, { rows: [
+      { uuid: 'res-uuid-1', subnet: 'subnet-uuid-lan', ip_address: '192.168.1.10', hw_address: 'AA:BB:CC:DD:EE:99', hostname: 'printer' },
+    ] });
+  }
 
   switch (url) {
     case '/api/core/system/status':
@@ -131,8 +200,11 @@ async function main(): Promise<void> {
   await new Promise<void>((r) => mock.listen(MOCK_PORT, () => r()));
   console.log(`[smoke] mock appliance on :${MOCK_PORT}`);
 
-  // Boot the real plugin (index.ts calls app.listen on PORT).
+  // Boot the real plugin (index.ts calls app.listen on PORT). Disable the
+  // inventory cache: the test flips the mock's DHCP backend between two
+  // /monitoring calls and each must re-collect.
   process.env.PORT = String(PLUGIN_PORT);
+  process.env.UNM_NO_INVENTORY_CACHE = '1';
   await import('./src/index');
   await new Promise((r) => setTimeout(r, 300));
   console.log(`[smoke] plugin on :${PLUGIN_PORT}`);
@@ -167,7 +239,7 @@ async function main(): Promise<void> {
   check('2 best-effort snapshot.create prepended', byId('snapshot.create').length === 2 && byId('snapshot.create').every((s) => s.bestEffort));
   const serverA = plan.steps.find((s) => s.deviceId === 'devA' && s.actionId === 'wireguard.server.set')!;
   const peerA = plan.steps.find((s) => s.deviceId === 'devA' && s.actionId === 'wireguard.peer.add')!;
-  check('peer A depends on server A', peerA.dependsOn?.includes(serverA.stepIndex), { peer: peerA.dependsOn, server: serverA.stepIndex });
+  check('peer A depends on server A', (peerA.dependsOn ?? []).includes(serverA.stepIndex), { peer: peerA.dependsOn, server: serverA.stepIndex });
   check('no key material in plan output', JSON.stringify(plan).length > 0 && !/privateKey|publicKey/.test(JSON.stringify(plan)));
 
   // --- /config (read action) -------------------------------------------------------------
@@ -195,7 +267,7 @@ async function main(): Promise<void> {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ deviceId: 'devA', managementAddress: `http://localhost:${MOCK_PORT}`, apiKey: 'kA', apiSecret: 'sA' }),
   });
-  const monJson = (await monRes.json()) as { health?: string; metrics?: Record<string, unknown> };
+  const monJson = (await monRes.json()) as { health?: string; metrics?: Record<string, unknown>; metricDescriptors?: unknown[] };
   console.log('\n== /monitoring ==');
   check('health ok', monJson.health === 'ok', monJson.health);
   check('cpu.percent collected', typeof monJson.metrics?.['cpu.percent'] === 'number', monJson.metrics?.['cpu.percent']);
@@ -224,6 +296,103 @@ async function main(): Promise<void> {
   const descriptors = (monJson.metricDescriptors ?? []) as { key: string }[];
   check('networks descriptor present', descriptors.some((d) => d.key === 'networks'));
   check('dhcpLeases descriptor present', descriptors.some((d) => d.key === 'dhcpLeases'));
+
+  // --- /monitoring DHCP config (dnsmasq backend — auto-detected) -----------------
+  const dhcpNets = (monJson.metrics?.['dhcpNetworks'] ?? []) as Record<string, unknown>[];
+  console.log('\n== /monitoring dhcpNetworks/dhcpReservations (dnsmasq) ==');
+  check('dnsmasq range row parsed', Array.isArray(dhcpNets) && dhcpNets.length === 1, dhcpNets);
+  const dn = dhcpNets[0];
+  check('range carries interface + start/end + uuid refId', dn?.interface === 'lan' && dn.rangeStart === '192.168.1.50' && dn.rangeEnd === '192.168.1.200' && dn.refId === 'range-uuid-lan', dn);
+  const dhcpRes = (monJson.metrics?.['dhcpReservations'] ?? []) as Record<string, unknown>[];
+  check('dnsmasq staticmap row parsed', Array.isArray(dhcpRes) && dhcpRes.length === 1, dhcpRes);
+  const dr = dhcpRes[0];
+  check('staticmap normalized (mac lowercased + ip + interface + uuid)', dr?.mac === 'aa:bb:cc:dd:ee:99' && dr.ip === '192.168.1.10' && dr.interface === 'lan' && dr.refId === 'sm-uuid-1', dr);
+  check('dhcpNetworks descriptor present', descriptors.some((d) => d.key === 'dhcpNetworks'));
+
+  // --- /monitoring DHCP config (Kea backend — forced via the dhcpBackend option) --
+  mockDhcpBackend = 'kea';
+  const monKeaRes = await fetch(`${BASE}/monitoring`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'x-unm-settings': JSON.stringify({ dhcpBackend: 'kea' }) },
+    body: JSON.stringify({ deviceId: 'devA', managementAddress: `http://localhost:${MOCK_PORT}`, apiKey: 'kA', apiSecret: 'sA' }),
+  });
+  const monKeaJson = (await monKeaRes.json()) as { health?: string; metrics?: Record<string, unknown> };
+  console.log('\n== /monitoring dhcpNetworks/dhcpReservations (kea) ==');
+  check('HTTP 200', monKeaRes.status === 200);
+  const keaNets = (monKeaJson.metrics?.['dhcpNetworks'] ?? []) as Record<string, unknown>[];
+  check('Kea subnet pool split into start/end', Array.isArray(keaNets) && keaNets.length === 1, keaNets);
+  const kn = keaNets[0];
+  // Real firmware shape: search_subnet recordset row (uuid + description + pools string).
+  check('Kea row carries name/cidr/refId from the recordset', kn?.name === 'LAN' && kn.rangeStart === '192.168.1.50' && kn.rangeEnd === '192.168.1.200' && kn.cidr === '192.168.1.0/24' && kn.refId === 'subnet-uuid-lan', kn);
+  const keaRes = (monKeaJson.metrics?.['dhcpReservations'] ?? []) as Record<string, unknown>[];
+  check('Kea reservation row parsed', Array.isArray(keaRes) && keaRes.length === 1, keaRes);
+  const kr = keaRes[0];
+  // Real firmware shape: hw_address/ip_address fields (no interface on Kea rows).
+  check('Kea reservation normalized (mac + ip + refId)', kr?.mac === 'aa:bb:cc:dd:ee:99' && kr.ip === '192.168.1.10' && kr.refId === 'res-uuid-1', kr);
+
+  // --- /config DHCP writes (Kea backend — forced via the dhcpBackend option) ----
+  console.log('\n== /config dhcp.staticMapping.add/set (kea) ==');
+  const keaAddRes = await fetch(`${BASE}/config`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'x-unm-settings': JSON.stringify({ dhcpBackend: 'kea' }) },
+    body: JSON.stringify({ deviceId: 'devA', managementAddress: `http://localhost:${MOCK_PORT}`, apiKey: 'kA', apiSecret: 'sA', actionId: 'dhcp.staticMapping.add', input: { mac: 'aa:bb:cc:dd:ee:01', ip: '192.168.1.50', hostname: 'laptop-1' } }),
+  });
+  const keaAddJson = (await keaAddRes.json()) as { success?: boolean };
+  check('Kea add succeeds without interface', keaAddRes.status === 200 && keaAddJson.success === true, keaAddJson);
+  // Model-correct payload under the `reservation` key (the controller reads
+  // POST['reservation']) with hw_address/ip_address + the REQUIRED subnet
+  // relation resolved from IP containment (192.168.1.50 ∈ 192.168.1.0/24 → subnet-uuid-lan).
+  const keaAddItem = ((capturedWrites['keaAdd'] as { reservation?: Record<string, unknown> })?.reservation ?? {}) as Record<string, unknown>;
+  check('Kea add payload uses model fields + resolved subnet', keaAddItem['hw_address'] === 'aa:bb:cc:dd:ee:01' && keaAddItem['ip_address'] === '192.168.1.50' && keaAddItem['hostname'] === 'laptop-1' && keaAddItem['subnet'] === 'subnet-uuid-lan', capturedWrites['keaAdd']);
+
+  const keaSetRes = await fetch(`${BASE}/config`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'x-unm-settings': JSON.stringify({ dhcpBackend: 'kea' }) },
+    body: JSON.stringify({ deviceId: 'devA', managementAddress: `http://localhost:${MOCK_PORT}`, apiKey: 'kA', apiSecret: 'sA', actionId: 'dhcp.staticMapping.set', input: { uuid: 'res-uuid-1', mac: 'aa:bb:cc:dd:ee:99', ip: '192.168.1.77' } }),
+  });
+  const keaSetJson = (await keaSetRes.json()) as { success?: boolean };
+  check('Kea set succeeds', keaSetRes.status === 200 && keaSetJson.success === true, keaSetJson);
+  // Same-subnet edit keeps the original subnet relation (no re-resolve needed).
+  // The mock get_reservation returns the real-firmware relation-map shape — this
+  // also proves the parser extracts the selected uuid from it.
+  const keaSetCapture = capturedWrites['keaSet'] as { uuid?: string; body?: { reservation?: Record<string, unknown> } };
+  check('Kea set targets the right uuid', keaSetCapture.uuid === 'res-uuid-1', capturedWrites['keaSet']);
+  const keaSetItem = (keaSetCapture.body?.reservation ?? {}) as Record<string, unknown>;
+  check('Kea set payload keeps subnet + new ip_address', keaSetItem['subnet'] === 'subnet-uuid-lan' && keaSetItem['ip_address'] === '192.168.1.77' && keaSetItem['hw_address'] === 'aa:bb:cc:dd:ee:99', capturedWrites['keaSet']);
+
+  // --- /config DHCP writes (dnsmasq backend) ------------------------------------
+  mockDhcpBackend = 'dnsmasq';
+  console.log('\n== /config dhcp.staticMapping.add/set (dnsmasq) ==');
+  const dmAddRes = await fetch(`${BASE}/config`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ deviceId: 'devA', managementAddress: `http://localhost:${MOCK_PORT}`, apiKey: 'kA', apiSecret: 'sA', actionId: 'dhcp.staticMapping.add', input: { interface: 'lan', mac: 'aa:bb:cc:dd:ee:02', ip: '192.168.1.51' } }),
+  });
+  const dmAddJson = (await dmAddRes.json()) as { success?: boolean };
+  check('dnsmasq add succeeds with interface', dmAddRes.status === 200 && dmAddJson.success === true, dmAddJson);
+  const dmAddBody = capturedWrites['dnsmasqAdd'] as Record<string, unknown>;
+  check('dnsmasq add payload (interface/mac/ipaddr)', dmAddBody['interface'] === 'lan' && dmAddBody['mac'] === 'aa:bb:cc:dd:ee:02' && dmAddBody['ipaddr'] === '192.168.1.51', capturedWrites['dnsmasqAdd']);
+
+  const dmNoIfaceRes = await fetch(`${BASE}/config`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ deviceId: 'devA', managementAddress: `http://localhost:${MOCK_PORT}`, apiKey: 'kA', apiSecret: 'sA', actionId: 'dhcp.staticMapping.add', input: { mac: 'aa:bb:cc:dd:ee:02', ip: '192.168.1.51' } }),
+  });
+  const dmNoIfaceJson = (await dmNoIfaceRes.json()) as { success?: boolean };
+  check('dnsmasq add without interface fails cleanly', dmNoIfaceRes.status === 200 && dmNoIfaceJson.success === false, dmNoIfaceJson);
+
+  const dmSetRes = await fetch(`${BASE}/config`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ deviceId: 'devA', managementAddress: `http://localhost:${MOCK_PORT}`, apiKey: 'kA', apiSecret: 'sA', actionId: 'dhcp.staticMapping.set', input: { uuid: 'sm-uuid-1', mac: 'aa:bb:cc:dd:ee:99', ip: '192.168.1.77' } }),
+  });
+  const dmSetJson = (await dmSetRes.json()) as { success?: boolean };
+  check('dnsmasq set succeeds (del+add emulation)', dmSetRes.status === 200 && dmSetJson.success === true, dmSetJson);
+  // Emulation: del by uuid THEN re-add with the ORIGINAL interface preserved.
+  const dmDelCapture = capturedWrites['dnsmasqDel'] as { uuid?: string };
+  check('dnsmasq set deleted the original row', dmDelCapture.uuid === 'sm-uuid-1', capturedWrites['dnsmasqDel']);
+  const dmSetAddBody = capturedWrites['dnsmasqAdd'] as Record<string, unknown>;
+  check('dnsmasq re-add kept interface + new ipaddr', dmSetAddBody['interface'] === 'lan' && dmSetAddBody['mac'] === 'aa:bb:cc:dd:ee:99' && dmSetAddBody['ipaddr'] === '192.168.1.77', capturedWrites['dnsmasqAdd']);
 
   // --- /monitoring storage (mounted filesystems via system_disk) --------------
   const fsRows = (monJson.metrics?.['filesystems'] ?? []) as Record<string, unknown>[];

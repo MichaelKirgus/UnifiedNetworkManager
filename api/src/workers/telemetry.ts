@@ -53,7 +53,7 @@ const INVENTORY_SWEEP_INTERVAL_MS = 10 * 60 * 1000;
 /** Metric keys that carry cross-device inventory (ingested into their own tables). */
 const INVENTORY_METRIC_KEYS = [
   'networks', 'arp', 'ndp', 'hosts', 'dhcpLeases', 'wlanClients', 'macTable', 'dockerHosts', 'vmHosts',
-  'tunnels', 'routes', 'dnsEntries', 'firewallRules', 'certificates', 'services',
+  'tunnels', 'routes', 'dnsEntries', 'dhcpNetworks', 'dhcpReservations', 'firewallRules', 'certificates', 'services',
   'wifiNetworks', 'wifiAirtime', 'wifiRadios', 'wifiNeighbors',
   'ports', 'filesystems', 'disks', 'containers', 'images', 'vms', 'gpus', 'updates',
   'mailDomains', 'mailMailboxes', 'mailAliases',
@@ -966,6 +966,115 @@ async function ingestInventory(
             eq(schema.deviceDnsEntries.deviceId, deviceId),
             eq(schema.deviceDnsEntries.pluginId, pluginId),
             or(...staleDns.map((k) => and(eq(schema.deviceDnsEntries.name, k.name), eq(schema.deviceDnsEntries.ip, k.ip))))
+          )
+        );
+      }
+    }
+
+    // --- dhcpNetworks (configured DHCP server networks/pools) -----------------
+    // Same present-vs-absent contract as dnsEntries: a PRESENT-but-empty array is
+    // authoritative ("this device has no DHCP networks right now") so stale rows
+    // are wiped; an ABSENT key means "plugin doesn't report DHCP networks" and must
+    // not touch the table (24h sweep still applies). Identity is name|rangeStart so
+    // a scope with several ranges yields multiple rows.
+    const rawDhcpNetworks = Array.isArray(metrics['dhcpNetworks']) ? (metrics['dhcpNetworks'] as unknown[]) : null;
+    if (rawDhcpNetworks !== null) {
+      const values: {
+        deviceId: string; pluginId: string; name: string; iface: string | null; rangeStart: string; rangeEnd: string;
+        cidr: string | null; leaseTimeSeconds: number | null; gateway: string | null; dnsServers: string | null; refId: string | null; collectedAt: string;
+      }[] = [];
+      for (const raw of rawDhcpNetworks) {
+        if (!raw || typeof raw !== 'object') continue;
+        const r = raw as Record<string, unknown>;
+        const name = typeof r['name'] === 'string' ? (r['name'] as string).trim() : '';
+        const rangeStart = typeof r['rangeStart'] === 'string' ? (r['rangeStart'] as string).trim() : '';
+        const rangeEnd = typeof r['rangeEnd'] === 'string' ? (r['rangeEnd'] as string).trim() : '';
+        if (!name || !rangeStart) continue; // both are part of the conflict key
+        const iface = typeof r['interface'] === 'string' && (r['interface'] as string).trim() !== '' ? (r['interface'] as string).trim() : null;
+        const cidr = typeof r['cidr'] === 'string' && (r['cidr'] as string).trim() !== '' ? (r['cidr'] as string).trim() : null;
+        const leaseTimeSeconds = typeof r['leaseTimeSeconds'] === 'number' && Number.isFinite(r['leaseTimeSeconds']) ? Math.round(r['leaseTimeSeconds'] as number) : null;
+        const gateway = typeof r['gateway'] === 'string' && (r['gateway'] as string).trim() !== '' ? (r['gateway'] as string).trim() : null;
+        const dnsServers = typeof r['dnsServers'] === 'string' && (r['dnsServers'] as string).trim() !== '' ? (r['dnsServers'] as string).trim() : null;
+        const refId = typeof r['refId'] === 'string' && (r['refId'] as string).trim() !== '' ? (r['refId'] as string).trim() : null;
+        values.push({ deviceId, pluginId, name, iface, rangeStart, rangeEnd: rangeEnd || rangeStart, cidr, leaseTimeSeconds, gateway, dnsServers, refId, collectedAt });
+      }
+      const dhcpNetByKey = new Map<string, typeof values[number]>();
+      for (const v of values) {
+        dhcpNetByKey.set(`${v.deviceId}|${v.pluginId}|${v.name}|${v.rangeStart}`, v);
+      }
+      if (dhcpNetByKey.size > 0) {
+        await db.insert(schema.deviceDhcpNetworks).values(Array.from(dhcpNetByKey.values())).onConflictDoUpdate({
+          target: [schema.deviceDhcpNetworks.deviceId, schema.deviceDhcpNetworks.pluginId, schema.deviceDhcpNetworks.name, schema.deviceDhcpNetworks.rangeStart],
+          // All display columns are refreshed — a range/lease-time edited on the device must track the live table.
+          set: {
+            collectedAt: sql`excluded."collectedAt"`, iface: sql`excluded.iface`, rangeEnd: sql`excluded."rangeEnd"`,
+            cidr: sql`excluded.cidr`, leaseTimeSeconds: sql`excluded."leaseTimeSeconds"`, gateway: sql`excluded.gateway`, dnsServers: sql`excluded."dnsServers"`, refId: sql`excluded."refId"`,
+          },
+        });
+      }
+      // A DHCP network removed on the device must vanish from the page. Drop rows
+      // this snapshot no longer reports (only when the key is present at all).
+      const existingDhcpNetKeys = await db
+        .select({ name: schema.deviceDhcpNetworks.name, rangeStart: schema.deviceDhcpNetworks.rangeStart })
+        .from(schema.deviceDhcpNetworks)
+        .where(and(eq(schema.deviceDhcpNetworks.deviceId, deviceId), eq(schema.deviceDhcpNetworks.pluginId, pluginId)));
+      const seenDhcpNetKeys = new Set(values.map((v) => `${v.name}|${v.rangeStart}`));
+      const staleDhcpNets = existingDhcpNetKeys.filter((k) => !seenDhcpNetKeys.has(`${k.name}|${k.rangeStart}`));
+      if (staleDhcpNets.length > 0) {
+        await db.delete(schema.deviceDhcpNetworks).where(
+          and(
+            eq(schema.deviceDhcpNetworks.deviceId, deviceId),
+            eq(schema.deviceDhcpNetworks.pluginId, pluginId),
+            or(...staleDhcpNets.map((k) => and(eq(schema.deviceDhcpNetworks.name, k.name), eq(schema.deviceDhcpNetworks.rangeStart, k.rangeStart))))
+          )
+        );
+      }
+    }
+
+    // --- dhcpReservations (static MAC→IP mappings) ----------------------------
+    // Same present-vs-absent contract as dnsEntries. Identity is mac — a MAC with
+    // several fixed IPs on one device collapses to the last-seen IP (vendors key
+    // reservations by MAC). `refId`/`ip`/`hostname` are refreshed on conflict so an
+    // edited reservation tracks the live table; NULLs in the snapshot overwrite.
+    const rawDhcpReservations = Array.isArray(metrics['dhcpReservations']) ? (metrics['dhcpReservations'] as unknown[]) : null;
+    if (rawDhcpReservations !== null) {
+      const values: { deviceId: string; pluginId: string; mac: string; ip: string | null; hostname: string | null; iface: string | null; refId: string | null; status: string | null; collectedAt: string }[] = [];
+      for (const raw of rawDhcpReservations) {
+        if (!raw || typeof raw !== 'object') continue;
+        const r = raw as Record<string, unknown>;
+        const mac = typeof r['mac'] === 'string' ? (r['mac'] as string).trim().toLowerCase() : '';
+        if (!mac) continue; // mac is part of the conflict key
+        const ip = typeof r['ip'] === 'string' && (r['ip'] as string).trim() !== '' ? (r['ip'] as string).trim() : null;
+        const hostname = typeof r['hostname'] === 'string' && (r['hostname'] as string).trim() !== '' ? (r['hostname'] as string).trim() : null;
+        const iface = typeof r['interface'] === 'string' && (r['interface'] as string).trim() !== '' ? (r['interface'] as string).trim() : null;
+        const refId = typeof r['refId'] === 'string' && (r['refId'] as string).trim() !== '' ? (r['refId'] as string).trim() : null;
+        const status = typeof r['status'] === 'string' && (r['status'] as string).trim() !== '' ? (r['status'] as string).trim().toLowerCase() : null;
+        values.push({ deviceId, pluginId, mac, ip, hostname, iface, refId, status, collectedAt });
+      }
+      const dhcpResByMac = new Map<string, typeof values[number]>();
+      for (const v of values) {
+        dhcpResByMac.set(`${v.deviceId}|${v.pluginId}|${v.mac}`, v);
+      }
+      if (dhcpResByMac.size > 0) {
+        await db.insert(schema.deviceDhcpReservations).values(Array.from(dhcpResByMac.values())).onConflictDoUpdate({
+          target: [schema.deviceDhcpReservations.deviceId, schema.deviceDhcpReservations.pluginId, schema.deviceDhcpReservations.mac],
+          set: { collectedAt: sql`excluded."collectedAt"`, ip: sql`excluded.ip`, hostname: sql`excluded.hostname`, iface: sql`excluded.iface`, refId: sql`excluded."refId"`, status: sql`excluded.status` },
+        });
+      }
+      // A reservation removed on the device must vanish from the page. Drop rows
+      // this snapshot no longer reports (only when the key is present at all).
+      const existingDhcpResMacs = await db
+        .select({ mac: schema.deviceDhcpReservations.mac })
+        .from(schema.deviceDhcpReservations)
+        .where(and(eq(schema.deviceDhcpReservations.deviceId, deviceId), eq(schema.deviceDhcpReservations.pluginId, pluginId)));
+      const seenDhcpResMacs = new Set(values.map((v) => v.mac));
+      const staleDhcpRes = existingDhcpResMacs.filter((k) => !seenDhcpResMacs.has(k.mac));
+      if (staleDhcpRes.length > 0) {
+        await db.delete(schema.deviceDhcpReservations).where(
+          and(
+            eq(schema.deviceDhcpReservations.deviceId, deviceId),
+            eq(schema.deviceDhcpReservations.pluginId, pluginId),
+            or(...staleDhcpRes.map((k) => eq(schema.deviceDhcpReservations.mac, k.mac)))
           )
         );
       }
@@ -2595,11 +2704,15 @@ async function sweepStaleInventory(inventoryWindowMs: number): Promise<void> {
     await db.delete(schema.networks).where(and(lt(schema.networks.collectedAt, cutoff), notInArray(schema.networks.deviceId, disabledIds)));
     await db.delete(schema.devicePorts).where(and(lt(schema.devicePorts.collectedAt, cutoff), notInArray(schema.devicePorts.deviceId, disabledIds)));
     await db.delete(schema.deviceDnsEntries).where(and(lt(schema.deviceDnsEntries.collectedAt, cutoff), notInArray(schema.deviceDnsEntries.deviceId, disabledIds)));
+    await db.delete(schema.deviceDhcpNetworks).where(and(lt(schema.deviceDhcpNetworks.collectedAt, cutoff), notInArray(schema.deviceDhcpNetworks.deviceId, disabledIds)));
+    await db.delete(schema.deviceDhcpReservations).where(and(lt(schema.deviceDhcpReservations.collectedAt, cutoff), notInArray(schema.deviceDhcpReservations.deviceId, disabledIds)));
   } else {
     await db.delete(schema.hosts).where(lt(schema.hosts.lastSeenAt, cutoff));
     await db.delete(schema.networks).where(lt(schema.networks.collectedAt, cutoff));
     await db.delete(schema.devicePorts).where(lt(schema.devicePorts.collectedAt, cutoff));
     await db.delete(schema.deviceDnsEntries).where(lt(schema.deviceDnsEntries.collectedAt, cutoff));
+    await db.delete(schema.deviceDhcpNetworks).where(lt(schema.deviceDhcpNetworks.collectedAt, cutoff));
+    await db.delete(schema.deviceDhcpReservations).where(lt(schema.deviceDhcpReservations.collectedAt, cutoff));
   }
   // Tunnels/routes/Wi-Fi rows carry no deviceId — they are only ever refreshed
   // by polling enabled devices, so the plain stale sweep applies to them.

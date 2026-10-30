@@ -49,7 +49,7 @@ import {
   OpnsenseTransport,
 } from './opnsenseClient';
 import { DEVICE_MODELS, RELEASES } from './deviceModels';
-import { createClient, OpnsenseCredentials, OpnsensePorts, resolveBase } from './client/http';
+import { createClient, get as opnsenseGet, OpnsenseCredentials, OpnsensePorts, resolveBase } from './client/http';
 import * as firmware from './client/firmware';
 import { resolveEdition } from './client/editions';
 import { detectDnsBackend, searchHostRecords, parseHostRecordRows, DnsBackend } from './client/dns';
@@ -338,6 +338,141 @@ function parseDhcpLeaseRows(rows: unknown[]): Record<string, unknown>[] {
 }
 
 /**
+ * Collects the CONFIGURED DHCP server surface for the cross-device DHCP page:
+ *   - dnsmasq backend: `GET /api/dnsmasq/settings/search_range` rows carry
+ *     `{ interface, start_addr, end_addr }` (the same shape networkIntents.ts
+ *     writes via add_range); staticmaps come from services/dhcp.
+ *   - Kea backend: subnets come from the `search_subnet` recordset (rows[] with
+ *     uuid/subnet CIDR/pools/description) — on current firmware the full config
+ *     (`GET /api/kea/dhcpv4/get`) carries NO subnets, so it is only a fallback;
+ *     reservations come from `search_reservation`. Field names vary by OPNsense
+ *     release, so every read is defensive multi-key.
+ * Returns [networks | null, reservations | null] — a null means "read failed"
+ * (the caller omits the metric key so stored rows survive); an empty array is
+ * authoritative ("this appliance has no DHCP ranges/reservations").
+ */
+async function collectDhcpConfig(
+  client: import('axios').AxiosInstance,
+  backend: DhcpBackend
+): Promise<[Record<string, unknown>[] | null, Record<string, unknown>[] | null]> {
+  if (backend === 'dnsmasq') {
+    const [rangeRes, mapRes] = await Promise.all([
+      opnsenseGet(client, '/api/dnsmasq/settings/search_range'),
+      import('./client/dhcp').then((m) => m.searchStaticMappings(client, 'dnsmasq')),
+    ]);
+    let networks: Record<string, unknown>[] | null = null;
+    if (rangeRes?.ok && rangeRes.data && typeof rangeRes.data === 'object') {
+      const d = rangeRes.data as Record<string, unknown>;
+      const rows: Record<string, unknown>[] = Array.isArray(d['rows']) ? (d['rows'] as Record<string, unknown>[]) : Array.isArray(d) ? (d as Record<string, unknown>[]) : [];
+      networks = rows.flatMap((r) => {
+        const iface = pickString(r, ['interface', 'if']);
+        let start = pickString(r, ['start_addr', 'start', 'range_start']);
+        let end = pickString(r, ['end_addr', 'end', 'range_end']);
+        if (!iface || !start) return [];
+        // A range row may carry a bare "a-b" string in one field — split defensively.
+        const dash = start.match(/^(\d{1,3}(?:\.\d{1,3}){3})-(\d{1,3}(?:\.\d{1,3}){3})$/);
+        if (dash) { start = dash[1]; end = dash[2]; }
+        // uuid is the delete handle for dhcp.network.delete.
+        return [{ name: iface, interface: iface, rangeStart: start, rangeEnd: end ?? start, refId: pickString(r, ['uuid']) }];
+      });
+    }
+    let reservations: Record<string, unknown>[] | null = null;
+    if (mapRes?.ok && mapRes.data && typeof mapRes.data === 'object') {
+      const d = mapRes.data as Record<string, unknown>;
+      const rows: Record<string, unknown>[] = Array.isArray(d['rows']) ? (d['rows'] as Record<string, unknown>[]) : [];
+      reservations = rows.map((r) => ({
+        mac: (pickString(r, ['mac', 'macaddr']) ?? '').toLowerCase(),
+        ip: pickString(r, ['ipaddr', 'ip', 'address']),
+        hostname: pickString(r, ['hostname', 'host']),
+        // dnsmasq staticmaps are per-interface — the add action needs it back.
+        interface: pickString(r, ['interface', 'if']),
+        refId: pickString(r, ['uuid']),
+      })).filter((r) => typeof r['mac'] === 'string' && (r['mac'] as string).length > 0);
+    }
+    return [networks, reservations];
+  }
+
+  // Kea backend. Subnets live in the `search_subnet` recordset on current
+  // firmware (rows[] with uuid/subnet_id/subnet CIDR/pools/description); older
+  // releases surface them inside the full config (`GET /api/kea/dhcpv4/get`) —
+  // try the recordset first, fall back to the config containers.
+  const { getKeaDhcpv4Config, searchStaticMappings, searchKeaSubnets } = await import('./client/dhcp');
+  let subnets: Record<string, unknown>[] | null = null;
+  const subnetRes = await searchKeaSubnets(client);
+  if (subnetRes?.ok && subnetRes.data && typeof subnetRes.data === 'object') {
+    const d = subnetRes.data as Record<string, unknown>;
+    subnets = Array.isArray(d['rows']) ? (d['rows'] as Record<string, unknown>[]) : [];
+  }
+  if (!subnets) {
+    const cfgRes = await getKeaDhcpv4Config(client);
+    if (cfgRes?.ok && cfgRes.data && typeof cfgRes.data === 'object') {
+      const d = cfgRes.data as Record<string, unknown>;
+      // Kea config shapes vary by release — accept the common containers.
+      subnets = Array.isArray(d['subnets'])
+        ? (d['subnets'] as Record<string, unknown>[])
+        : d['config'] && typeof d['config'] === 'object' && Array.isArray((d['config'] as Record<string, unknown>)['subnets'])
+          ? ((d['config'] as Record<string, unknown>)['subnets'] as Record<string, unknown>[])
+          : [];
+    }
+  }
+  let networks: Record<string, unknown>[] | null = null;
+  if (subnets !== null) {
+    networks = subnets.flatMap((sn) => {
+      // The recordset's `uuid` is the delete handle for dhcp.network.delete
+      // (Kea del_subnet); fall back to the numeric subnet id on older shapes.
+      const refId = pickString(sn, ['uuid']) ?? (() => {
+        const idRaw = sn['id'] ?? sn['subnet_id'];
+        return typeof idRaw === 'string' && idRaw.trim() !== '' ? idRaw : typeof idRaw === 'number' ? String(idRaw) : undefined;
+      })();
+      // The subnet's own `subnet` field is a CIDR ("10.25.0.0/16") — surface it.
+      const cidr = (pickString(sn, ['subnet']) ?? '').match(/^\d{1,3}(?:\.\d{1,3}){3}\/\d{1,2}$/)?.[0] ?? null;
+      // Display name: the recordset carries a human `description` ("NET_GUEST");
+      // fall back to the numeric id so unnamed subnets still render distinctly.
+      const name = pickString(sn, ['description', 'name']) ?? refId ?? 'kea-subnet';
+      // Pool entries are canonically ONE "start-end" STRING in the recordset
+      // (`pools: "10.25.2.1-10.25.2.255"`); some releases surface an array of
+      // strings or objects — normalize all three to a record list before the
+      // multi-key reads below.
+      const rawPools = sn['pools'];
+      const poolList: unknown[] = Array.isArray(rawPools) ? (rawPools as unknown[]) : typeof rawPools === 'string' && rawPools.trim() !== '' ? [rawPools] : [];
+      const pools: Record<string, unknown>[] = poolList.map((raw) => {
+        if (typeof raw === 'string') return { pool: raw };
+        return raw && typeof raw === 'object' ? (raw as Record<string, unknown>) : {};
+      });
+      if (pools.length === 0) return [];
+      return pools.map((p) => {
+        // Kea stores a pool range either as ONE "start-end" string (`pool`) or as
+        // separate start/end fields — accept both.
+        let start = pickString(p, ['start', 'range_start']);
+        let end = pickString(p, ['end', 'range_end']);
+        if (!start) {
+          const dash = (pickString(p, ['pool']) ?? '').match(/^(\d{1,3}(?:\.\d{1,3}){3})-(\d{1,3}(?:\.\d{1,3}){3})$/);
+          if (dash) { start = dash[1]; end = end ?? dash[2]; }
+        }
+        return { name, interface: null, rangeStart: start, rangeEnd: end ?? start, cidr, refId };
+      }).filter((r) => typeof r['rangeStart'] === 'string' && (r['rangeStart'] as string).length > 0);
+    });
+  }
+  const mapRes = await searchStaticMappings(client, 'kea');
+  let reservations: Record<string, unknown>[] | null = null;
+  if (mapRes?.ok && mapRes.data && typeof mapRes.data === 'object') {
+    const d = mapRes.data as Record<string, unknown>;
+    const rows: Record<string, unknown>[] = Array.isArray(d['rows']) ? (d['rows'] as Record<string, unknown>[]) : [];
+    reservations = rows.map((r) => ({
+      // Current firmware's recordset uses `hw_address`/`ip_address`; older
+      // releases surface `mac`/`ip` — accept all. Kea rows carry no interface
+      // (the reservation is bound to a subnet uuid, not an interface).
+      mac: (pickString(r, ['mac', 'hwaddr', 'hw_address']) ?? '').toLowerCase(),
+      ip: pickString(r, ['ip', 'ipaddress', 'ip_address', 'address']),
+      hostname: pickString(r, ['hostname', 'host']),
+      interface: pickString(r, ['interface', 'if']),
+      refId: pickString(r, ['uuid', 'id']),
+    })).filter((r) => typeof r['mac'] === 'string' && (r['mac'] as string).length > 0);
+  }
+  return [networks, reservations];
+}
+
+/**
  * Parses the ZFS pool status + USB storage responses into Storage-page rows.
  * Both endpoints are version-dependent and only exist on appliances that have
  * the respective hardware — a missing/404 response yields empty arrays (the
@@ -426,9 +561,13 @@ async function getInventory(
   transport?: OpnsenseTransport,
   credentials?: Record<string, unknown>,
   ports?: OpnsensePorts,
-  sshPort = 22
+  sshPort = 22,
+  dhcpBackendOverride?: DhcpBackend
 ): Promise<InventorySnapshot> {
-  const cached = inventoryCache.get(host);
+  // UNM_NO_INVENTORY_CACHE=1 disables the read-through cache — used by the smoke
+  // test, which flips the mock appliance's DHCP backend between two /monitoring
+  // calls and needs each one to re-collect. Writes still warm the cache.
+  const cached = process.env['UNM_NO_INVENTORY_CACHE'] === '1' ? undefined : inventoryCache.get(host);
   if (cached && Date.now() - cached.collectedAt < INVENTORY_INTERVAL_MS) {
     return cached;
   }
@@ -439,7 +578,7 @@ async function getInventory(
   // slow collection completes and warms the cache; later polls are fast.
   const inFlight = inventoryInFlight.get(host);
   if (inFlight) return inFlight;
-  const p = collectInventory(host, apiKey, apiSecret, transport, credentials, ports, sshPort).finally(() => {
+  const p = collectInventory(host, apiKey, apiSecret, transport, credentials, ports, sshPort, dhcpBackendOverride).finally(() => {
     inventoryInFlight.delete(host);
   });
   inventoryInFlight.set(host, p);
@@ -448,7 +587,11 @@ async function getInventory(
 
 /** Performs one full cold inventory collection (all endpoints, best-effort).
  * `credentials` carries the assignment's decrypted fields incl. bound slots —
- * used ONLY for the optional SSH ZFS enrichment (slots.ssh). */
+ * used ONLY for the optional SSH ZFS enrichment (slots.ssh).
+ * `dhcpBackendOverride` is the user-set `dhcpBackend` option ('dnsmasq'|'kea') —
+ * when present it wins over auto-detection so READS and WRITES always agree on
+ * the backend (the override exists precisely for appliances where the Kea
+ * service-status probe is inconclusive). */
 async function collectInventory(
   host: string,
   apiKey: string,
@@ -456,7 +599,8 @@ async function collectInventory(
   transport?: OpnsenseTransport,
   credentials?: Record<string, unknown>,
   ports?: OpnsensePorts,
-  sshPort = 22
+  sshPort = 22,
+  dhcpBackendOverride?: DhcpBackend
 ): Promise<InventorySnapshot> {
   // The client-lib calls need a bound axios instance for this appliance.
   const client = createClient(host, { apiKey, apiSecret }, transport, ports);
@@ -475,7 +619,7 @@ async function collectInventory(
   // Raw interfaces_info entries — kept for the PPPoE tunnel detector (which
   // needs the interface TYPE fields that parseNetworkRows discards).
   let ifEntries: Record<string, unknown>[] = [];
-  const snap: InventorySnapshot = { collectedAt: Date.now(), arp: [], ndp: [], networks: [], dhcpLeases: [], tunnels: [], routes: [], firewallRules: null, services: null, gateways: [], filesystems: [], disks: [], certificates: [], dnsEntries: null };
+  const snap: InventorySnapshot = { collectedAt: Date.now(), arp: [], ndp: [], networks: [], dhcpLeases: [], dhcpNetworks: null, dhcpReservations: null, tunnels: [], routes: [], firewallRules: null, services: null, gateways: [], filesystems: [], disks: [], certificates: [], dnsEntries: null };
   if (info?.ok && info.data && typeof info.data === 'object') {
     const d = info.data as Record<string, unknown>;
     if (d['name'] !== undefined) snap.hostname = String(d['name']);
@@ -540,16 +684,30 @@ async function collectInventory(
     }
   }
 
-  // DHCP leases: backend auto-detected per appliance, then normalized.
+  // DHCP leases: backend resolved per appliance (user override wins, else
+  // auto-detect), then normalized.
+  let dhcpBackend: DhcpBackend | null = null;
   try {
-    const backend = await detectDhcpBackend(client);
-    const leaseRes = backend === 'kea' ? await searchKeaLeases(client) : await searchDnsmasqLeases(client);
+    dhcpBackend = dhcpBackendOverride ?? await detectDhcpBackend(client);
+    const leaseRes = dhcpBackend === 'kea' ? await searchKeaLeases(client) : await searchDnsmasqLeases(client);
     if (leaseRes?.ok && leaseRes.data && typeof leaseRes.data === 'object') {
       const rows = (leaseRes.data as Record<string, unknown>)['rows'];
       snap.dhcpLeases = Array.isArray(rows) ? parseDhcpLeaseRows(rows) : [];
     }
   } catch {
     // best-effort — a failing lease endpoint must not sink the inventory cache
+  }
+
+  // Configured DHCP networks + static reservations (DHCP page): backend auto-detected
+  // above, then normalized per backend. null on failure so /monitoring omits the keys
+  // and a transient error never wipes previously ingested rows.
+  try {
+    if (!dhcpBackend) dhcpBackend = dhcpBackendOverride ?? await detectDhcpBackend(client);
+    const [netRows, resRows] = await collectDhcpConfig(client, dhcpBackend);
+    snap.dhcpNetworks = netRows;
+    snap.dhcpReservations = resRows;
+  } catch {
+    // best-effort — keep the keys absent (null) on failure
   }
 
   // Static DNS host entries (DNS page): backend auto-detected per appliance,
@@ -901,6 +1059,14 @@ function descriptorsFromMetrics(metrics: Record<string, unknown>): MetricDescrip
   if (Array.isArray(metrics['dhcpLeases']) && (metrics['dhcpLeases'] as unknown[]).length > 0) {
     push({ key: 'dhcpLeases', label: 'DHCP Leases', type: 'string', visualization: 'table', group: 'Inventory', columns: ['mac', 'ip', 'hostname', 'intf', 'expiry'], intervalMs: INVENTORY_INTERVAL_MS });
   }
+  // Configured DHCP ranges + static reservations (cross-device DHCP page) —
+  // inventory, slow refresh. Emitted whenever the read SUCCEEDED (empty = none).
+  if (Array.isArray(metrics['dhcpNetworks'])) {
+    push({ key: 'dhcpNetworks', label: 'DHCP Ranges', type: 'string', visualization: 'table', group: 'Inventory', columns: ['name', 'interface', 'rangeStart', 'rangeEnd', 'cidr'], intervalMs: INVENTORY_INTERVAL_MS });
+  }
+  if (Array.isArray(metrics['dhcpReservations'])) {
+    push({ key: 'dhcpReservations', label: 'DHCP Reservations', type: 'string', visualization: 'table', group: 'Inventory', columns: ['mac', 'ip', 'hostname', 'interface'], intervalMs: INVENTORY_INTERVAL_MS });
+  }
   // Configured tunnels (WireGuard/OpenVPN/IPsec/PPPoE/GRE) — inventory, slow
   // refresh; also normalized into the API's cross-device `tunnels` table.
   if (Array.isArray(metrics['tunnels']) && (metrics['tunnels'] as unknown[]).length > 0) {
@@ -1203,6 +1369,12 @@ function strSetting(settings: Record<string, unknown>, key: string): string | un
   return typeof v === 'string' && v.length > 0 ? v : undefined;
 }
 
+/** The user-set `dhcpBackend` option as a backend ('auto'/absent → undefined). */
+function dhcpBackendOverrideOf(settings: Record<string, unknown>): DhcpBackend | undefined {
+  const v = strSetting(settings, 'dhcpBackend');
+  return v === 'dnsmasq' || v === 'kea' ? v : undefined;
+}
+
 /**
  * Resolves the runtime context for one device (edition + DNS/DHCP backends).
  * Probes are read-only and best-effort — failures fall back to CE / dnsmasq.
@@ -1278,7 +1450,8 @@ async function collectMetrics(
   credentials?: Record<string, unknown>,
   collectInventory?: boolean,
   ports?: OpnsensePorts,
-  sshPort = 22
+  sshPort = 22,
+  dhcpBackendOverride?: DhcpBackend
 ): Promise<{ metrics: Record<string, unknown>; interfaces: string[]; zfsFresh: boolean }> {
   const metrics: Record<string, unknown> = {};
   const interfaces: string[] = [];
@@ -1422,7 +1595,7 @@ async function collectMetrics(
       if (Array.isArray(versions) && versions.length > 0) metrics['version'] = String(versions[0]);
     }
   } else {
-    inventory = await getInventory(host, apiKey, apiSecret, transport, credentials, ports, sshPort);
+    inventory = await getInventory(host, apiKey, apiSecret, transport, credentials, ports, sshPort, dhcpBackendOverride);
     // Fresh authoritative ZFS data only when the SSH enrichment succeeded for this
     // snapshot (served from cache like the rest of the inventory — pool states are
     // slow-changing). Drives notification mirroring in /monitoring.
@@ -1436,6 +1609,13 @@ async function collectMetrics(
     // pages) in addition to being rendered as generic tables in the device view.
     if (inventory.networks.length > 0) metrics['networks'] = inventory.networks;
     if (inventory.dhcpLeases.length > 0) metrics['dhcpLeases'] = inventory.dhcpLeases;
+
+    // Configured DHCP networks + static reservations for the cross-device DHCP page.
+    // Emitted whenever the read SUCCEEDED — present-but-empty is authoritative
+    // (the appliance has no ranges/reservations); null (read failed) keeps the key
+    // absent so a transient error never wipes previously ingested rows.
+    if (Array.isArray(inventory.dhcpNetworks)) metrics['dhcpNetworks'] = inventory.dhcpNetworks;
+    if (Array.isArray(inventory.dhcpReservations)) metrics['dhcpReservations'] = inventory.dhcpReservations;
 
     // Static DNS host entries for the cross-device DNS page. Emitted whenever
     // the read SUCCEEDED — present-but-empty is authoritative (the appliance
@@ -1934,7 +2114,9 @@ app.post('/monitoring', async (req, res) => {
     // inventory BEFORE any credentials are transmitted (throws on mismatch).
     await assertPinned(req, managementAddress, transport, ports);
 
-    const { metrics, interfaces, zfsFresh } = await collectMetrics(managementAddress, apiKey, apiSecret, transport, deviceId, credentials, collectInventory, ports, sshPort);
+    // The user-set `dhcpBackend` option (when not 'auto') wins over auto-detect
+    // for the READ path too — reads and writes must agree on the backend.
+    const { metrics, interfaces, zfsFresh } = await collectMetrics(managementAddress, apiKey, apiSecret, transport, deviceId, credentials, collectInventory, ports, sshPort, dhcpBackendOverrideOf(settings));
 
     // Firewall events: fetch new log rows since the last digest cursor and push
     // them to the API's internal endpoint. Fire-and-forget — NOT awaited, so it
@@ -2365,7 +2547,7 @@ app.post('/state', stateHandler(async (body: StateRequestBody, req) => {
   await assertPinned(req, body.managementAddress, transport, ports);
 
   // `creds` also carries bound slots (slots.ssh) for the optional ZFS path.
-  const snapshot = await getInventory(body.managementAddress, apiKey, apiSecret, transport, creds, ports, sshPortOf(settings));
+  const snapshot = await getInventory(body.managementAddress, apiKey, apiSecret, transport, creds, ports, sshPortOf(settings), dhcpBackendOverrideOf(settings));
 
   // Interface MACs: the networks rows already carry `mac` from interfaces_info;
   // fall back to the live interface-statistics MACs collected this poll.

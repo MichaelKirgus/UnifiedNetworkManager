@@ -18,6 +18,14 @@ export interface InventorySnapshot {
   networks: Record<string, unknown>[];
   /** Active DHCP leases normalized across Kea/dnsmasq backends. */
   dhcpLeases: Record<string, unknown>[];
+  /** Configured DHCP server networks (dnsmasq ranges / Kea subnets) → UNM DHCP page.
+   * null = collection failed this cycle → /monitoring must NOT emit the key, so a
+   * transient failure never wipes previously stored rows (present-but-empty is
+   * authoritative on the API side). */
+  dhcpNetworks: Record<string, unknown>[] | null;
+  /** Static DHCP reservations/mappings (dnsmasq staticmaps / Kea reservations) → UNM DHCP page.
+   * null = collection failed this cycle → key omitted. */
+  dhcpReservations: Record<string, unknown>[] | null;
   /** Configured tunnels (WireGuard/OpenVPN/IPsec/PPPoE/GRE) — see collectTunnels. */
   tunnels: TunnelRow[];
   /** Configured static routes — see collectRoutes. */

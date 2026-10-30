@@ -49,6 +49,10 @@ export const PERMISSION_DESCRIPTIONS: Record<string, string> = {
   // plugins (OPNsense, OpenWrt, RouterOS, LCOS). Managed via the plan/config
   // workflow; this read permission only gates viewing the page.
   'dns:read': 'View the DNS page (static DNS entries across devices)',
+  // Cross-device DHCP inventory — configured server networks/pools and static
+  // reservations reported by dhcp-capable plugins (RouterOS, OPNsense, OpenWrt).
+  // Managed via the plan/config workflow; this read permission only gates viewing.
+  'dhcp:read': 'View the DHCP page (server networks + static reservations across devices)',
   'firewall:read': 'View the Firewall page (filter + NAT rules across devices)',
   'certificates:read': 'View the Certificates page (TLS certs + SSH host keys across devices)',
   // Accepting a CHANGED certificate/host key re-pins it for strict pinning — a

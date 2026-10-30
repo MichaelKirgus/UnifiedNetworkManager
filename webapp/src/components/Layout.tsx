@@ -13,7 +13,7 @@ import { useExecutionMode } from '../executionMode';
  *  On every other page the top-bar Read-Only/Plan/Execute toggle renders disabled. */
 // The create-app / create-VM wizards are sub-paths of /containers and /vms,
 // so the prefix match below already covers them.
-const PLAN_ACTION_PATHS = ['/storage', '/shares', '/containers', '/vms', '/updates', '/services', '/mail', '/dns', '/networks'];
+const PLAN_ACTION_PATHS = ['/storage', '/shares', '/containers', '/vms', '/updates', '/services', '/mail', '/dns', '/dhcp', '/networks'];
 
 function isPlanActionPath(pathname: string): boolean {
   if (PLAN_ACTION_PATHS.some((p) => pathname === p || pathname.startsWith(p + '/'))) return true;

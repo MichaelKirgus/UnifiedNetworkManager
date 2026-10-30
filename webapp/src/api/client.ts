@@ -1599,6 +1599,53 @@ export interface DnsRow {
   devices: DnsDeviceMember[];
 }
 
+// --- DHCP inventory (cross-device, see GET /dhcp) --------------------------------
+
+/** One configured DHCP server network/pool range on one device. */
+export interface DhcpNetworkRow {
+  deviceId: string;
+  pluginId: string;
+  name: string;
+  iface?: string | null;
+  rangeStart: string;
+  rangeEnd: string;
+  cidr?: string | null;
+  leaseTimeSeconds?: number | null;
+  gateway?: string | null;
+  dnsServers?: string | null;
+  /** Vendor-side row identity used for deletion (dnsmasq range uuid, Kea subnet id…). */
+  refId?: string | null;
+  deviceName?: string | null;
+  managementAddress?: string | null;
+  siteName?: string | null;
+  pluginName?: string | null;
+}
+
+/** One static DHCP reservation (MAC → fixed IP) on one device. */
+export interface DhcpReservationRow {
+  deviceId: string;
+  pluginId: string;
+  mac: string;
+  ip?: string | null;
+  hostname?: string | null;
+  /** Serving interface the mapping is scoped to (OPNsense staticmaps are per-interface). Null = not exposed. */
+  iface?: string | null;
+  /** Vendor-side row identity used for deletion (e.g. OPNsense uuid). Null = delete by MAC. */
+  refId?: string | null;
+  /** Vendor lease status when exposed (RouterOS 'bound'/'free') — badges live rows. */
+  status?: string | null;
+  deviceName?: string | null;
+  managementAddress?: string | null;
+  siteName?: string | null;
+  pluginName?: string | null;
+}
+
+/** Response of GET /dhcp — flat per-device rows (no cross-device merge). */
+export interface DhcpOverview {
+  networks: DhcpNetworkRow[];
+  reservations: DhcpReservationRow[];
+}
+
 /** One structured log entry emitted by a plugin (see GET /logs). */
 export interface LogEntry {
   id: string;
@@ -3847,6 +3894,14 @@ export const api = {
     if (params?.siteId) qs.set('siteId', params.siteId);
     const suffix = qs.toString() ? `?${qs.toString()}` : '';
     return apiFetch<DnsRow[]>(`/dns${suffix}`);
+  },
+  /** Configured DHCP networks + static reservations across devices. */
+  dhcp: (params?: { deviceId?: string; siteId?: string }) => {
+    const qs = new URLSearchParams();
+    if (params?.deviceId) qs.set('deviceId', params.deviceId);
+    if (params?.siteId) qs.set('siteId', params.siteId);
+    const suffix = qs.toString() ? `?${qs.toString()}` : '';
+    return apiFetch<DhcpOverview>(`/dhcp${suffix}`);
   },
   wifi: (params?: { siteId?: string }) => {
     const qs = new URLSearchParams();

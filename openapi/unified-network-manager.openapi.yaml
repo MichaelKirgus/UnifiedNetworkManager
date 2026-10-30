@@ -4712,6 +4712,51 @@ paths:
         '401':
           description: Authentication required
 
+  /dhcp:
+    get:
+      tags: [Inventory]
+      summary: List configured DHCP networks + static reservations across devices
+      description: >-
+        Cross-device view of the normalized `device_dhcp_networks` and
+        `device_dhcp_reservations` inventory tables, populated by the telemetry
+        worker from each dhcp-capable plugin's server configuration (RouterOS
+        /ip/pool + /ip/dhcp-server/network, OPNsense Kea subnets or dnsmasq
+        ranges, OpenWrt uci dhcp .option=range). Rows are upserted per poll;
+        rows not refreshed within the stale window are swept away. Response is
+        `{ networks: [...], reservations: [...] }` — flat per-device rows (no
+        cross-device merge). Live leases are NOT here — they live in /hosts
+        (source 'dhcp').
+      parameters:
+        - in: query
+          name: deviceId
+          required: false
+          schema: { type: string }
+          description: Filter to one device
+        - in: query
+          name: siteId
+          required: false
+          schema: { type: string }
+          description: Filter to devices belonging to a site
+      responses:
+        '200':
+          description: DHCP network + reservation rows (device + plugin identity included)
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [networks, reservations]
+                properties:
+                  networks:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/DhcpNetworkRow'
+                  reservations:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/DhcpReservationRow'
+        '401':
+          description: Authentication required
+
   /documented-hosts:
     get:
       tags: [Inventory]
@@ -8896,6 +8941,50 @@ components:
                 type: array
                 items: { type: string }
                 description: "Distinct non-empty notes configured on this device for the name"
+
+    DhcpNetworkRow:
+      type: object
+      description: >-
+        One configured DHCP server network/pool range on one device, as reported
+        by a plugin's `dhcpNetworks` metric. A scope with several ranges yields
+        multiple rows (identity = name + rangeStart).
+      required: [deviceId, pluginId, name, rangeStart, rangeEnd]
+      properties:
+        deviceId: { type: string }
+        deviceName: { type: [string, 'null'], description: "Display name of the device" }
+        managementAddress: { type: [string, 'null'] }
+        siteName: { type: [string, 'null'] }
+        pluginId: { type: string, description: "Plugin instance id (multi-instance ids carry a :instance suffix)" }
+        pluginName: { type: [string, 'null'], description: "Display name of the plugin instance that reported this row" }
+        name: { type: string, description: "Network/scope name as configured, or the serving interface when the vendor has no name" }
+        iface: { type: [string, 'null'], description: "Serving interface (e.g. bridge1, lan). Null = not exposed by the vendor" }
+        rangeStart: { type: string, description: "First address of the lease range" }
+        rangeEnd: { type: string, description: "Last address of the lease range" }
+        cidr: { type: [string, 'null'], description: "Subnet CIDR covering the range (derived by the plugin when known)" }
+        leaseTimeSeconds: { type: [integer, 'null'], description: "Lease time in seconds as configured. Null = vendor default / not exposed" }
+        gateway: { type: [string, 'null'], description: "Gateway address handed out to clients" }
+        dnsServers: { type: [string, 'null'], description: "DNS servers handed out to clients (comma-joined)" }
+        refId: { type: [string, 'null'], description: "Vendor-side row identity used for deletion (dnsmasq range uuid, Kea subnet id…). Null = no stable handle" }
+
+    DhcpReservationRow:
+      type: object
+      description: >-
+        One static DHCP reservation (MAC → fixed IP) on one device, as reported
+        by a plugin's `dhcpReservations` metric. Identity = mac per device+plugin.
+      required: [deviceId, pluginId, mac]
+      properties:
+        deviceId: { type: string }
+        deviceName: { type: [string, 'null'], description: "Display name of the device" }
+        managementAddress: { type: [string, 'null'] }
+        siteName: { type: [string, 'null'] }
+        pluginId: { type: string, description: "Plugin instance id (multi-instance ids carry a :instance suffix)" }
+        pluginName: { type: [string, 'null'], description: "Display name of the plugin instance that reported this row" }
+        mac: { type: string, description: "Client MAC address, lowercase colon form" }
+        ip: { type: [string, 'null'], description: "Fixed IP the client always receives. Null = name-only mapping" }
+        hostname: { type: [string, 'null'], description: "Hostname bound to the reservation (when the vendor has one)" }
+        iface: { type: [string, 'null'], description: "Serving interface the mapping is scoped to (OPNsense staticmaps are per-interface). Null = not exposed" }
+        refId: { type: [string, 'null'], description: "Vendor-side row identity used for deletion (e.g. OPNsense uuid). Null = delete by MAC" }
+        status: { type: [string, 'null'], description: "Vendor lease status when exposed (e.g. RouterOS bound/free) — some vendors keep static bindings and active dynamic leases in one table; the page badges live rows" }
 
     DocumentedHostIp:
       type: object
