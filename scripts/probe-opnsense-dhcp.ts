@@ -129,6 +129,14 @@ async function main(): Promise<void> {
   console.log('\n--- /api/services/dhcp/staticmap/search ---');
   console.log(`HTTP ${staticmap.status}:`, JSON.stringify(staticmap.body).slice(0, 2000));
 
+  const dnsmasqLeases = await getAppliance(host, '/api/dnsmasq/leases/search', apiKey, apiSecret);
+  console.log('\n--- /api/dnsmasq/leases/search (first 4000 chars) ---');
+  console.log(`HTTP ${dnsmasqLeases.status}:`, JSON.stringify(dnsmasqLeases.body).slice(0, 4000));
+
+  const keaLeases = await getAppliance(host, '/api/kea/leases4/search', apiKey, apiSecret);
+  console.log('\n--- /api/kea/leases4/search (first 2000 chars) ---');
+  console.log(`HTTP ${keaLeases.status}:`, JSON.stringify(keaLeases.body).slice(0, 2000));
+
   // Which DHCP service is actually running? (informational)
   const services = await getAppliance(host, '/api/core/service/search', apiKey, apiSecret);
   if (keaCfg.status === 200 && keaRes.status !== 200) {

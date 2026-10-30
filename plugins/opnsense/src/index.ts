@@ -8,6 +8,7 @@ import {
   createPluginLogger,
   createNotifier,
   createPluginServer,
+  normalizeMac,
   pickNumber,
   pickString,
   readSettings,
@@ -308,24 +309,30 @@ function parseNetworkRows(raw: Record<string, unknown>): Record<string, unknown>
 }
 
 /**
- * Normalizes DHCP lease rows across the two backends. Kea and dnsmasq expose
- * different field names (and dnsmasq's expiry is a unix timestamp); this maps
- * them onto one shape: { mac, ip, hostname?, expiry? (ISO), intf? }. Rows
- * without both a MAC and an IP are dropped — they can't be joined to anything.
+ * Normalizes DHCP lease rows from either backend onto one shape:
+ * { mac, ip, hostname?, expiry? (ISO), intf? }. Both backends share the same
+ * row field names — Kea's LeasesController and the dnsmasq lease endpoint both
+ * emit `hwaddr` + `address` + `expire` (unix seconds) plus `if_descr`/`if`
+ * (verified live on a Kea appliance). mac/ipaddress are accepted for older or
+ * other shapes. Rows without both a MAC and an IP are dropped — they can't be
+ * joined to anything; Kea freed leases (state != 0) are skipped too.
  */
 function parseDhcpLeaseRows(rows: unknown[]): Record<string, unknown>[] {
   const out: Record<string, unknown>[] = [];
   for (const raw of rows) {
     if (!raw || typeof raw !== 'object') continue;
     const r = raw as Record<string, unknown>;
-    const mac = typeof r['mac'] === 'string' ? (r['mac'] as string).toLowerCase() : undefined;
-    const ip = typeof r['ipaddress'] === 'string' ? (r['ipaddress'] as string) : typeof r['ip'] === 'string' ? (r['ip'] as string) : undefined;
+    const mac = normalizeMac(pickString(r, ['hwaddr', 'mac', 'macaddr']) ?? '');
+    const ip = pickString(r, ['address', 'ipaddress', 'ip']);
     if (!mac || !ip) continue;
-    const hostname = typeof r['hostname'] === 'string' && r['hostname'].trim() !== '' ? (r['hostname'] as string) : undefined;
-    const intf = typeof r['interface'] === 'string' ? (r['interface'] as string) : typeof r['intf'] === 'string' ? (r['intf'] as string) : undefined;
-    // Kea: `expiry` is an ISO-ish string or epoch; dnsmasq: `expires` unix seconds.
+    // Kea reports freed leases with state != 0 — only active ones are hosts.
+    if (typeof r['state'] === 'number' && r['state'] !== 0) continue;
+    const hostname = pickString(r, ['hostname', 'host'])?.replace(/\.$/, '');
+    // Prefer the human-readable interface description (NET_INTRANET); fall back
+    // to the raw key (opt10 / vlan0020).
+    const intf = pickString(r, ['if_descr', 'interface', 'intf']) ?? pickString(r, ['if']);
     let expiry: string | undefined;
-    const rawExpiry = r['expiry'] ?? r['expires'];
+    const rawExpiry = r['expiry'] ?? r['expires'] ?? r['expire'];
     if (typeof rawExpiry === 'number' && rawExpiry > 0) {
       expiry = new Date(rawExpiry * 1000).toISOString();
     } else if (typeof rawExpiry === 'string' && rawExpiry.trim() !== '') {

@@ -269,9 +269,12 @@ export function deleteKeaSubnet(client: AxiosInstance, uuid: string): Promise<Op
   return post(client, `/api/kea/dhcpv4/del_subnet/${encodeURIComponent(uuid)}`, {});
 }
 
-/** GET /api/kea/leases/search — current Kea leases. */
+/** GET /api/kea/leases4/search — current Kea DHCPv4 leases. The endpoint is
+ * version-specific (Leases4Controller::searchAction → `kea list leases4` via
+ * configd); there is NO combined `/api/kea/leases/search`. v6 leases are
+ * DUID-keyed without a MAC, so they can't join to hosts and are not fetched. */
 export function searchKeaLeases(client: AxiosInstance, query?: Record<string, unknown>): Promise<OpnsenseApiResult> {
-  return get(client, '/api/kea/leases/search', query);
+  return get(client, '/api/kea/leases4/search', query);
 }
 
 // --- dnsmasq-specific (exposed for completeness) ------------------------------------------

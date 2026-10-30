@@ -90,6 +90,13 @@ function clampInt(v: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, Math.round(v)));
 }
 
+/** Normalizes a MAC to lowercase colon form ("aa:bb:cc:dd:ee:ff"); '' when not exactly 12 hex digits. */
+function normalizeMacColon(raw: string): string {
+  const hex = raw.toLowerCase().replace(/[^0-9a-f]/g, '');
+  if (hex.length !== 12) return '';
+  return hex.replace(/([0-9a-f]{2})(?=[0-9a-f])/g, '$1:');
+}
+
 /** One plugin-reported reason for a non-ok health (SDK `HealthReason`). */
 interface PluginHealthReason {
   severity: 'warning' | 'critical';
@@ -1042,7 +1049,10 @@ async function ingestInventory(
       for (const raw of rawDhcpReservations) {
         if (!raw || typeof raw !== 'object') continue;
         const r = raw as Record<string, unknown>;
-        const mac = typeof r['mac'] === 'string' ? (r['mac'] as string).trim().toLowerCase() : '';
+        // Canonical form is lowercase colon ("aa:bb:cc:dd:ee:ff") — vendors emit
+        // bare hex (LCOS), colons, or dashes; normalize so rows from different
+        // devices are comparable and the webapp's MAC_PATTERN validates them.
+        const mac = typeof r['mac'] === 'string' ? normalizeMacColon(r['mac'] as string) : '';
         if (!mac) continue; // mac is part of the conflict key
         const ip = typeof r['ip'] === 'string' && (r['ip'] as string).trim() !== '' ? (r['ip'] as string).trim() : null;
         const hostname = typeof r['hostname'] === 'string' && (r['hostname'] as string).trim() !== '' ? (r['hostname'] as string).trim() : null;
