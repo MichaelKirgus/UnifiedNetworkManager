@@ -7824,6 +7824,40 @@ paths:
         '500':
           description: Test run failed
 
+  /automations/{id}/dry-run:
+    post:
+      tags: [Automations]
+      summary: Simulate the rule without executing anything (dry run)
+      description: >-
+        Predicts what a manual apply would do, with zero side effects. updateAvailable
+        triggers resolve the CURRENTLY available device_updates rows and produce one
+        simulated firing per row; other trigger types produce one bare-context firing
+        each. Every action is SIMULATED — intent actions build a real plan via the same
+        createPlanCore path (the deterministic plugin /plan call) to report its exact
+        steps, then tear it down. No run rows are written, no deferral windows touched,
+        nothing enqueued or applied.
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: The simulated firings (what would happen if the rule fired now)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AutomationDryRunResponse' }
+        '400':
+          description: Rule has no triggers or actions to simulate
+        '401':
+          description: Authentication required
+        '403':
+          description: Missing automations:write permission
+        '404':
+          description: Rule not found
+        '500':
+          description: Dry run failed
+
   /automations/{id}/runs:
     get:
       tags: [Automations]
@@ -12561,6 +12595,14 @@ components:
             createdBy: { type: string, nullable: true }
             createdAt: { type: string, format: date-time }
             updatedAt: { type: string, format: date-time }
+            nextUpdateRun:
+              description: >-
+                Earliest firing time across the rule's open deferral windows for
+                deferred updateAvailable triggers (the maintenance slot its pending
+                updates will fire at). Null when no window is open. Computed on list;
+                not part of create/patch payloads.
+              type: ['string', 'null']
+              format: date-time
 
     AutomationResponse:
       type: object
@@ -12647,3 +12689,58 @@ components:
         runs:
           type: array
           items: { $ref: '#/components/schemas/AutomationRun' }
+
+    SimulatedAction:
+      description: "Predicted outcome of one action block in a dry run (nothing was executed)."
+      type: object
+      required: [id, type, status, summary]
+      properties:
+        id: { type: string }
+        type: { type: string, enum: [intent, webhook, notification, internal] }
+        status:
+          type: string
+          enum: [would-run, skipped, error]
+          description: "would-run = would execute; skipped = deliberately skipped (e.g. requireNoReboot); error = would fail to resolve/build"
+        summary: { type: string, description: "One-line human description of what would happen." }
+        plan:
+          description: "For intent actions that resolve cleanly — the exact plan a real apply would build (built then torn down)."
+          type: object
+          required: [pluginId, actionId, deviceIds, steps]
+          properties:
+            pluginId: { type: string }
+            actionId: { type: string }
+            deviceIds:
+              type: array
+              items: { type: string }
+            steps:
+              type: array
+              items:
+                type: object
+                required: [stepIndex, deviceId, actionId]
+                properties:
+                  stepIndex: { type: integer }
+                  deviceId: { type: string }
+                  actionId: { type: string }
+        detail:
+          description: "Skip reason or error message (null when not applicable)."
+          type: ['string', 'null']
+
+    SimulatedFiring:
+      description: "One simulated firing of a trigger block in a dry run."
+      type: object
+      required: [trigger, label, actions]
+      properties:
+        trigger: { $ref: '#/components/schemas/AutomationTriggerBlock' }
+        label: { type: string, description: "Human label — e.g. 'update web09 (KIRGUSBANDE)' or 'schedule (dailyAt)'." }
+        actions:
+          type: array
+          items: { $ref: '#/components/schemas/SimulatedAction' }
+
+    AutomationDryRunResponse:
+      type: object
+      required: [firings]
+      properties:
+        firings:
+          description: "One entry per simulated firing (updateAvailable triggers produce one per currently-available row)."
+          type: array
+          items: { $ref: '#/components/schemas/SimulatedFiring' }

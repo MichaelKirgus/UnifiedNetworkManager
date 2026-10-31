@@ -3425,6 +3425,8 @@ export interface Automation {
   updatedAt: string;
   /** triggerId → next ISO occurrence (schedule triggers only). */
   schedulePreviews: Record<string, string | null>;
+  /** Earliest firing time across open deferral windows of deferred updateAvailable triggers (null = none pending). */
+  nextUpdateRun?: string | null;
 }
 
 /** One row of a rule's run history. */
@@ -3438,6 +3440,30 @@ export interface AutomationRun {
   status: 'succeeded' | 'failed' | 'partial' | 'skipped';
   error?: string | null;
   planIds: string[];
+}
+
+/** Predicted outcome of one action block in a dry run (nothing was executed). */
+export interface SimulatedAction {
+  id: string;
+  type: 'intent' | 'webhook' | 'notification' | 'internal';
+  /** would-run = would execute; skipped = deliberately skipped; error = would fail to resolve/build. */
+  status: 'would-run' | 'skipped' | 'error';
+  summary: string;
+  /** For intent actions that resolve cleanly — the exact plan a real apply would build (built then torn down). */
+  plan?: {
+    pluginId: string;
+    actionId: string;
+    deviceIds: string[];
+    steps: Array<{ stepIndex: number; deviceId: string; actionId: string }>;
+  };
+  detail?: string | null;
+}
+
+/** One simulated firing of a trigger block in a dry run. */
+export interface SimulatedFiring {
+  trigger: AutomationTriggerBlock;
+  label: string;
+  actions: SimulatedAction[];
 }
 
 function getToken(): string | null {
@@ -4462,6 +4488,9 @@ export const api = {
   /** Manually trigger the rule now. mode "apply" runs for real against currently-available update rows; default is a wiring check. */
   testAutomation: (id: string, opts?: { mode?: 'test' | 'apply' }) =>
     apiFetch<{ run: AutomationRun; runs?: AutomationRun[] }>(`/automations/${encodeURIComponent(id)}/test`, { method: 'POST', body: JSON.stringify(opts?.mode ? { mode: opts.mode } : {}) }),
+  /** Simulate the rule without executing anything — predicts what a manual apply would do (zero side effects). */
+  dryRunAutomation: (id: string) =>
+    apiFetch<{ firings: SimulatedFiring[] }>(`/automations/${encodeURIComponent(id)}/dry-run`, { method: 'POST', body: JSON.stringify({}) }),
   automationRuns: (id: string, limit = 50) =>
     apiFetch<{ runs: AutomationRun[] }>(`/automations/${encodeURIComponent(id)}/runs?limit=${limit}`),
   /** Upcoming occurrences of a schedule spec (builder "next runs" hint). */

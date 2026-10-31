@@ -11,14 +11,14 @@
 
 import { Router, Request, Response } from 'express';
 import { v4 as uuidv4 } from 'uuid';
-import { desc, eq } from 'drizzle-orm';
+import { and, desc, eq, like } from 'drizzle-orm';
 import { requireAuth, requirePermission } from '../auth/middleware';
 import { db } from '../db';
 import * as schema from '../db/schema';
-import { nextScheduleRun, parseJsonField, previewSchedule, validateAutomationDraft } from '../automations/engine';
+import { nextScheduleRun, parseJsonField, pendingWindowState, previewSchedule, validateAutomationDraft } from '../automations/engine';
 import { listAutomationTemplates } from '../automations/templates';
 import type { ActionBlock, Automation, AutomationDraft, AutomationRun, LogTrigger, ScheduleSpec, TriggerBlock } from '../automations/types';
-import { fireRule, manualTriggerRule, scanLogMatches, seedPendingUpdateWindows } from '../workers/automations';
+import { dryRunRule, fireRule, manualTriggerRule, scanLogMatches, seedPendingUpdateWindows } from '../workers/automations';
 
 const router = Router();
 
@@ -37,7 +37,7 @@ interface RuleRow {
 }
 
 /** Serializes a rule row for the API — parsed blocks + computed next runs. */
-function serializeRule(row: RuleRow): Automation & { schedulePreviews: Record<string, string | null> } {
+function serializeRule(row: RuleRow, nextUpdateRunIso?: string | null): Automation & { schedulePreviews: Record<string, string | null>; nextUpdateRun: string | null } {
   const triggers = parseJsonField<TriggerBlock[]>(row.triggers, []);
   // Next occurrence per schedule trigger (anchor = lastFiredAt ?? createdAt).
   const anchor = row.lastFiredAt ?? row.createdAt;
@@ -60,7 +60,44 @@ function serializeRule(row: RuleRow): Automation & { schedulePreviews: Record<st
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
     schedulePreviews,
+    nextUpdateRun: nextUpdateRunIso ?? null,
   };
+}
+
+/**
+ * Earliest firing time across a rule's OPEN deferral windows (automation_state
+ * 'pending:*' rows) — the maintenance slot its deferred updateAvailable triggers
+ * will fire at. A window whose maxWaitHours bound has elapsed fires on the next
+ * tick, so it reports "now". Null when no window is open.
+ */
+async function computeNextUpdateRun(automationId: string, triggers: TriggerBlock[], nowMs: number): Promise<string | null> {
+  const deferByTrigger = new Map<string, { schedule: ScheduleSpec; maxWaitHours?: number }>();
+  for (const t of triggers) {
+    if (t.type === 'updateAvailable' && t.defer) deferByTrigger.set(t.id, t.defer);
+  }
+  if (deferByTrigger.size === 0) return null;
+
+  const rows = db.query.automationState.findMany({
+    where: and(
+      eq(schema.automationState.automationId, automationId),
+      like(schema.automationState.stateKey, 'pending:%')
+    ),
+  });
+  let earliest: number | null = null;
+  for (const row of await rows) {
+    const defer = deferByTrigger.get(row.triggerId);
+    if (!defer) continue;
+    let win: { sinceIso?: string } | null = null;
+    try { win = JSON.parse(row.value); } catch { continue; } // malformed — skip
+    if (typeof win?.sinceIso !== 'string') continue;
+    const state = pendingWindowState(defer, win.sinceIso, nowMs);
+    if (state === 'max-wait-exceeded') return new Date(nowMs).toISOString(); // fires on the next tick
+    if (state !== 'due' && state !== 'pending') continue;
+    const next = nextScheduleRun(defer.schedule, win.sinceIso);
+    if (!next) continue;
+    if (earliest === null || next.getTime() < earliest) earliest = next.getTime();
+  }
+  return earliest === null ? null : new Date(earliest).toISOString();
 }
 
 function serializeRun(row: { id: string; automationId: string; firedAt: string; triggerType: string; context: string; status: string; error: string | null; planIds: string }): AutomationRun {
@@ -102,7 +139,14 @@ function automationFromDraft(draft: AutomationDraft, id: string): Automation {
 // GET /automations — list all rules with computed next-run previews.
 router.get('/automations', requireAuth, requirePermission('automations:read'), async (_req: Request, res: Response) => {
   const rows = await db.select().from(schema.automations).orderBy(desc(schema.automations.createdAt));
-  res.status(200).json({ automations: (rows as unknown as RuleRow[]).map(serializeRule) });
+  const nowMs = Date.now();
+  // Deferred updateAvailable triggers fire at their open deferral windows' next
+  // schedule slot — surface that as the rule's "next run" too (not just schedules).
+  const automations = await Promise.all((rows as unknown as RuleRow[]).map(async (row) => {
+    const triggers = parseJsonField<TriggerBlock[]>(row.triggers, []);
+    return serializeRule(row, await computeNextUpdateRun(row.id, triggers, nowMs));
+  }));
+  res.status(200).json({ automations });
 });
 
 // GET /automations/templates — the template catalog (built-ins + plugin-
@@ -273,6 +317,32 @@ router.post('/automations/:id/test', requireAuth, requirePermission('automations
     .orderBy(desc(schema.automationRuns.firedAt))
     .limit(20);
   res.status(200).json({ run: serializeRun(runs[0]), runs: runs.map(serializeRun) });
+});
+
+// POST /automations/:id/dry-run — simulate the rule WITHOUT executing anything.
+// Mirrors the manual apply's context construction (updateAvailable triggers resolve
+// the currently-available rows, one simulated firing per row; other triggers get a
+// bare-context firing), but every action is SIMULATED: intent actions build a real
+// plan via createPlanCore (the deterministic plugin /plan call) to report its exact
+// steps, then tear it down. No run rows, no state changes, nothing enqueued — the
+// response is purely "what would happen if this fired right now".
+router.post('/automations/:id/dry-run', requireAuth, requirePermission('automations:write'), async (req: Request, res: Response) => {
+  const existing = await loadRule(String(req.params.id ?? ''));
+  if (!existing) { res.status(404).json({ error: 'Automation not found' }); return; }
+
+  const triggers = parseJsonField<TriggerBlock[]>(existing.triggers, []);
+  const actions = parseJsonField<ActionBlock[]>(existing.actions, []);
+  if (triggers.length === 0 || actions.length === 0) {
+    res.status(400).json({ error: 'Rule has no triggers or actions to simulate' });
+    return;
+  }
+
+  try {
+    const firings = await dryRunRule(serializeRule(existing));
+    res.status(200).json({ firings });
+  } catch (err) {
+    res.status(500).json({ error: `Dry run failed: ${(err as Error).message}` });
+  }
 });
 
 // GET /automations/:id/runs — run history for one rule (newest first, capped).

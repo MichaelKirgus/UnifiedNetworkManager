@@ -1,13 +1,47 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { ChevronDown, ChevronRight, Play, Pencil, Plus, Trash2, Workflow } from 'lucide-react';
-import { api, Automation, AutomationActionBlock, AutomationDraft, AutomationRun, AutomationTemplate, AutomationTriggerBlock } from '../api/client';
+import { ChevronDown, ChevronRight, FlaskConical, Play, Pencil, Plus, Trash2, Workflow } from 'lucide-react';
+import { api, Automation, AutomationActionBlock, AutomationDraft, AutomationRun, AutomationTemplate, AutomationTriggerBlock, SimulatedFiring } from '../api/client';
 import { AUTOMATION_DRAFT_STORAGE_KEY } from './Updates';
 import { can } from '../auth/permissions';
 import { DataTable, DataTableColumn } from '../components/DataTable';
+import { DialogShell } from '../components/DialogShell';
 import { Layout } from '../components/Layout';
 import { useTimeFormat } from '../utils/time';
 import RuleBuilderDialog from './RuleBuilderDialog';
+
+/** Dry-run result panel — what a manual apply would do, per simulated firing. */
+function DryRunResults({ firings }: { firings: SimulatedFiring[] }) {
+  if (firings.length === 0) return <div className="text-sm text-faint">Nothing to simulate.</div>;
+  return (
+    <div className="max-h-[60vh] space-y-3 overflow-y-auto pr-1">
+      {firings.map((f, i) => (
+        <div key={i} className="rounded-md border border-border bg-muted/30 p-2.5">
+          <div className="mb-1.5 flex items-center gap-2 text-sm font-medium">
+            <span className={`rounded-full px-2 py-0.5 text-xs font-medium ${TRIGGER_CHIP[f.trigger.type] ?? 'bg-muted'}`}>{f.trigger.type}</span>
+            <span>{f.label}</span>
+          </div>
+          <ul className="space-y-1">
+            {f.actions.map((a) => (
+              <li key={a.id} className="text-sm">
+                <span className={a.status === 'would-run' ? 'text-status-ok' : a.status === 'skipped' ? 'text-status-warning' : 'text-danger'}>
+                  {a.status === 'would-run' ? '→ would run' : a.status === 'skipped' ? '↷ skipped' : '✕ error'}
+                </span>{' '}
+                <span className="text-secondary">{a.summary}</span>
+                {a.detail && <div className="pl-4 text-xs text-faint">{a.detail}</div>}
+                {a.plan && (
+                  <div className="mt-0.5 pl-4 text-xs text-faint">
+                    plan: {a.plan.actionId} on {a.plan.deviceIds.length} device(s) — {a.plan.steps.map((s) => s.actionId).join(', ')}
+                  </div>
+                )}
+              </li>
+            ))}
+          </ul>
+        </div>
+      ))}
+    </div>
+  );
+}
 
 /** Short human summary of a trigger block for the list's chip column. */
 function triggerSummary(t: AutomationTriggerBlock): string {
@@ -52,6 +86,16 @@ function actionSummary(a: AutomationActionBlock): string {
     case 'internal':
       return a.kind === 'backup' ? `backup ${a.preset ?? 'config'}` : `replication sync`;
   }
+}
+
+/** Earliest upcoming firing of a rule — the min of its schedule previews and any open deferred-update window. */
+function nextRunIso(row: Automation): string | null {
+  const candidates = [
+    ...Object.values(row.schedulePreviews ?? {}).filter((v): v is string => !!v),
+    ...(row.nextUpdateRun ? [row.nextUpdateRun] : []),
+  ];
+  if (candidates.length === 0) return null;
+  return candidates.reduce((min, iso) => (new Date(iso).getTime() < new Date(min).getTime() ? iso : min));
 }
 
 const TRIGGER_CHIP: Record<AutomationTriggerBlock['type'], string> = {
@@ -122,6 +166,8 @@ export default function Automations() {
   const [editing, setEditing] = useState<Automation | null>(null);
   /** Template pre-fill for a fresh rule (set when creating from the catalog). */
   const [templateDraft, setTemplateDraft] = useState<Pick<AutomationDraft, 'name' | 'description' | 'enabled' | 'triggers' | 'actions' | 'cooldownSec'> | null>(null);
+  /** Dry-run result panel (rule name + simulated firings), or null when closed. */
+  const [dryRunFor, setDryRunFor] = useState<{ name: string; firings: SimulatedFiring[] } | null>(null);
 
   const automationsQuery = useQuery({ queryKey: ['automations'], queryFn: () => api.automations() });
   const rows = useMemo(() => automationsQuery.data?.automations ?? [], [automationsQuery.data]);
@@ -184,6 +230,15 @@ export default function Automations() {
         return `${upd ?? '?'}: ${r.error}`;
       }).filter(Boolean).join('; ');
       alert(`Trigger run finished — ${ok}/${runs.length} succeeded.${errs ? ` ${errs}` : ''}`);
+    },
+  });
+
+  // Dry run simulates the rule without executing anything (zero side effects) and
+  // shows what a manual apply would do — one simulated firing per live update row.
+  const dryRunMutation = useMutation({
+    mutationFn: (id: string) => api.dryRunAutomation(id),
+    onSuccess: (res, id) => {
+      setDryRunFor({ name: rows.find((r) => r.id === id)?.name ?? 'rule', firings: res.firings });
     },
   });
 
@@ -291,10 +346,16 @@ export default function Automations() {
       header: 'Next run',
       key: 'nextRun',
       width: 170,
-      sortAccessor: (row) => Object.values(row.schedulePreviews ?? {}).find(Boolean) ?? '',
+      sortAccessor: (row) => nextRunIso(row) ?? '',
       render: (row) => {
-        const next = Object.values(row.schedulePreviews ?? {}).find(Boolean);
-        return next ? formatDateTime(next as string) : <span className="text-faint">—</span>;
+        const next = nextRunIso(row);
+        if (!next) return <span className="text-faint">—</span>;
+        const isUpdateWindow = row.nextUpdateRun !== null && row.nextUpdateRun === next;
+        return (
+          <span title={isUpdateWindow ? 'Deferred update window — fires at this maintenance slot' : undefined}>
+            {formatDateTime(next)}{isUpdateWindow && <span className="ml-1 text-xs text-status-warning">updates</span>}
+          </span>
+        );
       },
     },
     {
@@ -310,6 +371,9 @@ export default function Automations() {
             <>
               <button aria-label={`Trigger ${row.name}`} title="Trigger now — runs the actions for real (update triggers apply currently-available updates)" disabled={testMutation.isPending} onClick={() => testMutation.mutate(row.id)} className="rounded-md p-1.5 text-faint hover:bg-accent-indigo/20 hover:text-accent-indigo">
                 <Play className="h-4 w-4" />
+              </button>
+              <button aria-label={`Dry run ${row.name}`} title="Dry run — simulate what would happen (nothing is executed)" disabled={dryRunMutation.isPending} onClick={() => dryRunMutation.mutate(row.id)} className="rounded-md p-1.5 text-faint hover:bg-accent-teal/20 hover:text-accent-teal">
+                <FlaskConical className="h-4 w-4" />
               </button>
               <button aria-label={`Edit ${row.name}`} title="Edit rule" onClick={() => openEdit(row)} className="rounded-md p-1.5 text-faint hover:bg-accent-indigo/20 hover:text-accent-indigo">
                 <Pencil className="h-4 w-4" />
@@ -380,6 +444,18 @@ export default function Automations() {
           onClose={() => { setBuilderOpen(false); setTemplateDraft(null); }}
           onSaved={() => { setBuilderOpen(false); setTemplateDraft(null); invalidate(); }}
         />
+      )}
+
+      {dryRunFor && (
+        <DialogShell
+          title={`Dry run — ${dryRunFor.name}`}
+          subtitle="Simulation only — nothing was executed, no plans were kept, and no state changed. This is what a manual apply would do right now."
+          icon={<FlaskConical className="h-4 w-4 text-primary" />}
+          onClose={() => setDryRunFor(null)}
+          maxWidth="max-w-2xl"
+        >
+          <DryRunResults firings={dryRunFor.firings} />
+        </DialogShell>
       )}
     </Layout>
   );

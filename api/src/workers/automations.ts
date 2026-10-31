@@ -21,8 +21,9 @@ import { getEffectiveSettingValue } from '../systemSettings';
 import { emitNotification } from '../notifications';
 import { evaluateFlowCondition, evaluateMetricCondition, evaluateSchedules, hashLogLine, parseJsonField, pendingWindowState, scopeMatchesDevice, splitLogLines, updatePendingStateKey, updateRowMatches } from '../automations/engine';
 import type { UpdateTransition } from '../automations/engine';
-import type { Automation, ContainerLogTrigger, DeviceStatus, FlowTrigger, LogTrigger, MetricTrigger, TriggerBlock, TriggerContext, UpdateTrigger } from '../automations/types';
-import { executeAction } from '../automations/actions';
+import type { Automation, ContainerLogTrigger, DeviceStatus, FlowTrigger, LogTrigger, MetricTrigger, ScheduleTrigger, TriggerBlock, TriggerContext, UpdateTrigger } from '../automations/types';
+import { executeAction, simulateAction } from '../automations/actions';
+import type { SimulatedAction } from '../automations/actions';
 import { dispatchPluginAction } from '../utils/pluginDispatch';
 
 const TICK_INTERVAL_MS = 15_000; // how often the leader scans for due triggers
@@ -1160,6 +1161,64 @@ export async function manualTriggerRule(rule: Automation): Promise<void> {
       );
     }
   }
+}
+
+/** One simulated firing (dry run): the trigger context + every action's predicted outcome. */
+export interface SimulatedFiring {
+  /** The trigger block this firing is for. */
+  trigger: TriggerBlock;
+  /** Human label — e.g. "update web09" or "schedule". */
+  label: string;
+  actions: SimulatedAction[];
+}
+
+/**
+ * Dry-runs a rule WITHOUT executing anything (POST /automations/:id/dry-run).
+ * Mirrors manualTriggerRule's context construction exactly — updateAvailable
+ * triggers resolve the CURRENTLY available rows and produce one simulated firing
+ * per row, other triggers produce one bare-context firing each — but every action
+ * goes through simulateAction() instead of executeAction(). Intent actions build a
+ * real plan (the deterministic plugin /plan call) to report its exact steps, then
+ * tear it down. No run rows are written, no windows touched, nothing enqueued.
+ */
+export async function dryRunRule(rule: Automation): Promise<SimulatedFiring[]> {
+  const deviceRows = await db.query.devices.findMany();
+  const namesById = new Map(deviceRows.map((d) => [d.id, d.name]));
+
+  const out: SimulatedFiring[] = [];
+  for (const t of rule.triggers) {
+    if (t.type !== 'updateAvailable') {
+      const ctx: TriggerContext = { trigger: t };
+      out.push({
+        trigger: t,
+        label: t.type === 'schedule' ? `schedule (${(t as ScheduleTrigger).schedule.kind})` : t.type,
+        actions: await Promise.all(rule.actions.map((a) => simulateAction(rule.id, rule.name, a, ctx))),
+      });
+      continue;
+    }
+
+    const snaps = await resolveLiveUpdateRows(rule, t);
+    if (snaps.length === 0) {
+      // Nothing available right now — one bare firing so the UI can show what would
+      // happen to non-update actions and that update actions have no row to apply.
+      out.push({
+        trigger: t,
+        label: 'updateAvailable (no updates currently available)',
+        actions: await Promise.all(rule.actions.map((a) => simulateAction(rule.id, rule.name, a, { trigger: t }))),
+      });
+      continue;
+    }
+
+    for (const snap of snaps) {
+      const ctx = buildUpdateTriggerContext(t, namesById.get(snap.deviceId) ?? null, snap);
+      out.push({
+        trigger: t,
+        label: `update ${snap.name} (${namesById.get(snap.deviceId) ?? snap.deviceId})`,
+        actions: await Promise.all(rule.actions.map((a) => simulateAction(rule.id, rule.name, a, ctx))),
+      });
+    }
+  }
+  return out;
 }
 
 /**
