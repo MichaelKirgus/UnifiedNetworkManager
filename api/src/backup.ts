@@ -516,6 +516,8 @@ export interface SectionMergeReport {
   section: string;
   tables: TableMergeResult[];
   warnings: string[];
+  /** Set when this section failed and rolled back (only with continueOnSectionError). */
+  error?: string;
 }
 
 function pkKey(meta: TableMeta, row: Record<string, unknown>): string {
@@ -615,6 +617,8 @@ export interface ApplyOptions {
   sections?: string[];
   /** Setting keys to skip (replication exclusion policy). */
   excludeSettingKeys?: ReadonlySet<string>;
+  /** Keep applying remaining sections when one fails — each failed section rolls back on its own and is reported with `error`. Default false = stop at the first failure. */
+  continueOnSectionError?: boolean;
 }
 
 /**
@@ -655,7 +659,8 @@ export async function applyArchive(archive: BackupArchive, opts: ApplyOptions = 
         }
       });
     } catch (err) {
-      throw new BackupError(`Section "${section}" failed to apply: ${(err as Error).message}`, 409);
+      if (!opts.continueOnSectionError) throw new BackupError(`Section "${section}" failed to apply: ${(err as Error).message}`, 409);
+      report.error = (err as Error).message;
     }
     reports.push(report);
   }

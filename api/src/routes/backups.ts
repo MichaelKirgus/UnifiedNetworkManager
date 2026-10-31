@@ -314,7 +314,10 @@ backupsRouter.post('/backups/restore/apply', requireAuth, requirePermission('ins
     }
 
     const archive: BackupArchive = parseArchive(buffer);
-    const reports = await applyArchive(archive, { sections });
+    // Continue past a failed section so one bad table (e.g. a duplicate username in
+    // identity) doesn't silently block the rest — each section is its own transaction,
+    // and failures are reported per-section in `report[].error`.
+    const reports = await applyArchive(archive, { sections, continueOnSectionError: true });
     if (pendingId) await deletePendingUpload(pendingId); // applied — drop the staged copy
     res.status(200).json({ report: reports });
   } catch (err) {

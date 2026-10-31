@@ -257,6 +257,15 @@ export default function BackupRestorePage() {
             <p className="rounded-md border border-border bg-background px-3 py-2 text-xs text-faint">{buildTagNote}</p>
           )}
 
+          {/* Apply failures must be visible HERE — step 1's banner never shows once the user is on Preview. */}
+          {applyMutation.isError && (
+            <div className="rounded-md border border-danger-border bg-danger px-3 py-2 text-sm text-danger-fg">
+              <p className="font-medium">Apply failed</p>
+              <p>{(applyMutation.error as Error).message}</p>
+              <p className="mt-1 text-xs opacity-80">Sections applied before the failure stay merged (each section is its own transaction) — uncheck the failing section and retry.</p>
+            </div>
+          )}
+
           {/* Section toggles */}
           <div className="space-y-1">
             {previewRows.map(({ key, rowCount }) => (
@@ -299,6 +308,18 @@ export default function BackupRestorePage() {
       {/* ================= STEP 3 — report ================= */}
       {step === 3 && report && (
         <div className="space-y-4">
+          {/* Sections that failed rolled back on their own — the rest applied. Say so loudly. */}
+          {report.some((r) => r.error) && (
+            <div className="rounded-md border border-danger-border bg-danger px-3 py-2 text-sm text-danger-fg">
+              <p className="font-medium">Some sections failed and were rolled back — the others applied.</p>
+              <ul className="mt-1 list-inside list-disc space-y-0.5 text-xs">
+                {report.filter((r) => r.error).map((r) => (
+                  <li key={r.section}>Section "{r.section}": {r.error}</li>
+                ))}
+              </ul>
+            </div>
+          )}
+
           <div className="flex flex-wrap gap-2 text-sm">
             <span className="rounded bg-success px-2 py-1 font-medium text-success-fg">{createdTotal.toLocaleString()} created</span>
             <span className="rounded bg-info px-2 py-1 font-medium text-info-fg">{updatedTotal.toLocaleString()} updated (merged)</span>

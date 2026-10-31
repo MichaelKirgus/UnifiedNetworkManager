@@ -2367,6 +2367,8 @@ export interface SectionMergeReport {
   section: string;
   tables: TableMergeResult[];
   warnings: string[];
+  /** Set when this section failed and rolled back — the other sections still applied. */
+  error?: string;
 }
 
 /** A replication target row — the peer token is never returned. */
