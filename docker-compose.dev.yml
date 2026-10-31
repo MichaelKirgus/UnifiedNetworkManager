@@ -1454,8 +1454,12 @@ services:
       # setup (no CORS; see docs/REVERSE-PROXY.md).
       args:
         VITE_API_URL: ${UNM_WEBAPP_API_URL:-http://localhost:3000/v1}
+    # The image default CMD is proxy.js (static SPA + /v1/* → api), listening on
+    # 8080 inside the container. Dev keeps VITE_API_URL absolute (browser calls
+    # the host-run API directly), so the in-container proxy is unused here — it
+    # only matters for pre-built images without a build-arg override.
     ports:
-      - ${UNM_WEB_PORT:-8080}:5173
+      - ${UNM_WEB_PORT:-8080}:8080
     environment:
       # Optional macvlan default gateway (scripts/docker-entrypoint.sh) — empty = no-op.
       - UNM_DEFAULT_GATEWAY=${UNM_DEFAULT_GATEWAY:-}
@@ -1466,10 +1470,10 @@ services:
       - UNM_SKIP_CHOWN=${UNM_SKIP_CHOWN:-}
       - UNM_DOCKER_GID=${UNM_DOCKER_GID:-}
       - UNM_DOCKER_UID=${UNM_DOCKER_UID:-}
-    # Static-serve self-check on :5173 (the baked build-tag manifest is a
+    # Static-serve self-check on :8080 (the baked build-tag manifest is a
     # stable same-origin URL that exists in every image).
     healthcheck:
-      test: ["CMD-SHELL", 'node -e ''require("http").get({host:"127.0.0.1",port:5173,path:"/manifest.json"},function(r){process.exit(r.statusCode===200?0:1)}).on("error",function(){process.exit(1)})''']
+      test: ["CMD-SHELL", 'node -e ''require("http").get({host:"127.0.0.1",port:8080,path:"/manifest.json"},function(r){process.exit(r.statusCode===200?0:1)}).on("error",function(){process.exit(1)})''']
       interval: 30s
       timeout: 10s
       retries: 3

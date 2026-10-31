@@ -808,7 +808,7 @@ services:
     image: ${UNM_REGISTRY:-ghcr.io/michaelkirgus/unifiednetworkmanager}/secrets-provider-plugin:${UNM_IMAGE_TAG:-dev}
   webapp:
     ports:
-      - ${UNM_WEB_PORT:-8080}:5173
+      - ${UNM_WEB_PORT:-8080}:8080
     environment:
       - UNM_DEFAULT_GATEWAY=${UNM_DEFAULT_GATEWAY:-}
       - UNM_RUN_AS_ROOT=${UNM_RUN_AS_ROOT:-}
@@ -818,7 +818,7 @@ services:
     healthcheck:
       test:
         - CMD-SHELL
-        - node -e 'require("http").get({host:"127.0.0.1",port:5173,path:"/manifest.json"},function(r){process.exit(r.statusCode===200?0:1)}).on("error",function(){process.exit(1)})'
+        - node -e 'require("http").get({host:"127.0.0.1",port:8080,path:"/manifest.json"},function(r){process.exit(r.statusCode===200?0:1)}).on("error",function(){process.exit(1)})'
       interval: 30s
       timeout: 10s
       retries: 3

@@ -9,8 +9,8 @@
 //                                     use a release tag like v0.1.0 for releases)
 //
 // Port standardization applied on the way out:
-//   - webapp is published on host port 8080 (${UNM_WEB_PORT:-8080}:5173) — same
-//     as the dev compose and the vite dev server.
+//   - webapp is published on host port 8080 (${UNM_WEB_PORT:-8080}:8080) — the
+//     image default CMD (proxy.js: static SPA + /v1/* → api) listens on 8080.
 //   - mcp gets NO host port by default: it carries an API token with full agent
 //     capabilities, so exposing it to all interfaces is opt-in (see header note).
 //
@@ -47,7 +47,9 @@ for (const [name, svc] of Object.entries(services)) {
   // Port standardization for the end-user file (see header):
   if (name === 'webapp' && Array.isArray(out.ports)) {
     out.ports = out.ports.map((p) =>
-      String(p).includes(':5173') ? '${UNM_WEB_PORT:-8080}:5173' : p
+      // Container port is 8080 (proxy.js default); normalize any legacy :5173
+      // mapping so the host-port override keeps working.
+      String(p).includes(':5173') || String(p).includes(':8080') ? '${UNM_WEB_PORT:-8080}:8080' : p
     );
   }
   if (name === 'mcp') delete out.ports; // not exposed by default — opt-in via UNM_MCP_PORT
