@@ -18,7 +18,7 @@ import * as schema from '../db/schema';
 import { nextScheduleRun, parseJsonField, previewSchedule, validateAutomationDraft } from '../automations/engine';
 import { listAutomationTemplates } from '../automations/templates';
 import type { ActionBlock, Automation, AutomationDraft, AutomationRun, LogTrigger, ScheduleSpec, TriggerBlock } from '../automations/types';
-import { fireRule, scanLogMatches } from '../workers/automations';
+import { fireRule, manualTriggerRule, scanLogMatches, seedPendingUpdateWindows } from '../workers/automations';
 
 const router = Router();
 
@@ -80,6 +80,23 @@ function serializeRun(row: { id: string; automationId: string; firedAt: string; 
 async function loadRule(id: string): Promise<RuleRow | null> {
   const rows = await db.select().from(schema.automations).where(eq(schema.automations.id, id));
   return (rows[0] as unknown as RuleRow) ?? null;
+}
+
+/** Builds an in-memory Automation view of a validated draft — for post-save engine hooks (window seeding). */
+function automationFromDraft(draft: AutomationDraft, id: string): Automation {
+  return {
+    id,
+    name: draft.name.trim(),
+    description: typeof draft.description === 'string' && draft.description.trim() ? draft.description.trim() : null,
+    enabled: draft.enabled !== false,
+    triggers: draft.triggers,
+    actions: draft.actions,
+    cooldownSec: Number.isInteger(draft.cooldownSec) && (draft.cooldownSec ?? 0) >= 0 ? (draft.cooldownSec as number) : 0,
+    lastFiredAt: null,
+    createdBy: null,
+    createdAt: '',
+    updatedAt: '',
+  };
 }
 
 // GET /automations — list all rules with computed next-run previews.
@@ -151,6 +168,12 @@ router.post('/automations', requireAuth, requirePermission('automations:write'),
     updatedAt: now,
   });
 
+  // Seed deferral windows for updates that are already available — without this a
+  // new rule would never pick up rows that predate it (no transition fires for them).
+  // Awaited so the response is deterministic (an immediate manual trigger or state
+  // read right after create sees the seeded windows; seeding is idempotent + cheap).
+  if (draft.enabled !== false) await seedPendingUpdateWindows(automationFromDraft(draft, id));
+
   const row = await loadRule(id);
   res.status(201).json({ automation: serializeRule(row!) });
 });
@@ -189,6 +212,11 @@ router.patch('/automations/:id', requireAuth, requirePermission('automations:wri
     })
     .where(eq(schema.automations.id, existing.id));
 
+  // Re-enabling (or editing) an enabled rule with deferred update triggers → make
+  // sure currently-available rows have a window. Idempotent — open windows keep
+  // their original anchor; only missing ones are seeded.
+  if (draft.enabled !== false) await seedPendingUpdateWindows(automationFromDraft(draft, existing.id));
+
   const row = await loadRule(existing.id);
   res.status(200).json({ automation: serializeRule(row!) });
 });
@@ -202,9 +230,13 @@ router.delete('/automations/:id', requireAuth, requirePermission('automations:wr
   res.status(200).json({ deleted: true });
 });
 
-// POST /automations/:id/test — run the rule's actions ONCE right now (no trigger
-// evaluation) so the user can verify wiring before relying on it. Uses the
-// first trigger block as the nominal context; the run row is tagged test=true.
+// POST /automations/:id/test — manually trigger the rule right now. Optional body:
+//   { "mode": "apply" } → run for real: updateAvailable triggers resolve the
+//     CURRENTLY available device_updates rows and fire once per row (defer
+//     schedules are bypassed). This is what `resolveFromTrigger: "update"` actions
+//     need — a bare test context has no update row to resolve against.
+//   { "mode": "test" } or omitted → legacy wiring check: the first trigger block
+//     fires once with a bare context (no live rows resolved).
 router.post('/automations/:id/test', requireAuth, requirePermission('automations:write'), async (req: Request, res: Response) => {
   const existing = await loadRule(String(req.params.id ?? ''));
   if (!existing) { res.status(404).json({ error: 'Automation not found' }); return; }
@@ -216,20 +248,31 @@ router.post('/automations/:id/test', requireAuth, requirePermission('automations
     return;
   }
 
+  const modeRaw = typeof req.body?.mode === 'string' ? req.body.mode : '';
+  if (modeRaw !== '' && modeRaw !== 'test' && modeRaw !== 'apply') {
+    res.status(400).json({ error: "mode must be 'test' or 'apply'" });
+    return;
+  }
+
   const rule: Automation = serializeRule(existing);
   try {
-    await fireRule(rule, triggers[0], { kind: 'test', triggerType: triggers[0].type }, { trigger: triggers[0] });
+    if (modeRaw === 'apply') {
+      await manualTriggerRule(rule);
+    } else {
+      await fireRule(rule, triggers[0], { kind: 'test', triggerType: triggers[0].type }, { trigger: triggers[0] });
+    }
   } catch (err) {
     res.status(500).json({ error: `Test run failed: ${(err as Error).message}` });
     return;
   }
 
-  // Return the run row just written (newest first for this rule).
+  // Return the run rows just written — apply mode with an updateAvailable trigger
+  // writes one per live row, so list them (newest first) alongside the newest.
   const runs = await db.select().from(schema.automationRuns)
     .where(eq(schema.automationRuns.automationId, existing.id))
     .orderBy(desc(schema.automationRuns.firedAt))
-    .limit(1);
-  res.status(200).json({ run: serializeRun(runs[0]) });
+    .limit(20);
+  res.status(200).json({ run: serializeRun(runs[0]), runs: runs.map(serializeRun) });
 });
 
 // GET /automations/:id/runs — run history for one rule (newest first, capped).

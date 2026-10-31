@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { ChevronDown, ChevronRight, FlaskConical, Pencil, Plus, Trash2, Workflow } from 'lucide-react';
+import { ChevronDown, ChevronRight, Play, Pencil, Plus, Trash2, Workflow } from 'lucide-react';
 import { api, Automation, AutomationActionBlock, AutomationDraft, AutomationRun, AutomationTemplate, AutomationTriggerBlock } from '../api/client';
 import { AUTOMATION_DRAFT_STORAGE_KEY } from './Updates';
 import { can } from '../auth/permissions';
@@ -166,11 +166,24 @@ export default function Automations() {
     onSuccess: invalidate,
   });
 
+  // Manual trigger runs for real (mode "apply"): updateAvailable triggers resolve
+  // the currently-available device_updates rows and fire once per row.
   const testMutation = useMutation({
-    mutationFn: (id: string) => api.testAutomation(id),
+    mutationFn: (id: string) => api.testAutomation(id, { mode: 'apply' }),
     onSuccess: (res, id) => {
       queryClient.invalidateQueries({ queryKey: ['automation-runs', id] });
-      alert(res.run.status === 'succeeded' ? `Test run succeeded.` : `Test run ${res.run.status}: ${res.run.error ?? ''}`);
+      const runs = res.runs?.length ? res.runs : [res.run];
+      if (runs.length === 1) {
+        alert(res.run.status === 'succeeded' ? `Trigger run succeeded.` : `Trigger run ${res.run.status}: ${res.run.error ?? ''}`);
+        return;
+      }
+      const ok = runs.filter((r) => r.status === 'succeeded').length;
+      const errs = runs.map((r) => {
+        if (!r.error) return null;
+        const upd = (r.context as { update?: { name?: string } } | undefined)?.update?.name;
+        return `${upd ?? '?'}: ${r.error}`;
+      }).filter(Boolean).join('; ');
+      alert(`Trigger run finished — ${ok}/${runs.length} succeeded.${errs ? ` ${errs}` : ''}`);
     },
   });
 
@@ -295,8 +308,8 @@ export default function Automations() {
         <div className="flex items-center gap-1">
           {canWrite && (
             <>
-              <button aria-label={`Test ${row.name}`} title="Run the actions once now" disabled={testMutation.isPending} onClick={() => testMutation.mutate(row.id)} className="rounded-md p-1.5 text-faint hover:bg-accent-indigo/20 hover:text-accent-indigo">
-                <FlaskConical className="h-4 w-4" />
+              <button aria-label={`Trigger ${row.name}`} title="Trigger now — runs the actions for real (update triggers apply currently-available updates)" disabled={testMutation.isPending} onClick={() => testMutation.mutate(row.id)} className="rounded-md p-1.5 text-faint hover:bg-accent-indigo/20 hover:text-accent-indigo">
+                <Play className="h-4 w-4" />
               </button>
               <button aria-label={`Edit ${row.name}`} title="Edit rule" onClick={() => openEdit(row)} className="rounded-md p-1.5 text-faint hover:bg-accent-indigo/20 hover:text-accent-indigo">
                 <Pencil className="h-4 w-4" />

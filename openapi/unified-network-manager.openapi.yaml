@@ -7748,7 +7748,7 @@ paths:
         required: true
         content:
           application/json:
-            schema: { $ref: '#/components/schemas/AutomationDraft' }
+            schema: { $ref: '#/components/schemas/AutomationDraftPatch' }
       responses:
         '200':
           description: The updated rule
@@ -7785,12 +7785,28 @@ paths:
   /automations/{id}/test:
     post:
       tags: [Automations]
-      summary: Run the rule's actions once now (verify wiring before relying on it)
+      summary: Manually trigger the rule now (wiring check, or apply currently-available updates)
+      description: >-
+        Optional body { "mode": "apply" } runs for real — updateAvailable triggers
+        resolve the CURRENTLY available device_updates rows and fire once per row
+        (defer schedules are bypassed). Omitted or { "mode": "test" } is the legacy
+        wiring check: the first trigger block fires once with a bare context.
       parameters:
         - in: path
           name: id
           required: true
           schema: { type: string }
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                mode:
+                  type: string
+                  enum: [test, apply]
+                  description: "apply = run for real against live update rows (default test)"
       responses:
         '200':
           description: The run row just written
@@ -12517,6 +12533,23 @@ components:
           items: { $ref: '#/components/schemas/AutomationActionBlock' }
         cooldownSec: { type: integer, minimum: 0, default: 0, description: "Minimum seconds between two firings (event-trigger throttle)" }
 
+    AutomationDraftPatch:
+      description: Partial automation update — every field is optional; omitted fields keep their current values.
+      type: object
+      properties:
+        name: { type: string, minLength: 1, maxLength: 200 }
+        description: { type: ['string', 'null'] }
+        enabled: { type: boolean }
+        triggers:
+          type: array
+          minItems: 1
+          items: { $ref: '#/components/schemas/AutomationTriggerBlock' }
+        actions:
+          type: array
+          minItems: 1
+          items: { $ref: '#/components/schemas/AutomationActionBlock' }
+        cooldownSec: { type: integer, minimum: 0 }
+
     Automation:
       allOf:
         - $ref: '#/components/schemas/AutomationDraft'
@@ -12591,9 +12624,9 @@ components:
         id: { type: string }
         automationId: { type: string }
         firedAt: { type: string, format: date-time }
-        triggerType: { type: string, enum: [schedule, metric, log, deviceStatus, flow, containerLog] }
+        triggerType: { type: string, enum: [schedule, metric, log, deviceStatus, flow, containerLog, updateAvailable] }
         context: { type: object, additionalProperties: true, description: "Trigger context at firing time" }
-        status: { type: string, enum: [succeeded, failed, partial] }
+        status: { type: string, enum: [succeeded, failed, partial, skipped] }
         error: { type: string, nullable: true }
         planIds: { type: array, items: { type: string }, description: "Plans created by intent actions" }
 
@@ -12602,6 +12635,10 @@ components:
       required: [run]
       properties:
         run: { $ref: '#/components/schemas/AutomationRun' }
+        runs:
+          type: array
+          description: "All run rows written by this trigger (apply mode with an updateAvailable trigger writes one per live row)"
+          items: { $ref: '#/components/schemas/AutomationRun' }
 
     AutomationRunsResponse:
       type: object

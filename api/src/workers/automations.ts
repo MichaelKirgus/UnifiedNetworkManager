@@ -1070,6 +1070,126 @@ async function handleUpdateTransition(
   }
 }
 
+// ── Manual trigger + seeding (pre-existing updates) ───────────────────────────
+// updateAvailable triggers fire only on TRANSITIONS (appeared/advanced) detected at
+// telemetry ingest. Two consequences this section addresses:
+//   1. A rule created/enabled AFTER an update row already exists never sees a
+//      transition for it — seedPendingUpdateWindows() opens the deferral windows
+//      for currently-available rows so the schedule picks them up.
+//   2. The manual trigger (POST /automations/:id/test) has no transition event at
+//      all — manualTriggerRule() resolves CURRENTLY available rows and fires once
+//      per row, which is what `resolveFromTrigger: "update"` actions need.
+
+/** Parses a device_updates.applyInput JSON column into an object, or undefined. */
+function parseApplyInputColumn(raw: string | null): Record<string, unknown> | undefined {
+  if (!raw) return undefined;
+  try {
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Resolves the CURRENTLY available device_updates rows that match this rule's
+ * updateAvailable trigger (pluginId, scope, kinds/names/namePattern/rebootRequired).
+ * `condition` is not part of the match — it selects transitions, not rows.
+ */
+async function resolveLiveUpdateRows(rule: Automation, t: UpdateTrigger): Promise<PendingUpdateSnapshot[]> {
+  const [rows, deviceRows] = await Promise.all([
+    db.query.deviceUpdates.findMany(),
+    db.query.devices.findMany(),
+  ]);
+  const devicesById = new Map(deviceRows.map((d) => [d.id, toScopeDevice(d)]));
+  const out: PendingUpdateSnapshot[] = [];
+  for (const r of rows) {
+    if (t.pluginId && r.pluginId !== t.pluginId) continue;
+    const dev = devicesById.get(r.deviceId);
+    if (!dev || !scopeMatchesDevice(t.scope, dev)) continue;
+    if (!updateRowMatches(t, { kind: r.kind, name: r.name, currentVersion: r.currentVersion, latestVersion: r.latestVersion, rebootRequired: r.rebootRequired })) continue;
+    out.push({
+      deviceId: r.deviceId,
+      pluginId: r.pluginId,
+      kind: r.kind,
+      name: r.name,
+      currentVersion: r.currentVersion,
+      latestVersion: r.latestVersion,
+      rebootRequired: r.rebootRequired,
+      applyActionId: r.applyActionId ?? null,
+      applyInput: parseApplyInputColumn(r.applyInput),
+    });
+  }
+  return out;
+}
+
+/**
+ * Manually runs a rule's actions once (POST /automations/:id/test). A manual run is
+ * an explicit "do it now" intent — defer schedules are bypassed. updateAvailable
+ * triggers resolve the currently available rows and fire the rule ONCE PER ROW
+ * (the row becomes ctx.update, which `resolveFromTrigger: "update"` actions need);
+ * with no matching rows the rule runs once with a bare context so non-update
+ * actions can still be verified and the run row records what happened. Other
+ * trigger types run once each as before. Never throws — failures land on the run rows.
+ */
+export async function manualTriggerRule(rule: Automation): Promise<void> {
+  const deviceRows = await db.query.devices.findMany();
+  const namesById = new Map(deviceRows.map((d) => [d.id, d.name]));
+
+  for (const t of rule.triggers) {
+    if (t.type !== 'updateAvailable') {
+      await fireRule(rule, t, { kind: 'test', triggerType: t.type }, { trigger: t });
+      continue;
+    }
+    const snaps = await resolveLiveUpdateRows(rule, t);
+    if (snaps.length === 0) {
+      // Nothing available right now — bare context so update actions fail with the
+      // clear "no update row" error instead of silently doing nothing.
+      await fireRule(rule, t, { kind: 'test', triggerType: t.type }, { trigger: t });
+      continue;
+    }
+    for (const snap of snaps) {
+      // A manual apply supersedes any pending deferral window for this row — clear it
+      // so the scheduled slot doesn't double-apply later.
+      await writeState(rule.id, t.id, updatePendingStateKey(snap.deviceId, snap.pluginId, snap.kind, snap.name), null);
+      await fireRule(
+        rule,
+        t,
+        updateRunContext(snap.deviceId, snap.pluginId, { kind: snap.kind, name: snap.name, transition: 'appeared', currentVersion: snap.currentVersion, latestVersion: snap.latestVersion, rebootRequired: snap.rebootRequired }),
+        buildUpdateTriggerContext(t, namesById.get(snap.deviceId) ?? null, snap),
+      );
+    }
+  }
+}
+
+/**
+ * Seeds deferral windows for updates that are ALREADY available when a rule is
+ * created or enabled. Without this, a new rule would never pick up rows that predate it
+ * (no transition fires for them) and its defer schedule would have nothing to fire
+ * against. Idempotent — existing windows keep their original anchor (sinceIso). Only
+ * deferred triggers are seeded: immediate triggers fire on the next transition as
+ * before, and firing every currently-available row instantly at create time would be
+ * surprising. Never throws — seeding is best-effort by contract.
+ */
+export async function seedPendingUpdateWindows(rule: Automation): Promise<void> {
+  for (const t of rule.triggers) {
+    if (t.type !== 'updateAvailable' || !t.defer) continue;
+    try {
+      const snaps = await resolveLiveUpdateRows(rule, t);
+      // One anchor per seeding event — all windows opened here share sinceIso so a
+      // single schedule slot covers the whole batch.
+      const sinceIso = new Date().toISOString();
+      for (const snap of snaps) {
+        const key = updatePendingStateKey(snap.deviceId, snap.pluginId, snap.kind, snap.name);
+        if (await readState(rule.id, t.id, key)) continue; // window already open — keep its anchor
+        await writeState(rule.id, t.id, key, JSON.stringify({ sinceIso, snapshot: snap } satisfies PendingUpdateWindow));
+      }
+    } catch (err) {
+      console.error(`[automations] seeding pending update windows for rule ${rule.id} failed:`, err);
+    }
+  }
+}
+
 /** One evaluator tick over all pending deferral windows of the given rules. */
 async function evaluatePendingUpdateWindows(rules: Automation[], nowMs: number): Promise<void> {
   const deviceRows = await db.query.devices.findMany();

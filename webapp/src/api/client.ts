@@ -4459,9 +4459,9 @@ export const api = {
     apiFetch<Automation>(`/automations/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify(body) }),
   deleteAutomation: (id: string) =>
     apiFetch<{ deleted: boolean }>(`/automations/${encodeURIComponent(id)}`, { method: 'DELETE' }),
-  /** Run the rule's actions once now (verify wiring before relying on it). */
-  testAutomation: (id: string) =>
-    apiFetch<{ run: AutomationRun }>(`/automations/${encodeURIComponent(id)}/test`, { method: 'POST' }),
+  /** Manually trigger the rule now. mode "apply" runs for real against currently-available update rows; default is a wiring check. */
+  testAutomation: (id: string, opts?: { mode?: 'test' | 'apply' }) =>
+    apiFetch<{ run: AutomationRun; runs?: AutomationRun[] }>(`/automations/${encodeURIComponent(id)}/test`, { method: 'POST', body: JSON.stringify(opts?.mode ? { mode: opts.mode } : {}) }),
   automationRuns: (id: string, limit = 50) =>
     apiFetch<{ runs: AutomationRun[] }>(`/automations/${encodeURIComponent(id)}/runs?limit=${limit}`),
   /** Upcoming occurrences of a schedule spec (builder "next runs" hint). */
