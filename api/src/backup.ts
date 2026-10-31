@@ -64,18 +64,18 @@ const PENDING_DIR = path.join(BACKUP_DIR, '.pending');
 // Sections & presets
 // ---------------------------------------------------------------------------
 
-export const SECTION_KEYS = ['identity', 'settings', 'devices', 'documented', 'plans', 'liveInventory'] as const;
+export const SECTION_KEYS = ['identity', 'settings', 'devices', 'documented', 'plans', 'automations', 'liveInventory'] as const;
 export type SectionKey = (typeof SECTION_KEYS)[number];
 
 /** Presets are just bundles of sections. */
 export const PRESETS: Record<string, readonly string[]> = {
-  config: ['identity', 'settings', 'devices'],
+  config: ['identity', 'settings', 'devices', 'automations'],
   planned: ['documented', 'plans'],
   all: [...SECTION_KEYS],
 };
 
 /** Sections that may cross instance boundaries via replication (no live inventory). */
-export const PORTABLE_SECTIONS: readonly SectionKey[] = ['identity', 'settings', 'devices', 'documented', 'plans'];
+export const PORTABLE_SECTIONS: readonly SectionKey[] = ['identity', 'settings', 'devices', 'documented', 'plans', 'automations'];
 
 // ---------------------------------------------------------------------------
 // Exclusion lists — the ONLY place data is kept out of backups.
@@ -140,12 +140,20 @@ const DEVICE_TABLES: ReadonlySet<string> = new Set([
   'plugin_state',
 ]);
 
+/** Actions & Schedules (automation engine) — rules, their run audit trail and per-trigger state. */
+const AUTOMATION_TABLES: ReadonlySet<string> = new Set([
+  'automations',
+  'automation_runs',
+  'automation_state',
+]);
+
 function sectionForTable(name: string): SectionKey {
   if (IDENTITY_TABLES.has(name)) return 'identity';
   if (name === 'system_settings') return 'settings';
   if (name.startsWith('documented_')) return 'documented';
   if (name === 'plans' || name === 'plan_steps') return 'plans';
   if (DEVICE_TABLES.has(name)) return 'devices';
+  if (AUTOMATION_TABLES.has(name)) return 'automations';
   // Safe fallback: unknown/new tables are treated as regenerable inventory —
   // still covered by scope "all", never polluting config/planned backups.
   return 'liveInventory';
@@ -174,6 +182,9 @@ const RESTORE_ORDER: Record<string, number> = {
   documented_host_ips: 18,
   plans: 19,
   plan_steps: 20,
+  automations: 21,
+  automation_runs: 22,
+  automation_state: 23,
 };
 const RESTORE_ORDER_DEFAULT = 30;
 

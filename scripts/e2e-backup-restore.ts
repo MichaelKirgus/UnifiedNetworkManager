@@ -52,7 +52,7 @@ const DEFAULT_REPLICATION_EXCLUDES = new Set([
   'geoipActiveFileId',
 ]);
 
-const PORTABLE_SECTIONS = new Set(['identity', 'settings', 'devices', 'documented', 'plans']);
+const PORTABLE_SECTIONS = new Set(['identity', 'settings', 'devices', 'documented', 'plans', 'automations']);
 
 async function main(): Promise<void> {
   // --- Login (admin/admin; TOTP minted from the seeded secret when enabled) ----
@@ -95,7 +95,8 @@ async function main(): Promise<void> {
   check('GET /backups/meta returns 200', meta.status === 200, { status: meta.status });
   const metaBody = (await meta.json()) as { sections?: Array<{ key: string; tables: string[] }>; presets?: Record<string, string[]> };
   const sectionKeys = (metaBody.sections ?? []).map((s) => s.key);
-  check('sections include the six known keys', ['identity', 'settings', 'devices', 'documented', 'plans', 'liveInventory'].every((k) => sectionKeys.includes(k)), sectionKeys);
+  check('sections include the seven known keys', ['identity', 'settings', 'devices', 'documented', 'plans', 'automations', 'liveInventory'].every((k) => sectionKeys.includes(k)), sectionKeys);
+  check('config preset includes automations', Boolean(metaBody.presets?.config?.includes('automations')), metaBody.presets);
   check('presets define config/planned/all', Boolean(metaBody.presets?.config && metaBody.presets?.planned && metaBody.presets?.all), Object.keys(metaBody.presets ?? {}));
 
   // ---------------------------------------------------------------------------

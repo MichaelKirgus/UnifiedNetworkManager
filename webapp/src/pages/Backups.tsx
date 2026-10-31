@@ -413,7 +413,7 @@ export default function Backups() {
             <RefreshCw className="h-4 w-4 text-primary" /> Replication
           </h2>
           <p className="mb-3 text-xs text-faint">
-            One-way sync of portable config (identity, settings, devices, documented, plans) to/from a peer instance. Live inventory never replicates — it is regenerated locally by polling.
+            One-way sync of portable config (identity, settings, devices, documented, plans, automations) to/from a peer instance. Live inventory never replicates — it is regenerated locally by polling.
             Secrets move only between instances sharing the same MASTER_KEY + CRYPTO_SALT.
           </p>
 

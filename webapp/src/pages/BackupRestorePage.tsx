@@ -37,6 +37,7 @@ const SECTION_LABELS: Record<string, string> = {
   devices: 'Devices & plugins',
   documented: 'Documented networks/hosts',
   plans: 'Plans',
+  automations: 'Automations (rules, runs, trigger state)',
   liveInventory: 'Live inventory (regenerable)',
 };
 
