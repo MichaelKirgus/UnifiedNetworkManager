@@ -313,8 +313,9 @@ export default function Login() {
           ) : !challengeToken ? (
             <form className="space-y-4" onSubmit={handleCredentials}>
               <div>
-                <label className="mb-1 block text-sm font-medium text-secondary">Username</label>
+                <label htmlFor="login-username" className="mb-1 block text-sm font-medium text-secondary">Username</label>
                 <input
+                  id="login-username"
                   className="w-full rounded-md border border-border px-3 py-2 text-sm focus:border-focus-ring focus:outline-none"
                   value={username}
                   onChange={(e) => setUsername(e.target.value)}
@@ -322,8 +323,9 @@ export default function Login() {
                 />
               </div>
               <div>
-                <label className="mb-1 block text-sm font-medium text-secondary">Password</label>
+                <label htmlFor="login-password" className="mb-1 block text-sm font-medium text-secondary">Password</label>
                 <input
+                  id="login-password"
                   type="password"
                   className="w-full rounded-md border border-border px-3 py-2 text-sm focus:border-focus-ring focus:outline-none"
                   value={password}
@@ -343,10 +345,11 @@ export default function Login() {
           ) : (
             <form className="space-y-4" onSubmit={handleVerify}>
               <div>
-                <label className="mb-1 block text-sm font-medium text-secondary">
+                <label htmlFor="login-totp" className="mb-1 block text-sm font-medium text-secondary">
                   Two-factor authentication code
                 </label>
                 <input
+                  id="login-totp"
                   className="w-full rounded-md border border-border px-3 py-2 text-sm tracking-widest focus:border-focus-ring focus:outline-none"
                   value={totpCode}
                   maxLength={6}

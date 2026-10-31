@@ -1,7 +1,5 @@
-import { useEffect } from 'react';
 import { useNavigate, useLocation, Navigate, Route, Routes } from 'react-router-dom';
 import { ReactNode } from 'react';
-import { useQuery } from '@tanstack/react-query';
 import Login from './pages/Login';
 import Devices from './pages/Devices';
 import DeviceDetail from './pages/DeviceDetail';
@@ -58,7 +56,7 @@ import Settings from './pages/Settings';
 import CredentialPolicies from './pages/CredentialPolicies';
 import MyAccount from './pages/MyAccount';
 import OnboardingPage from './pages/OnboardingPage';
-import { api } from './api/client';
+import { OnboardingRedirect } from './components/OnboardingRedirect';
 import { useInstanceTitle } from './hooks/useInstanceTitle';
 import { can } from './auth/permissions';
 
@@ -165,30 +163,10 @@ function HomeRedirect() {
   return <Navigate to={target} replace />;
 }
 
-/**
- * First-run onboarding redirect: the seeded `admin` account is sent to the
- * setup wizard exactly once — when it has a session token, is not already on
- * /onboarding (or its login page), and `users.onboardedAt` is still NULL.
- * Completing or skipping the wizard stamps the flag, so this never fires again.
- */
-function OnboardingRedirect() {
-  const navigate = useNavigate();
-  const location = useLocation();
-  // Gated on an active token: without this, the query fires on the login page
-  // too (no auth header → 401 cached in the shared ['me'] entry), and after a
-  // sign-in the stale error would keep `data` undefined — so the mandatory
-  // first-run wizard never triggered for a freshly seeded admin.
-  const meQuery = useQuery({ queryKey: ['me'], queryFn: api.me, enabled: Boolean(localStorage.getItem('accessToken')) });
-
-  useEffect(() => {
-    if (!localStorage.getItem('accessToken')) return;
-    if (location.pathname === '/onboarding' || location.pathname.startsWith('/login')) return;
-    const me = meQuery.data;
-    if (me && me.username === 'admin' && !me.onboardedAt) navigate('/onboarding', { replace: true });
-  }, [meQuery.data, location.pathname, navigate]);
-
-  return null;
-}
+// First-run onboarding redirect (components/OnboardingRedirect.tsx): the seeded
+// `admin` account is sent to the setup wizard exactly once — when it has a session
+// token, is not already on /onboarding (or its login page), and users.onboardedAt
+// is still NULL. Completing or skipping the wizard stamps the flag.
 
 export default function App() {
   // Reflect the instance display name in the browser tab title on every page.
