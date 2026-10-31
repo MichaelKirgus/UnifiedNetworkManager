@@ -7,6 +7,7 @@ import { DialogShell } from '../components/DialogShell';
 import { Layout } from '../components/Layout';
 import { formatBytes } from '../components/formatMetric';
 import { api, BackupEntry, ReplicationTarget, ReplicationTargetInput } from '../api/client';
+import { setPendingRestoreFile } from '../pendingRestoreFile';
 import { useTimeFormat } from '../utils/time';
 
 /**
@@ -398,7 +399,7 @@ export default function Backups() {
             <button type="button" onClick={() => fileInputRef.current?.click()} className="inline-flex items-center gap-2 rounded-md border border-border px-3 py-1.5 text-sm hover:bg-muted">
               Upload archive…
             </button>
-            <input ref={fileInputRef} type="file" accept=".unmbak.gz,application/gzip,application/octet-stream" className="hidden" onChange={(e) => { const f = e.target.files?.[0]; if (f) navigate(`/backups/restore?upload=${encodeURIComponent(f.name)}`); e.target.value = ''; }} />
+            <input ref={fileInputRef} type="file" accept=".unmbak.gz,application/gzip,application/octet-stream" className="hidden" onChange={(e) => { const f = e.target.files?.[0]; if (f) { setPendingRestoreFile(f); navigate('/backups/restore'); } e.target.value = ''; }} />
             <button type="button" onClick={() => navigate('/backups/restore')} className="inline-flex items-center gap-2 rounded-md border border-border px-3 py-1.5 text-sm hover:bg-muted">
               Restore from stored backup…
             </button>

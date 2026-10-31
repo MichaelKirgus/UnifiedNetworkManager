@@ -4,6 +4,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import clsx from 'clsx';
 import { ArchiveRestore, Check, FileUp, Loader2 } from 'lucide-react';
 import { api, BackupEntry, BackupManifest, SectionMergeReport } from '../api/client';
+import { takePendingRestoreFile } from '../pendingRestoreFile';
 import { WizardLayout } from '../components/Wizard';
 
 /**
@@ -45,12 +46,13 @@ export default function BackupRestorePage() {
   const [searchParams] = useSearchParams();
   const from = searchParams.get('from') ?? '/backups';
   const storedBackupId = searchParams.get('backupId');
-  const uploadHint = searchParams.get('upload');
 
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   // --- Source state -------------------------------------------------------------
   const [sourceType, setSourceType] = useState<'none' | 'upload' | 'stored'>('none');
+  /** Name of the archive picked on the Backups page (or via Replace) — display only. */
+  const [pickedName, setPickedName] = useState<string | null>(null);
   const [pendingId, setPendingId] = useState<string | null>(null);
   const [manifest, setManifest] = useState<BackupManifest | null>(null);
   const [storedEntry, setStoredEntry] = useState<BackupEntry | null>(null);
@@ -86,6 +88,18 @@ export default function BackupRestorePage() {
       setSourceType('upload');
     },
   });
+
+  // Consume the archive handed off by the Backups page's "Upload archive…" button.
+  // A closed file dialog is not re-readable by script, so without this handoff
+  // the user would have to pick the same file a second time. take-once semantics
+  // keep StrictMode's double effect run idempotent (the second call gets null).
+  useEffect(() => {
+    const f = takePendingRestoreFile();
+    if (!f) return;
+    setPickedName(f.name);
+    stageUpload.mutate(f);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const applyMutation = useMutation({
     mutationFn: () =>
@@ -155,12 +169,12 @@ export default function BackupRestorePage() {
             <h3 className="mb-2 flex items-center gap-2 text-sm font-semibold"><FileUp className="h-4 w-4 text-primary" /> Upload an archive</h3>
             {sourceType === 'upload' && manifest ? (
               <div className="flex items-center justify-between gap-2 rounded-md border border-success/40 bg-success/10 px-3 py-2 text-sm">
-                <span className="font-medium">{uploadHint ?? 'Archive staged'} — ready to preview</span>
+                <span className="font-medium">{pickedName ?? 'Archive staged'} — ready to preview</span>
                 <button type="button" onClick={() => fileInputRef.current?.click()} className="text-xs text-secondary underline hover:text-foreground">Replace</button>
               </div>
             ) : (
               <>
-                <p className="mb-2 text-xs text-faint">A .unmbak.gz archive exported from any UNM instance{uploadHint ? ` — you picked "${uploadHint}" on the Backups page` : ''}.</p>
+                <p className="mb-2 text-xs text-faint">A .unmbak.gz archive exported from any UNM instance. If you picked one on the Backups page it is staged automatically — no second selection needed.</p>
                 <button type="button" onClick={() => fileInputRef.current?.click()} className="inline-flex items-center gap-2 rounded-md border border-border px-3 py-1.5 text-sm hover:bg-muted">
                   Choose archive…
                 </button>
@@ -171,7 +185,7 @@ export default function BackupRestorePage() {
               type="file"
               accept=".unmbak.gz,application/gzip,application/octet-stream"
               className="hidden"
-              onChange={(e) => { const f = e.target.files?.[0]; if (f) stageUpload.mutate(f); e.target.value = ''; }}
+              onChange={(e) => { const f = e.target.files?.[0]; if (f) { setPickedName(f.name); stageUpload.mutate(f); } e.target.value = ''; }}
             />
           </div>
 
