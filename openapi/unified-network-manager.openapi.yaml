@@ -12199,7 +12199,7 @@ components:
         preset: { type: string, enum: [config, planned, all], description: Preset bundle; ignored when sections is given }
         sections:
           type: array
-          items: { type: string, enum: [identity, settings, devices, documented, plans, liveInventory] }
+          items: { type: string, enum: [identity, settings, devices, documented, plans, automations, liveInventory] }
         destination: { type: string, enum: [local, repo] }
         providerId: { type: string, description: File-repo plugin instance id (required for destination=repo) }
     BackupEntry:
