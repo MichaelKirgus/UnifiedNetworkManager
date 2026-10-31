@@ -174,7 +174,11 @@ function HomeRedirect() {
 function OnboardingRedirect() {
   const navigate = useNavigate();
   const location = useLocation();
-  const meQuery = useQuery({ queryKey: ['me'], queryFn: api.me });
+  // Gated on an active token: without this, the query fires on the login page
+  // too (no auth header → 401 cached in the shared ['me'] entry), and after a
+  // sign-in the stale error would keep `data` undefined — so the mandatory
+  // first-run wizard never triggered for a freshly seeded admin.
+  const meQuery = useQuery({ queryKey: ['me'], queryFn: api.me, enabled: Boolean(localStorage.getItem('accessToken')) });
 
   useEffect(() => {
     if (!localStorage.getItem('accessToken')) return;

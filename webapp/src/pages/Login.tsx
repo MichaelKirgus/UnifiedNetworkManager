@@ -1,4 +1,5 @@
 import { FormEvent, useEffect, useState } from 'react';
+import { useQueryClient } from '@tanstack/react-query';
 import { useNavigate } from 'react-router-dom';
 import { ArrowLeft, ArrowRight, ExternalLink, KeyRound, Loader2, ShieldCheck } from 'lucide-react';
 import { api, ApiError } from '../api/client';
@@ -23,6 +24,7 @@ function flowLabel(flow: Flow): string {
 
 export default function Login() {
   const navigate = useNavigate();
+  const queryClient = useQueryClient();
 
   // The active identity provider's flow, resolved from the API on mount.
   const [flow, setFlow] = useState<Flow | null>(null);
@@ -130,6 +132,11 @@ export default function Login() {
    *  policy flagged an expired password) hold on a forced-change step. */
   function finishSignIn(res: { accessToken: string; permissions?: string[]; username?: string }) {
     localStorage.setItem('accessToken', res.accessToken);
+    // The ['me'] cache may hold a pre-login 401 error (the query is always
+    // enabled, so it fires on the login page too). Without this invalidation
+    // OnboardingRedirect would never see fresh data and the mandatory first-run
+    // wizard would silently not trigger for a freshly seeded admin.
+    void queryClient.invalidateQueries({ queryKey: ['me'] });
     setPermissions(res.permissions ?? []);
     if (res.username) setUsername(res.username);
     if (forceChange) {
