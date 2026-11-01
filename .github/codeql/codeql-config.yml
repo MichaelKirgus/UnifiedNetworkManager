@@ -109,3 +109,31 @@ query-config:
   - id: js-sensitive-get-query                # "Sensitive data read from GET request" (2)
     paths-ignore:
       - 'plugins/opnsense/src/index.ts'
+
+  # Automation trigger patterns are OPERATOR-authored (authenticated, validated
+  # with `new RegExp(...)` at write time — routes/automations.ts rejects invalid
+  # ones with 400) and matched against device telemetry. The pattern author IS
+  # the trusted principal; a self-inflicted ReDoS via one's own rule is not an
+  # exploitable boundary crossing.
+  - id: js-regex-injection                    # "Regular expression injection" (5)
+    paths-ignore:
+      - 'api/src/automations/'
+      - 'api/src/workers/automations.ts'
+      - 'api/src/routes/automations.ts'
+
+  # Plugin HTTP routes are internal-only: they sit on the trusted compose
+  # network behind a shared plugin-key gate (requirePluginKey), never exposed to
+  # clients. Brute-forcing an already-issued key is not a realistic threat; the
+  # API's own auth endpoints carry the real rate limiting.
+  - id: js-missing-rate-limiting              # "Missing rate limit" (5)
+    paths-ignore:
+      - 'plugins/basic-auth/src/index.ts'
+      - 'plugins/file-repo/src/index.ts'
+      - 'plugins/web-fetch/src/index.ts'
+
+  # Advertised automation templates are normalized server-side; the flagged
+  # interpolation only builds log/description strings from plugin-provided text,
+  # never a command or query.
+  - id: js-tainted-format-string              # "Tainted format string" (1)
+    paths-ignore:
+      - 'api/src/automations/templates.ts'
