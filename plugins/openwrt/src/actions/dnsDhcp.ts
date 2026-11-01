@@ -140,19 +140,22 @@ export const DHCP_ACTIONS: ActionDescriptor[] = [
   {
     id: 'dhcp.staticMapping.delete',
     label: 'Delete DHCP static mapping',
-    description: 'Removes a dnsmasq host reservation by its uci key.',
+    description: 'Removes a dnsmasq host reservation by MAC address (the uci section is looked up live, so index shifts are safe).',
     module: 'DHCP',
     riskLevel: 'write',
     deviceCount: 1,
     staged: true,
     inputSchema: {
-      hostKey: { type: 'string', required: true, description: 'uci key, e.g. @host[0]' },
+      mac: { type: 'string', required: true, pattern: '^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$', description: 'MAC address of the reservation to remove' },
     },
     execute: async (ctx, input) => {
       if (!sshAvailable(ctx)) return noSshResult();
       const ssh = ctx.backend.ssh!;
-      const hostKey = String(input.hostKey);
-      if (!/^@\w+\[\d+\]$/.test(hostKey)) return failResult('Invalid mapping key — expected form @host[N].');
+      const mac = String(input.mac).toLowerCase();
+      const tree = await readUciPackage(ssh, 'dhcp');
+      const match = Object.entries(tree['dhcp'] ?? {}).find(([k, o]) => /^@(host|map)\[\d+\]$/.test(k) && typeof o['mac'] === 'string' && (o['mac'] as string).toLowerCase() === mac);
+      if (!match) return failResult(`No dnsmasq host reservation found for MAC ${input.mac}.`);
+      const [hostKey] = match;
       const r = await runCommands(ssh, [uciDelCmd('dhcp', hostKey), uciCommitCmd(), '/etc/init.d/dnsmasq restart >/dev/null 2>&1 || true']);
       return r.ok ? okResult({ deleted: hostKey }) : failResult(`dhcp.staticMapping.delete failed: ${r.stderr.slice(0, 300)}`);
     },

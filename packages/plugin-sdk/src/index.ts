@@ -85,6 +85,9 @@ export type { UpdateKind, UpdateRow, UpdateExecBackend, UpgradablePackage, PmAda
 // Security checks (capability 'securityChecks'): row contract for the cross-device
 // Security page. See security.ts.
 export type { SecurityCheckKind, SecurityCheckRow } from './security';
+// DHCP inventory (generic `dhcpNetworks[]` / `dhcpReservations[]` metrics):
+// row contract for the cross-device DHCP page. See dhcp.ts.
+export type { DhcpNetworkRow, DhcpReservationRow } from './dhcp';
 // GPU detection + live metrics (generic `gpus[]` metric): PCI enumeration over
 // sysfs + nvidia-smi / rocm-smi parsers — vendor-neutral (NVIDIA/AMD/Intel). See gpu.ts.
 export { collectGpuRows, buildGpuProbeScript, parsePciGpuSection, parseNvidiaSmiSection, normalizeNvidiaSlot, detectGpuVendor, gpuNameFromPci } from './gpu';

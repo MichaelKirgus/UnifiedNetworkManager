@@ -7,6 +7,7 @@ import { DialogShell } from '../components/DialogShell';
 import { Layout } from '../components/Layout';
 import { formatBytes } from '../components/formatMetric';
 import { api, BackupEntry, ReplicationTarget, ReplicationTargetInput } from '../api/client';
+import { setPendingRestoreFile } from '../pendingRestoreFile';
 import { useTimeFormat } from '../utils/time';
 
 /**
@@ -161,8 +162,9 @@ export default function Backups() {
   const [sections, setSections] = useState<Set<string>>(new Set());
   const [destination, setDestination] = useState<'local' | 'repo'>('local');
   const [providerId, setProviderId] = useState<string>('');
-  const [backupName, setBackupName] = useState('');
-
+  const [backupName, setBackupName] = useState('');  // Passphrase for the optional secrets section — encrypts decrypted credentials
+  // into a portable envelope. Never stored; needed again to restore elsewhere.
+  const [secretsPassphrase, setSecretsPassphrase] = useState<string>('');
   // --- Replication state ----------------------------------------------------------
   const [targetDialog, setTargetDialog] = useState<{ open: boolean; existing: ReplicationTarget | null }>({ open: false, existing: null });
   const [syncingId, setSyncingId] = useState<string | null>(null);
@@ -177,7 +179,7 @@ export default function Backups() {
   const invalidateBackups = () => void queryClient.invalidateQueries({ queryKey: ['backups'] });
 
   const createBackup = useMutation({
-    mutationFn: (body: { name?: string; sections: string[]; destination: 'local' | 'repo'; providerId?: string }) => api.createBackup(body),
+    mutationFn: (body: { name?: string; sections: string[]; destination: 'local' | 'repo'; providerId?: string; passphrase?: string }) => api.createBackup(body),
     onSuccess: () => {
       setBackupName('');
       invalidateBackups();
@@ -217,6 +219,7 @@ export default function Backups() {
     if (sections.size > 0) return [...sections];
     return meta?.presets[preset] ?? [];
   }, [meta, preset, sections]);
+  const includesSecrets = effectiveSections.includes('secrets');
 
   function toggleSection(key: string) {
     setPreset('custom'); // manual selection overrides the preset
@@ -270,10 +273,16 @@ export default function Backups() {
               {/* Section checkboxes */}
               <div className="flex flex-wrap gap-2 text-sm">
                 {meta.sections.map((s) => (
-                  <label key={s.key} className="flex items-center gap-1.5 rounded-md border border-border px-2 py-1" title={`Tables: ${s.tables.join(', ')}`}>
+                  <label
+                    key={s.key}
+                    className={clsx('flex items-center gap-1.5 rounded-md border px-2 py-1', s.key === 'secrets' && 'border-warning/60')}
+                    title={s.key === 'secrets'
+                      ? 'Device credentials (passwords, API keys, SSH keys) — encrypted with a passphrase you choose; portable to other instances. Not part of any preset.'
+                      : `Tables: ${s.tables.join(', ')}`}
+                  >
                     <input type="checkbox" checked={effectiveSections.includes(s.key)} onChange={() => toggleSection(s.key)} />
-                    <span>{s.key}</span>
-                    <span className="text-xs text-faint">({s.tables.length})</span>
+                    <span>{s.key === 'secrets' ? 'secrets (credentials)' : s.key}</span>
+                    {s.key !== 'secrets' && <span className="text-xs text-faint">({s.tables.length})</span>}
                   </label>
                 ))}
               </div>
@@ -291,13 +300,25 @@ export default function Backups() {
                   <span className="mb-1 block text-xs font-medium uppercase tracking-wide text-faint">Name (optional)</span>
                   <input className="w-56 rounded-md border border-border bg-background px-2 py-1.5" value={backupName} onChange={(e) => setBackupName(e.target.value)} placeholder={`backup-${preset}-…`} />
                 </label>
+                {includesSecrets && (
+                  <label className="block text-sm">
+                    <span className="mb-1 block text-xs font-medium uppercase tracking-wide text-faint">Credentials passphrase *</span>
+                    <input
+                      type="password"
+                      className="w-56 rounded-md border border-border bg-background px-2 py-1.5"
+                      value={secretsPassphrase}
+                      onChange={(e) => setSecretsPassphrase(e.target.value)}
+                      placeholder="Encrypts the credentials in this archive"
+                    />
+                  </label>
+                )}
                 <button
                   type="button"
-                  disabled={createBackup.isPending || effectiveSections.length === 0 || (destination === 'repo' && (!providerId || !onlineProviders.some((p) => p.id === providerId)))}
+                  disabled={createBackup.isPending || effectiveSections.length === 0 || (destination === 'repo' && (!providerId || !onlineProviders.some((p) => p.id === providerId))) || (includesSecrets && secretsPassphrase === '')}
                   onClick={() => {
                     const body = destination === 'repo'
-                      ? { name: backupName.trim() || undefined, sections: effectiveSections, destination: 'repo' as const, providerId }
-                      : { name: backupName.trim() || undefined, sections: effectiveSections, destination: 'local' as const };
+                      ? { name: backupName.trim() || undefined, sections: effectiveSections, destination: 'repo' as const, providerId, ...(includesSecrets ? { passphrase: secretsPassphrase } : {}) }
+                      : { name: backupName.trim() || undefined, sections: effectiveSections, destination: 'local' as const, ...(includesSecrets ? { passphrase: secretsPassphrase } : {}) };
                     createBackup.mutate(body);
                   }}
                   className="inline-flex items-center gap-2 rounded-md bg-primary px-4 py-1.5 text-sm font-medium text-white hover:bg-primary-hover disabled:opacity-50"
@@ -305,6 +326,12 @@ export default function Backups() {
                   {createBackup.isPending && <Loader2 className="h-4 w-4 animate-spin" />}
                   Create backup
                 </button>
+                {includesSecrets && (
+                  <p className="w-full text-xs text-faint">
+                    The passphrase encrypts every device credential in this archive (scrypt + AES-256-GCM). It is NOT stored anywhere —
+                    keep it safe: restoring on another instance requires the same passphrase.
+                  </p>
+                )}
               </div>
 
               {/* Repo destination needs an explicit instance pick (strict binding — no fallback to a sibling). */}
@@ -398,7 +425,7 @@ export default function Backups() {
             <button type="button" onClick={() => fileInputRef.current?.click()} className="inline-flex items-center gap-2 rounded-md border border-border px-3 py-1.5 text-sm hover:bg-muted">
               Upload archive…
             </button>
-            <input ref={fileInputRef} type="file" accept=".unmbak.gz,application/gzip,application/octet-stream" className="hidden" onChange={(e) => { const f = e.target.files?.[0]; if (f) navigate(`/backups/restore?upload=${encodeURIComponent(f.name)}`); e.target.value = ''; }} />
+            <input ref={fileInputRef} type="file" accept=".unmbak.gz,application/gzip,application/octet-stream" className="hidden" onChange={(e) => { const f = e.target.files?.[0]; if (f) { setPendingRestoreFile(f); navigate('/backups/restore'); } e.target.value = ''; }} />
             <button type="button" onClick={() => navigate('/backups/restore')} className="inline-flex items-center gap-2 rounded-md border border-border px-3 py-1.5 text-sm hover:bg-muted">
               Restore from stored backup…
             </button>
@@ -412,7 +439,7 @@ export default function Backups() {
             <RefreshCw className="h-4 w-4 text-primary" /> Replication
           </h2>
           <p className="mb-3 text-xs text-faint">
-            One-way sync of portable config (identity, settings, devices, documented, plans) to/from a peer instance. Live inventory never replicates — it is regenerated locally by polling.
+            One-way sync of portable config (identity, settings, devices, documented, plans, automations) to/from a peer instance. Live inventory never replicates — it is regenerated locally by polling.
             Secrets move only between instances sharing the same MASTER_KEY + CRYPTO_SALT.
           </p>
 

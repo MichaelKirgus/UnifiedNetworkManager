@@ -33,6 +33,7 @@ import { runLcosCliCommands, stripCommandEcho } from '../lcosCli';
 import { isLcfDocument, lcfScalar, parseLcf } from '../lcf';
 import { NETWORK_INTENT_ACTIONS } from './networkIntents';
 import { dnsIntentActions as DNS_INTENT_ACTIONS } from './dnsIntents';
+import { DHCP_INTENT_ACTIONS } from './dhcpIntents';
 import { L2_TOPOLOGY_ACTIONS } from './l2Topology';
 import { GAP_READ_ACTIONS } from './gapReads';
 import { ActionContext, ActionDescriptor, ActionResult } from './types';
@@ -1140,6 +1141,9 @@ const ALL_ACTIONS: ActionDescriptor[] = [
   ...NETWORK_INTENT_ACTIONS,
   // Canonical DNS intents (dns.set / dns.delete) — SNMP read, CLI write.
   ...DNS_INTENT_ACTIONS,
+  // Canonical DHCP reservation intents (dhcp.staticMapping.add/delete) —
+  // Setup/DHCP/Hosts: SNMP read for state, CLI write; no set action (edit = del+add).
+  ...DHCP_INTENT_ACTIONS,
   // L2 topology read (interface layering: ports → bundles/bridges) — feeds the
   // per-device attach-point resolution of network.create.
   ...L2_TOPOLOGY_ACTIONS,
