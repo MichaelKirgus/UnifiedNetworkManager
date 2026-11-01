@@ -89,6 +89,9 @@ query-config:
       - 'packages/plugin-sdk/src/ntp.ts'
       - 'packages/plugin-sdk/src/certificates.ts'
       - 'plugins/ix-truenas/src/index.ts'
+      # The cert-reading probe: finite timeout whose handler destroys the
+      # socket, cleared on response/error — same bounded pattern as above.
+      - 'plugins/generic-http/src/index.ts'
 
   # In-process test mock bound to 127.0.0.1 — never network-exposed; the error
   # message is only visible to the local test runner.
