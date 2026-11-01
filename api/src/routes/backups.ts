@@ -129,8 +129,10 @@ backupsRouter.get('/backups/meta', requireAuth, requirePermission('instance:back
   });
 });
 
-// POST /backups — create a backup. Body: { name?, preset? | sections[], destination: 'local'|'repo', providerId? }.
-backupsRouter.post('/backups', requireAuth, requirePermission('instance:backup'), async (req: Request, res: Response) => {
+// POST /backups — create a backup. Body: { name?, preset? | sections[], destination: 'local'|'repo', providerId?, passphrase? }.
+// `passphrase` is required when the explicit section list contains "secrets" —
+// it encrypts the decrypted credentials into a portable envelope (never stored).
+backupsRouter.post('/backups', requireAuth, requirePermission('instance:backup'), async (req, res) => {
   const body = (req.body ?? {}) as Record<string, unknown>;
   let sections: string[];
   if (Array.isArray(body.sections)) {
@@ -145,12 +147,13 @@ backupsRouter.post('/backups', requireAuth, requirePermission('instance:backup')
     res.status(400).json({ error: 'No sections selected' });
     return;
   }
+  const passphrase = typeof body.passphrase === 'string' && body.passphrase !== '' ? body.passphrase : undefined;
   const destination = body.destination === 'repo' ? 'repo' : 'local';
   const providerId = typeof body.providerId === 'string' && body.providerId.trim() !== '' ? body.providerId.trim().slice(0, 128) : null;
 
   try {
     if (destination === 'repo' && !providerId) throw new BackupError('Repo destination requires a "providerId"');
-    const archive = await buildArchive(sections);
+    const archive = await buildArchive(sections, { passphrase });
     const { buffer, sha256, sizeBytes } = gzipArchive(archive);
     const id = randomUUID();
 
@@ -287,8 +290,9 @@ backupsRouter.post('/backups/restore/upload', requireAuth, requirePermission('in
 });
 
 // POST /backups/restore/apply — merge-apply a staged upload or a stored backup.
-// Body: { pendingId? | backupId?, sections? }. Safe merge: upsert by PK, absent rows untouched.
-backupsRouter.post('/backups/restore/apply', requireAuth, requirePermission('instance:backup'), async (req: Request, res: Response) => {
+// Body: { pendingId? | backupId?, sections?, passphrase? }. Safe merge: upsert by PK,
+// absent rows untouched. `passphrase` unlocks the secrets envelope when present.
+backupsRouter.post('/backups/restore/apply', requireAuth, requirePermission('instance:backup'), async (req, res) => {
   const body = (req.body ?? {}) as Record<string, unknown>;
   const pendingId = typeof body.pendingId === 'string' ? body.pendingId : null;
   const backupId = typeof body.backupId === 'string' ? body.backupId : null;
@@ -297,6 +301,7 @@ backupsRouter.post('/backups/restore/apply', requireAuth, requirePermission('ins
     return;
   }
   const sections = Array.isArray(body.sections) ? (body.sections as unknown[]).filter((s): s is string => typeof s === 'string') : undefined;
+  const passphrase = typeof body.passphrase === 'string' && body.passphrase !== '' ? body.passphrase : undefined;
 
   try {
     let buffer: Buffer | null;
@@ -317,7 +322,7 @@ backupsRouter.post('/backups/restore/apply', requireAuth, requirePermission('ins
     // Continue past a failed section so one bad table (e.g. a duplicate username in
     // identity) doesn't silently block the rest — each section is its own transaction,
     // and failures are reported per-section in `report[].error`.
-    const reports = await applyArchive(archive, { sections, continueOnSectionError: true });
+    const reports = await applyArchive(archive, { sections, continueOnSectionError: true, passphrase });
     if (pendingId) await deletePendingUpload(pendingId); // applied — drop the staged copy
     res.status(200).json({ report: reports });
   } catch (err) {
