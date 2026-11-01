@@ -13,11 +13,7 @@ import {
 import { DialogShell } from '../components/DialogShell';
 import { defaultValues, SchemaForm, validateSchema } from '../components/SchemaForm';
 import { useTimeFormat } from '../utils/time';
-
-/** Stable-enough id for trigger/action blocks (the engine only needs uniqueness within a rule). */
-function newId(prefix: string): string {
-  try { return `${prefix}-${crypto.randomUUID()}`; } catch { return `${prefix}-${Math.random().toString(36).slice(2, 10)}`; }
-}
+import { newId } from '../utils/uuid';
 
 /** {{…}} tokens available in webhook/notification templates (see engine renderTemplate). */
 const TEMPLATE_TOKENS = '{{automation.name}}, {{trigger.type}}, {{run.at}}, {{device.name}}, {{device.address}}, {{metric.key}}, {{metric.value}}, {{log.message}}';

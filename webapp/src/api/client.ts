@@ -2334,6 +2334,8 @@ export interface BackupManifest {
   instanceName?: string;
   buildTag?: string;
   scope: string;
+  /** True when the archive carries a passphrase-encrypted device-credentials envelope. */
+  secretsEncrypted?: boolean;
   sections: Record<string, { rowCount: number; tables: Record<string, number> }>;
 }
 
@@ -4030,8 +4032,10 @@ export const api = {
   backupMeta: () => apiFetch<BackupMeta>('/backups/meta'),
   /** Lists stored backups, newest first (enriched with destination state). */
   listBackups: () => apiFetch<{ backups: BackupEntry[] }>('/backups'),
-  /** Creates a backup into the local volume or a file-repo instance. */
-  createBackup: (body: { name?: string; preset?: string; sections?: string[]; destination: 'local' | 'repo'; providerId?: string }) =>
+  /** Creates a backup into the local volume or a file-repo instance.
+   * `passphrase` is required when sections contains 'secrets' — it encrypts the
+   * decrypted credentials into a portable envelope (never stored). */
+  createBackup: (body: { name?: string; preset?: string; sections?: string[]; destination: 'local' | 'repo'; providerId?: string; passphrase?: string }) =>
     apiFetch<{ backup: BackupEntry }>('/backups', { method: 'POST', body: JSON.stringify(body) }),
   /** Deletes a stored backup (metadata + bytes on its bound destination). */
   deleteBackup: (id: string) => apiFetch<void>(`/backups/${encodeURIComponent(id)}`, { method: 'DELETE' }),
@@ -4067,8 +4071,9 @@ export const api = {
     }
     return res.json() as Promise<{ pendingId: string; manifest: BackupManifest }>;
   },
-  /** Merge-applies a staged upload or stored backup (safe upsert-by-PK). */
-  applyBackupRestore: (body: { pendingId?: string; backupId?: string; sections?: string[] }) =>
+  /** Merge-applies a staged upload or stored backup (safe upsert-by-PK).
+   * `passphrase` unlocks the secrets envelope when the archive carries one. */
+  applyBackupRestore: (body: { pendingId?: string; backupId?: string; sections?: string[]; passphrase?: string }) =>
     apiFetch<{ report: SectionMergeReport[] }>('/backups/restore/apply', { method: 'POST', body: JSON.stringify(body) }),
   /** Discards a staged restore upload without applying. */
   discardPendingRestore: (pendingId: string) => apiFetch<void>(`/backups/restore/pending/${encodeURIComponent(pendingId)}`, { method: 'DELETE' }),

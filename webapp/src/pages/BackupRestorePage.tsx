@@ -38,6 +38,7 @@ const SECTION_LABELS: Record<string, string> = {
   documented: 'Documented networks/hosts',
   plans: 'Plans',
   automations: 'Automations (rules, runs, trigger state)',
+  secrets: 'Secrets (device credentials — passphrase-encrypted)',
   liveInventory: 'Live inventory (regenerable)',
 };
 
@@ -58,6 +59,8 @@ export default function BackupRestorePage() {
   const [manifest, setManifest] = useState<BackupManifest | null>(null);
   const [storedEntry, setStoredEntry] = useState<BackupEntry | null>(null);
   const [selectedSections, setSelectedSections] = useState<Set<string>>(new Set());
+  /** Passphrase for the archive's secrets envelope (required to import credentials). */
+  const [restorePassphrase, setRestorePassphrase] = useState('');
 
   // --- Wizard state ---------------------------------------------------------------
   const [step, setStep] = useState<1 | 2 | 3>(1);
@@ -81,6 +84,15 @@ export default function BackupRestorePage() {
     if (manifest) setSelectedSections(new Set(Object.keys(manifest.sections)));
   }, [manifest]);
 
+  /** True when the chosen archive carries a passphrase-encrypted secrets envelope. */
+  const archiveHasSecrets = sourceType === 'upload'
+    ? Boolean(manifest?.secretsEncrypted)
+    : storedEntry
+      ? sectionsOf(storedEntry).includes('secrets') // the section only exists when exported with a passphrase
+      : false;
+  /** The secrets toggle is on AND the archive actually has an envelope to unlock. */
+  const needsPassphrase = archiveHasSecrets && selectedSections.has('secrets');
+
   const stageUpload = useMutation({
     mutationFn: (file: File) => api.uploadBackupForRestore(file),
     onSuccess: (res) => {
@@ -103,12 +115,14 @@ export default function BackupRestorePage() {
   }, []);
 
   const applyMutation = useMutation({
-    mutationFn: () =>
-      sourceType === 'upload' && pendingId
-        ? api.applyBackupRestore({ pendingId, sections: [...selectedSections] })
+    mutationFn: () => {
+      const body = { sections: [...selectedSections], ...(needsPassphrase ? { passphrase: restorePassphrase } : {}) };
+      return sourceType === 'upload' && pendingId
+        ? api.applyBackupRestore({ pendingId, ...body })
         : storedEntry
-          ? api.applyBackupRestore({ backupId: storedEntry.id, sections: [...selectedSections] })
-          : Promise.reject(new Error('No source selected')),
+          ? api.applyBackupRestore({ backupId: storedEntry.id, ...body })
+          : Promise.reject(new Error('No source selected'));
+    },
     onSuccess: (res) => {
       setReport(res.report);
       setStep(3);
@@ -275,13 +289,34 @@ export default function BackupRestorePage() {
                   <input type="checkbox" checked={selectedSections.has(key)} onChange={() => toggleSection(key)} />
                   {SECTION_LABELS[key] ?? key}
                 </span>
-                <span className="text-xs text-faint">{rowCount != null ? `${rowCount.toLocaleString()} rows` : 'row counts available after download'}</span>
+                <span className="text-xs text-faint">{key === 'secrets'
+                  ? (rowCount != null ? `${rowCount.toLocaleString()} credential(s)` : '')
+                  : rowCount != null ? `${rowCount.toLocaleString()} rows` : 'row counts available after download'}</span>
               </label>
             ))}
           </div>
 
           {manifest && (
             <p className="text-xs text-faint">Archive total: {totalRows.toLocaleString()} rows across {manifestSections.length} section(s), exported {new Date(manifest.exportedAt).toLocaleString()}.</p>
+          )}
+
+          {/* Passphrase unlock for the secrets envelope */}
+          {needsPassphrase && (
+            <div className="rounded-md border border-warning/60 bg-background p-3">
+              <label className="block text-sm">
+                <span className="mb-1 block text-xs font-medium uppercase tracking-wide text-faint">Credentials passphrase *</span>
+                <input
+                  type="password"
+                  className="w-72 rounded-md border border-border bg-background px-2 py-1.5"
+                  value={restorePassphrase}
+                  onChange={(e) => setRestorePassphrase(e.target.value)}
+                  placeholder="The passphrase used when the backup was created"
+                />
+              </label>
+              <p className="mt-1 text-xs text-faint">
+                The archive's device credentials are encrypted with this passphrase. A wrong passphrase fails only the secrets section — all other sections still merge.
+              </p>
+            </div>
           )}
 
           {/* Apply */}
@@ -295,7 +330,7 @@ export default function BackupRestorePage() {
               <button type="button" onClick={() => setStep(1)} className="rounded-md px-3 py-1.5 text-sm text-secondary hover:bg-muted">Back to source</button>
               <button
                 type="button"
-                disabled={selectedSections.size === 0 || !!versionWarning}
+                disabled={selectedSections.size === 0 || !!versionWarning || (needsPassphrase && restorePassphrase === '')}
                 onClick={() => applyMutation.mutate()}
                 className="inline-flex items-center gap-2 rounded-md bg-primary px-4 py-1.5 text-sm font-medium text-white hover:bg-primary-hover disabled:opacity-50"
               >
