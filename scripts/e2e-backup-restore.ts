@@ -52,7 +52,7 @@ const DEFAULT_REPLICATION_EXCLUDES = new Set([
   'geoipActiveFileId',
 ]);
 
-const PORTABLE_SECTIONS = new Set(['identity', 'settings', 'devices', 'documented', 'plans']);
+const PORTABLE_SECTIONS = new Set(['identity', 'settings', 'devices', 'documented', 'plans', 'automations']);
 
 async function main(): Promise<void> {
   // --- Login (admin/admin; TOTP minted from the seeded secret when enabled) ----
@@ -95,7 +95,8 @@ async function main(): Promise<void> {
   check('GET /backups/meta returns 200', meta.status === 200, { status: meta.status });
   const metaBody = (await meta.json()) as { sections?: Array<{ key: string; tables: string[] }>; presets?: Record<string, string[]> };
   const sectionKeys = (metaBody.sections ?? []).map((s) => s.key);
-  check('sections include the six known keys', ['identity', 'settings', 'devices', 'documented', 'plans', 'liveInventory'].every((k) => sectionKeys.includes(k)), sectionKeys);
+  check('sections include the seven known keys', ['identity', 'settings', 'devices', 'documented', 'plans', 'automations', 'liveInventory'].every((k) => sectionKeys.includes(k)), sectionKeys);
+  check('config preset includes automations', Boolean(metaBody.presets?.config?.includes('automations')), metaBody.presets);
   check('presets define config/planned/all', Boolean(metaBody.presets?.config && metaBody.presets?.planned && metaBody.presets?.all), Object.keys(metaBody.presets ?? {}));
 
   // ---------------------------------------------------------------------------
@@ -134,6 +135,17 @@ async function main(): Promise<void> {
   check('archive parses: format unm-backup v1', archive.manifest?.format === 'unm-backup' && archive.manifest?.schemaVersion === 1, archive.manifest);
   const archivedSections = Object.keys(archive.data ?? {});
   check('planned preset archives documented+plans only', JSON.stringify([...archivedSections].sort()) === JSON.stringify(['documented', 'plans']), archivedSections);
+
+  // Explicit section list covering ALL seven sections — this is what the webapp
+  // sends for the "all" preset. Guards against a stale OpenAPI enum on
+  // BackupCreateRequest.sections (the spec's enum must stay in sync with
+  // SECTION_KEYS or every request containing a new section fails with 400).
+  const allSections = ['identity', 'settings', 'devices', 'documented', 'plans', 'automations', 'liveInventory'];
+  const allRes = await authed('POST', '/backups', { name: 'e2e-all-sections', sections: allSections, destination: 'local' });
+  const allBody = (await allRes.json()) as { backup?: Record<string, unknown> } | null;
+  check('create with explicit all-seven sections → 201 (OpenAPI enum in sync)', allRes.status === 201, { status: allRes.status, body: allBody });
+  const allBackupId = String(allBody?.backup?.id ?? '');
+  if (allBackupId) await authed('DELETE', `/backups/${allBackupId}`);
 
   // Re-upload the SAME archive → apply sections=[documented] → idempotent merge.
   const upRes = await fetch(`${API}/backups/restore/upload`, { method: 'POST', headers: { 'Content-Type': 'application/octet-stream', 'x-backup-name': 'e2e-planned.unmbak.gz', Authorization: `Bearer ${token}` }, body: bytes });

@@ -191,6 +191,41 @@ export const DNS_LIST = {
 } as const;
 
 /* ------------------------------------------------------------------ *
+ * DHCP setup mirror — 11.2.10 (Setup/DHCP group)
+ *
+ * The Setup/DHCP config subtree IS SNMP-readable (verified live on WLC01 +
+ * GW_Ralf, LCOS 10.94, 2026-10): .2.10.9 is the static-host table
+ * (CLI `cd /Setup/DHCP/Hosts` — banner OID [1.3.6.1.4.1.2356.11][2.10.9]),
+ * i.e. DHCP reservations (MAC → fixed IP, scoped to a network/pool).
+ * Column-first; index = COMPOSITE [MAC text, network-name text], both length-
+ * prefixed — the MAC is bare lowercase hex (12 chars, the same form `add` accepts
+ * and `dir -a` renders) and the trailing part mirrors column 5. Writes are NOT
+ * exposed via SNMP SET (like every other LCOS setup table) — writes go through
+ * the SSH CLI.
+ * ------------------------------------------------------------------ */
+
+/** lcsSetupDhcpHostTable (TABLE node 11.2.10.9) — DHCP static hosts / reservations. */
+export const DHCP_HOSTS = {
+  base: `${LCOS_BASE}.2.10.9`, // index: [MAC text, network-name text] — both length-prefixed; MAC is bare lowercase hex "00a0574c1acf"
+  COL_MAC: 1, // DisplayString — MAC-Address (echoes the index)
+  COL_IP: 2, // DisplayString — IP-Address (dotted v4; '' when absent)
+  COL_HOSTNAME: 3, // DisplayString — Hostname ('' when unset)
+  COL_IMAGE_ALIAS: 4, // DisplayString — Image-alias ('' when unset)
+  COL_NETWORK: 5, // DisplayString — Network-name (the DHCP pool the mapping is scoped to)
+} as const;
+
+/** lcsSetupDhcpNetworkListTable (TABLE node 11.2.10.20) — configured DHCP pools. */
+export const DHCP_NET_LIST = {
+  base: `${LCOS_BASE}.2.10.20`, // index: network name text (length-prefixed, upper-cased by LCOS)
+  COL_NAME: 1, // DisplayString — Network-name (echoes the index)
+  COL_START: 2, // DisplayString — Start-Address-Pool
+  COL_END: 3, // DisplayString — End-Address-Pool
+  COL_NETMASK: 4, // DisplayString — Netmask
+  COL_GATEWAY: 6, // DisplayString — Gateway-Address (0.0.0.0 when unset)
+  COL_DNS_DEFAULT: 7, // DisplayString — DNS-Default (0.0.0.0 when unset)
+} as const;
+
+/* ------------------------------------------------------------------ *
  * IPv6 status — 11.1.77 (Status/IPv6 runtime tree)
  *
  * LCOS keeps v4 and v6 in SEPARATE config trees (Setup/TCP-IP vs

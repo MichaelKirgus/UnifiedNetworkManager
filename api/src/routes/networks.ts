@@ -704,6 +704,82 @@ router.get('/dns', requireAuth, requirePermission('dns:read'), async (_req, res:
   }
 });
 
+// GET /dhcp - Configured DHCP networks + static reservations across devices.
+// Query params: deviceId (exact), siteId (filter by device's site).
+// Returns { networks, reservations } — flat per-device rows (no cross-device merge;
+// a network row is already one logical range on one device). Live leases are NOT
+// here — they live in the hosts table (source 'dhcp') and the page joins them.
+router.get('/dhcp', requireAuth, requirePermission('dhcp:read'), async (_req, res: Response) => {
+  try {
+    const { deviceId, siteId } = _req.query as Record<string, string | undefined>;
+
+    // Device-level access control — scoped callers only see rows of their devices.
+    const allowed = await allowedDeviceIds(_req);
+    if (allowed !== null && allowed.size === 0) {
+      res.status(200).json({ networks: [], reservations: [] });
+      return;
+    }
+    if (deviceId && allowed !== null && !allowed.has(deviceId)) {
+      res.status(200).json({ networks: [], reservations: [] });
+      return;
+    }
+
+    let where;
+    if (deviceId && siteId) {
+      // Both filters: verify the device belongs to the site first.
+      const device = await db.query.devices.findFirst({ where: eq(schema.devices.id, deviceId) });
+      if (!device || device.siteId !== siteId) {
+        res.status(200).json({ networks: [], reservations: [] });
+        return;
+      }
+      where = eq(schema.deviceDhcpNetworks.deviceId, deviceId);
+    } else if (deviceId) {
+      where = eq(schema.deviceDhcpNetworks.deviceId, deviceId);
+    } else if (siteId) {
+      let deviceIds = (await db.query.devices.findMany({ where: eq(schema.devices.siteId, siteId) })).map((d) => d.id);
+      if (allowed !== null) deviceIds = deviceIds.filter((id) => allowed.has(id));
+      if (deviceIds.length === 0) {
+        res.status(200).json({ networks: [], reservations: [] });
+        return;
+      }
+      where = inArray(schema.deviceDhcpNetworks.deviceId, deviceIds);
+    } else if (allowed !== null) {
+      where = inArray(schema.deviceDhcpNetworks.deviceId, [...allowed]);
+    }
+
+    const [networkRows, reservationRows] = await Promise.all([
+      db.query.deviceDhcpNetworks.findMany({
+        ...(where ? { where } : {}),
+        orderBy: [asc(schema.deviceDhcpNetworks.name), asc(schema.deviceDhcpNetworks.rangeStart)],
+      }),
+      db.query.deviceDhcpReservations.findMany({
+        ...(where ? { where } : {}),
+        orderBy: [asc(schema.deviceDhcpReservations.mac)],
+      }),
+    ]);
+
+    const deviceIds = [...new Set([...networkRows.map((r) => r.deviceId), ...reservationRows.map((r) => r.deviceId)])];
+    const pluginIds = [...new Set([...networkRows.map((r) => r.pluginId), ...reservationRows.map((r) => r.pluginId)])];
+    const [deviceViews, pluginNames] = await Promise.all([loadDeviceViews(deviceIds), loadPluginNames(pluginIds)]);
+
+    const decorate = <T extends { deviceId: string; pluginId: string }>(row: T): T & Record<string, unknown> => ({
+      ...row,
+      deviceName: deviceViews.get(row.deviceId)?.name ?? null,
+      managementAddress: deviceViews.get(row.deviceId)?.managementAddress ?? null,
+      siteName: deviceViews.get(row.deviceId)?.siteName ?? null,
+      pluginName: pluginNames.get(row.pluginId) ?? null,
+    });
+
+    res.status(200).json({
+      networks: networkRows.map(decorate),
+      reservations: reservationRows.map(decorate),
+    });
+  } catch (err) {
+    const e = err as { status?: number; message?: string };
+    res.status(e.status ?? 500).json({ error: e.message ?? 'Internal server error' });
+  }
+});
+
 // GET /tunnels - All configured tunnels across devices.
 // Query params: deviceId (exact), siteId (filter by device's site),
 // type ('wireguard'|'openvpn'|'ipsec'|'pppoe'|'gre').

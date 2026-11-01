@@ -392,7 +392,7 @@ The same server also runs in **stdio mode** without Docker (client-launched, pro
 - **Build order matters**: `@unm/plugin-sdk` and `@unm/snmp-client` must build first — npm `file:` dependencies are *copied* into each consumer's `node_modules`, so `make build` refreshes those copies before fanning out all plugin builds in parallel. After editing a shared package, always run `make build`.
 - **Type-check**: `cd api && npx tsc --noEmit`, same for `webapp/` and each plugin; or just `make build`.
 - **OpenAPI is enforced**: every new public route must be added to `openapi/unified-network-manager.openapi.yaml` — the validator 404s undocumented paths. Structural check: `node validate-openapi.cjs`.
-- **Schema changes**: idempotent DDL in `initDb()` (`api/src/db.ts`) + `drizzle-kit push`; keep `schema.ts` composite-PK names equal to the live Postgres constraint names.
+- **Schema changes**: edit `src/db/schema.ts`, then `cd api && npx drizzle-kit push`. In dev, `setup.sh` re-runs this on every start; in production images the API does it itself at boot (`api/src/schemaBootstrap.ts`) — fresh databases are bootstrapped automatically, and **additive** changes (new tables/columns) apply on next container start. A **data-loss** change is refused without `--force` so it can never silently destroy data: review it, then run it manually with `docker exec <api> sh -c "cd /app/api && node_modules/.bin/drizzle-kit push --force"`. Keep `schema.ts` composite-PK names equal to the live Postgres constraint names.
 - **Smoke tests**: `cd plugins/opnsense && ../../node_modules/.bin/tsx smoke-test.ts` (same for `plugins/mikrotik-swos`).
 - **Plugin images always rebuild from source** (`docker compose up -d --build <service>`) — reusing stale images silently serves old code.
 

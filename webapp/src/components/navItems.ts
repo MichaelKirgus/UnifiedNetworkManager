@@ -67,6 +67,10 @@ export const NAV_ITEMS: NavItem[] = [
   // Cross-device static DNS entries — host records reported by dns-capable
   // plugins (OPNsense, OpenWrt, RouterOS, LCOS), grouped by lowercase name.
   { to: '/dns', label: 'DNS', icon: Globe2, requiresPermission: 'dns:read' },
+  // Cross-device DHCP inventory — configured server networks/ranges + static
+  // MAC→IP reservations (RouterOS, OPNsense, OpenWrt). Radio reads as address
+  // assignment/broadcast.
+  { to: '/dhcp', label: 'DHCP', icon: Radio, requiresPermission: 'dhcp:read' },
   // User-maintained host documentation — permanent inventory records with
   // live "discovered" matching (distinct from the live ARP/NDP Hosts page).
   { to: '/documented-hosts', label: 'Documented Hosts', icon: NotebookPen, requiresPermission: 'documented-hosts:read' },
