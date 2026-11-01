@@ -12199,9 +12199,12 @@ components:
         preset: { type: string, enum: [config, planned, all], description: Preset bundle; ignored when sections is given }
         sections:
           type: array
-          items: { type: string, enum: [identity, settings, devices, documented, plans, automations, liveInventory] }
+          items: { type: string, enum: [identity, settings, devices, documented, plans, automations, secrets, liveInventory] }
         destination: { type: string, enum: [local, repo] }
         providerId: { type: string, description: File-repo plugin instance id (required for destination=repo) }
+        passphrase:
+          type: string
+          description: "Required when sections contains 'secrets' — encrypts the decrypted credentials into a portable envelope (scrypt + AES-256-GCM). Never stored; needed again to restore on another instance. The secrets section is in no preset and never crosses replication."
     BackupEntry:
       type: object
       required: [id, name, scope, sections, sizeBytes, sha256, source, createdAt]
@@ -12229,6 +12232,7 @@ components:
         instanceName: { type: string }
         buildTag: { type: string }
         scope: { type: string }
+        secretsEncrypted: { type: boolean, description: "True when the archive carries a passphrase-encrypted device-credentials envelope (restore requires the passphrase)" }
         sections:
           type: object
           additionalProperties:
@@ -12255,6 +12259,9 @@ components:
           type: array
           items: { type: string }
           description: "Subset of the archive's sections (default: all present)"
+        passphrase:
+          type: string
+          description: "Required when applying an archive that carries a 'secrets' envelope — unlocks it. Secrets are re-encrypted under this instance's provider key with their original ids preserved."
     SectionMergeReport:
       type: object
       required: [section, tables]

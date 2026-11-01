@@ -201,7 +201,7 @@ const logger = createPluginLogger(identity);
  * provider's id. Returns the new id + createdAt.
  */
 app.post('/secrets', requirePluginKey, async (req, res) => {
-  const { type, fields, label, expiresAt, userId, interactiveLoginAllowed, fileAccessAllowed } = req.body ?? {};
+  const { type, fields, label, expiresAt, userId, interactiveLoginAllowed, fileAccessAllowed, id } = req.body ?? {};
   logger.setEnabled(readSettings(req, PLUGIN_OPTIONS).logToApi === true);
   if (!type || typeof type !== 'string') {
     res.status(400).json({ error: 'type is required' });
@@ -215,6 +215,8 @@ app.post('/secrets', requirePluginKey, async (req, res) => {
     res.status(401).json({ error: 'User ID not found in token' });
     return;
   }
+  // Optional explicit id (cross-instance import) — must be a well-formed UUID.
+  const pinnedId = typeof id === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id) ? id : undefined;
 
   try {
     const encryptedValue = encrypt(JSON.stringify(fields));
@@ -228,6 +230,7 @@ app.post('/secrets', requirePluginKey, async (req, res) => {
       // Interactive-session usage flags (opt-in per secret; default false).
       interactiveLoginAllowed: typeof interactiveLoginAllowed === 'boolean' ? interactiveLoginAllowed : false,
       fileAccessAllowed: typeof fileAccessAllowed === 'boolean' ? fileAccessAllowed : false,
+      ...(pinnedId ? { id: pinnedId } : {}),
     });
     res.status(201).json({ id: record.id, createdAt: record.createdAt });
   } catch (err) {
