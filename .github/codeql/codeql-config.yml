@@ -33,7 +33,7 @@ query-config:
   # UNM's entire purpose is to reach operator-configured device endpoints and
   # DB-registered plugin endpoints (icon/asset proxy included). The target host
   # is trusted by construction — this is the product, not a vulnerability.
-  - id: js-request-forgery            # "Server-side request forgery" (27 alerts)
+  - id: js/request-forgery            # "Server-side request forgery" (27 alerts)
     paths-ignore:
       - 'plugins/'
       - 'api/src/routes/plugins.ts'
@@ -41,7 +41,7 @@ query-config:
   # All flagged regexes were audited and are linear-time (no nested/overlapping
   # quantifiers), so catastrophic backtracking is impossible. Input is LAN-device
   # output, not an untrusted public endpoint.
-  - id: js-polynomial-redos           # "Polynomial regular expression used on uncontrolled data" (23)
+  - id: js/polynomial-redos           # "Polynomial regular expression used on uncontrolled data" (23)
     paths-ignore:
       - 'plugins/'
       - 'packages/plugin-sdk/src/'
@@ -54,7 +54,7 @@ query-config:
   # true, and self-signed appliance certs fail chain validation first. The
   # generic-http + certificates.ts sites are intentional cert-reading/TOFU probes;
   # consoleProxy is the internal mTLS plugin WS.
-  - id: js-disabling-certificate-validation   # "Disabling certificate validation" (11)
+  - id: js/disabling-certificate-validation   # "Disabling certificate validation" (11)
     paths-ignore:
       - 'plugins/'
       - 'packages/plugin-sdk/src/certificates.ts'
@@ -65,24 +65,24 @@ query-config:
   # Vendor protocols mandate the algorithm — SwOS .b-file uses MD5 request
   # encoding, IPMI RMCP+ uses HMAC-SHA1/AES-CBC-128. Changing it breaks device
   # compatibility; these are not discretionary choices.
-  - id: js-insufficient-password-hash         # "Use of password hash with insufficient computational effort" (5)
+  - id: js/insufficient-password-hash         # "Use of password hash with insufficient computational effort" (5)
     paths-ignore:
       - 'plugins/'
-  - id: js-weak-cryptographic-algorithm       # "Use of a broken or weak cryptographic algorithm" (4)
+  - id: js/weak-cryptographic-algorithm       # "Use of a broken or weak cryptographic algorithm" (4)
     paths-ignore:
       - 'plugins/'
 
   # The SDK SSH exec() primitive runs UNM's own action-catalog commands against
   # managed devices. Commands are operator-defined (configs:apply + 2FA-gated),
   # not attacker-controlled input.
-  - id: js-command-line-injection             # "Uncontrolled command line" (1)
+  - id: js/command-line-injection             # "Uncontrolled command line" (1)
     paths-ignore:
       - 'packages/plugin-sdk/src/ssh.ts'
 
   # Every flagged site is bounded by design: finite timeouts whose handlers
   # close the socket / end the connection, and pooled WS sessions where a single
   # unresponsive RPC must not destroy the shared connection.
-  - id: js-resource-exhaustion                # "Resource exhaustion" (7)
+  - id: js/resource-exhaustion                # "Resource exhaustion" (7)
     paths-ignore:
       - 'plugins/ix-truenas/src/client/truenasClient.ts'
       - 'plugins/generic-ipmi/src/client/ipmiClient.ts'
@@ -92,13 +92,13 @@ query-config:
 
   # In-process test mock bound to 127.0.0.1 — never network-exposed; the error
   # message is only visible to the local test runner.
-  - id: js-stack-trace-exposure               # "Information exposure through a stack trace" (1)
+  - id: js/stack-trace-exposure               # "Information exposure through a stack trace" (1)
     paths-ignore:
       - 'packages/plugin-test-kit/src/mocks/applianceHttp.js'
 
   # Local smoke test assigning parsed mock-appliance responses onto internal
   # state objects — no user-controlled keys, not shipped.
-  - id: js-prototype-polluting-assignment     # "Prototype-polluting assignment" (1)
+  - id: js/prototype-polluting-assignment     # "Prototype-polluting assignment" (1)
     paths-ignore:
       - 'plugins/mikrotik-swos/smoke-test.ts'
 
@@ -106,7 +106,7 @@ query-config:
   # It lives on the trusted compose network (not internet-facing); the proper fix
   # is a cross-cutting transport change (header-based credential passing) tracked
   # separately — suppressing here to keep the signal focused on external routes.
-  - id: js-sensitive-get-query                # "Sensitive data read from GET request" (2)
+  - id: js/sensitive-get-query                # "Sensitive data read from GET request" (2)
     paths-ignore:
       - 'plugins/opnsense/src/index.ts'
 
@@ -115,7 +115,7 @@ query-config:
   # ones with 400) and matched against device telemetry. The pattern author IS
   # the trusted principal; a self-inflicted ReDoS via one's own rule is not an
   # exploitable boundary crossing.
-  - id: js-regex-injection                    # "Regular expression injection" (5)
+  - id: js/regex-injection                    # "Regular expression injection" (5)
     paths-ignore:
       - 'api/src/automations/'
       - 'api/src/workers/automations.ts'
@@ -125,7 +125,7 @@ query-config:
   # network behind a shared plugin-key gate (requirePluginKey), never exposed to
   # clients. Brute-forcing an already-issued key is not a realistic threat; the
   # API's own auth endpoints carry the real rate limiting.
-  - id: js-missing-rate-limiting              # "Missing rate limit" (5)
+  - id: js/missing-rate-limiting              # "Missing rate limit" (5)
     paths-ignore:
       - 'plugins/basic-auth/src/index.ts'
       - 'plugins/file-repo/src/index.ts'
@@ -134,6 +134,6 @@ query-config:
   # Advertised automation templates are normalized server-side; the flagged
   # interpolation only builds log/description strings from plugin-provided text,
   # never a command or query.
-  - id: js-tainted-format-string              # "Tainted format string" (1)
+  - id: js/tainted-format-string              # "Tainted format string" (1)
     paths-ignore:
       - 'api/src/automations/templates.ts'
