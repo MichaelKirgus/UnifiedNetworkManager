@@ -6,6 +6,7 @@ import * as OpenApiValidator from 'express-openapi-validator';
 import { loadOpenApiSpec, resolveOpenApiPath } from './openapi';
 import { getEffectiveSettingValue } from './systemSettings';
 import { initDb, backfillSecrets, backfillAdminPermissions, backfillDeviceSites, backfillAdminRole, backfillInteractiveLoginPermission, backfillDeviceAllPermission } from './db';
+import { ensureSchemaBootstrapped } from './schemaBootstrap';
 import authRouter from './routes/auth';
 import devicesRouter from './routes/devices';
 import pluginsRouter from './routes/plugins';
@@ -151,6 +152,11 @@ const authLimiter = rateLimit({
 });
 
 async function main(): Promise<void> {
+  // Fresh-install bootstrap: create the core schema if it doesn't exist yet.
+  // No-op on every existing deployment (one pg_class query); production images
+  // have no host-side `drizzle-kit push` step, so this is what makes a fresh
+  // database bootable. See src/schemaBootstrap.ts.
+  await ensureSchemaBootstrapped();
   await initDb();
   await backfillAdminRole();
   await backfillAdminPermissions();
