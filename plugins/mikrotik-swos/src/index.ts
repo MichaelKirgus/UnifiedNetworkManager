@@ -53,6 +53,8 @@ export const PLUGIN_NAME = 'MikroTik SwOS Plugin';
 const identity = resolvePluginIdentity({
   uuid: PLUGIN_UUID,
   name: PLUGIN_NAME,
+  description:
+    'MikroTik SwOS switch management — system, ports, PoE, LAG and VLANs plus a full action catalog (port config, backup download).',
   // 0.1.0 — initial release: SwOS/SwOS Lite monitoring (system, ports, PoE, LAG,
   // VLANs, SFP, SNMP) + inventory propagation (VLAN networks, MAC table hosts),
   // plus the full action catalog from the reference project's proven write set

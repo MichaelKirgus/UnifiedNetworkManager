@@ -56,6 +56,8 @@ import {
 const identity = resolvePluginIdentity({
   uuid: '00000000-0000-4000-8000-000000000010', // zabbix plugin — stable primary key in the API
   name: 'Zabbix Plugin',
+  description:
+    'Zabbix integration — server health + monitored-host/problem tables, host inventory sync and problem mirroring into UNM.',
   // 0.2.0 — Notification-center mirroring (SDK createNotifier): /monitoring now
   // mirrors active problems into UNM's notification center with stable per-event
   // dedupe keys and resolve-on-clear, gated by the new `notifyAlerts` option;

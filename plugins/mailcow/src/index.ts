@@ -52,6 +52,8 @@ import {
 const identity = resolvePluginIdentity({
   uuid: '00000000-0000-4000-8000-00000000000f', // mailcow plugin — stable primary key in the API
   name: 'Mailcow Plugin',
+  description:
+    'mailcow-dockerized management — domains, mailboxes and aliases via the REST API, with DKIM/fail2ban security checks.',
   version: '0.1.0',
   vendors: ['mailcow'],
   // securityChecks: fail2ban (rate limiting) + per-domain DKIM over the REST API.

@@ -491,6 +491,10 @@ export interface PlanRequest<Credentials extends object = Record<string, unknown
 export interface ActionResult {
   success: boolean;
   applied?: boolean;
+  /** Top-level ONLY (never nested in `details`) — the plan executor reads
+   * result.verified to decide succeeded vs unverified. Idempotent no-op skips
+   * that CONFIRMED the desired state (entry already present / absent) should
+   * carry verified: true — they are self-evidently verified. */
   verified?: boolean;
   details?: Record<string, unknown>;
   error?: string;

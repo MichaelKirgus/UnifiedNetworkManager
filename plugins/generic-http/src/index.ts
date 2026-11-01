@@ -49,6 +49,8 @@ export const PLUGIN_NAME = 'Generic HTTP(S) Plugin';
 const identity = resolvePluginIdentity({
   uuid: PLUGIN_UUID,
   name: PLUGIN_NAME,
+  description:
+    'Credential-free HTTP(S) health checker for any host — response time/status metrics plus TLS certificate expiry tracking.',
   version: '0.1.0',
   vendors: ['generic'],
   // monitoring: live response-time/status metrics every poll.

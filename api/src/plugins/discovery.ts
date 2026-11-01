@@ -14,6 +14,8 @@ import type {
 } from '../types/deviceSupport';
 import { CredentialSlotDescriptor, normalizeCredentialSlots } from '../types/credentialSlots';
 import { getEffectiveSettingValue } from '../systemSettings';
+import { normalizeAutomationTemplates } from '../automations/templates';
+import type { AutomationTemplate } from '../automations/templates';
 
 /**
  * Self-describing identity that every plugin MUST expose, either via its
@@ -24,6 +26,8 @@ import { getEffectiveSettingValue } from '../systemSettings';
 export interface PluginIdentity {
   uuid: string;
   name: string;
+  /** Short human-readable description for the webapp's plugin catalog picker (absent when undeclared). */
+  description?: string;
   version: string;
   vendors: string[];
   capabilities: string[];
@@ -47,6 +51,8 @@ export interface PluginIdentity {
   credentialSlots?: CredentialSlotDescriptor[];
   /** Device support metadata — license/help/docs + supported-device matrix (see types/deviceSupport.ts). */
   deviceSupport?: DeviceSupport;
+  /** Ready-made automation rule drafts advertised in /discover (validated at normalization). */
+  automationTemplates?: AutomationTemplate[];
   /** mTLS state — true when this discovery pass reached the plugin over https. */
   tlsLive?: boolean;
 }
@@ -334,6 +340,7 @@ function parseTxt(txt: Record<string, string> | undefined): Partial<PluginIdenti
 interface RawDiscover {
   uuid?: unknown;
   name?: unknown;
+  description?: unknown;
   version?: unknown;
   vendors?: unknown;
   capabilities?: unknown;
@@ -348,6 +355,7 @@ interface RawDiscover {
   deviceModels?: unknown;
   credentialSlots?: unknown;
   deviceSupport?: unknown;
+  automationTemplates?: unknown;
 }
 
 /**
@@ -361,6 +369,10 @@ export function normalizeDiscoverPayload(raw: RawDiscover, sourceEndpoint: strin
   return {
     uuid: raw.uuid,
     name: typeof raw.name === 'string' ? raw.name : raw.uuid,
+    // Catalog description — trimmed, dropped when empty (absent ≠ wipe).
+    ...(typeof raw.description === 'string' && raw.description.trim() !== ''
+      ? { description: raw.description.trim() }
+      : {}),
     version: typeof raw.version === 'string' ? raw.version : 'unknown',
     vendors: Array.isArray(raw.vendors) ? (raw.vendors as string[]) : [],
     capabilities: Array.isArray(raw.capabilities) ? (raw.capabilities as string[]) : [],
@@ -377,6 +389,7 @@ export function normalizeDiscoverPayload(raw: RawDiscover, sourceEndpoint: strin
     deviceModels: normalizeDeviceModels(raw.deviceModels),
     credentialSlots: normalizeCredentialSlots(raw.credentialSlots),
     deviceSupport: normalizeDeviceSupport(raw.deviceSupport as DeviceSupport | undefined),
+    automationTemplates: normalizeAutomationTemplates(raw.automationTemplates),
   };
 }
 
@@ -465,6 +478,11 @@ async function upsertPlugin(identity: PluginIdentity): Promise<void> {
   // Device support metadata: same guard — only overwrite when this discovery
   // source actually carries a document (the mDNS TXT path does not).
   const deviceSupportJson = identity.deviceSupport ? JSON.stringify(identity.deviceSupport) : null;
+  // Automation templates: same guard — an absent/empty advertisement must never
+  // wipe stored ones (the mDNS TXT path carries none). normalizeAutomationTemplates
+  // already dropped invalid entries, so a non-undefined value is safe to store.
+  const hasTemplates = Array.isArray(identity.automationTemplates) && identity.automationTemplates.length > 0;
+  const automationTemplatesJson = hasTemplates ? JSON.stringify(identity.automationTemplates) : null;
   // mTLS state: only the HTTP-polling path knows it (mDNS TXT carries none),
   // so an undefined value must never wipe what a probe established.
   const hasTlsLive = typeof identity.tlsLive === 'boolean';
@@ -472,12 +490,16 @@ async function upsertPlugin(identity: PluginIdentity): Promise<void> {
   // without UNM_BUILD_TAG (local/dev) advertises nothing; neither may wipe a
   // previously-stored tag.
   const hasBuildTag = typeof identity.buildTag === 'string' && identity.buildTag.length > 0;
+  // Catalog description: same guard — only overwrite when this discovery source
+  // actually carries one, so an undeclared value never wipes a stored one.
+  const hasDescription = typeof identity.description === 'string' && identity.description.length > 0;
 
   if (existing) {
     await db
       .update(schema.plugins)
       .set({
         name: identity.name,
+        ...(hasDescription ? { description: identity.description } : {}),
         version: identity.version,
         vendors: JSON.stringify(identity.vendors),
         capabilities: JSON.stringify(identity.capabilities),
@@ -491,6 +513,7 @@ async function upsertPlugin(identity: PluginIdentity): Promise<void> {
         ...(hasModels ? { deviceModels: deviceModelsJson } : {}),
         ...(hasSlots ? { credentialSlots: credentialSlotsJson } : {}),
         ...(deviceSupportJson !== null ? { deviceSupport: deviceSupportJson } : {}),
+        ...(automationTemplatesJson !== null ? { automationTemplates: automationTemplatesJson } : {}),
         ...(hasBuildTag ? { buildTag: identity.buildTag } : {}),
         ...(hasTlsLive ? { tlsLive: identity.tlsLive ?? false } : {}),
         lastSeenAt: now,
@@ -500,6 +523,7 @@ async function upsertPlugin(identity: PluginIdentity): Promise<void> {
     await db.insert(schema.plugins).values({
       id: identity.uuid,
       name: identity.name,
+      description: hasDescription ? (identity.description as string) : null,
       version: identity.version,
       vendors: JSON.stringify(identity.vendors),
       capabilities: JSON.stringify(identity.capabilities),
@@ -513,6 +537,7 @@ async function upsertPlugin(identity: PluginIdentity): Promise<void> {
       deviceModels: deviceModelsJson,
       credentialSlots: credentialSlotsJson,
       deviceSupport: deviceSupportJson,
+      automationTemplates: automationTemplatesJson,
       buildTag: hasBuildTag ? identity.buildTag : null,
       ...(hasTlsLive ? { tlsLive: identity.tlsLive ?? false } : {}),
       createdAt: now,

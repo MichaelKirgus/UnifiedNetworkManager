@@ -1,6 +1,6 @@
 import { useQueries, useQuery, useQueryClient } from '@tanstack/react-query';
 import clsx from 'clsx';
-import { ArrowUpCircle, CheckCircle2, ChevronDown, ChevronRight, ChevronUp, Container, Download, EyeOff, FileCode2, FolderOpen, Loader2, Play, Plus, RotateCw, ScrollText, Square, Terminal as TerminalIcon, Trash2, X } from 'lucide-react';
+import { ArrowUpCircle, CheckCircle2, ChevronDown, ChevronRight, ChevronUp, Container, Download, EyeOff, FileCode2, FolderOpen, Loader2, Play, Plus, RotateCw, ScrollText, Square, Tag, Terminal as TerminalIcon, Trash2, X } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState, type FormEvent, type MouseEvent as ReactMouseEvent, type ReactNode } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { ConsoleDialog } from '../components/ConsoleDialog';
@@ -67,15 +67,34 @@ function stateRank(s: string): number {
   return 1; // exited / dead / unknown
 }
 
-/** Normalizes one probe `containerStates` payload into name → lowercase docker
- * state. Fresh plugins report the real state ('exited', …); older ones reported
- * a bare running set ({ status: 'running' }) — normalize both to strings. */
-function normalizeContainerStates(v: unknown): Record<string, string> | null {
+/** One container's LIVE probe state: docker state + (when the probe carried a
+ * `names` selection and the plugin supports it — ix-truenas ≥0.28) the REAL
+ * docker start time from a batched `docker inspect`. */
+interface LiveContainerStateEntry {
+  status: string;
+  startedAt?: string | null;
+}
+
+/** Normalizes one probe `containerStates` payload into name → live state entry.
+ * Fresh plugins report the real state ('exited', …); older ones reported a bare
+ * running set ({ status: 'running' }) — normalize both. `startedAt` is carried
+ * through verbatim when present (ISO-8601 UTC from docker inspect). */
+function normalizeContainerStates(v: unknown): Record<string, LiveContainerStateEntry> | null {
   if (!v || typeof v !== 'object') return null;
-  const out: Record<string, string> = {};
+  const out: Record<string, LiveContainerStateEntry> = {};
   for (const [name, s] of Object.entries(v as Record<string, unknown>)) {
-    const st = typeof s === 'string' ? s : (s && typeof s === 'object' && typeof (s as Record<string, unknown>).status === 'string') ? String((s as Record<string, unknown>).status) : 'running';
-    out[name] = st.toLowerCase();
+    let st: string;
+    let startedAt: string | undefined;
+    if (typeof s === 'string') {
+      st = s; // legacy bare-string shape
+    } else if (s && typeof s === 'object') {
+      const o = s as Record<string, unknown>;
+      st = typeof o.status === 'string' ? String(o.status) : 'running';
+      startedAt = typeof o.startedAt === 'string' && o.startedAt !== '' ? o.startedAt : undefined;
+    } else {
+      st = 'running';
+    }
+    out[name] = { status: st.toLowerCase(), ...(startedAt ? { startedAt } : {}) };
   }
   return out;
 }
@@ -84,7 +103,7 @@ function normalizeContainerStates(v: unknown): Record<string, string> | null {
  * probe `containerStates` data (null = no data at all). The app is 'running'
  * when ANY member runs; otherwise the WORST non-running state wins so a
  * mid-transition app shows 'restarting', not just 'exited'. */
-function liveStateForNames(names: string[], states?: Record<string, string>): string | null {
+function liveStateForNames(names: string[], states?: Record<string, LiveContainerStateEntry>): string | null {
   if (!states || Object.keys(states).length === 0) return null;
   let anyRunning = false;
   let worst: string | null = null;
@@ -92,14 +111,14 @@ function liveStateForNames(names: string[], states?: Record<string, string>): st
     // Exact docker-name match first, then the `<app>-<service>` convention.
     const direct = states[n];
     if (direct !== undefined) {
-      if (direct === 'running') anyRunning = true;
-      else if (!worst || stateRank(direct) > stateRank(worst)) worst = direct;
+      if (direct.status === 'running') anyRunning = true;
+      else if (!worst || stateRank(direct.status) > stateRank(worst)) worst = direct.status;
       continue;
     }
     for (const [k, v] of Object.entries(states)) {
       if (!k.endsWith(`-${n}`)) continue;
-      if (v === 'running') anyRunning = true;
-      else if (!worst || stateRank(v) > stateRank(worst)) worst = v;
+      if (v.status === 'running') anyRunning = true;
+      else if (!worst || stateRank(v.status) > stateRank(worst)) worst = v.status;
     }
   }
   return anyRunning ? 'running' : worst;
@@ -108,10 +127,43 @@ function liveStateForNames(names: string[], states?: Record<string, string>): st
 /** Live docker state of an APP from probe data (null = no fresh data for its
  * device). TrueNAS multi-container apps name docker containers
  * `<app>-<service>`, so candidates are matched exactly or by suffix. */
-function liveStateOf(row: ContainerRow, states?: Record<string, string>): string | null {
+function liveStateOf(row: ContainerRow, states?: Record<string, LiveContainerStateEntry>): string | null {
   const services = servicesOf(row);
   const candidates = Array.from(new Set([row.name, ...(services.length > 0 ? services.map((s) => s.service ?? row.name) : [])]));
   return liveStateForNames(candidates, states);
+}
+
+/** Parses an ISO-8601 start time to epoch ms (null when absent/unparseable). */
+function parseStartedAtMs(v?: string | null): number | null {
+  if (!v) return null;
+  const t = Date.parse(v);
+  return Number.isNaN(t) ? null : t;
+}
+
+/** LIVE start time of an APP from probe data (null = no fresh live stamp).
+ * Single-container apps: the member's real docker StartedAt. Multi-container
+ * apps: the EARLIEST running member's start — a restart redeploys every
+ * container, so the oldest one is when the app came back up. Only RUNNING
+ * members count (docker leaves no start time on stopped containers). */
+function liveStartedAtOf(row: ContainerRow, states?: Record<string, LiveContainerStateEntry>): string | null {
+  if (!states || Object.keys(states).length === 0) return null;
+  const services = servicesOf(row);
+  const candidates = Array.from(new Set([row.name, ...(services.length > 0 ? services.map((s) => s.service ?? row.name) : [])]));
+  let best: { ms: number; iso: string } | null = null;
+  for (const n of candidates) {
+    const direct = states[n];
+    if (direct && direct.status === 'running' && direct.startedAt) {
+      const ms = parseStartedAtMs(direct.startedAt);
+      if (ms !== null && (!best || ms < best.ms)) best = { ms, iso: direct.startedAt };
+      continue;
+    }
+    for (const [k, v] of Object.entries(states)) {
+      if (!k.endsWith(`-${n}`) || v.status !== 'running' || !v.startedAt) continue;
+      const ms = parseStartedAtMs(v.startedAt);
+      if (ms !== null && (!best || ms < best.ms)) best = { ms, iso: v.startedAt };
+    }
+  }
+  return best ? best.iso : null;
 }
 
 /**
@@ -403,6 +455,226 @@ function PullImageDialog({ deviceId, deviceName, pluginId, onClose }: { deviceId
   );
 }
 
+/** One editable row of the ChangeImageDialog: a container/service of one app,
+ * with its current image reference and the (editable) new target reference. */
+interface ImageSetRow {
+  key: string;
+  appName: string;
+  deviceName?: string | null;
+  pluginId: string;
+  deviceId: string;
+  /** Docker name / service key — sent as `mapping.name` so the plugin scopes
+   * the match to exactly this member (TrueNAS also matches `<app>-<service>`). */
+  service: string;
+  /** Current image reference (the plugin's match key, `mapping.from`). */
+  from: string;
+  /** New target reference — editable, pre-filled with the current one. */
+  to: string;
+}
+
+/** Builds the dialog rows for a set of selected apps: every member container
+ * that has a known image reference becomes one row (single-container apps fall
+ * back to the app-level image). Rows without an image are skipped — the plugin
+ * cannot match them anyway. */
+function buildImageSetRows(apps: ContainerRow[]): ImageSetRow[] {
+  const out: ImageSetRow[] = [];
+  for (const app of apps) {
+    const services = servicesOf(app);
+    if (services.length > 0) {
+      services.forEach((s, i) => {
+        const image = s.image ?? '';
+        if (!image || image.trim() === '') return;
+        out.push({
+          key: `${app.deviceId}|${app.pluginId}|${app.name}#${i}`,
+          appName: app.name,
+          deviceName: app.deviceName,
+          pluginId: app.pluginId,
+          deviceId: app.deviceId,
+          service: s.service ?? app.name,
+          from: image,
+          to: image,
+        });
+      });
+    } else if (app.image && app.image.trim() !== '') {
+      out.push({
+        key: `${app.deviceId}|${app.pluginId}|${app.name}#0`,
+        appName: app.name,
+        deviceName: app.deviceName,
+        pluginId: app.pluginId,
+        deviceId: app.deviceId,
+        service: app.name,
+        from: app.image,
+        to: app.image,
+      });
+    }
+  }
+  return out;
+}
+
+/**
+ * ChangeImageDialog — point one or more containers at a different image via the
+ * canonical `containers.image.set` intent (plan workflow, 2FA-gated). Each row is
+ * one container/service of a selected app: its current reference plus an editable
+ * target. A tag bump ("app:v1.4.2" → "app:v1.4.3") and a full image swap
+ * ("redis:7" → "valkey:8") both work — the plugin recreates each matched
+ * container on the new ref with its configuration preserved (named volumes are
+ * never touched; stopped containers stay stopped). Unchanged rows are not sent.
+ * Steps are grouped per (plugin, device) so one plan covers a whole fleet
+ * selection; TrueNAS catalog apps have no editable compose and are skipped by
+ * the plugin itself.
+ */
+function ChangeImageDialog({ apps, onTrack, onClose }: { apps: ContainerRow[]; onTrack: (planId: string, deviceIds: string[], names: string[]) => void; onClose: () => void }) {
+  const { mode } = useExecutionMode();
+  const isPlanMode = mode === 'plan';
+  const isReadOnly = mode === 'readonly';
+  const [rows, setRows] = useState<ImageSetRow[]>(() => buildImageSetRows(apps));
+  const [error, setError] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [reauth, setReauth] = useState(false);
+  // Plan mode: the plans were saved without executing.
+  const [savedCount, setSavedCount] = useState(0);
+
+  const changedRows = rows.filter((r) => r.to.trim() !== '' && r.to.trim() !== r.from);
+
+  function setRowTo(key: string, to: string) {
+    setRows((prev) => prev.map((r) => (r.key === key ? { ...r, to } : r)));
+  }
+
+  async function submit() {
+    if (isReadOnly) return; // Read-Only — the button is disabled; safety net.
+    setSaving(true);
+    setError(null);
+    try {
+      // Group changed rows per (plugin, device) — one plan step each.
+      const groups = new Map<string, { pluginId: string; deviceId: string; mappings: Array<{ name?: string; from: string; to: string }>; apps: Set<string> }>();
+      for (const r of changedRows) {
+        const k = `${r.pluginId}|${r.deviceId}`;
+        let g = groups.get(k);
+        if (!g) { g = { pluginId: r.pluginId, deviceId: r.deviceId, mappings: [], apps: new Set() }; groups.set(k, g); }
+        g.mappings.push({ name: r.service, from: r.from, to: r.to.trim() });
+        g.apps.add(r.appName);
+      }
+      if (groups.size === 0) { setError('No changes — every target reference is unchanged.'); setSaving(false); return; }
+
+      let saved = 0;
+      for (const g of groups.values()) {
+        const planId = await createAndExecutePlan(g.pluginId, 'containers.image.set', [{ deviceId: g.deviceId, input: { mappings: g.mappings } }], mode);
+        if (isPlanMode) { saved += 1; continue; }
+        onTrack(planId, [g.deviceId], Array.from(g.apps));
+      }
+      if (isPlanMode && saved > 0) { setSavedCount(saved); return; }
+      onClose();
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 401) setReauth(true);
+      else setError(err instanceof Error ? err.message : String(err));
+      setSaving(false);
+    }
+  }
+
+  // Plan mode: the plans were saved without executing — offer to close.
+  if (savedCount > 0) {
+    return (
+      <DialogShell
+        title="Change image"
+        onClose={onClose}
+        maxWidth="max-w-3xl"
+        footer={
+          <button type="button" onClick={onClose} className="rounded-md bg-primary px-3 py-1.5 text-sm font-medium text-white hover:bg-primary-hover">
+            Close
+          </button>
+        }
+      >
+        <div className="flex items-start gap-2 rounded-md border border-success-border bg-success px-3 py-2 text-xs text-success-fg">
+          <CheckCircle2 size={14} className="mt-0.5 shrink-0" />
+          {savedCount} plan{savedCount === 1 ? '' : 's'} saved without executing — the containers were NOT changed. Open the Plans center to run them later (or schedule them).
+        </div>
+      </DialogShell>
+    );
+  }
+
+  return (
+    <>
+      <DialogShell
+        title={`Change image${apps.length > 1 ? ` (${apps.length} apps)` : ''}`}
+        subtitle="Each changed container is recreated on the new image with its configuration preserved — env, ports, restart policy, static IPs. Named volumes are never touched and stopped containers stay stopped."
+        onClose={onClose}
+        maxWidth="max-w-3xl"
+      >
+        <div>
+          {isReadOnly && (
+            <div className="mb-3 flex items-start gap-2 rounded-md border border-warning-border bg-warning px-3 py-2 text-xs text-warning-fg">
+              <EyeOff className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+              Read-only mode is active — this change cannot be saved or applied. Switch to Plan or Execute in the top bar.
+            </div>
+          )}
+          {error && (
+            <div className="mb-3 rounded-md border border-danger-border bg-danger px-3 py-2 text-xs text-danger-fg">{error}</div>
+          )}
+          {rows.length === 0 ? (
+            <div className="py-6 text-center text-sm text-secondary">None of the selected apps report an image reference yet — nothing to change.</div>
+          ) : (
+            <div className="max-h-[52vh] overflow-y-auto rounded-md border border-border">
+              {rows.map((r) => {
+                const changed = r.to.trim() !== '' && r.to.trim() !== r.from;
+                return (
+                  <div key={r.key} className="flex items-center gap-3 border-b border-border px-3 py-2 last:border-b-0">
+                    <div className="w-44 min-w-0 shrink-0">
+                      <div className="truncate text-xs font-medium" title={`${r.appName}${r.deviceName ? ` · ${r.deviceName}` : ''}`}>{r.appName}</div>
+                      {rows.some((x) => x.appName !== r.appName) && (
+                        <div className="truncate text-[11px] text-faint">{r.service}{r.deviceName ? ` · ${r.deviceName}` : ''}</div>
+                      )}
+                    </div>
+                    <span className="min-w-0 flex-1 truncate font-mono text-xs text-secondary" title={r.from}>{r.from}</span>
+                    {changed && <span className="shrink-0 text-faint">→</span>}
+                    <input
+                      value={r.to}
+                      onChange={(e) => setRowTo(r.key, e.target.value)}
+                      spellCheck={false}
+                      disabled={isReadOnly}
+                      aria-label={`New image for ${r.appName}/${r.service}`}
+                      className={clsx(
+                        'w-72 shrink-0 rounded-md border bg-background px-2 py-1 font-mono text-xs focus:outline-none',
+                        changed ? 'border-accent-sky-border focus:border-focus-ring' : 'border-border focus:border-focus-ring',
+                        isReadOnly && 'opacity-50',
+                      )}
+                    />
+                  </div>
+                );
+              })}
+            </div>
+          )}
+          <div className="mt-3 flex items-center justify-end gap-2">
+            <button type="button" onClick={onClose} disabled={saving} className="rounded-md border border-border px-3 py-1.5 text-sm font-medium text-secondary hover:bg-background disabled:opacity-40">
+              Cancel
+            </button>
+            <button
+              type="button"
+              onClick={() => void submit()}
+              disabled={saving || isReadOnly || changedRows.length === 0}
+              title={isReadOnly ? 'Read-only mode — switch to Plan or Execute to make changes' : changedRows.length === 0 ? 'Change at least one target image first' : undefined}
+              className="inline-flex items-center gap-1.5 rounded-md bg-primary px-3 py-1.5 text-sm font-medium text-white hover:bg-primary-hover disabled:opacity-40"
+            >
+              {saving && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+              <Tag size={14} />
+              {isPlanMode ? `Save as plan${changedRows.length > 1 ? 's' : ''}` : `Change ${changedRows.length || ''} image${changedRows.length === 1 ? '' : 's'}`}
+            </button>
+          </div>
+        </div>
+      </DialogShell>
+
+      {reauth && (
+        <div onClick={(e) => e.stopPropagation()}>
+          <ReauthDialog
+            contextLabel="Change container image(s)"
+            onClose={() => setReauth(false)}
+            onSuccess={async () => { setReauth(false); await submit(); }}
+          />
+        </div>
+      )}
+    </>
+  );
+}
+
 /**
  * LogsDialog — read-only viewer for a single app's container log output, wrapped in
  * the shared draggable/resizable shell. The actual fetching + rendering lives in
@@ -433,17 +705,21 @@ function LogsDialog({ app, onClose }: { app: ContainerRow; onClose: () => void }
 /** Uptime cell — "running since". RUNNING + startedAt → duration; non-RUNNING
  * or no stamp → "—". The value is the real container start when the plugin
  * observed it via SSH (`docker inspect`), otherwise UNM-tracked from state
- * transitions (a lower bound that resets after restarts). */
-function UptimeCell({ row }: { row: ContainerRow }) {
+ * transitions (a lower bound that resets after restarts). `liveStartedAt`
+ * (fresh probe data) overrides the inventory stamp so a restart shows up in
+ * seconds instead of waiting for the next enrichment cycle. */
+function UptimeCell({ row, liveStartedAt }: { row: ContainerRow; liveStartedAt?: string | null }) {
   const { formatDateTime } = useTimeFormat();
-  if (row.state !== 'RUNNING' || !row.startedAt) return <span className="text-faint">—</span>;
-  const since = new Date(row.startedAt).getTime();
+  if (row.state !== 'RUNNING') return <span className="text-faint">—</span>;
+  const stamp = liveStartedAt ?? row.startedAt;
+  if (!stamp) return <span className="text-faint">—</span>;
+  const since = new Date(stamp).getTime();
   if (Number.isNaN(since)) return <span className="text-faint">—</span>;
   const secs = Math.max(0, (Date.now() - since) / 1000);
   return (
     <span
       className="font-mono text-xs text-secondary"
-      title={`Running since ${formatDateTime(row.startedAt)}`}
+      title={`Running since ${formatDateTime(stamp)}`}
     >
       {formatDuration(secs)}
     </span>
@@ -621,8 +897,10 @@ interface BuiltApp {
  * with no per-service detail yet falls back to a synthetic container from the
  * app-level image so nothing is lost. `liveStats` (probe data for this device)
  * overrides the enrichment stats when present — live wins, cached fills gaps.
- * `liveStates` carries the fresh probe docker states for each member's badge. */
-function buildApp(row: ContainerRow, liveStats?: Record<string, LiveContainerStat>, liveStates?: Record<string, string>): BuiltApp {
+ * `liveStates` carries the fresh probe docker states for each member's badge;
+ * `liveStartedAt` the fresh per-member start times (probe inspect data) that
+ * override the enrichment stamps in the uptime cells. */
+function buildApp(row: ContainerRow, liveStats?: Record<string, LiveContainerStat>, liveStates?: Record<string, LiveContainerStateEntry>, liveStartedAt?: Record<string, string>): BuiltApp {
   const base = `${row.deviceId}|${row.pluginId}|${row.name}`;
   const services = servicesOf(row);
   let list: ContainerServiceDetail[];
@@ -668,7 +946,9 @@ function buildApp(row: ContainerRow, liveStats?: Record<string, LiveContainerSta
         liveState: liveStates && svcName ? liveStateForNames([svcName], liveStates) : null,
         mac: s.mac ?? null,
         ip: s.ip ?? null,
-        startedAt: s.startedAt ?? null,
+        // Fresh probe start time wins over the enrichment snapshot (same
+        // exact / `<app>-<svc>` matching as liveStateForNames).
+        startedAt: (liveStartedAt && svcName ? liveStartedAt[svcName] ?? liveStartedAt[`${row.name}-${svcName}`] : undefined) ?? s.startedAt ?? null,
         cpuPct: live?.cpuPct ?? s.cpuPct ?? null,
         memUsedBytes: live?.memUsedBytes ?? s.memUsedBytes ?? null,
         memLimitBytes: live?.memLimitBytes ?? s.memLimitBytes ?? null,
@@ -939,6 +1219,9 @@ function nodeCell(key: string, node: TreeNode, depth: number, actions?: ChildAct
       return <span className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5">{parts}</span>;
     }
     case 'startedAt': {
+      // node.startedAt already carries the fresh probe start time when the
+      // fast transition probe covered this member (buildApp overrides it),
+      // else the enrichment/inventory stamp.
       if (node.kind !== 'container' || !node.startedAt) return null;
       const since = new Date(node.startedAt).getTime();
       if (Number.isNaN(since)) return null;
@@ -1230,6 +1513,8 @@ export default function Containers() {
 
   /** Custom app whose compose YAML is being edited. */
   const [yamlApp, setYamlApp] = useState<ContainerRow | null>(null);
+  /** Selected apps whose container images are being changed (null = closed). */
+  const [imageApps, setImageApps] = useState<ContainerRow[] | null>(null);
   const [logsApp, setLogsApp] = useState<ContainerRow | null>(null);
   /** Device target of the "Pull image" dialog (null = closed). */
   const [pullTarget, setPullTarget] = useState<{ deviceId: string; deviceName?: string | null; pluginId: string } | null>(null);
@@ -1327,7 +1612,7 @@ export default function Containers() {
   // per-name updates. Feeds both the settle watch's cheap live check and the
   // live State badges; a failed poll keeps serving the last good snapshot.
   const liveStatesByDevice = useMemo(() => {
-    const m = new Map<string, { at: number; states: Record<string, string> }>();
+    const m = new Map<string, { at: number; states: Record<string, LiveContainerStateEntry> }>();
     probeTargets.forEach((t, i) => {
       const res = probeResults[i];
       if (!res?.data) return;
@@ -1353,9 +1638,23 @@ export default function Containers() {
 
   /** Fresh (≤30 s) live states for one device+plugin — null when the probe has
    * no recent data, so callers fall back to the inventory state. */
-  function freshLiveStates(deviceId: string, pluginId: string): Record<string, string> | null {
+  function freshLiveStates(deviceId: string, pluginId: string): Record<string, LiveContainerStateEntry> | null {
     const e = liveStatesByDevice.get(`${deviceId}|${pluginId}`);
     return e && Date.now() - e.at < 30_000 ? e.states : null;
+  }
+
+  /** Fresh (≤30 s) LIVE start times for one device+plugin — name → ISO stamp.
+   * Only present when the probe carried a `names` selection AND the plugin
+   * supports it (ix-truenas ≥0.28); absent otherwise, so callers fall back to
+   * the inventory/enrichment stamps. */
+  function freshLiveStartedAt(deviceId: string, pluginId: string): Record<string, string> | null {
+    const e = liveStatesByDevice.get(`${deviceId}|${pluginId}`);
+    if (!e || Date.now() - e.at >= 30_000) return null;
+    const out: Record<string, string> = {};
+    for (const [name, s] of Object.entries(e.states)) {
+      if (s.startedAt) out[name] = s.startedAt;
+    }
+    return Object.keys(out).length > 0 ? out : null;
   }
 
   useEffect(() => {
@@ -1364,6 +1663,18 @@ export default function Containers() {
     // completion — start the throttle clock there so this watch only adds
     // follow-ups, never a redundant immediate one.
     let lastHeavyAt = Date.now();
+    // Grace period: keep the fast probe (and its throttled heavy refreshes)
+    // running for at least 90 s after the watch (re)starts even if the DB
+    // already shows RUNNING. Two things must happen before the live start times
+    // may disappear from the Uptime column: (1) the plugin's background SSH
+    // enrichment (`docker inspect` over all containers — seconds on a small box,
+    // longer on a busy one) picks up the NEW StartedAt after the plan's own
+    // refresh tail ingested the still-stale cache, and (2) at least ONE more
+    // heavy refresh (15 s throttle) lands that fresh stamp in the DB. 90 s
+    // covers both with margin; without it the column would briefly show the new
+    // uptime from the probe, then revert to the stale inventory value until the
+    // next ~15 min enrichment cycle — exactly the original bug.
+    const graceUntil = Date.now() + 90_000;
     /** app name → live state on previous tick. Stability gate: TrueNAS
      * app.state lags docker state during transitions, so one sample can still
      * be mid-flight — require the same answer twice before syncing the DB. */
@@ -1372,11 +1683,13 @@ export default function Containers() {
       if (Date.now() > settleWatch.until) { setSettleWatch(null); return; }
       const data = containersRef.current;
 
-      // Authoritative exit: the DB no longer shows any watched app as transitional.
+      // Authoritative exit: the DB no longer shows any watched app as
+      // transitional AND the grace period has elapsed (see above — keeps the
+      // fast probe alive long enough to capture fresh live start times).
       const dbTransitional = new Set(
         (data?.containers ?? []).filter((c) => TRANSITIONAL_STATES.has(c.state)).map((c) => c.name),
       );
-      if (!settleWatch.names.some((n) => dbTransitional.has(n))) { setSettleWatch(null); return; }
+      if (!settleWatch.names.some((n) => dbTransitional.has(n)) && Date.now() > graceUntil) { setSettleWatch(null); return; }
 
       // Cheap live check: docker ps -a via the probe cache (3 s cadence, zero
       // appliance API load — unlike refreshDevices which triggers a full
@@ -1651,8 +1964,8 @@ export default function Containers() {
       // enrichment data — live wins, cached fills gaps.
       const key = `${row.deviceId}|${row.pluginId}`;
       const liveEntry = liveStatesByDevice.get(key);
-      const freshStates = liveEntry && Date.now() - liveEntry.at < 30_000 ? liveEntry.states : undefined;
-      const built = buildApp(row, liveStatsByDevice.get(key), freshStates);
+      const fresh = liveEntry && Date.now() - liveEntry.at < 30_000 ? liveEntry : undefined;
+      const built = buildApp(row, liveStatsByDevice.get(key), fresh?.states, freshLiveStartedAt(row.deviceId, row.pluginId) ?? undefined);
       roots.push(built.app);
       childMap.set(built.app.key, built.containers.map((c) => c.node));
       for (const c of built.containers) if (c.volumes.length > 0) childMap.set(c.node.key, c.volumes);
@@ -1700,9 +2013,27 @@ export default function Containers() {
       header: 'Uptime',
       key: 'startedAt',
       width: 120,
-      exportValue: (node) => node.row?.startedAt ?? '',
-      sortAccessor: (node) => (node.row?.startedAt ? new Date(node.row.startedAt).getTime() : null),
-      render: (node) => (node.row ? <UptimeCell row={node.row} /> : null),
+      // Effective stamp = fresh live probe start time (real docker StartedAt
+      // from the fast transition probe) when available, else the inventory /
+      // enrichment value — so a restart shows up in seconds.
+      exportValue: (node) => {
+        const r = node.row;
+        if (!r) return '';
+        return freshLiveStartedAt(r.deviceId, r.pluginId) ? liveStartedAtOf(r, freshLiveStates(r.deviceId, r.pluginId) ?? undefined) ?? r.startedAt ?? '' : r.startedAt ?? '';
+      },
+      sortAccessor: (node) => {
+        const r = node.row;
+        if (!r) return null;
+        const eff = freshLiveStartedAt(r.deviceId, r.pluginId) ? liveStartedAtOf(r, freshLiveStates(r.deviceId, r.pluginId) ?? undefined) ?? r.startedAt : r.startedAt;
+        return eff ? new Date(eff).getTime() : null;
+      },
+      render: (node) => {
+        const r = node.row;
+        if (!r) return null;
+        const live = freshLiveStartedAt(r.deviceId, r.pluginId);
+        const ls = live ? liveStartedAtOf(r, freshLiveStates(r.deviceId, r.pluginId) ?? undefined) : null;
+        return <UptimeCell row={r} liveStartedAt={ls} />;
+      },
     },
     {
       header: 'Image',
@@ -1812,6 +2143,9 @@ export default function Containers() {
           { id: 'containers.stop', label: 'Stop', icon: <Square size={13} />, available: hasAction(r.pluginId, 'containers.stop'), eligible: RUNNING_STATES.has(r.state), danger: true, write: true },
           { id: 'containers.restart', label: 'Restart', icon: <RotateCw size={14} />, available: hasAction(r.pluginId, 'containers.restart'), eligible: true, write: true },
           { id: 'containers.upgrade', label: 'Update', icon: <ArrowUpCircle size={14} />, available: hasAction(r.pluginId, 'containers.upgrade'), eligible: r.upgradeAvailable === true, write: true },
+          // Change image — tag bump or full image swap via the canonical
+          // containers.image.set intent (recreate on docker, compose rewrite on TrueNAS).
+          { id: 'containers.image.set', label: 'Change image', icon: <Tag size={14} />, available: hasAction(r.pluginId, 'containers.image.set'), eligible: true, write: true },
           // Compose editing is offered whenever the plugin advertises BOTH the
           // read and write side of the contract (TrueNAS custom apps today).
           { id: 'compose.config.read+containers.update', label: 'Edit compose YAML', icon: <FileCode2 size={14} />, available: hasAction(r.pluginId, 'compose.config.read') && hasAction(r.pluginId, 'containers.update'), eligible: true, write: true },
@@ -1834,6 +2168,7 @@ export default function Containers() {
                   disabled={!enabled}
                   onClick={() => {
                     if (a.id === 'compose.config.read+containers.update') setYamlApp(r);
+                    else if (a.id === 'containers.image.set') setImageApps([r]);
                     else if (a.id === 'containers.logs.read') setLogsApp(r);
                     else void singleApp(r, a.id, a.label);
                   }}
@@ -2077,6 +2412,17 @@ export default function Containers() {
                   { label: 'Restart', onClick: containerBulk('containers.restart', 'Restart selected', () => true, '') },
                   { label: 'Update', onClick: containerBulk('containers.upgrade', 'Update selected', (r) => r.upgradeAvailable === true, 'No selected apps have an update available.') },
                   {
+                    // Change image — opens the dialog for every selected app whose plugin
+                    // advertises containers.image.set; rows without a known image are skipped.
+                    label: 'Change image',
+                    enabled: (rows) => rows.some((n) => n.row && hasAction(n.row.pluginId, 'containers.image.set')),
+                    onClick: (rows) => {
+                      const apps = rows.filter((n) => n.row && hasAction(n.row.pluginId, 'containers.image.set')).map((n) => n.row!);
+                      if (apps.length === 0) return;
+                      setImageApps(apps);
+                    },
+                  },
+                  {
                     label: 'Delete',
                     confirm: (count) => `Permanently delete ${count} app(s) and their docker resources? This is destructive.`,
                     onClick: containerBulk('containers.delete', 'Delete selected', () => true, ''),
@@ -2220,6 +2566,8 @@ export default function Containers() {
 
       {/* Custom-app compose YAML editor. */}
       {yamlApp && <YamlEditorDialog app={yamlApp} onClose={() => setYamlApp(null)} />}
+      {/* Change image — canonical containers.image.set intent (plan workflow). */}
+      {imageApps && <ChangeImageDialog apps={imageApps} onTrack={trackPlan} onClose={() => setImageApps(null)} />}
       {logsApp && <LogsDialog app={logsApp} onClose={() => setLogsApp(null)} />}
 
       {/* Filesystem browser — browse a container volume's HOST location over SFTP (capability 'filesystem'). */}

@@ -481,6 +481,11 @@ export interface ProbeContainerState {
   name: string;
   /** Docker-native lowercase state ('running', 'exited', 'created', …). */
   status: string;
+  /** Real docker start time (ISO-8601 UTC) — present only when a batched
+   * `docker inspect` covered this container (probe calls that carry a `names`
+   * selection, see collectProbeStartedAt); absent on the full page-wide probe
+   * and for containers without a start time yet. */
+  startedAt?: string;
 }
 
 /**
@@ -540,6 +545,62 @@ async function collectProbeStatesInner(
     return out;
   } catch (e) {
     probeFailLog(host, e instanceof SshError ? `SSH docker ps probe on ${host} failed: ${e.message}` : `SSH docker ps probe on ${host} unexpected error: ${(e as Error).message}`, log);
+    return null; // best-effort — the webapp keeps its last good snapshot
+  }
+}
+
+/** Max container names per `docker inspect` exec — keeps the arg list bounded.
+ * The fast transition probe only ever sends a handful of names. */
+const STARTED_AT_CHUNK = 50;
+
+/** Shell-quotes one docker name for an exec command line (names come from the
+ * webapp's candidate lists, not just docker's own charset). */
+function quoteName(n: string): string {
+  return `'${n.replace(/'/g, "'\\''")}'`;
+}
+
+/**
+ * Collects REAL docker start times for a SMALL set of container names via ONE
+ * batched `docker inspect --format '{{.Name}}|{{.State.StartedAt}}' name…` over
+ * the shared SSH pool — the cheap counterpart to the enrichment cycle's
+ * per-container `docker inspect`. NOTE: `docker ps --format` cannot emit
+ * `.StartedAt` (not part of its template context), so inspect is the only way.
+ * Only called from probe requests that carry a `names` selection (the webapp's
+ * fast transition probe) — the default page-wide probe stays a single
+ * `docker ps -a` with zero per-container work. Returns name → ISO-8601 UTC
+ * start time; stopped/created containers have an EMPTY StartedAt and are
+ * omitted. null = no ssh slot or SSH failure (best-effort — callers keep what
+ * they had); an empty map is a valid answer (none of the names exist).
+ */
+export async function collectProbeStartedAt(
+  host: string,
+  sshCreds: ReturnType<typeof resolveSshCredentials>,
+  names: string[],
+  log?: (level: 'info' | 'warn', message: string) => void
+): Promise<Map<string, string> | null> {
+  if (!sshCreds || names.length === 0) return null; // no ssh slot bound — API-only mode
+  try {
+    const port = hostSshPort(host);
+    const client = await sshPool.get(host, port, sshCreds, { hostKeyVerifier: dynamicSshHostVerifier(host, port) });
+    const out = new Map<string, string>();
+    for (let i = 0; i < names.length; i += STARTED_AT_CHUNK) {
+      const chunk = names.slice(i, i + STARTED_AT_CHUNK);
+      const args = chunk.map(quoteName).join(' ');
+      const r = await client.exec(`docker inspect --format '{{.Name}}|{{.State.StartedAt}}' ${args} 2>/dev/null`, sshCreds);
+      // docker inspect exits non-zero when ANY name is missing but still prints
+      // the ones that exist — parse stdout whenever it carries lines.
+      for (const line of r.stdout.split('\n')) {
+        const sep = line.indexOf('|');
+        if (sep < 0) continue;
+        const name = line.slice(0, sep).replace(/^\//, '').trim();
+        const startedAt = line.slice(sep + 1).trim();
+        if (!name || !startedAt) continue; // stopped/created → no start time yet
+        out.set(name, startedAt);
+      }
+    }
+    return out;
+  } catch (e) {
+    probeFailLog(host, e instanceof SshError ? `SSH docker inspect probe on ${host} failed: ${e.message}` : `SSH docker inspect probe on ${host} unexpected error: ${(e as Error).message}`, log);
     return null; // best-effort — the webapp keeps its last good snapshot
   }
 }
@@ -1022,6 +1083,22 @@ function runConfigWave(
 /** Current (possibly stale/empty) enrichment state for a host. */
 export function getEnrichment(host: string): EnrichmentState | undefined {
   return enrichmentCache.get(host);
+}
+
+/**
+ * Marks the cached docker facts (per-container MACs/IPs/StartedAt) as stale so
+ * the NEXT /monitoring poll re-runs the SSH `docker inspect` cycle. Called by
+ * the container lifecycle actions (stop/start/restart/upgrade): without this,
+ * a plan's own settle+refresh tail would ingest the still-FRESH cache — i.e.
+ * the pre-restart start times — and the DB would only catch up on the next 15
+ * min TTL expiry. The re-collect is fire-and-forget (seconds over SSH), so it
+ * usually lands before the webapp's settle watch does its follow-up refresh.
+ */
+export function invalidateDockerEnrichment(host: string): void {
+  const s = enrichmentCache.get(host);
+  if (!s) return;
+  s.atDockerInfo = undefined; // isStale() treats undefined as stale
+  enrichmentCache.set(host, s);
 }
 
 function isStale(at?: number): boolean {

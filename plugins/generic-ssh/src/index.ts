@@ -74,6 +74,8 @@ export const PLUGIN_NAME = 'Generic SSH Plugin (Linux)';
 const identity = resolvePluginIdentity({
   uuid: PLUGIN_UUID,
   name: PLUGIN_NAME,
+  description:
+    'Full SSH access to any Linux host — monitoring, inventory, filesystem browsing, interactive console and config actions.',
   // 0.2.0 — Docker / Docker Compose support (Containers page): emits the generic
   // containers[] + images[] metrics at the inventory cadence (one row per "App"
   // = compose project, same grouping as the Docker plugin), serves probe keys

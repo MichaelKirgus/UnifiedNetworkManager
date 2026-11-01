@@ -15,3 +15,6 @@ coverage/
 # .vscode/mcp.json is intentionally tracked — it documents the MCP wiring for contributors.
 .vscode/*
 !.vscode/mcp.json
+
+# Local-only Truenas deployment compose (not shipped)
+docker-compose.truenas.yaml

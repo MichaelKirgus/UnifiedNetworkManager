@@ -10,7 +10,7 @@ monitoring plus configuration actions for ports, PoE, LAGs and VLANs.
 | --- | --- | --- |
 | Monitoring | — | System state + per-port link/throughput via the `.b-file` API. |
 | Inventory | — | Ports and VLANs for the Networks/Hosts pages. |
-| Configuration actions | — | 20 catalog actions: port config, PoE config, LAG config, VLAN port membership, VLAN table sets, SNMP config, firmware update, backup download / config restore. |
+| Configuration actions | — | 16 catalog actions: system info/identity/management/reboot, port config, PoE config, LAG config, VLAN port membership + table sets, SNMP config, firmware update, backup download / config restore, network create/delete + L2-topology read intents. |
 | Planning / rollouts | — | Multi-device intents for fleet switch configuration. |
 | Updates | — | Firmware status + update through the `.b-file` API. |
 

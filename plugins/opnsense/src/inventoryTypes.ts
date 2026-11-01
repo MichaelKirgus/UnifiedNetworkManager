@@ -18,6 +18,14 @@ export interface InventorySnapshot {
   networks: Record<string, unknown>[];
   /** Active DHCP leases normalized across Kea/dnsmasq backends. */
   dhcpLeases: Record<string, unknown>[];
+  /** Configured DHCP server networks (dnsmasq ranges / Kea subnets) → UNM DHCP page.
+   * null = collection failed this cycle → /monitoring must NOT emit the key, so a
+   * transient failure never wipes previously stored rows (present-but-empty is
+   * authoritative on the API side). */
+  dhcpNetworks: Record<string, unknown>[] | null;
+  /** Static DHCP reservations/mappings (dnsmasq staticmaps / Kea reservations) → UNM DHCP page.
+   * null = collection failed this cycle → key omitted. */
+  dhcpReservations: Record<string, unknown>[] | null;
   /** Configured tunnels (WireGuard/OpenVPN/IPsec/PPPoE/GRE) — see collectTunnels. */
   tunnels: TunnelRow[];
   /** Configured static routes — see collectRoutes. */
@@ -40,6 +48,13 @@ export interface InventorySnapshot {
    * null = collection failed this cycle → /monitoring must NOT emit the key, so a
    * transient failure never wipes previously stored rows. */
   services: ServiceRow[] | null;
+  /** Static DNS host entries {name, ip} from the active backend (dnsmasq hosts /
+   * unbound local-zone overrides) — feeds UNM's cross-device DNS page. Unbound
+   * rows carry a native free-text `description` when set; dnsmasq has none.
+   * null = collection failed this cycle → /monitoring must NOT emit the key. */
+  // `domain` is set only by the unbound backend (bare hostname + separate
+  // domain field); dnsmasq rows carry no domain.
+  dnsEntries: Array<{ name: string; ip: string; domain?: string; description?: string }> | null;
   /** True when the SSH ZFS enrichment SUCCEEDED for this snapshot (a bound ssh
    * slot answered with a real pool listing). Drives notification mirroring of
    * pool states — false means "no fresh authoritative ZFS data", so live pool

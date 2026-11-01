@@ -106,9 +106,11 @@ interface TimeRangeFilterProps {
   /** Optional visible label rendered above the controls. */
   label?: string;
   className?: string;
+  /** Smaller padding/type for dense filter bars (e.g. the topology header). */
+  compact?: boolean;
 }
 
-export function TimeRangeFilter({ value, onChange, defaultValue = '24h', label, className }: TimeRangeFilterProps) {
+export function TimeRangeFilter({ value, onChange, defaultValue = '24h', label, className, compact }: TimeRangeFilterProps) {
   const controlled = value !== undefined && onChange !== undefined;
   const [internal, setInternal] = useState<TimeRangeValue>(defaultValue);
   // Keep internal state in sync when used as a controlled component.
@@ -131,12 +133,15 @@ export function TimeRangeFilter({ value, onChange, defaultValue = '24h', label, 
     else emit(id);
   }
 
+  // Compact variant for dense filter bars — same controls, tighter metrics.
+  const fieldCls = compact ? 'rounded-md border border-border bg-background px-2 py-1 text-xs' : 'rounded-md border border-border bg-background px-2.5 py-1.5 text-sm';
+
   return (
     <div className={className}>
       {label && <label className="mb-1 block text-xs font-medium text-secondary">{label}</label>}
       <div className="flex flex-wrap items-center gap-2">
         <select
-          className="rounded-md border border-border bg-background px-2.5 py-1.5 text-sm"
+          className={fieldCls}
           value={selectValue}
           onChange={(e) => onPresetChange(e.target.value)}
         >
@@ -153,7 +158,7 @@ export function TimeRangeFilter({ value, onChange, defaultValue = '24h', label, 
             <input
               type="datetime-local"
               aria-label="Range start"
-              className="rounded-md border border-border bg-background px-2 py-1.5 text-sm"
+              className={fieldCls}
               value={isoToLocalInput(current.from)}
               onChange={(e) => emit({ custom: true, from: localInputToIso(e.target.value), to: current.to })}
             />
@@ -161,7 +166,7 @@ export function TimeRangeFilter({ value, onChange, defaultValue = '24h', label, 
             <input
               type="datetime-local"
               aria-label="Range end"
-              className="rounded-md border border-border bg-background px-2 py-1.5 text-sm"
+              className={fieldCls}
               value={isoToLocalInput(current.to)}
               onChange={(e) => emit({ custom: true, from: current.from, to: localInputToIso(e.target.value) })}
             />

@@ -52,6 +52,8 @@ const certCache = new TtlCache<CertificateRow[]>({ isFresh: (v) => Array.isArray
 const identity = resolvePluginIdentity({
   uuid: PLUGIN_UUID,
   name: PLUGIN_NAME,
+  description:
+    'Generic SNMP monitoring + inventory for any device that speaks SNMP (v1/v2c/v3) — interfaces, throughput, WiFi and certificates.',
   // 0.3.0 — WiFi (802.11) collection: IEEE 802.11 MIB walks for access-point
   // and client facts, gated by the boolean `collectWifi` option (default on).
   version: '0.3.0',

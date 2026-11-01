@@ -318,7 +318,8 @@ export async function getSxInventory(
   host: string,
   creds: SnmpCredentials,
   opts: SxOptions,
-  log?: LcosLogSink
+  log?: LcosLogSink,
+  force = false
 ): Promise<{ snapshot: SxSwitchSnapshot | null; fromCache: boolean; error?: string }> {
   // Probe gate first — cheap rejection of non-SX devices / bad credentials.
   const probe = async (): Promise<ProbeOutcome> => {
@@ -334,6 +335,7 @@ export async function getSxInventory(
     opts,
     log,
     probe,
+    force,
     walks: (ctx) => inventoryWalks(ctx as SxVariant),
     // Opt-in FDB enrichment (slow on populated switches — see SxOptions).
     enrich: async (out, ctx) => {

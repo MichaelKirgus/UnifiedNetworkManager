@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { useNavigate } from 'react-router-dom';
 import {
@@ -8,19 +8,35 @@ import {
   ReactFlow,
   type Edge as FlowEdge,
   type Node as FlowNode,
+  type ReactFlowInstance,
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
 import clsx from 'clsx';
 import { Layout } from '../components/Layout';
 import { can } from '../auth/permissions';
 import { api, NetworkLayer, TopologyEdge as TopoEdge, TopologyNode as TopoNode } from '../api/client';
+import { TimeRangeFilter, resolveTimeRangeIso, type TimeRangeValue } from '../components/TimeRangeFilter';
+import { joinHostTraffic, joinPairTraffic, joinSegmentTraffic, maxOf, nodeEmphasis } from '../components/topology/traffic';
+import { layoutHostsNet, MAX_HOSTS, type NetSimNode } from '../components/topology/hostsLayout';
+import { ApNode, HubNode, NetHostNode, SwitchNode } from '../components/topology/HubNode';
 import { DeviceNode, setLayerRegistry } from '../components/topology/DeviceNode';
 import { SegmentNode } from '../components/topology/SegmentNode';
 import { HostNode } from '../components/topology/HostNode';
 import { RemoteNode } from '../components/topology/RemoteNode';
 import { TrunkEdge } from '../components/topology/TrunkEdge';
 
-const nodeTypes = { device: DeviceNode, segment: SegmentNode, host: HostNode, remote: RemoteNode, band: BandNode };
+const nodeTypes = {
+  device: DeviceNode,
+  segment: SegmentNode,
+  host: HostNode,
+  remote: RemoteNode,
+  band: BandNode,
+  // Hosts net view (force-directed) — hub/AP/switch/host-dot renderers.
+  hub: HubNode,
+  ap: ApNode,
+  switch: SwitchNode,
+  nethost: NetHostNode,
+};
 
 /** True when the straight segment between two card centers crosses any OTHER
  * card's box (with a small margin). Same-row edges whose direct line passes
@@ -273,7 +289,27 @@ function withBendOffsets(
 // reads the kind + VLAN list from `data` and picks its rendering.
 const edgeTypes = { trunk: TrunkEdge };
 
-type ViewMode = 'physical' | 'logical';
+type ViewMode = 'physical' | 'logical' | 'hosts';
+
+/** MiniMap base hues as RGB triplets — mirrors the --topo-* palette in
+ * index.css (fixed dark-slate values, identical across all themes), so JS can
+ * mix toward the traffic accent without reading computed styles. */
+const TOPO_RGB: Record<string, [number, number, number]> = {
+  segment: [99, 102, 241], // --topo-segment
+  host: [203, 213, 225], // --topo-host
+  remote: [165, 180, 252], // --topo-remote
+  unassigned: [148, 163, 184], // --topo-unassigned
+  node: [51, 65, 85], // --topo-node
+};
+const TRAFFIC_RGB: [number, number, number] = [56, 189, 248]; // --topo-traffic
+
+/** Mix a base hue toward the traffic accent by `t` (0..1) — MiniMap dots of
+ * busy nodes glow sky while idle ones keep their kind color. */
+function mixTowardTraffic(base: [number, number, number], t: number): string {
+  const k = Math.max(0, Math.min(1, t));
+  const c = base.map((b, i) => Math.round(b + (TRAFFIC_RGB[i] - b) * k));
+  return `rgb(${c[0]} ${c[1]} ${c[2]})`;
+}
 
 type DeviceTopoNode = TopoNode & { kind: 'device' };
 
@@ -410,6 +446,66 @@ function layoutLogical(
   return { nodes, memberSourceIds };
 }
 
+/** Compact tag multi-select for the header — a select that adds/removes tags
+ * (AND semantics: a device must carry ALL selected tags). Free-form input is
+ * deliberately omitted: tags come from the inventory, and typing an unknown
+ * one would silently filter to an empty graph. */
+function TagFilter({ allTags, value, onChange }: { allTags: string[]; value: string[]; onChange: (tags: string[]) => void }) {
+  const [open, setOpen] = useState(false);
+  if (allTags.length === 0) return null; // nothing to filter by — stay out of the way
+  const options = [...new Set(allTags.map((t) => t.toLowerCase()))].sort();
+  const selectedLower = new Set(value.map((t) => t.toLowerCase()));
+  return (
+    <div className="relative">
+      <select
+        value=""
+        onChange={(e) => {
+          if (!e.target.value) return;
+          const tag = e.target.value;
+          // Case-insensitive dedupe — "Router" and "router" are the same tag.
+          if (value.some((t) => t.toLowerCase() === tag)) onChange(value.filter((t) => t !== tag));
+          else onChange([...value, tag]);
+        }}
+        className="rounded-md border border-border bg-card px-2 py-1 text-xs text-secondary"
+      >
+        <option value="">Filter by tag…</option>
+        {options.map((t) => (
+          <option key={t} value={t}>
+            {selectedLower.has(t) ? `✓ ${t}` : t}
+          </option>
+        ))}
+      </select>
+      {value.length > 0 && (
+        <>
+          <button
+            type="button"
+            onClick={() => setOpen((o) => !o)}
+            className="ml-1 rounded-md border border-border bg-muted px-2 py-1 text-xs font-medium text-secondary hover:bg-background"
+            title={`${value.length} tag filter${value.length > 1 ? 's' : ''} (AND)`}
+          >
+            {value.length} tag{value.length > 1 ? 's' : ''}
+          </button>
+          {open && (
+            <div className="absolute left-0 top-full z-20 mt-1 flex max-w-72 flex-wrap gap-1 rounded-md border border-border bg-card p-2 shadow-md">
+              {value.map((t) => (
+                <span key={t} className="inline-flex items-center gap-1 rounded-full bg-muted px-2 py-0.5 text-xs font-medium text-secondary">
+                  {t}
+                  <button type="button" onClick={() => onChange(value.filter((x) => x !== t))} aria-label={`Remove ${t}`} className="text-faint hover:text-danger-fg">
+                    ×
+                  </button>
+                </span>
+              ))}
+              <button type="button" onClick={() => { onChange([]); setOpen(false); }} className="rounded px-1.5 py-0.5 text-xs text-muted-foreground hover:bg-background">
+                Clear all
+              </button>
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
 export default function Topology() {
   const navigate = useNavigate();
   const [view, setView] = useState<ViewMode>('physical');
@@ -417,26 +513,180 @@ export default function Topology() {
   const [showTunnels, setShowTunnels] = useState(true);
   const [siteId, setSiteId] = useState('');
   const [segmentKey, setSegmentKey] = useState('all');
+  // Device filters — applied SERVER-SIDE on /topology (segments/edges recompute
+  // over the filtered subset). Tags use AND semantics.
+  const [tagFilter, setTagFilter] = useState<string[]>([]);
+  const [layerFilter, setLayerFilter] = useState('');
+  // Traffic overlay — opt-in; relative presets slide with time (resolved inside
+  // queryFn, same pattern as the Flows page).
+  const [showTraffic, setShowTraffic] = useState(false);
+  const [range, setRange] = useState<TimeRangeValue>('24h');
+  // Hosts-net live simulation — the layout returns it stopped; node drags
+  // reheat it so every other element reacts with real forces (weighted by
+  // degree + traffic: busy hubs barely flinch, light hosts shove around).
+  // Ref (not state): the sim's tick listener writes positions into RF nodes,
+  // and drag handlers read it — no re-render needed for either.
+  const netSimRef = useRef<{ sim?: import('d3-force').Simulation<NetSimNode, never>; byId?: Map<string, NetSimNode> }>({});
+  const dragRef = useRef<NetSimNode | null>(null);
+  // The React Flow instance (captured on init) — used to read each node's
+  // measured dimensions so moved nodes can carry them into their replacement
+  // objects (see the tick-mirror effect below).
+  const rfInstanceRef = useRef<ReactFlowInstance | null>(null);
+  // Live positions while a hosts-net drag has reheated the sim. RF's plain
+  // `nodes` prop is controlled — without this mirror, reheated ticks would
+  // move the SIM but not the rendered nodes.
+  const [liveNodes, setLiveNodes] = useState<FlowNode[] | null>(null);
+  // Screen→flow conversion for the drag handlers — read React Flow's live
+  // viewport transform straight from its `.react-flow__viewport` element
+  // (translate + scale), relative to the flow container. No context/provider
+  // needed, and it stays correct through pan/zoom.
+  const flowWrapRef = useRef<HTMLDivElement | null>(null);
+  const toFlowPos = (clientX: number, clientY: number) => {
+    const wrap = flowWrapRef.current;
+    if (!wrap) return { x: clientX, y: clientY };
+    const rect = wrap.getBoundingClientRect();
+    const vp = wrap.querySelector('.react-flow__viewport') as HTMLElement | null;
+    let tx = 0;
+    let ty = 0;
+    let scale = 1;
+    if (vp) {
+      const t = getComputedStyle(vp).transform;
+      if (t && t !== 'none') {
+        try {
+          const m = new DOMMatrix(t);
+          tx = m.e;
+          ty = m.f;
+          scale = m.a || 1;
+        } catch {
+          /* identity */
+        }
+      }
+    }
+    return { x: (clientX - rect.left - tx) / scale, y: (clientY - rect.top - ty) / scale };
+  };
 
   // Site filter options — only fetched when allowed (API gates on sites:read).
   const sitesQuery = useQuery({ queryKey: ['sites'], queryFn: () => api.sites(), enabled: can('sites:read') });
+  // Device inventory — feeds the tag filter's option list.
+  const devicesQuery = useQuery({ queryKey: ['devices'], queryFn: api.devices, enabled: can('devices:read'), refetchInterval: 300_000 });
   // Layer registry — drives the physical view's bands (names/colors/order).
   const layersQuery = useQuery({ queryKey: ['layers'], queryFn: () => api.layers(), refetchInterval: 60_000 });
   // Feed the layer colors into the device-node chip/border registry.
   useEffect(() => {
     setLayerRegistry(layersQuery.data ?? []);
   }, [layersQuery.data]);
-  // includeHosts is only consumed in the logical view; requesting it always
-  // keeps a single cache entry per (site, hosts) pair.
+  // includeHosts is consumed by the logical view (checkbox) and ALWAYS by the
+  // hosts net view — requesting it keeps one cache entry per (site, hosts)
+  // pair. Tag/layer filters are server-side: they change which devices exist
+  // in the graph at all. hostLimit caps per-segment placement for the net view.
+  const wantHosts = showHosts || view === 'hosts';
   const topoQuery = useQuery({
-    queryKey: ['topology', siteId || null, showHosts],
-    queryFn: () => api.topology({ siteId: siteId || undefined, includeHosts: showHosts }),
+    queryKey: ['topology', siteId || null, wantHosts, tagFilter, layerFilter || null],
+    queryFn: () =>
+      api.topology({
+        siteId: siteId || undefined,
+        includeHosts: wantHosts,
+        tags: tagFilter.length > 0 ? tagFilter : undefined,
+        layer: layerFilter || undefined,
+        hostLimit: view === 'hosts' ? MAX_HOSTS : undefined,
+      }),
     refetchInterval: 30_000, // matches the telemetry poll cadence
   });
 
-  const { rfNodes, rfEdges } = useMemo(() => {
+  // --- Traffic overlay data (opt-in; gated on flows:read + toggle) -----------
+  // Three rollups feed the overlay: device↔device pairs (edge widths), per-IP
+  // + per-network inventory (host/segment badges), and per-device totals
+  // (device badges — includes internet egress that pairs can't see). Relative
+  // presets slide with time, so resolve INSIDE queryFn on every refetch.
+  const trafficEnabled = showTraffic && can('flows:read');
+  const windowParams = () => ({ ...resolveTimeRangeIso(range), siteId: siteId || undefined });
+  const pairsQuery = useQuery({
+    queryKey: ['topo-traffic', 'pairs', range, siteId || null],
+    queryFn: () => api.flowsPairs({ limit: 100, ...windowParams() }),
+    enabled: trafficEnabled,
+    refetchInterval: 60_000,
+  });
+  const inventoryQuery = useQuery({
+    queryKey: ['topo-traffic', 'inventory', range, siteId || null],
+    queryFn: () => api.flowsInventory(windowParams()),
+    enabled: trafficEnabled,
+    refetchInterval: 60_000,
+  });
+  const devicesTrafficQuery = useQuery({
+    queryKey: ['topo-traffic', 'devices', range, siteId || null],
+    queryFn: () => api.flowsDevices(windowParams()),
+    enabled: trafficEnabled,
+    refetchInterval: 60_000,
+  });
+
+  // Traffic joins — byte counts keyed by ORIGINAL node/edge ids. Computed once
+  // per data change and attached inside the layout memo below (logical-view
+  // instance nodes inherit their original's bytes via `data`).
+  const traffic = useMemo(() => {
+    if (!trafficEnabled || !topoQuery.data) return null;
+    const deviceBytes = new Map<string, number>();
+    for (const d of devicesTrafficQuery.data?.devices ?? []) deviceBytes.set(d.deviceId, d.estBytes);
+    const hostBytes = joinHostTraffic(inventoryQuery.data?.perIp ?? [], topoQuery.data.nodes.filter((n) => n.kind === 'host'));
+    const segmentBytes = joinSegmentTraffic(
+      inventoryQuery.data?.perNetwork ?? [],
+      topoQuery.data.nodes.filter((n) => n.kind === 'segment').map((s) => s.id)
+    );
+    // Edge widths come from pairs; the scale ceiling is the busiest PAIR so a
+    // single dominant link reads as "thick" without distorting the rest. Node
+    // kinds get their own ceilings (a 10 GB segment vs a 50 MB host).
+    const edgeBytes = joinPairTraffic(pairsQuery.data?.pairs ?? [], topoQuery.data.edges);
+    return {
+      deviceBytes,
+      hostBytes,
+      segmentBytes,
+      edgeBytes,
+      maxEdge: maxOf(edgeBytes),
+      maxDevice: maxOf(deviceBytes),
+      maxHost: maxOf(hostBytes),
+      maxSegment: maxOf(segmentBytes),
+    };
+  }, [trafficEnabled, topoQuery.data, devicesTrafficQuery.data, inventoryQuery.data, pairsQuery.data]);
+
+  interface GraphResult {
+    rfNodes: FlowNode[];
+    rfEdges: FlowEdge[];
+    /** Hosts-net cap info (only set in the hosts view) — drives the header note. */
+    hostsNetInfo?: { totalHosts: number; shownHosts: number; rankedByTraffic: boolean };
+  }
+
+  const graph = useMemo<GraphResult>(() => {
     const data = topoQuery.data;
-    if (!data) return { rfNodes: [] as FlowNode[], rfEdges: [] as FlowEdge[] };
+    if (!data) return { rfNodes: [], rfEdges: [] };
+
+    // Display names per node id — wireless edge chips show "AP · WLAN-1 ↔ host".
+    const nameById = new Map<string, string>();
+    for (const n of data.nodes) {
+      if (n.kind === 'device') nameById.set(n.id, n.name);
+      else if (n.kind === 'host') nameById.set(n.id, n.hostname || n.mac);
+      else if (n.kind === 'remote') nameById.set(n.id, n.label);
+    }
+    // Attach traffic bytes + the scale ceiling to edge data (no-op when the
+    // overlay is off). Wireless edges also carry endpoint display names for
+    // their hover chip. Logical-view endpoints are INSTANCE ids (`segId::orig`)
+    // — strip the prefix so nameById (keyed by original id) still resolves.
+    const origId = (id: string) => (id.includes('::') ? id.slice(id.indexOf('::') + 2) : id);
+    const decorateEdges = (fs: FlowEdge[]): FlowEdge[] => {
+      if (!traffic) return fs;
+      return fs.map((f) => {
+        const fd = f.data as Record<string, unknown>;
+        const extra: Record<string, unknown> = {};
+        const bytes = traffic.edgeBytes.get(f.id);
+        if (bytes) {
+          extra.trafficBytes = bytes;
+          extra.trafficMax = traffic.maxEdge;
+        }
+        if (fd.kind === 'wireless') {
+          extra.sourceLabel = fd.sourceLabel ?? nameById.get(origId(f.source)) ?? '';
+          extra.targetLabel = fd.targetLabel ?? nameById.get(origId(f.target)) ?? '';
+        }
+        return Object.keys(extra).length > 0 ? { ...f, data: { ...fd, ...extra } } : f;
+      });
+    };
 
     // Edges attach to the node's centered wall handles (see SideHandles in
     // DeviceNode.tsx); walls come from layout geometry, parallel cables get a
@@ -464,13 +714,32 @@ export default function Topology() {
         if (n.type === 'band') continue;
         boxes.set(n.id, { x: n.position.x, y: n.position.y, width: dims.get(n.id)!.width, height: dims.get(n.id)!.height });
       }
-      return {
-        rfNodes: laidNodes,
-        // Bend distribution AFTER parallel assignment — the perpendicular X/Y
-        // offset and the jog coordinate are independent and compose into clean
-        // ladders (same pair) and fans (cross-pair corridors).
-        rfEdges: withBendOffsets(assignParallel(edges.filter((e) => e.kind === 'cable' || e.kind === 'tunnel'), posMap, dims, boxes), posMap, dims),
-      };
+      // Traffic overlay — attach per-device bytes to device cards (no-op when
+      // off). Band nodes are decorative and keep their plain data.
+      const rfNodes = traffic
+        ? laidNodes.map((n) => {
+            if (n.type !== 'device') return n;
+            const d = n.data as TopoNode & { kind: 'device' };
+            const bytes = traffic.deviceBytes.get(d.id.replace(/^device:/, ''));
+            return bytes ? { ...n, data: { ...d, trafficBytes: bytes } } : n;
+          })
+        : laidNodes;
+      // The physical layout places only device + remote nodes — host nodes
+      // (incl. WLAN clients) have no position here, so any edge touching an
+      // unplaced endpoint is dropped rather than dangling. Cables/tunnels are
+      // unaffected (both ends always placed).
+      const rfEdges = decorateEdges(
+        withBendOffsets(assignParallel(edges.filter((e) => posMap.has(e.source) && posMap.has(e.target)), posMap, dims, boxes), posMap, dims)
+      );
+      return { rfNodes, rfEdges };
+    }
+
+    // Hosts net view — force-directed: segment hubs pinned on a grid, hosts as
+    // traffic-sized dots orbiting their hub(s), WLAN clients dashed to their AP.
+    if (view === 'hosts') {
+      const res = layoutHostsNet({ nodes: data.nodes, edges: data.edges, hostBytes: traffic?.hostBytes, segmentFilter: segmentKey });
+      netSimRef.current = { sim: res.sim, byId: res.byId };
+      return { rfNodes: res.rfNodes, rfEdges: res.rfEdges, hostsNetInfo: res };
     }
 
     // Logical view.
@@ -502,9 +771,40 @@ export default function Topology() {
       }
     }
 
+    // WLAN-only clients have NO segment membership of their own (seen only in
+    // an AP's station table, on a radio that matches no member interface).
+    // Attach them to a visible block so their dashed AP link has somewhere to
+    // land — prefer the block containing their AP, else any visible block.
+    if (showHosts) {
+      const hostById = new Map(data.nodes.filter((n): n is TopoNode & { kind: 'host' } => n.kind === 'host').map((h) => [h.id, h]));
+      const apSegs = new Map<string, string[]>(); // AP device id → visible segments containing it
+      for (const [segId, m] of membersBySegment) {
+        for (const d of m.devices) {
+          let list = apSegs.get(d.id);
+          if (!list) {
+            list = [];
+            apSegs.set(d.id, list);
+          }
+          list.push(segId);
+        }
+      }
+      const placedHostIds = new Set<string>();
+      for (const m of membersBySegment.values()) for (const h of m.hosts) placedHostIds.add(h.id);
+      for (const e of data.edges) {
+        if (e.kind !== 'wireless' || placedHostIds.has(e.target)) continue;
+        const host = hostById.get(e.target);
+        if (!host) continue;
+        const segId = apSegs.get(e.source)?.[0] ?? visibleSegments[0]?.id;
+        if (!segId) continue;
+        membersBySegment.get(segId)!.hosts.push(host);
+        placedHostIds.add(e.target);
+      }
+    }
+
     const laid = layoutLogical(visibleSegments, membersBySegment);
     for (const n of laid.nodes) posMap.set(n.id, n.position);
     const dims = new Map(laid.nodes.map((n) => [n.id, { width: n.measured?.width ?? NODE_W, height: n.measured?.height ?? 90 }]));
+    // Card boxes for collision detection (detour routing around nodes).
     const boxes = new Map<string, { x: number; y: number; width: number; height: number }>();
     for (const n of laid.nodes) {
       if (n.type === 'band') continue;
@@ -512,16 +812,117 @@ export default function Topology() {
     }
     // Point each membership edge at the member's instance node in ITS block.
     const remapped = memberEdges.map((e) => ({ ...e, source: laid.memberSourceIds.get(`${e.target}|${e.source}`) ?? e.source }));
+
+    // Traffic overlay — attach bytes to segment cards and to device/host
+    // instances (each instance inherits its ORIGINAL node's traffic).
+    const rfNodes = traffic
+      ? laid.nodes.map((n) => {
+          if (n.type === 'segment') {
+            const d = n.data as TopoNode & { kind: 'segment' };
+            const bytes = traffic.segmentBytes.get(d.id);
+            return bytes ? { ...n, data: { ...d, trafficBytes: bytes } } : n;
+          }
+          if (n.type === 'device') {
+            const d = n.data as TopoNode & { kind: 'device' };
+            const bytes = traffic.deviceBytes.get(d.id.replace(/^device:/, ''));
+            return bytes ? { ...n, data: { ...d, trafficBytes: bytes } } : n;
+          }
+          if (n.type === 'host') {
+            const d = n.data as TopoNode & { kind: 'host' };
+            const bytes = traffic.hostBytes.get(d.id);
+            return bytes ? { ...n, data: { ...d, trafficBytes: bytes } } : n;
+          }
+          return n;
+        })
+      : laid.nodes;
+
+    // WLAN associations — AP and host both exist as per-block INSTANCES here
+    // (`<segId>::<origId>`), so re-point each edge at instance copies,
+    // preferring the block where BOTH ends live (the client's own segment).
+    const instancesOf = new Map<string, string[]>(); // original id → instance ids
+    for (const n of laid.nodes) {
+      if (!n.id.includes('::')) continue;
+      const orig = n.id.slice(n.id.indexOf('::') + 2);
+      let list = instancesOf.get(orig);
+      if (!list) {
+        list = [];
+        instancesOf.set(orig, list);
+      }
+      list.push(n.id);
+    }
+    const wirelessRemapped: TopoEdge[] = [];
+    for (const e of data.edges) {
+      if (e.kind !== 'wireless') continue;
+      const apInsts = instancesOf.get(e.source) ?? [];
+      const hostInsts = instancesOf.get(e.target) ?? [];
+      if (apInsts.length === 0 || hostInsts.length === 0) continue; // AP/host not in any visible block
+      const segOf = (instId: string) => instId.slice(0, instId.indexOf('::'));
+      const shared = apInsts.find((a) => hostInsts.some((h) => segOf(h) === segOf(a)));
+      wirelessRemapped.push({ ...e, source: shared ?? apInsts[0], target: hostInsts[0] });
+    }
+
     return {
-      rfNodes: laid.nodes,
-      rfEdges: withBendOffsets(assignParallel(remapped, posMap, dims, boxes), posMap, dims),
+      rfNodes,
+      rfEdges: decorateEdges(withBendOffsets(assignParallel([...remapped, ...wirelessRemapped], posMap, dims, boxes), posMap, dims)),
     };
-  }, [topoQuery.data, view, segmentKey, showHosts, showTunnels, layersQuery.data]);
+  }, [topoQuery.data, view, segmentKey, showHosts, showTunnels, layersQuery.data, traffic]);
+
+  const { rfNodes, rfEdges } = graph;
+
+  // Hosts-net: mirror sim ticks into RF node positions while the net is live.
+  // Moved nodes get FRESH objects carrying their `measured` dimensions from
+  // the store — without that, xyflow's adoptUserNodes re-adopts them with no
+  // measured handle bounds and every edge touching them loses its path (the
+  // "whole canvas clears" bug: a net view is mostly lines). Unmoved nodes keep
+  // their object refs so nothing else churns. Verified in an isolated repro:
+  // edges intact before/mid/after drag with this pattern, gone without.
+  useEffect(() => {
+    if (view !== 'hosts') return;
+    const { sim, byId } = netSimRef.current;
+    if (!sim || !byId) return;
+    // Throttled to one update per animation frame (the sim runs ~60 ticks/s;
+    // React can't keep up with all of them). The dragged node is skipped here:
+    // the container's pointermove handler updates it synchronously with the
+    // cursor (no lag).
+    let raf = 0;
+    const mirror = () => {
+      raf = 0;
+      setLiveNodes((prev) => {
+        const base = prev ?? graph.rfNodes;
+        return base.map((fn) => {
+          if (fn.id === dragRef.current?.id) return fn;
+          const s = byId.get(fn.id);
+          if (!s) return fn; // not part of the sim
+          const nx = (s.x ?? 0) - (s.hw ?? 0);
+          const ny = (s.y ?? 0) - (s.hh ?? 0);
+          if (fn.position.x === nx && fn.position.y === ny) return fn; // unchanged → same ref
+          const internal = rfInstanceRef.current?.getInternalNode(fn.id);
+          return { ...fn, position: { x: nx, y: ny }, measured: internal?.measured };
+        });
+      });
+    };
+    const onTick = () => {
+      if (!raf) raf = requestAnimationFrame(mirror);
+    };
+    sim.on('tick.net', onTick);
+    return () => {
+      // d3-dispatch removes a listener by passing null.
+      sim.on('tick.net', null);
+      if (raf) cancelAnimationFrame(raf);
+      setLiveNodes(null);
+    };
+  }, [view, topoQuery.data, segmentKey, graph.rfNodes]);
 
   const segments = useMemo(
     () => (topoQuery.data?.nodes ?? []).filter((n): n is TopoNode & { kind: 'segment' } => n.kind === 'segment'),
     [topoQuery.data]
   );
+
+  // Overlay hint — shown once the traffic queries have settled and the window
+  // produced no flow rows at all (coverage gap, not "no traffic on this link").
+  const trafficLoaded = pairsQuery.isSuccess && inventoryQuery.isSuccess && devicesTrafficQuery.isSuccess;
+  const noFlowData =
+    showTraffic && can('flows:read') && trafficLoaded && (pairsQuery.data?.pairs.length ?? 0) === 0 && (inventoryQuery.data?.perIp.length ?? 0) === 0;
 
   return (
     <Layout title="Topology">
@@ -529,9 +930,9 @@ export default function Topology() {
         {/* Header controls */}
         <div className="flex flex-wrap items-center gap-2">
 
-          {/* Physical | Logical toggle */}
+          {/* Physical | Logical | Hosts toggle */}
           <div className="inline-flex rounded-md border border-border bg-card p-0.5">
-            {(['physical', 'logical'] as ViewMode[]).map((v) => (
+            {(['physical', 'logical', 'hosts'] as ViewMode[]).map((v) => (
               <button
                 key={v}
                 onClick={() => setView(v)}
@@ -559,6 +960,23 @@ export default function Topology() {
             ))}
           </select>
 
+          {/* Device filters — server-side on /topology (AND tag semantics). */}
+          <TagFilter allTags={(devicesQuery.data ?? []).flatMap((d) => d.tags)} value={tagFilter} onChange={setTagFilter} />
+          {layersQuery.data && layersQuery.data.length > 0 && (
+            <select
+              value={layerFilter}
+              onChange={(e) => setLayerFilter(e.target.value)}
+              className="rounded-md border border-border bg-card px-2 py-1 text-xs text-secondary"
+            >
+              <option value="">All layers</option>
+              {layersQuery.data.map((l) => (
+                <option key={l.id} value={l.id}>
+                  Layer: {l.name}
+                </option>
+              ))}
+            </select>
+          )}
+
           {/* Tunnels toggle (physical view only — logical has no tunnels). */}
           {view === 'physical' && (
             <label className="flex cursor-pointer items-center gap-1.5 text-xs text-secondary">
@@ -567,26 +985,48 @@ export default function Topology() {
             </label>
           )}
 
-          {/* Segment focus (logical view only) */}
-          {view === 'logical' && (
+          {/* Traffic overlay — opt-in; line width + node badges scale with the
+              selected window's estimated bytes (sampling extrapolation). */}
+          {can('flows:read') && (
             <>
-              <select
-                value={segmentKey}
-                onChange={(e) => setSegmentKey(e.target.value)}
-                className="max-w-56 rounded-md border border-border bg-card px-2 py-1 text-xs text-secondary"
-              >
-                <option value="all">All segments</option>
-                {segments.map((s) => (
-                  <option key={s.id} value={s.id}>
-                    {s.vlanId !== null ? `VLAN ${s.vlanId}` : s.label}
-                  </option>
-                ))}
-              </select>
               <label className="flex cursor-pointer items-center gap-1.5 text-xs text-secondary">
-                <input type="checkbox" checked={showHosts} onChange={(e) => setShowHosts(e.target.checked)} />
-                Show hosts
+                <input type="checkbox" checked={showTraffic} onChange={(e) => setShowTraffic(e.target.checked)} />
+                Show traffic
               </label>
+              {showTraffic && <TimeRangeFilter compact value={range} onChange={setRange} />}
             </>
+          )}
+
+          {/* Segment focus — logical view (block filter) and hosts net view
+              (focus one hub). */}
+          {(view === 'logical' || view === 'hosts') && (
+            <select
+              value={segmentKey}
+              onChange={(e) => setSegmentKey(e.target.value)}
+              className="max-w-56 rounded-md border border-border bg-card px-2 py-1 text-xs text-secondary"
+            >
+              <option value="all">All segments</option>
+              {segments.map((s) => (
+                <option key={s.id} value={s.id}>
+                  {s.vlanId !== null ? `VLAN ${s.vlanId}` : s.label}
+                </option>
+              ))}
+            </select>
+          )}
+
+          {/* Hosts net view — cap note (top-N by traffic when the overlay has bytes). */}
+          {view === 'hosts' && graph.hostsNetInfo && (
+            <span className="text-[10px] text-muted-foreground" title={graph.hostsNetInfo.rankedByTraffic ? 'Capped to the busiest hosts in the selected window' : `Capped at ${MAX_HOSTS} hosts`}>
+              {graph.hostsNetInfo.shownHosts} of {graph.hostsNetInfo.totalHosts} hosts{graph.hostsNetInfo.rankedByTraffic ? ' (top by traffic)' : ''}
+            </span>
+          )}
+
+          {/* Show hosts — logical view only (the hosts net view is all hosts). */}
+          {view === 'logical' && (
+            <label className="flex cursor-pointer items-center gap-1.5 text-xs text-secondary">
+              <input type="checkbox" checked={showHosts} onChange={(e) => setShowHosts(e.target.checked)} />
+              Show hosts
+            </label>
           )}
 
           {/* Legend */}
@@ -606,24 +1046,146 @@ export default function Topology() {
                   <span className="inline-block h-0.5 w-4 border-t-2 border-dashed border-topo-tunnel" /> tunnel
                 </span>
               </>
+            ) : view === 'hosts' ? (
+              <>
+                <span className="flex items-center gap-1">
+                  <span className="inline-block h-3 w-3 rounded-full border-2 border-topo-segment bg-card" /> segment hub
+                </span>
+                <span className="flex items-center gap-1" title="VLAN with no visible hosts — bridged by the attached devices">
+                  <span className="inline-block h-2.5 w-2.5 rounded-full border border-dashed border-topo-segment bg-card/60" /> empty segment
+                </span>
+                <span className="flex items-center gap-1" title="Switch/router bridging the attached VLANs">
+                  <span className="inline-block h-2 w-3 rounded-sm border border-border bg-card" /> switch
+                </span>
+                <span className="flex items-center gap-1">
+                  <span className="inline-block h-2.5 w-2.5 rounded-full bg-topo-host" title="Dot size ≈ traffic in window">host (size ≈ traffic)</span>
+                </span>
+                <span className="flex items-center gap-1">
+                  <span className="inline-block h-0.5 w-4 border-t border-dotted border-topo-wireless" /> WLAN link
+                </span>
+              </>
             ) : (
               <span>segment = merged logical network (VLAN/subnet)</span>
+            )}
+            {showHosts && view === 'logical' && (
+              <span className="flex items-center gap-1">
+                <span className="inline-block h-0.5 w-4 border-t border-dotted border-topo-wireless" /> WLAN link
+              </span>
+            )}
+            {showTraffic && can('flows:read') && (
+              <span className="flex items-center gap-1" title="Line width and node badges scale with estimated bytes in the selected window">
+                <span className="inline-block h-0.5 w-2 bg-topo-cable" />
+                <span className="inline-block h-1 w-2 rounded-sm bg-topo-cable" /> line ≈ traffic
+              </span>
             )}
           </div>
         </div>
 
-        {/* Graph */}
-        <div className="min-h-0 flex-1 overflow-hidden rounded-lg border border-border bg-card">
+        {/* Overlay hint — window has no flow rows at all (coverage gap). */}
+        {noFlowData && (
+          <div className="flex flex-wrap items-center gap-2 text-[10px]">
+            <span className="rounded-md border border-border bg-muted px-2 py-1 text-secondary">
+              No flow data in this window — check collectors on the Flows page.
+            </span>
+          </div>
+        )}
+
+        {/* Graph — the hosts-net drag handlers live on THIS always-mounted
+            container (not inside the conditional below): switching the nodes
+            prop between rfNodes and liveNodes must stay a plain prop update,
+            or React Flow remounts, re-fits its viewport against unmeasured
+            nodes, and the whole canvas zooms away. */}
+        <div
+          ref={flowWrapRef}
+          className="min-h-0 flex-1 overflow-hidden rounded-lg border border-border bg-card"
+          style={view === 'hosts' ? { touchAction: 'none' } : undefined}
+          onPointerDown={(e) => {
+            if (view !== 'hosts') return;
+            const sim = netSimRef.current.sim;
+            const byId = netSimRef.current.byId;
+            if (!sim || !byId) return;
+            const el = (e.target as HTMLElement).closest('[data-id]') as HTMLElement | null;
+            const id = el?.dataset.id;
+            if (!id) return; // background / minimap — let RF pan
+            const s = byId.get(id);
+            if (!s) return; // not part of the sim (shouldn't happen here)
+            e.preventDefault();
+            dragRef.current = s;
+            const p = toFlowPos(e.clientX, e.clientY);
+            s.fx = p.x + (s.hw ?? 0);
+            s.fy = p.y + (s.hh ?? 0);
+            s.vx = 0;
+            s.vy = 0;
+            sim.alphaTarget(0.3).restart();
+          }}
+          onPointerMove={(e) => {
+            const s = dragRef.current;
+            if (!s || view !== 'hosts') return;
+            const p = toFlowPos(e.clientX, e.clientY);
+            // Synchronous with the cursor — no frame lag. Fresh object carrying
+            // `measured` (see the tick-mirror effect above for why).
+            setLiveNodes((prev) => {
+              const base = prev ?? graph.rfNodes;
+              return base.map((fn) => {
+                if (fn.id !== s.id) return fn;
+                const internal = rfInstanceRef.current?.getInternalNode(fn.id);
+                return { ...fn, position: { x: p.x, y: p.y }, measured: internal?.measured };
+              });
+            });
+            s.fx = p.x + (s.hw ?? 0);
+            s.fy = p.y + (s.hh ?? 0);
+          }}
+          onPointerUp={() => {
+            const s = dragRef.current;
+            if (!s || view !== 'hosts' || !netSimRef.current.sim) return;
+            dragRef.current = null;
+            delete s.fx;
+            delete s.fy;
+            // Small reheat — the node settles under its own forces (grid
+            // pull, links, collisions) instead of snapping back.
+            netSimRef.current.sim.alphaTarget(0).alpha(0.25);
+          }}
+        >
           {topoQuery.isLoading ? (
             <div className="flex h-full items-center justify-center text-sm text-faint">Computing topology…</div>
-          ) : rfNodes.length === 0 ? (
-            <div className="flex h-full items-center justify-center text-sm text-faint">No devices to display.</div>
+          ) : rfNodes.length === 0 || (view !== 'hosts' && !rfNodes.some((n) => n.type === 'device')) ? (
+            <div className="flex h-full flex-col items-center justify-center gap-1 text-sm text-faint">
+              {tagFilter.length > 0 || layerFilter ? (
+                <>
+                  <span>No devices match the current filters.</span>
+                  <button type="button" onClick={() => { setTagFilter([]); setLayerFilter(''); }} className="text-xs text-secondary underline hover:text-foreground">
+                    Clear tag/layer filters
+                  </button>
+                </>
+              ) : view === 'hosts' ? (
+                'No hosts in the inventory yet.'
+              ) : (
+                'No devices to display.'
+              )}
+            </div>
           ) : (
+            // Hosts net view — interactive forces: dragging a node pins it in
+            // the d3 sim (fx/fy) and reheats, so every other element reacts
+            // with real tension; on release the node settles under its own
+            // forces. The pointer handlers live on the outer container (see
+            // above) — NOT here, because this branch must not remount when
+            // `liveNodes` flips from null to an array mid-drag.
             <ReactFlow
-              nodes={rfNodes}
+              // Hosts view: live sim positions once a drag has reheated the net.
+              nodes={view === 'hosts' ? (liveNodes ?? rfNodes) : rfNodes}
               edges={rfEdges}
+              onInit={(inst) => {
+                rfInstanceRef.current = inst;
+              }}
               nodeTypes={nodeTypes}
               edgeTypes={edgeTypes}
+              // RF's own dragging is off in hosts view — the wrapper above
+              // drives the sim instead (see comment on the div).
+              nodesDraggable={view !== 'hosts'}
+              // Controls/MiniMap/background dots are themed via the --xy-*
+              // overrides in index.css (keyed off the html theme classes) —
+              // not xyflow's colorMode, which is one fixed dark palette and
+              // wouldn't track live theme switches or Black-vs-Slate.
               fitView
               minZoom={0.15}
               maxZoom={2}
@@ -639,18 +1201,25 @@ export default function Topology() {
               <MiniMap
                 pannable
                 zoomable
-                // Topology canvas palette — centralized in index.css (--topo-*).
-                nodeColor={(n) =>
-                  n.type === 'segment'
-                    ? 'rgb(var(--topo-segment))'
-                    : n.type === 'host'
-                      ? 'rgb(var(--topo-host))'
-                      : n.type === 'remote'
-                        ? 'rgb(var(--topo-remote))'
-                        : n.type === 'band'
-                          ? ((n.data as { color?: string }).color ?? 'rgb(var(--topo-unassigned))')
-                          : 'rgb(var(--topo-node))'
-                }
+                // Topology canvas palette — centralized in index.css (--topo-*);
+                // TOPO_RGB mirrors those fixed values so JS can mix toward the
+                // traffic accent when the overlay is on (busy nodes glow sky).
+                nodeColor={(n) => {
+                  if (n.type === 'band') return ((n.data as { color?: string }).color ?? 'rgb(var(--topo-unassigned))');
+                  // Hosts-net types map onto their kind hues (hub=segment, ap=device).
+                  const base =
+                    n.type === 'segment' || n.type === 'hub'
+                      ? TOPO_RGB.segment
+                      : n.type === 'host' || n.type === 'nethost'
+                        ? TOPO_RGB.host
+                        : n.type === 'remote'
+                          ? TOPO_RGB.remote
+                          : TOPO_RGB.node; // ap + switch = device hue
+                  const d = n.data as { trafficBytes?: number };
+                  if (!traffic || typeof d.trafficBytes !== 'number') return `rgb(${base.join(' ')})`;
+                  const max = base === TOPO_RGB.segment ? traffic.maxSegment : base === TOPO_RGB.host ? traffic.maxHost : traffic.maxDevice;
+                  return mixTowardTraffic(base, nodeEmphasis(d.trafficBytes, max));
+                }}
               />
             </ReactFlow>
           )}

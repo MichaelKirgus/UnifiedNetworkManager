@@ -27,6 +27,7 @@ import {
   Radar,
   FileKey2,
   Globe,
+  Globe2,
   DatabaseBackup,
   NotebookPen,
   Settings2,
@@ -37,6 +38,7 @@ import {
   Cog,
   Mail as MailIcon,
   ArrowUpCircle,
+  Workflow,
 } from 'lucide-react';
 import { can } from '../auth/permissions';
 import type { NavCountKey } from '../api/client';
@@ -62,6 +64,13 @@ export const NAV_ITEMS: NavItem[] = [
   // Cross-device inventory views (populated by the telemetry worker).
   { to: '/networks', label: 'Networks', icon: Network, requiresPermission: 'networks:read' },
   { to: '/hosts', label: 'Hosts', icon: Laptop, requiresPermission: 'hosts:read' },
+  // Cross-device static DNS entries — host records reported by dns-capable
+  // plugins (OPNsense, OpenWrt, RouterOS, LCOS), grouped by lowercase name.
+  { to: '/dns', label: 'DNS', icon: Globe2, requiresPermission: 'dns:read' },
+  // Cross-device DHCP inventory — configured server networks/ranges + static
+  // MAC→IP reservations (RouterOS, OPNsense, OpenWrt). Radio reads as address
+  // assignment/broadcast.
+  { to: '/dhcp', label: 'DHCP', icon: Radio, requiresPermission: 'dhcp:read' },
   // User-maintained host documentation — permanent inventory records with
   // live "discovered" matching (distinct from the live ARP/NDP Hosts page).
   { to: '/documented-hosts', label: 'Documented Hosts', icon: NotebookPen, requiresPermission: 'documented-hosts:read' },
@@ -127,6 +136,9 @@ export const NAV_ITEMS: NavItem[] = [
   { to: '/secrets', label: 'Secrets', icon: KeyRound, requiresPermission: ['secrets:read', 'secrets:self-write'] },
   // Multi-device execution plans (create/execute additionally require configs:apply + 2FA).
   { to: '/plans', label: 'Plans', icon: RouteIcon, requiresPermission: 'plans:read', countKey: 'plans' },
+  // ITTT-style automation rules — schedule/metric/log/device-status triggers
+  // driving intent plans, webhooks, notifications or internal operations.
+  { to: '/automations', label: 'Actions & Schedules', icon: Workflow, requiresPermission: 'automations:read' },
   { to: '/plugins', label: 'Plugins', icon: Puzzle },
   // Only visible to users who may read user accounts/permissions.
   { to: '/users', label: 'Users', icon: UsersIcon, requiresPermission: 'users:read' },
