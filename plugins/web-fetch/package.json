@@ -1,6 +1,6 @@
 {
   "name": "unm-plugin-web-fetch",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "license": "EUPL-1.2",
   "private": true,
   "description": "UNM web-fetch service (capability `webFetch`) — downloads files/web content from the internet on behalf of UNM and other plugins, plain or through an egress proxy (CONNECT tunneling). Lets the API container live in a network segment without internet access while this plugin sits behind one that has it.",

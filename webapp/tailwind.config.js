@@ -110,6 +110,8 @@ export default {
         'topo-node': 'rgb(var(--topo-node) / <alpha-value>)',
         'topo-cable': 'rgb(var(--topo-cable) / <alpha-value>)',
         'topo-tunnel': 'rgb(var(--topo-tunnel) / <alpha-value>)',
+        'topo-wireless': 'rgb(var(--topo-wireless) / <alpha-value>)',
+        'topo-traffic': 'rgb(var(--topo-traffic) / <alpha-value>)',
       },
     },
   },

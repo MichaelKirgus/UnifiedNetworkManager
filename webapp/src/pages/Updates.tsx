@@ -1,13 +1,14 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { ArrowUpCircle, CheckCircle2, ExternalLink, Layers, Loader2, Lock, RefreshCw, Rocket, ShieldCheck, Unlock, Zap } from 'lucide-react';
+import { ArrowUpCircle, CheckCircle2, ExternalLink, Layers, Loader2, Lock, RefreshCw, Rocket, ShieldCheck, Unlock, Zap, Workflow } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { DialogShell } from '../components/DialogShell';
 import { Layout } from '../components/Layout';
 import { DataTable, DataTableColumn, type ExpandChildContext } from '../components/DataTable';
 import { DeviceChip } from '../components/DeviceChip';
 import { ReauthDialog } from '../components/ReauthDialog';
 import { runAction, useExecutionMode, type ExecutionMode } from '../executionMode';
-import { api, ApiError, UpdateRow } from '../api/client';
+import { api, ApiError, UpdateRow, FixesSummary } from '../api/client';
 import { can } from '../auth/permissions';
 
 // ---------------------------------------------------------------------------
@@ -42,6 +43,68 @@ function ActionIconButton({ label, onClick, icon }: { label: string; onClick: ()
 
 function orDash(v?: string | null): string {
   return v && v.trim() !== '' ? v : '—';
+}
+
+// ---------------------------------------------------------------------------
+// "Fixes CVEs" — severity chips for the CVEs each update resolves (computed by
+// the API from the fleet's advisory data; os-package rows with a known
+// current+latest version only)
+// ---------------------------------------------------------------------------
+
+const RANK_STYLES: Record<string, string> = {
+  critical: 'bg-danger text-danger-fg',
+  high: 'bg-warning text-warning-fg',
+  medium: 'bg-info text-info-fg',
+  low: 'bg-muted text-secondary',
+  unknown: 'bg-muted text-faint',
+};
+
+/** Merges the per-row fixesCves summaries (device row = all of its child rows). */
+function aggregateFixes(rows: UpdateRow[]): FixesSummary | null {
+  const acc = { total: 0, critical: 0, high: 0, medium: 0, low: 0, unknown: 0 };
+  const ids: string[] = [];
+  const seen = new Set<string>();
+  for (const r of rows) {
+    const f = r.fixesCves;
+    if (!f) continue;
+    acc.total += f.total;
+    acc.critical += f.critical;
+    acc.high += f.high;
+    acc.medium += f.medium;
+    acc.low += f.low;
+    acc.unknown += f.unknown;
+    for (const id of f.topIds) if (!seen.has(id)) { seen.add(id); ids.push(id); } // per-row lists are already severity-ordered
+  }
+  if (acc.total === 0) return null;
+  return { ...acc, topIds: ids.slice(0, 8) };
+}
+
+/** The fixes summary of one tree node — its own row for children, the merged
+ * child rows for device parents. */
+function fixesOf(n: UpdateNode): FixesSummary | null {
+  if (!n.isDevice) return n.row?.fixesCves ?? null;
+  return aggregateFixes((n.groups ?? []).flatMap((g) => g.rows));
+}
+
+/** "2 critical · 1 high" chips — the tooltip lists the top CVE ids. */
+function FixesChips({ fixes }: { fixes: FixesSummary | null }) {
+  if (!fixes || fixes.total === 0) return <span className="text-faint">—</span>;
+  const parts = [
+    fixes.critical > 0 ? `${fixes.critical} critical` : '',
+    fixes.high > 0 ? `${fixes.high} high` : '',
+    fixes.medium > 0 ? `${fixes.medium} medium` : '',
+    fixes.low > 0 ? `${fixes.low} low` : '',
+    fixes.unknown > 0 ? `${fixes.unknown} unknown` : '',
+  ].filter(Boolean);
+  return (
+    <span className="inline-flex flex-wrap items-center gap-1" title={`Fixes ${fixes.total} known CVE(s): ${fixes.topIds.join(', ')}`}>
+      {parts.map((p) => (
+        <span key={p} className={`inline-flex rounded px-1.5 py-0.5 text-xs font-medium ${RANK_STYLES[p.split(' ')[1]] ?? 'bg-muted text-secondary'}`}>
+          {p}
+        </span>
+      ))}
+    </span>
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -300,8 +363,12 @@ function buildDeviceTree(rows: UpdateRow[]): { devices: UpdateNode[]; childrenBy
 // Page
 // ---------------------------------------------------------------------------
 
+/** sessionStorage key for a rule draft handed off from another page (Updates quick-create). */
+export const AUTOMATION_DRAFT_STORAGE_KEY = 'unm.pendingAutomationDraft';
+
 export default function Updates() {
   const queryClient = useQueryClient();
+  const navigate = useNavigate();
   const { mode } = useExecutionMode();
   const readOnly = mode === 'readonly';
   const canApply = can('configs:apply'); // server enforces it too; this only gates the UI
@@ -557,6 +624,47 @@ export default function Updates() {
     ]);
   }
 
+  /** Quick-create handoff: build an updateAvailable rule draft from the selected
+   * rows (kinds/names/plugin pre-filled, no-reboot guards on by default), stash it
+   * in sessionStorage and open the Automations page — which consumes it into a
+   * pre-filled builder. Nothing is created until the user saves there. */
+  function createAutomationFromSelection() {
+    const rows = selectedChildren;
+    if (rows.length === 0) return;
+    const kinds = [...new Set(rows.map((r) => r.kind))].sort();
+    const names = [...new Set(rows.map((r) => r.name))];
+    const pluginIds = [...new Set(rows.map((r) => r.pluginId))];
+    const trigger: Record<string, unknown> = {
+      id: 't-update',
+      type: 'updateAvailable',
+      condition: 'available',
+      kinds,
+      // A handful of exact names is a useful pre-fill; a long list isn't.
+      ...(names.length <= 5 ? { names } : {}),
+      ...(pluginIds.length === 1 ? { pluginId: pluginIds[0] } : {}),
+      rebootRequired: false,
+    };
+    const draft = {
+      name: `Auto-update ${kinds.join(' / ')} (no reboot)`,
+      description: `Created from the Updates page selection of ${rows.length} update${rows.length === 1 ? '' : 's'}. Applies via each row's plugin apply action; reboot-required rows are skipped.`,
+      enabled: true,
+      cooldownSec: 3600,
+      triggers: [trigger],
+      actions: [
+        { id: 'a-apply', type: 'intent', resolveFromTrigger: 'update', requireNoReboot: true, devices: {} },
+        {
+          id: 'a-note', type: 'notification', severity: 'info',
+          titleTemplate: 'Update applied on {{device.name}}',
+          messageTemplate: '{{update.kind}} "{{update.name}}" updated to {{update.latestVersion}} by automation.',
+        },
+      ],
+    };
+    try {
+      sessionStorage.setItem(AUTOMATION_DRAFT_STORAGE_KEY, JSON.stringify(draft));
+    } catch { /* storage full/blocked — the navigation still works */ }
+    navigate('/automations');
+  }
+
   /** Child-row action: just this one update, with its own prefilled input. */
   function applySingle(row: UpdateRow) {
     if (!row.applyActionId) return;
@@ -671,6 +779,12 @@ export default function Updates() {
       exportValue: (n) => orDash(summaryRowOf(n)?.latestVersion),
       searchText: (n) => summaryRowOf(n)?.latestVersion ?? '',
       render: (n) => <span className="font-mono text-xs font-medium text-foreground">{orDash(summaryRowOf(n)?.latestVersion)}</span>,
+    },
+    {
+      header: 'Fixes CVEs', key: 'fixesCves', width: 190, sortable: false, filterable: true,
+      exportValue: (n) => fixesOf(n)?.topIds.join(', ') ?? '',
+      searchText: (n) => fixesOf(n)?.topIds.join(' ') ?? '',
+      render: (n) => <FixesChips fixes={fixesOf(n)} />,
     },
     {
       header: 'Branch', key: 'branch', width: 130, sortable: false, filterable: false,
@@ -803,6 +917,8 @@ export default function Updates() {
         return <span className="font-mono text-xs">{orDash(row.currentVersion)}</span>;
       case 'latestVersion':
         return <span className="font-mono text-xs font-medium text-foreground">{orDash(row.latestVersion)}</span>;
+      case 'fixesCves':
+        return <FixesChips fixes={row.fixesCves ?? null} />;
       case 'branch': {
         const b = row.branch ?? null;
         return b ? (
@@ -928,6 +1044,16 @@ export default function Updates() {
             >
               Update selected ({selectedStepCount})
             </button>
+            {can('automations:write') && (
+              <button
+                type="button"
+                onClick={createAutomationFromSelection}
+                title="Open the Automations page with a pre-filled rule for these updates (editable before saving)"
+                className="inline-flex items-center gap-1.5 rounded-md border border-border bg-card px-2.5 py-1 text-xs font-medium text-secondary hover:bg-background"
+              >
+                <Workflow className="h-3.5 w-3.5" /> Create automation
+              </button>
+            )}
             <button
               type="button"
               onClick={() => setSelectedChildKeys(new Set())}

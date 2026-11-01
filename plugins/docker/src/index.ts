@@ -61,6 +61,8 @@ export const PLUGIN_NAME = 'Docker Plugin';
 const identity = resolvePluginIdentity({
   uuid: PLUGIN_UUID,
   name: PLUGIN_NAME,
+  description:
+    'Monitors any Docker host through the Engine API — containers, images and compose projects on the Containers page (TCP/TLS/socket transports).',
   // 0.4.0 — containers.deploy-compose deploys a NEW compose stack on the host
   // (docker compose up -d via an optional ssh slot; the Engine API has no
   // classic compose endpoint), powering the Containers page's Create-app dialog.
@@ -104,7 +106,13 @@ const identity = resolvePluginIdentity({
   // API exposes no host-GPU endpoint. Gated by the new `collectGpus` option,
   // DEFAULT OFF: most Docker hosts are GPU-less servers/VMs, so off = zero SSH
   // traffic and the key is omitted entirely (no wipe).
-  version: '0.9.0',
+  // 0.10.0 — canonical intent containers.image.set: change a container's image
+  // tag or switch it to another image entirely. Each matched container is
+  // RECREATED via the Engine API with its full configuration preserved (env,
+  // labels incl. compose project/service, ports, binds/volumes, restart policy,
+  // static IPs + aliases); named volumes are never touched and stopped
+  // containers stay stopped. Compose members are recreated in depends_on order.
+  version: '0.10.0',
   vendors: ['generic'],
   capabilities: ['monitoring', 'configuration', 'planning', 'deviceState', 'probe'],
 });

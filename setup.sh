@@ -55,6 +55,30 @@ build_host_port_map() {
   printf '%s' "$out"
 }
 
+# Load Postgres credentials from .env into the environment, mirroring compose's
+# ${POSTGRES_*:-unm} fallbacks (empty or unset → unm). Compose reads .env on its
+# own; this exists so the HOST-side tools that talk to the DB — `drizzle-kit push`
+# and the host-run API dev server — use the same credentials instead of the
+# hardcoded unm/unm. Values are read as-is (the recommended `openssl rand -hex 32`
+# password is URL-safe); exotic characters would need percent-encoding in DATABASE_URL.
+load_postgres_env() {
+  local f="$ROOT/.env" key val
+  for key in POSTGRES_USER POSTGRES_PASSWORD POSTGRES_DB; do
+    if [ -f "$f" ]; then
+      # Last matching line wins (matches compose); trim whitespace + one quote pair.
+      val="$(grep -E "^[[:space:]]*${key}=" "$f" | tail -n1 | cut -d= -f2- | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+      case "$val" in
+        \"*\") val="${val#\"}"; val="${val%\"}" ;;
+        \'*\') val="${val#\'}"; val="${val%\'}" ;;
+      esac
+      [ -n "$val" ] && export "$key=$val"
+    fi
+  done
+  : "${POSTGRES_USER:=unm}"
+  : "${POSTGRES_PASSWORD:=unm}"
+  : "${POSTGRES_DB:=unm}"
+}
+
 # All TCP ports to free during cleanup (API + webapp + every discovered plugin).
 all_dev_ports() {
   local svc
@@ -253,6 +277,13 @@ if ! command -v docker-compose &> /dev/null && ! docker compose version &> /dev/
 fi
 
 ensure_docker_daemon
+
+# Load Postgres credentials from .env and export a host-side DATABASE_URL so the
+# local tools (drizzle-kit push, host-run API) match what compose uses. Points at
+# localhost:5432 because these run on the HOST, not in the compose network — which
+# is exactly why the dev compose keeps a loopback-only 127.0.0.1:5432 bind.
+load_postgres_env
+export DATABASE_URL="${DATABASE_URL:-postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@localhost:5432/${POSTGRES_DB}}"
 
 # 2. Install dependencies
 echo "📦 Installing dependencies..."

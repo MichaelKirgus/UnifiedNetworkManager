@@ -123,7 +123,10 @@ export type TopologyEdge =
       vlans: number[];
     }
   | { id: string; source: string; target: string; kind: 'tunnel'; type: string; status: string | null }
-  | { id: string; source: string; target: string; kind: 'membership'; vlanId: number | null };
+  | { id: string; source: string; target: string; kind: 'membership'; vlanId: number | null }
+  /** WLAN client association — the AP that reported the host in its
+   * `wlanClients` table, drawn with a distinct (dashed) style. */
+  | { id: string; source: string; target: string; kind: 'wireless'; via: string };
 
 export interface TopologyInput {
   devices: TopoDeviceInput[];
@@ -134,6 +137,9 @@ export interface TopologyInput {
   snapshots: TopoSnapshot[];
   /** When true, end-hosts (ARP/MAC-table entries) are added as nodes. */
   includeHosts?: boolean;
+  /** Max hosts rendered per segment (default 50 — ARP tables can hold
+   * hundreds of entries; the topology page's hosts view raises this). */
+  hostLimit?: number;
 }
 
 export interface TopologyResult {
@@ -406,6 +412,9 @@ interface HostAccum {
   /** Where this MAC was observed (device + interface) — drives segment placement. */
   observedOn: Array<{ deviceId: string; intf: string }>;
   observedKeys: Set<string>;
+  /** APs that reported this client in their `wlanClients` table — one wireless
+   * edge per entry, drawn distinct from physical cables. */
+  wlanObs: Array<{ deviceId: string; intf: string }>;
 }
 
 // ---------- layer classification -------------------------------------------
@@ -948,13 +957,22 @@ export function buildTopologyGraph(input: TopologyInput): TopologyResult {
       if (!n) continue;
       let a = acc.get(n);
       if (!a) {
-        a = { mac: n, displayMac: h.mac, hostname: null, ips: new Set(), lastSeenAt: '', observedOn: [], observedKeys: new Set() };
+        a = { mac: n, displayMac: h.mac, hostname: null, ips: new Set(), lastSeenAt: '', observedOn: [], observedKeys: new Set(), wlanObs: [] };
         acc.set(n, a);
       }
       // DHCP rows carry the best hostname; first non-null wins otherwise.
       if (!a.hostname && h.hostname) a.hostname = h.hostname;
       if (h.ip !== '') a.ips.add(h.ip);
       if (h.lastSeenAt > a.lastSeenAt) a.lastSeenAt = h.lastSeenAt;
+      // WLAN client rows name the AP + radio directly — one wireless edge per
+      // (AP, radio) pair regardless of how many IP rows the client has.
+      if (h.source === 'wlan') {
+        const k = `${h.deviceId}|${(h.intf ?? '').toLowerCase()}`;
+        if (!a.observedKeys.has(`wlan:${k}`)) {
+          a.observedKeys.add(`wlan:${k}`);
+          a.wlanObs.push({ deviceId: h.deviceId, intf: h.intf ?? '' });
+        }
+      }
       if (h.intf) {
         const k = `${h.deviceId}|${h.intf.toLowerCase()}`;
         if (!a.observedKeys.has(k)) {
@@ -1024,7 +1042,9 @@ export function buildTopologyGraph(input: TopologyInput): TopologyResult {
       }
     }
 
-    const MAX_HOSTS_PER_SEGMENT = 50; // ARP tables can hold hundreds of entries
+    // Per-segment render cap — ARP tables can hold hundreds of entries. The
+    // route clamps the caller's `hostLimit` (default 50, max 1000).
+    const MAX_HOSTS_PER_SEGMENT = Math.max(1, input.hostLimit ?? 50);
     const hostNodesAdded = new Set<string>();
     // Sort ONCE (newest first) — the per-segment cap below keeps newest hosts.
     const sortedHosts = Array.from(acc.values()).sort((x, y) => (y.lastSeenAt > x.lastSeenAt ? 1 : -1));
@@ -1098,12 +1118,16 @@ export function buildTopologyGraph(input: TopologyInput): TopologyResult {
     // Place each host once; the per-segment cap is enforced in newest-first order.
     const placedPerSegment = new Map<string, number>();
     const vlanBySegKey = new Map(placements.map((p) => [p.segKey, p.vlanId]));
+    const deviceNodeIds = new Set(nodes.filter((n) => n.kind === 'device').map((n) => n.id));
     for (const a of sortedHosts) {
       const segs = new Set<string>();
       for (const o of a.observedOn) {
         for (const s of segmentsForObservation(o)) segs.add(s);
       }
-      if (segs.size === 0) continue;
+      // A WLAN-only client (seen ONLY in an AP's station table, e.g. on a
+      // segment whose member interfaces don't match the radio name) still gets
+      // a node — its wireless edge to the AP is what makes it visible.
+      if (segs.size === 0 && a.wlanObs.length === 0) continue;
       const hostId = `host:${a.mac}`;
       if (!hostNodesAdded.has(hostId)) {
         hostNodesAdded.add(hostId);
@@ -1120,6 +1144,13 @@ export function buildTopologyGraph(input: TopologyInput): TopologyResult {
         if (placed >= MAX_HOSTS_PER_SEGMENT) continue;
         placedPerSegment.set(segKey, placed + 1);
         edges.push({ id: nextEdgeId(), source: hostId, target: segKey, kind: 'membership', vlanId: vlanBySegKey.get(segKey) ?? null });
+      }
+      // Wireless association edges — AP → client, distinct from cables. The AP
+      // must be a device node in THIS graph (tag/site filters may have dropped it).
+      for (const w of a.wlanObs) {
+        const apId = `device:${w.deviceId}`;
+        if (!deviceNodeIds.has(apId)) continue;
+        edges.push({ id: nextEdgeId(), source: apId, target: hostId, kind: 'wireless', via: w.intf });
       }
     }
   }

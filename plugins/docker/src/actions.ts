@@ -15,8 +15,8 @@
  * state is skipped, not failed — mirroring ix-truenas's app.* actions.
  */
 
-import { ActionDescriptor, ActionResult, createRegistry, createSshPool, pollUntil, resolveSshCredentials } from '@unm/plugin-sdk';
-import { DockerClientOptions, containerLogsRaw, dockerDelete, dockerPost, dockerRequest, listComposeMembers, listContainers, listImages } from './client';
+import { ActionDescriptor, ActionResult, INTENT_CONTAINERS_IMAGE_SET, createRegistry, createSshPool, pollUntil, resolveSshCredentials } from '@unm/plugin-sdk';
+import { DockerClientOptions, containerLogsRaw, dockerDelete, dockerGet, dockerPost, dockerRequest, listComposeMembers, listContainers, listImages, pullImageStream } from './client';
 
 /** Executor context for one /config step — resolved client options + the raw
  *  decrypted credentials body (needed by SSH-based actions like deploy-compose). */
@@ -622,12 +622,13 @@ const containersRunImageAction: ActionDescriptor<DockerActionContext> = {
       }
     } catch { /* best-effort guard — create would 409 anyway */ }
 
-    // 1) Pull the image (streamed progress; wait for completion).
+    // 1) Pull the image (streamed progress; wait for completion). Streaming
+    // variant — /images/create answers with NDJSON lines, not a JSON document.
     const { fromImage, tag } = splitImageRef(image);
     const pullPath = `/images/create?fromImage=${encodeURIComponent(fromImage)}${tag ? `&tag=${encodeURIComponent(tag)}` : ''}`;
-    const pull = await dockerRequest<unknown>(ctx.opts, 'POST', pullPath, undefined, PULL_TIMEOUT_MS);
-    if (!pull.ok && pull.status !== 204) {
-      return { success: false, details: { error: `Image pull failed (${image}): ${pull.error || `HTTP ${pull.status}`}` } };
+    const pull = await pullImageStream(ctx.opts, pullPath, PULL_TIMEOUT_MS);
+    if (!pull.ok) {
+      return { success: false, details: { error: `Image pull failed (${image}): ${pull.error || 'pull failed'}` } };
     }
 
     // 2) Create the container.
@@ -861,9 +862,11 @@ const imagesPullAction: ActionDescriptor<DockerActionContext> = {
     for (const ref of refs) {
       const { fromImage, tag } = splitImageRef(ref);
       const pullPath = `/images/create?fromImage=${encodeURIComponent(fromImage)}${tag ? `&tag=${encodeURIComponent(tag)}` : ''}`;
-      const r = await dockerRequest<unknown>(ctx.opts, 'POST', pullPath, undefined, PULL_TIMEOUT_MS);
-      if (r.ok || r.status === 204) pulled.push(ref);
-      else errors[ref] = r.error || `HTTP ${r.status}`;
+      // Streaming variant — /images/create answers with NDJSON progress lines,
+      // which the generic JSON helper rejects on socket transport.
+      const r = await pullImageStream(ctx.opts, pullPath, PULL_TIMEOUT_MS);
+      if (r.ok) pulled.push(ref);
+      else errors[ref] = r.error || 'pull failed';
     }
     return { success: Object.keys(errors).length === 0, applied: true, verified: Object.keys(errors).length === 0, details: { pulled, ...(Object.keys(errors).length ? { errors } : {}) } };
   },
@@ -962,6 +965,345 @@ const imagesPruneAction: ActionDescriptor<DockerActionContext> = {
   },
 };
 
+// --- containers.image.set -----------------------------------------------------
+// Canonical fleet intent (SDK INTENT_CONTAINERS_IMAGE_SET): point one or more
+// containers at a different image — a tag bump ("app:v1.4.2" → "app:v1.4.3") or
+// an entirely different image ("redis:7" → "valkey:8"). The Engine API has no
+// compose-file access, so the change is applied by RECREATING each matched
+// container with its full configuration copied from `inspect` and only the
+// Image swapped — env, labels (incl. compose project/service), ports, binds,
+// volumes, restart policy, hostname/user/cmd/entrypoint and network attachments
+// (incl. static IPs + aliases) all survive. Recreations run SEQUENTIALLY: a
+// replacement may only attach to a user-defined network once the old container
+// has released its static IP. Compose members are ordered by `depends_on` so
+// dependencies come up first.
+//
+// Honest limitation (documented in the action description + docs/INTENTS.md):
+// this changes what is RUNNING, not the compose file on disk — a later manual
+// `docker compose up -d` would revert to the file's image refs.
+
+const COMPOSE_SERVICE_LABEL = 'com.docker.compose.service';
+const COMPOSE_DEPENDS_ON_LABEL = 'com.docker.compose.depends_on';
+
+/** One image-change mapping as accepted by the canonical intent (defensive parse). */
+interface ImageSetMapping {
+  /** Optional container/service name scoping the match. */
+  name?: string;
+  /** Current image ref — the match key. */
+  from: string;
+  /** New full image ref. */
+  to: string;
+}
+
+function parseMappings(input: Record<string, unknown>): ImageSetMapping[] {
+  const raw = input['mappings'];
+  if (!Array.isArray(raw)) return [];
+  const out: ImageSetMapping[] = [];
+  for (const m of raw) {
+    if (!m || typeof m !== 'object') continue;
+    const o = m as Record<string, unknown>;
+    const from = typeof o['from'] === 'string' ? o['from'].trim() : '';
+    const to = typeof o['to'] === 'string' ? o['to'].trim() : '';
+    if (from.length < 2 || to.length < 2) continue;
+    out.push({ ...(typeof o['name'] === 'string' && o['name'].trim() !== '' ? { name: o['name'].trim() } : {}), from, to });
+  }
+  return out;
+}
+
+/** Pulls one image ref (Engine API). Reuses the deploy/run-image split so
+ *  registry ports and digest refs work. Uses the streaming variant — /images/create
+ *  answers with NDJSON progress lines, which the generic JSON helper rejects on
+ *  socket transport. */
+async function pullImageRefDocker(opts: DockerClientOptions, ref: string): Promise<{ ok: boolean; error?: string }> {
+  const { fromImage, tag } = splitImageRef(ref);
+  const path = `/images/create?fromImage=${encodeURIComponent(fromImage)}${tag ? `&tag=${encodeURIComponent(tag)}` : ''}`;
+  return pullImageStream(opts, path, PULL_TIMEOUT_MS);
+}
+
+/** One user-defined network attachment of a container (name + static IPs + aliases). */
+interface NetAttachment {
+  name: string;
+  ipv4?: string;
+  ipv6?: string;
+  aliases?: string[];
+}
+
+/** Reads the container's network attachments from its inspect payload. The
+ *  default bridge is included when it was actually attached (compose services
+ *  on user networks are NOT — that drives the exact-topology restore below). */
+function networkAttachments(insp: Record<string, unknown>): NetAttachment[] {
+  const ns = insp['NetworkSettings'];
+  if (!ns || typeof ns !== 'object' || Array.isArray(ns)) return [];
+  const nets = (ns as Record<string, unknown>)['Networks'];
+  if (!nets || typeof nets !== 'object' || Array.isArray(nets)) return [];
+  const out: NetAttachment[] = [];
+  for (const [netName, v] of Object.entries(nets as Record<string, unknown>)) {
+    if (!v || typeof v !== 'object') continue;
+    // 'host' is a pseudo-network with no IPAM — nothing to re-attach.
+    if (netName === 'host') continue;
+    const n = v as Record<string, unknown>;
+    const ipam = (n['IPAMConfig'] ?? {}) as Record<string, unknown>;
+    out.push({
+      name: netName,
+      ipv4: typeof ipam['IPv4Address'] === 'string' && ipam['IPv4Address'] !== '' ? ipam['IPv4Address'] : undefined,
+      ipv6: typeof ipam['IPv6Address'] === 'string' && ipam['IPv6Address'] !== '' ? ipam['IPv6Address'] : undefined,
+      aliases: Array.isArray(n['Aliases']) ? (n['Aliases'] as unknown[]).filter((a): a is string => typeof a === 'string') : undefined,
+    });
+  }
+  return out;
+}
+
+/** Builds the POST /containers/create body for a replacement container — the
+ *  original's full Config + HostConfig with only the Image swapped. Inspect-only
+ *  fields (Mounts, AutoRemove…) are dropped; special NetworkModes (host/none/
+ *  container:/ns:) pass through, everything else is created on the default
+ *  bridge and re-attached explicitly so static IPs survive. */
+function buildCreateBody(insp: Record<string, unknown>, newImage: string): Record<string, unknown> {
+  const cfg = (insp['Config'] ?? {}) as Record<string, unknown>;
+  const hc = (insp['HostConfig'] ?? {}) as Record<string, unknown>;
+  const mode = typeof hc['NetworkMode'] === 'string' ? hc['NetworkMode'] : '';
+
+  const body: Record<string, unknown> = { Image: newImage };
+  for (const k of ['Hostname', 'Domainname', 'User', 'AttachStdin', 'Tty', 'OpenStdin', 'StdinOnce', 'Env', 'Cmd', 'Healthcheck', 'ArgsEscaped', 'WorkingDir', 'Entrypoint', 'NetworkDisabled', 'MacAddress', 'Labels', 'StopSignal', 'Shell', 'ExposedPorts', 'Volumes']) {
+    if (cfg[k] != null) body[k] = cfg[k];
+  }
+
+  const host: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(hc)) {
+    // Inspect-only / create-invalid fields.
+    if (['Mounts', 'AutoRemove', 'Networks', 'RestartCount'].includes(k)) continue;
+    host[k] = v;
+  }
+  // Only special modes pass through — a user-defined network name as mode is
+  // handled by the explicit connect step (which also restores static IPs).
+  if (mode === 'host' || mode === 'none' || mode.startsWith('container:') || mode.startsWith('ns:')) {
+    host['NetworkMode'] = mode;
+  } else {
+    delete host['NetworkMode']; // default bridge at create time
+  }
+  body['HostConfig'] = host;
+  return body;
+}
+
+/** Recreates ONE container on a new image, preserving its full configuration.
+ *  Sequence: inspect → create (temp name) → stop+remove old (frees static IPs)
+ *  → re-attach networks (static IPs + aliases) → restore exact topology →
+ *  rename back to the original name → start when it was running. */
+async function recreateWithImage(opts: DockerClientOptions, c: RawContainer, newImage: string): Promise<{ ok: boolean; error?: string }> {
+  const name = nameOf(c);
+  // /json is the canonical inspect path — some daemon builds (observed on
+  // Engine 29.x, API 1.56) answer the /inspect alias with a bare 404.
+  const insp = await dockerGet<Record<string, unknown>>(opts, `/containers/${encodeURIComponent(name)}/json`);
+  if (!insp.ok || !insp.data) return { ok: false, error: `could not inspect ${name}: ${insp.error ?? `HTTP ${insp.status}`}` };
+
+  const wasRunning = (c.State ?? '') === 'running';
+  const tempName = `${name}-unm-imgset`;
+  // Defensive cleanup of a leftover from an earlier interrupted run.
+  await dockerDelete<unknown>(opts, `/containers/${encodeURIComponent(tempName)}?force=true&v=false`);
+
+  const created = await dockerRequest<{ Id?: string }>(opts, 'POST', `/containers/create?name=${encodeURIComponent(tempName)}`, buildCreateBody(insp.data, newImage));
+  if (!created.ok || !created.data?.Id) {
+    return { ok: false, error: `create failed for ${name}: ${created.error ?? JSON.stringify(created.data ?? {})}` };
+  }
+  const newId = created.data.Id;
+
+  // Free the original name + its network resources. Graceful stop first when
+  // running (apps get a chance to flush state), then force-remove. v=false —
+  // named volumes are NEVER touched by an image change.
+  if (wasRunning) await dockerPost<unknown>(opts, `/containers/${encodeURIComponent(name)}/stop?t=4`);
+  const del = await dockerDelete<unknown>(opts, `/containers/${encodeURIComponent(name)}?force=true&v=false`);
+  if (!del.ok && del.status !== 304) return { ok: false, error: `could not remove old container ${name}: ${del.error ?? `HTTP ${del.status}`}` };
+
+  // Re-attach every user-defined network with its static IPs + aliases.
+  const attachments = networkAttachments(insp.data);
+  for (const n of attachments) {
+    const ipam: Record<string, unknown> = {};
+    if (n.ipv4) ipam['IPv4Address'] = n.ipv4;
+    if (n.ipv6) ipam['IPv6Address'] = n.ipv6;
+    const connBody: Record<string, unknown> = { Container: newId };
+    if (Object.keys(ipam).length > 0 || (n.aliases?.length ?? 0) > 0) {
+      connBody['IPAMConfig'] = { ...ipam, ...(n.aliases && n.aliases.length > 0 ? { Aliases: n.aliases } : {}) };
+    }
+    const r = await dockerRequest<unknown>(opts, 'POST', `/networks/${encodeURIComponent(n.name)}/connect`, connBody);
+    if (!r.ok) return { ok: false, error: `could not attach ${name} to network ${n.name}: ${r.error ?? `HTTP ${r.status}`}` };
+  }
+
+  // Restore the EXACT topology — the create step always lands on the default
+  // bridge; drop it when the original was not attached there (compose services
+  // on user-defined networks).
+  const hadBridge = attachments.some((n) => n.name === 'bridge');
+  if (!hadBridge && !attachments.some((n) => n.name === 'host')) {
+    await dockerRequest<unknown>(opts, 'POST', '/networks/bridge/disconnect', { Container: newId }); // best-effort
+  }
+
+  const ren = await dockerRequest<unknown>(opts, 'POST', `/containers/${encodeURIComponent(newId)}/rename?name=${encodeURIComponent(name)}`);
+  if (!ren.ok) return { ok: false, error: `could not rename replacement to ${name}: ${ren.error ?? `HTTP ${ren.status}`}` };
+
+  if (wasRunning) {
+    const st = await dockerPost<unknown>(opts, `/containers/${encodeURIComponent(name)}/start`);
+    if (!st.ok && st.status !== 304) return { ok: false, error: `could not start ${name}: ${st.error ?? `HTTP ${st.status}`}` };
+  }
+  return { ok: true };
+}
+
+/** Waits until the container under `name` runs on `ref` (and is running when
+ *  expected). Returns false on timeout — the caller reports "unverified". */
+async function verifyImage(opts: DockerClientOptions, name: string, ref: string, wantRunning: boolean): Promise<boolean> {
+  const wait = await pollUntil(
+    async () => {
+      const all = await listContainers(opts);
+      if (!all.ok || !Array.isArray(all.data)) return null; // transient — keep polling
+      const c = (all.data as RawContainer[]).find((x) => nameOf(x) === name);
+      if (!c) return false;
+      return c.Image === ref && (!wantRunning || c.State === 'running');
+    },
+    (ok) => ok === true,
+    { timeoutMs: 60_000, intervalMs: 2_000 },
+  );
+  return wait.ok;
+}
+
+/** One resolved recreation target. */
+interface ImageSetTarget {
+  mapping: ImageSetMapping;
+  container: RawContainer;
+}
+
+/** Orders targets so compose services are recreated AFTER their `depends_on`
+ *  dependencies (labels carry the service name + comma-separated deps, possibly
+ *  with conditions like "db:service_healthy"). Cycles fall back to original order. */
+function orderByDependencies(targets: ImageSetTarget[]): ImageSetTarget[] {
+  const byService = new Map<string, number>();
+  targets.forEach((t, i) => {
+    const s = t.container.Labels?.[COMPOSE_SERVICE_LABEL];
+    if (s && !byService.has(s)) byService.set(s, i);
+  });
+  const depsOf = (i: number): number[] => {
+    const raw = targets[i].container.Labels?.[COMPOSE_DEPENDS_ON_LABEL];
+    if (!raw) return [];
+    const out: number[] = [];
+    for (const part of String(raw).split(',')) {
+      const depSvc = part.split(':')[0]?.trim();
+      if (!depSvc) continue;
+      const j = byService.get(depSvc);
+      if (j !== undefined && j !== i) out.push(j);
+    }
+    return out;
+  };
+  const placed = new Array(targets.length).fill(false);
+  const result: ImageSetTarget[] = [];
+  let remaining = targets.length;
+  while (remaining > 0) {
+    let progress = false;
+    for (let i = 0; i < targets.length && remaining > 0; i++) {
+      if (placed[i]) continue;
+      const pendingDeps = depsOf(i).filter((j) => !placed[j]);
+      if (pendingDeps.length === 0) {
+        placed[i] = true;
+        result.push(targets[i]);
+        remaining--;
+        progress = true;
+      }
+    }
+    if (!progress) { // dependency cycle — append the rest in original order
+      for (let i = 0; i < targets.length; i++) if (!placed[i]) { placed[i] = true; result.push(targets[i]); remaining--; }
+      break;
+    }
+  }
+  return result;
+}
+
+const containersImageSetAction: ActionDescriptor<DockerActionContext> = {
+  id: INTENT_CONTAINERS_IMAGE_SET,
+  label: 'Change container image(s)',
+  description:
+    'Points the selected containers at a different image — a tag bump (e.g. "app:v1.4.2" → "app:v1.4.3") or an entirely new image ("redis:7" → "valkey:8"). Each matched container is RECREATED via the Engine API with its full configuration preserved (env, labels, ports, volumes, restart policy, static IPs); named volumes are never touched and stopped containers stay stopped. Idempotent — a container already on the target ref is skipped. Note: this changes what is running, not any compose file on disk.',
+  module: 'Containers',
+  riskLevel: 'write' as const,
+  // Single-device action (one step per device) — registered in CANONICAL_INTENTS
+  // so the plan API fans it out across a batch like every other fleet intent.
+  deviceCount: 1 as const,
+  timeoutMs: 900_000, // image pulls dominate
+  inputSchema: {
+    mappings: {
+      type: 'array',
+      required: true,
+      items: {
+        type: 'object',
+        properties: {
+          name: { type: 'string', required: false, minLength: 1, maxLength: 200, description: 'Optional container/service name to scope the match (omit = every service using `from`)' },
+          from: { type: 'string', required: true, minLength: 2, maxLength: 512, description: 'Current image reference of the container(s) to change' },
+          to: { type: 'string', required: true, minLength: 2, maxLength: 512, description: 'New full image reference (tag bump or a different image entirely)' },
+        },
+      },
+      description: 'Image changes to apply on this device — one entry per container/service',
+    },
+  },
+  async execute(ctx, input): Promise<ActionResult> {
+    const mappings = parseMappings(input);
+    if (mappings.length === 0) return { success: false, details: { error: 'No image mappings provided' } };
+
+    // 1) Resolve every mapping against the live container list.
+    const all = await listContainers(ctx.opts);
+    if (!all.ok || !Array.isArray(all.data)) return { success: false, details: { error: `Could not read the container list: ${all.error ?? 'unknown'}` } };
+    const containers = all.data as RawContainer[];
+
+    const targets: ImageSetTarget[] = [];
+    const missing: Record<string, string> = {};
+    for (const m of mappings) {
+      const key = `${m.from} → ${m.to}${m.name ? ` (${m.name})` : ''}`;
+      const hits = containers.filter((c) => c.Image === m.from && (!m.name || nameOf(c) === m.name));
+      if (hits.length === 0) { missing[key] = `no container with image ${m.from}${m.name ? ` named "${m.name}"` : ''} found`; continue; }
+      for (const c of hits) targets.push({ mapping: m, container: c });
+    }
+
+    // Idempotent skip — already on the target ref.
+    const toApply: ImageSetTarget[] = [];
+    const skipped: Record<string, string> = {};
+    const seenIds = new Set<string>();
+    for (const t of targets) {
+      const id = t.container.Id ?? nameOf(t.container);
+      if (seenIds.has(id)) continue; // duplicate mapping hit the same container — first wins
+      seenIds.add(id);
+      if ((t.container.Image ?? '') === t.mapping.to) skipped[nameOf(t.container)] = `already running ${t.mapping.to}`;
+      else toApply.push(t);
+    }
+
+    const errors: Record<string, string> = {};
+    if (toApply.length > 0) {
+      // 2) Pull every distinct new ref once (sequential — one huge image must not starve the rest).
+      for (const ref of [...new Set(toApply.map((t) => t.mapping.to))]) {
+        const p = await pullImageRefDocker(ctx.opts, ref);
+        if (!p.ok) errors[ref] = `image pull failed: ${p.error}`;
+      }
+
+      // 3) Recreate SEQUENTIALLY (static IPs must be released before the
+      // replacement attaches), dependencies first.
+      const unverifiedNames: string[] = [];
+      let changed = 0;
+      for (const t of orderByDependencies(toApply)) {
+        if (errors[t.mapping.to]) continue; // pull failed — nothing to recreate with
+        const name = nameOf(t.container);
+        const r = await recreateWithImage(ctx.opts, t.container, t.mapping.to);
+        if (!r.ok) { errors[name] = r.error!; continue; }
+        changed++;
+        const verified = await verifyImage(ctx.opts, name, t.mapping.to, (t.container.State ?? '') === 'running');
+        if (!verified) unverifiedNames.push(name);
+      }
+
+      return {
+        success: Object.keys(errors).length === 0,
+        applied: true,
+        verified: unverifiedNames.length === 0,
+        details: { changed, skipped, missing, ...(unverifiedNames.length > 0 ? { unverified: unverifiedNames } : {}), ...(Object.keys(errors).length > 0 ? { errors } : {}) },
+      };
+    }
+
+    // Nothing to apply — every match was already on its target ref (or absent).
+    return { success: Object.keys(missing).length === 0, verified: true, details: { changed: 0, skipped, missing } };
+  },
+};
+
 export const registry = createRegistry<DockerActionContext>([
   containersStartAction,
   containersStopAction,
@@ -979,4 +1321,5 @@ export const registry = createRegistry<DockerActionContext>([
   imagesUpdateAction,
   imagesPruneAction,
   containersLogsReadAction,
+  containersImageSetAction,
 ]);

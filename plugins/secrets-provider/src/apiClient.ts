@@ -47,6 +47,8 @@ export interface SecretMeta {
 
 /**
  * Stores a new secret (ciphertext) via the API. Returns the created record.
+ * `id` optionally pins the stored id (cross-instance import — references to
+ * the id keep working); omitted = the API mints a fresh UUID.
  */
 export async function storeSecret(input: {
   type: string;
@@ -57,6 +59,7 @@ export async function storeSecret(input: {
   expiresAt: string | null;
   interactiveLoginAllowed?: boolean;
   fileAccessAllowed?: boolean;
+  id?: string;
 }): Promise<SecretRecord> {
   const res = await http.post<SecretRecord>('/plugin/secrets', input);
   return res.data;
