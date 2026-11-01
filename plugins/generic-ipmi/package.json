@@ -1,0 +1,27 @@
+{
+  "name": "unm-plugin-generic-ipmi",
+  "version": "0.1.0",
+  "license": "EUPL-1.2",
+  "private": true,
+  "description": "UnifiedNetworkManager plugin for generic IPMI 2.0 (RMCP+) baseboards — chassis power state + sensor/FRU/SEL monitoring over a self-contained TypeScript RMCP+ client (RAKP auth, AES-CBC payload encryption; the password never touches argv), plus plan-gated power/boot control and a Serial-over-LAN console.",
+  "main": "dist/src/index.js",
+  "scripts": {
+    "dev": "ts-node-dev --respawn src/index.ts",
+    "build": "tsc",
+    "start": "node dist/src/index.js"
+  },
+  "dependencies": {
+    "@unm/plugin-sdk": "file:../../packages/plugin-sdk",
+    "bonjour-service": "^1.2.1",
+    "cors": "^2.8.5",
+    "express": "^5.2.1"
+  },
+  "devDependencies": {
+    "@types/cors": "^2.8.17",
+    "@types/express": "^5.0.6",
+    "@types/node": "^20.10.0",
+    "ts-node": "^10.9.2",
+    "ts-node-dev": "^2.0.0",
+    "typescript": "^5.3.2"
+  }
+}

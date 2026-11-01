@@ -100,7 +100,97 @@ export interface DeviceStatusTrigger {
   toStatuses: DeviceStatus[];
 }
 
-export type TriggerBlock = ScheduleTrigger | MetricTrigger | LogTrigger | DeviceStatusTrigger;
+/**
+ * Fires on UPDATE transitions in device_updates (the Updates page's data): a
+ * row appearing (a new update became available), its latestVersion advancing,
+ * or the row disappearing (update applied / withdrawn). Hooked at
+ * ingestUpdates()' commit point, so it reflects the settled per-poll state —
+ * transition-only firing, never re-firing on every poll while an update stays
+ * listed. `condition` selects which transitions fire:
+ *   - 'available' → a row appeared (or advanced while a deferred window is open)
+ *   - 'resolved'  → a row disappeared (update applied or withdrawn)
+ * `defer` optionally holds each firing until the next occurrence of its
+ * schedule spec (e.g. a nightly maintenance window); `maxWaitHours` caps how
+ * long an event waits before firing immediately. While an 'available' window is
+ * pending, the row disappearing cancels it silently and a version advance
+ * refreshes the stored snapshot without moving the window start.
+ */
+export interface UpdateTrigger {
+  id: string;
+  type: 'updateAvailable';
+  scope?: DeviceScope;
+  pluginId?: string;
+  /** Only these device_updates.kind values (absent = all). Free-form — plugins may emit custom kinds. */
+  kinds?: string[];
+  /** Exact row names to match (absent/empty = all). */
+  names?: string[];
+  /** JS regex source matched against the row name (search semantics). */
+  namePattern?: string;
+  condition: 'available' | 'resolved';
+  /** Only rows whose rebootRequired flag EQUALS this value (rows with a null flag never match a filter — unknown ≠ safe to auto-apply). */
+  rebootRequired?: boolean;
+  defer?: { schedule: ScheduleSpec; maxWaitHours?: number };
+}
+
+/** Flow direction a flow trigger watches (either endpoint of an observed tuple). */
+export const FLOW_DIRECTIONS = ['any', 'src', 'dst'] as const;
+export type FlowDirection = (typeof FLOW_DIRECTIONS)[number];
+
+/** Endpoint classification filter for flow triggers (flow_agg_* "srcClass"/"dstClass"). */
+export const FLOW_CLASSES = ['internal', 'internet', 'unknown'] as const;
+export type FlowClass = (typeof FLOW_CLASSES)[number];
+
+/**
+ * Fires when network traffic observed by the flow collector crosses a threshold.
+ * Evaluated against the AGGREGATE tables (flow_agg_5m / flow_agg_1h) over a
+ * sliding window ending at each tick: `windowSec` of buckets are summed per
+ * endpoint tuple and compared with `comparator`/`thresholdBytes`. The trigger
+ * fires when ANY in-scope tuple meets the condition; `durationSec` > 0 requires
+ * it to hold for that long (sustained window, same semantics as metric triggers).
+ * Scope matches against whichever endpoint device is known (src preferred); a
+ * tuple with no known device only matches an empty scope.
+ */
+export interface FlowTrigger {
+  id: string;
+  type: 'flow';
+  scope?: DeviceScope;
+  /** Which endpoint to measure ('any' = either side of the tuple). */
+  direction?: FlowDirection;
+  /** Only endpoints classified as this (absent = all classes). */
+  endpointClass?: FlowClass;
+  /** Optional exact-IP filter on the measured endpoint. */
+  ip?: string;
+  /** Sliding window length in seconds (default 300, capped at one hour). */
+  windowSec?: number;
+  comparator: MetricComparator;
+  thresholdBytes: number;
+  /** Seconds the condition must hold before firing (0/absent = immediate). */
+  durationSec?: number;
+}
+
+/**
+ * Fires when NEW lines appear in a container's log output. The worker tails the
+ * app's containers through the plugin's `containers.logs.read` action (the same
+ * read path the Containers page uses) and compares each line against the set of
+ * previously-seen lines for this trigger (content hash, capped ring buffer in
+ * automation_state). A null watermark = first run: only NEW lines after that are
+ * considered, so a freshly created rule doesn't fire on the whole tail history.
+ */
+export interface ContainerLogTrigger {
+  id: string;
+  type: 'containerLog';
+  scope?: DeviceScope;
+  /** Plugin providing `containers.logs.read` (ix-truenas or docker). */
+  pluginId: string;
+  /** App / container name as it appears in the Containers page. */
+  appName: string;
+  /** Trailing lines to tail on each evaluation (20–5000, default 300). */
+  tail?: number;
+  /** JS regex source (search semantics) matched against each new line. */
+  pattern: string;
+}
+
+export type TriggerBlock = ScheduleTrigger | MetricTrigger | LogTrigger | DeviceStatusTrigger | FlowTrigger | ContainerLogTrigger | UpdateTrigger;
 
 // ── Action blocks ────────────────────────────────────────────────────────────
 
@@ -113,15 +203,27 @@ export type NotificationSeverity = (typeof NOTIFICATION_SEVERITIES)[number];
  * plan (the same path the webapp's CreatePlan dialog uses — see
  * utils/createPlanCore.ts). `input` is validated against the catalog entry's
  * inputSchema in the UI; the engine passes it through verbatim.
+ *
+ * With `resolveFromTrigger: 'update'`, pluginId/actionId/input are filled at
+ * fire time from the firing update row's apply path (device_updates.applyActionId
+ * / applyInput) — for rules that react to updateAvailable triggers without
+ * hardcoding a per-plugin action id. A row with no apply path skips the action
+ * with a logged reason (never guessed). `requireNoReboot` additionally skips
+ * execution when the firing row's rebootRequired flag is true.
  */
 export interface IntentAction {
   id: string;
   type: 'intent';
-  pluginId: string;
-  /** Catalog action id (plugins.actionDescriptors). */
-  actionId: string;
+  /** Required unless resolveFromTrigger fills it at fire time. */
+  pluginId?: string;
+  /** Catalog action id (plugins.actionDescriptors). Required unless resolveFromTrigger fills it. */
+  actionId?: string;
   devices: { scope?: DeviceScope; deviceIds?: string[] };
   input?: Record<string, unknown>;
+  /** Fill pluginId/actionId/input from the firing update row's apply path. */
+  resolveFromTrigger?: 'update';
+  /** Skip execution when the firing update row requires a reboot (default off). */
+  requireNoReboot?: boolean;
 }
 
 /**
@@ -212,7 +314,8 @@ export interface AutomationRun {
   triggerType: TriggerBlock['type'];
   /** Trigger context at firing time — device/metric/log details for display. */
   context: Record<string, unknown>;
-  status: 'succeeded' | 'failed' | 'partial';
+  /** 'skipped' = every action was deliberately skipped (e.g. requireNoReboot guard). */
+  status: 'succeeded' | 'failed' | 'partial' | 'skipped';
   error?: string | null;
   planIds: string[];
 }
@@ -225,6 +328,22 @@ export interface TriggerContext {
   device?: { id: string; name: string; address?: string | null } | null;
   /** Metric key/value snapshot, for metric triggers. */
   metric?: { key: string; value: number | string | boolean | null } | null;
-  /** Log message, for log triggers. */
+  /** Log message, for log triggers (and container-log triggers). */
   logMessage?: string | null;
+  /** Flow tuple + measured bytes, for flow triggers. */
+  flow?: { ip: string; estBytes: number; windowSec: number; direction: string } | null;
+  /** Update row snapshot at firing time, for updateAvailable triggers ({{update.*}} tokens). */
+  update?: {
+    kind: string;
+    name: string;
+    currentVersion: string | null;
+    latestVersion: string | null;
+    rebootRequired: boolean | null;
+    /** The row's owning assignment — intent actions target exactly this device. */
+    deviceId: string;
+    pluginId: string;
+    /** Apply path declared by the plugin (null/absent = manual on device, never guessed). Absent for 'resolved' firings of rows that are already gone. */
+    applyActionId?: string | null;
+    applyInput?: Record<string, unknown>;
+  } | null;
 }

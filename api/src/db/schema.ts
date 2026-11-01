@@ -307,6 +307,11 @@ export const plugins = pgTable('plugins', {
   // effective-capability evaluation (see types/deviceSupport.ts). NULL = no
   // support matrix advertised.
   deviceSupport: text('deviceSupport'),
+  // Ready-made automation rule drafts declared by the plugin in /discover (JSON
+  // array of { id, name, description?, draft }). Served by GET /automations/
+  // templates alongside the API's built-in templates; the webapp opens the rule
+  // builder pre-filled from one. NULL = none advertised.
+  automationTemplates: text('automationTemplates'),
   // mTLS state (Stage 1): true when discovery last confirmed this plugin is
   // serving TLS with a CA-signed leaf on its conventional port. The API's
   // pluginHttp factory uses https+client-cert for these, plain http otherwise.
@@ -824,6 +829,128 @@ export const routes = pgTable(
         columns: [table.deviceId, table.pluginId, table.destination, table.protocol],
       }),
       idxRoutesDevice: index('idx_routes_device').on(table.deviceId),
+    };
+  }
+);
+
+// One row per static DNS host entry (hostname → address) on one device, as
+// reported by a plugin's `dnsEntries` metric. Powers the cross-device DNS page
+// with the same upsert-per-poll + delete-on-absent + 24h-sweep lifecycle as
+// tunnels/routes. Vendors normalize to {name, ip} at collection time (OPNsense
+// dnsmasq/unbound host records; OpenWrt uci dhcp @host/@map; RouterOS
+// /ip/dns/static; LCOS Setup/DNS/DNS-List). `name` is lowercased at ingest so
+// the page groups case-insensitively; one row per (device, name, ip) — a name
+// with several addresses yields multiple rows.
+export const deviceDnsEntries = pgTable(
+  'device_dns_entries',
+  {
+    deviceId: text('deviceId').notNull(),
+    pluginId: text('pluginId').notNull(),
+    // Hostname as configured on the device, lowercased at ingest (grouping key).
+    name: text('name').notNull(),
+    // IPv4 or IPv6 address the hostname resolves to. Record type (A/AAAA) is
+    // derived from the address shape — no separate column needed.
+    ip: text('ip').notNull(),
+    // Optional domain suffix as configured on the device. Only vendors that
+    // split a record into bare-hostname + domain emit it (OPNsense unbound
+    // host overrides); for them `name` is the bare hostname and the full name
+    // is `name`.`domain`. NULL = vendor has no separate domain field (the name
+    // already IS the full name — LCOS, RouterOS, OpenWrt).
+    domain: text('domain'),
+    // Optional free-text note as configured on the device (e.g. RouterOS
+    // /ip/dns/static `comment`). NULL = vendor has no native field for it.
+    description: text('description'),
+    collectedAt: text('collectedAt').notNull(),
+  },
+  (table) => {
+    return {
+      pkDnsEntries: primaryKey({
+        name: 'device_dns_entries_pkey',
+        columns: [table.deviceId, table.pluginId, table.name, table.ip],
+      }),
+      idxDnsEntriesDevice: index('idx_device_dns_entries_device').on(table.deviceId),
+    };
+  }
+);
+
+// One row per configured DHCP server network/pool on one device, as reported by a
+// plugin's `dhcpNetworks` metric. Powers the cross-device DHCP page with the same
+// upsert-per-poll + delete-on-absent + 24h-sweep lifecycle as tunnels/routes/dns.
+// Vendors normalize to {name, rangeStart, rangeEnd, …} at collection time (RouterOS
+// /ip/pool + /ip/dhcp-server/network; OPNsense Kea subnets or dnsmasq ranges; OpenWrt
+// uci dhcp .option=range). One row per (device, plugin, name, rangeStart) — a named
+// scope with several ranges yields multiple rows.
+export const deviceDhcpNetworks = pgTable(
+  'device_dhcp_networks',
+  {
+    deviceId: text('deviceId').notNull(),
+    pluginId: text('pluginId').notNull(),
+    // Network/scope name as configured, or the serving interface when the vendor has no name.
+    name: text('name').notNull(),
+    // Serving interface (e.g. `bridge1`, `lan`). NULL = vendor doesn't expose it.
+    iface: text('iface'),
+    // First address of the lease range. Part of the PK — a scope with several ranges yields rows.
+    rangeStart: text('rangeStart').notNull(),
+    // Last address of the lease range.
+    rangeEnd: text('rangeEnd').notNull(),
+    // Subnet CIDR covering the range (derived by the plugin when known). NULL = unknown.
+    cidr: text('cidr'),
+    // Lease time in seconds as configured on the device. NULL = vendor default / not exposed.
+    leaseTimeSeconds: integer('leaseTimeSeconds'),
+    // Gateway address handed out to clients. NULL = not exposed.
+    gateway: text('gateway'),
+    // DNS servers handed out to clients (comma-joined). NULL = not exposed.
+    dnsServers: text('dnsServers'),
+    // Vendor-side row identity used for deletion (dnsmasq range uuid, Kea subnet id…). NULL = no stable handle.
+    refId: text('refId'),
+    collectedAt: text('collectedAt').notNull(),
+  },
+  (table) => {
+    return {
+      pkDhcpNetworks: primaryKey({
+        name: 'device_dhcp_networks_pkey',
+        columns: [table.deviceId, table.pluginId, table.name, table.rangeStart],
+      }),
+      idxDhcpNetworksDevice: index('idx_device_dhcp_networks_device').on(table.deviceId),
+    };
+  }
+);
+
+// One row per static DHCP reservation (MAC → fixed IP) on one device, as reported by a
+// plugin's `dhcpReservations` metric. Same lifecycle as the other inventory tables.
+// Vendors normalize to {mac, ip?, hostname?} at collection time (RouterOS
+// /ip/dhcp-server/lease static; OPNsense Kea reservations or dnsmasq staticmaps; OpenWrt
+// uci dhcp @host/@map). `refId` is the vendor-side row identity used for deletion
+// (OPNsense uuid, …); NULL = delete by MAC. One row per (device, plugin, mac) — a MAC
+// with several fixed IPs on one device collapses to the last-seen IP (rare; vendors
+// key reservations by MAC).
+export const deviceDhcpReservations = pgTable(
+  'device_dhcp_reservations',
+  {
+    deviceId: text('deviceId').notNull(),
+    pluginId: text('pluginId').notNull(),
+    // Client MAC address, lowercase colon form. Part of the PK.
+    mac: text('mac').notNull(),
+    // Fixed IP the client always receives. NULL = name-only mapping (no fixed IP).
+    ip: text('ip'),
+    // Hostname bound to the reservation (when the vendor has one).
+    hostname: text('hostname'),
+    // Serving interface the mapping is scoped to (OPNsense staticmaps are per-interface). NULL = not exposed.
+    iface: text('iface'),
+    // Vendor-specific row identifier used for deletion (OPNsense uuid, …). NULL = delete by MAC.
+    refId: text('refId'),
+    // Vendor lease status when exposed (e.g. RouterOS 'bound'/'free') — some vendors keep
+    // static bindings and active dynamic leases in one table; the page badges live rows.
+    status: text('status'),
+    collectedAt: text('collectedAt').notNull(),
+  },
+  (table) => {
+    return {
+      pkDhcpReservations: primaryKey({
+        name: 'device_dhcp_reservations_pkey',
+        columns: [table.deviceId, table.pluginId, table.mac],
+      }),
+      idxDhcpReservationsDevice: index('idx_device_dhcp_reservations_device').on(table.deviceId),
     };
   }
 );
@@ -2472,7 +2599,7 @@ export const automations = pgTable(
     name: text('name').notNull(),
     description: text('description'),
     enabled: boolean('enabled').notNull().default(true),
-    // JSON array of trigger blocks (≥1): schedule | metric | log | deviceStatus.
+    // JSON array of trigger blocks (≥1): schedule | metric | log | deviceStatus | flow | containerLog.
     triggers: text('triggers').notNull().default('[]'),
     // JSON array of action blocks (≥1): intent | webhook | notification | internal.
     actions: text('actions').notNull().default('[]'),
@@ -2501,7 +2628,7 @@ export const automationRuns = pgTable(
     automationId: text('automationId').notNull(),
     // ISO timestamp of the firing instant (denormalized for cheap retention sweeps).
     firedAt: text('firedAt').notNull(),
-    // Which trigger block fired ('schedule' | 'metric' | 'log' | 'deviceStatus').
+    // Which trigger block fired (free TEXT — any TriggerBlock type).
     triggerType: text('triggerType').notNull(),
     // Trigger context at firing time (JSON): device/metric/log details for display.
     context: text('context').notNull().default('{}'),

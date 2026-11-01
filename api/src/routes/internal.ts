@@ -343,15 +343,17 @@ export function internalRouter() {
 
   // POST /plugin/secrets - store a secret (ciphertext).
   router.post('/plugin/secrets', pluginAuth, async (req: Request, res: Response) => {
-    const { type, providerId, label, encryptedValue, userId, expiresAt, interactiveLoginAllowed, fileAccessAllowed } = req.body ?? {};
+    const { type, providerId, label, encryptedValue, userId, expiresAt, interactiveLoginAllowed, fileAccessAllowed, id } = req.body ?? {};
     if (!encryptedValue || !userId) {
       return res.status(400).json({ error: 'encryptedValue and userId are required' });
     }
     try {
-      const id = uuidv4();
+      // Optional explicit id (cross-instance secret import — preserves
+      // device/plan/session references to the id). Must be a well-formed UUID.
+      const finalId = typeof id === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id) ? id : uuidv4();
       const createdAt = new Date().toISOString();
       await db.insert(schema.secrets).values({
-        id,
+        id: finalId,
         type: type ?? 'apiKey',
         providerId: providerId ?? null,
         label: label ?? null,
@@ -362,7 +364,7 @@ export function internalRouter() {
         fileAccessAllowed: typeof fileAccessAllowed === 'boolean' ? fileAccessAllowed : false,
         createdAt,
       });
-      res.status(201).json({ id, createdAt });
+      res.status(201).json({ id: finalId, createdAt });
     } catch (error) {
       console.error('Error storing secret:', error);
       res.status(500).json({ error: 'Internal server error' });

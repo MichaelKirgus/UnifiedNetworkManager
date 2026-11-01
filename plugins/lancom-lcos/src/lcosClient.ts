@@ -25,7 +25,7 @@ import {
 import {
   LCOS_BASE, SYS, HW, FIRMWARE, LAN_IF, LAN_BYTES, WAN_BYTES, WAN_IP,
   NET_LIST, ARP, DHCP, VPN_CONN, IP_ROUTES, IP_CIDR_ROUTES, WLAN_NET, WLAN_RADIO, WLAN_STATION, TEMP_EXTREMES,
-  IPV6_PREFIX, TIME, lcosTimezoneToMinutes,
+  IPV6_PREFIX, TIME, DNS_LIST, DHCP_HOSTS, DHCP_NET_LIST, lcosTimezoneToMinutes,
 } from './lcosOids';
 
 /* ------------------------------------------------------------------ *
@@ -138,6 +138,31 @@ export interface LcosTempExtreme {
   valueTenthsC: number | null;
 }
 
+/** One static DNS host entry from lcsSetupDnsHostTable (11.2.17.5, Setup/DNS/DNS-List). */
+export interface LcosDnsEntry {
+  name: string; // Host-name — case preserved as configured
+  ip: string; // IP-Address ('' when the row has no v4)
+  ipv6: string; // IPV6-Address ('' or '::' when absent)
+  rtgTag: number | null; // Rtg-tag (0 = default routing table)
+}
+
+/** One DHCP static host / reservation from lcsSetupDhcpHostTable (11.2.10.9, Setup/DHCP/Hosts). */
+export interface LcosDhcpHost {
+  mac: string; // bare lowercase hex "00a0574c1acf" — the form LCOS stores and `add` accepts
+  ip: string; // IP-Address ('' when unset)
+  hostname: string; // Hostname ('' when unset)
+  networkName: string; // Network-name — the DHCP pool the mapping is scoped to (upper-cased by LCOS)
+}
+
+/** One configured DHCP pool from lcsSetupDhcpNetworkListTable (11.2.10.20, Setup/DHCP/Network-list). */
+export interface LcosDhcpPool {
+  name: string; // Network-name — must match a TCP-IP network name; upper-cased by LCOS
+  startIp: string; // Start-Address-Pool ('' when unset)
+  endIp: string; // End-Address-Pool ('' when unset)
+  netmask: string; // Netmask ('0.0.0.0' when unset)
+  gateway: string; // Gateway-Address ('0.0.0.0' when unset)
+}
+
 /** One entry of the router's active routing table (IPv4 only — no v6 table in the MIB). */
 export interface LcosRoute {
   destination: string; // CIDR built from the ip + netmask columns
@@ -177,6 +202,9 @@ export interface LcosRouterSnapshot {
   ipv6Prefixes: LcosIpv6Prefix[]; // advertised/delegated v6 prefixes (Status/IPv6) — sparse by design
   arp: LcosArpEntry[];
   dhcpLeases: LcosDhcpLease[];
+  dhcpHosts: LcosDhcpHost[]; // DHCP static hosts / reservations (Setup/DHCP/Hosts config mirror)
+  dhcpPools: LcosDhcpPool[]; // configured DHCP pools (Setup/DHCP/Network-list config mirror)
+  dnsEntries: LcosDnsEntry[]; // static DNS host entries (Setup/DNS/DNS-List config mirror)
   vpnConnections: LcosVpnConn[];
   radios: LcosRadio[];
   ssids: LcosSsid[];
@@ -274,6 +302,9 @@ const INVENTORY_WALKS: string[] = [
   IPV6_PREFIX.base, // advertised/delegated v6 prefixes (Status/IPv6 — sparse; the Addresses table is deliberately NOT walked: no prefix lengths + link-local noise)
   ARP.base, // ARP cache → hosts inventory
   DHCP.base, // active DHCP leases → hosts inventory
+  DHCP_HOSTS.base, // DHCP static hosts / reservations (Setup/DHCP/Hosts config mirror) → dhcpReservations inventory
+  DHCP_NET_LIST.base, // configured DHCP pools (Setup/DHCP/Network-list config mirror) — pool context for reservation validation errors
+  DNS_LIST.base, // static DNS host entries (Setup/DNS config mirror — sparse; absent on models without the table)
   IP_ROUTES.base, // active routing table (static + OSPF/BGP/RIP) → routes inventory
   IP_CIDR_ROUTES.base, // standard ipCidrRouteTable — fallback when the vendor table is absent on this firmware
   VPN_CONN.base, // active VPN connections
@@ -299,7 +330,8 @@ export async function getLcosInventory(
   host: string,
   creds: SnmpCredentials,
   opts: LcosOptions,
-  log?: LcosLogSink
+  log?: LcosLogSink,
+  force = false
 ): Promise<{ snapshot: LcosRouterSnapshot | null; fromCache: boolean; error?: string }> {
   // Probe gate: one cheap snmpget against a scalar every LCOS router exposes
   // (hardware-info sw version). Non-LANCOM devices answer "No Such Object" in
@@ -323,6 +355,7 @@ export async function getLcosInventory(
     log,
     probe,
     walks: () => INVENTORY_WALKS,
+    force,
     parse: (out) => parseLcosStatus(out),
     // Quality gate: the serial number comes from the hardware-info WALK
     // (11.1.47), not the probe scalar — only cache when that walk succeeded.
@@ -672,6 +705,9 @@ function parseLcosStatus(out: Map<string, SnmpValue>): LcosRouterSnapshot {
     ipv6Prefixes,
     arp,
     dhcpLeases,
+    dhcpHosts: parseDhcpHosts(out),
+    dhcpPools: parseDhcpPools(out),
+    dnsEntries: parseDnsList(out),
     vpnConnections,
     radios,
     ssids,
@@ -681,6 +717,130 @@ function parseLcosStatus(out: Map<string, SnmpValue>): LcosRouterSnapshot {
     routes: (routes.length > 0 ? routes : standardRoutes.filter((x) => !stdInvalidKeys.has(x.key))).map((row) => ({ destination: row.destination, gateway: row.gateway, protocol: row.protocol, distance: row.distance, metric: row.metric, rtgTag: row.rtgTag, peer: row.peer, rawTypeLabel: row.rawTypeLabel })),
     temperatureExtremes,
   };
+}
+
+/**
+ * Parses the static DNS host-entry table (11.2.17.5 — Setup/DNS/DNS-List).
+ * Column-first, index = length-prefixed hostname text (case preserved). The
+ * table is a CONFIG mirror: it lists exactly what `cd /Setup/DNS/DNS-List`
+ * shows. Absent on models/firmware without the subtree → empty array (the
+ * combined walk treats missing subtrees as empty, never an error).
+ *
+ * FIRMWARE QUIRK (verified live on LCOS 10.94, GW_Ralf): every row OID of THIS
+ * table carries a trailing `.0` sub-identifier after the hostname index —
+ *   .11.2.17.5.1.<col>.<len><hostname-bytes>.0
+ * while all other LCOS tables (NET_LIST, DHCP, …) end right after the index.
+ * `decodeSingleText` therefore rejects every row; accept the optional trailing
+ * `.0` here so both shapes parse. Exported — the dns.set/dns.delete actions
+ * verify their writes against this same table.
+ */
+export function decodeDnsIndex(idx: string[]): string | null {
+  const d = decodePrefixedText(idx, 0);
+  if (!d) return null;
+  // Exact fit (other firmware / other tables) or one trailing ".0" sub-id.
+  if (d.next === idx.length) return d.text;
+  if (idx.length === d.next + 1 && idx[d.next] === '0') return d.text;
+  return null;
+}
+
+function parseDnsList(out: Map<string, SnmpValue>): LcosDnsEntry[] {
+  const byName = new Map<string, Partial<LcosDnsEntry>>();
+  for (const [oid, value] of out) {
+    const row = splitRow(oid, DNS_LIST.base);
+    if (!row) continue;
+    const name = decodeDnsIndex(row.idx);
+    if (!name) continue;
+    let e = byName.get(name);
+    if (!e) { e = {}; byName.set(name, e); }
+    switch (row.col) {
+      case DNS_LIST.COL_NAME: break; // echoes the index — nothing to store
+      // '0.0.0.0' in the v4 column is LCOS's placeholder for a v6-only row
+      // (verified live on WLC01 2026-10) — normalize it away like '::'.
+      case DNS_LIST.COL_IP: e.ip = String(value).trim() === '0.0.0.0' ? '' : String(value).trim(); break;
+      case DNS_LIST.COL_IPV6: e.ipv6 = String(value).trim(); break;
+      case DNS_LIST.COL_RTG_TAG: e.rtgTag = toInt(value); break;
+    }
+  }
+  return [...byName.entries()].map(([name, e]) => ({
+    name,
+    ip: e.ip ?? '',
+    ipv6: (e.ipv6 === '::' ? '' : e.ipv6) ?? '', // '::' = unset on LCOS
+    rtgTag: e.rtgTag ?? null,
+  }));
+}
+
+/**
+ * Parses the DHCP static-host table (11.2.10.9 — Setup/DHCP/Hosts). Column-first,
+ * index = COMPOSITE [MAC text, network-name text], both length-prefixed — the MAC
+ * is BARE lowercase hex ("00a0574c1acf", no colons) and the trailing network part
+ * mirrors column 5 (verified live on LCOS 10.94, GW_Ralf + WLC01, 2026-10). The
+ * table is a CONFIG mirror: it lists exactly what `cd /Setup/DHCP/Hosts` shows.
+ * Absent or empty on devices without reservations → empty array (the combined
+ * walk treats missing subtrees as empty, never an error). Exported — the
+ * dhcp.staticMapping.* actions verify their writes against this same table.
+ */
+export function parseDhcpHosts(out: Map<string, SnmpValue>): LcosDhcpHost[] {
+  const byMac = new Map<string, Partial<LcosDhcpHost>>();
+  for (const [oid, value] of out) {
+    const row = splitRow(oid, DHCP_HOSTS.base);
+    if (!row) continue;
+    // First index component: length-prefixed bare-hex MAC text ("12" + 12 ASCII
+    // digits). A second (network-name) component may follow — decodePrefixedText
+    // does NOT require an exact fit, unlike decodeSingleText.
+    const d = decodePrefixedText(row.idx, 0);
+    if (!d) continue;
+    const mac = d.text.toLowerCase();
+    if (!/^[0-9a-f]{12}$/.test(mac)) continue;
+    let e = byMac.get(mac);
+    if (!e) { e = {}; byMac.set(mac, e); }
+    switch (row.col) {
+      case DHCP_HOSTS.COL_MAC: break; // echoes the index — nothing to store
+      case DHCP_HOSTS.COL_IP: e.ip = String(value).trim(); break;
+      case DHCP_HOSTS.COL_HOSTNAME: e.hostname = String(value).trim(); break;
+      case DHCP_HOSTS.COL_NETWORK: e.networkName = String(value).trim(); break;
+      // COL_IMAGE_ALIAS — not used by UNM
+    }
+  }
+  return [...byMac.entries()].map(([mac, e]) => ({
+    mac,
+    ip: e.ip ?? '',
+    hostname: e.hostname ?? '',
+    networkName: e.networkName ?? '',
+  }));
+}
+
+/**
+ * Parses the DHCP pool table (11.2.10.20 — Setup/DHCP/Network-list). Column-first,
+ * index = length-prefixed network-name text (upper-cased by LCOS; verified live on
+ * GW_Ralf, 2026-10: NET_MANAGEMENT → 10.28.1.0–10.28.1.255). Pools are the scope
+ * a static host must fall inside — LCOS rejects `add` with "Value invalid" when
+ * the reservation IP is outside every pool of its network name, so this table is
+ * what the dhcp.staticMapping.add action reports in that failure case.
+ */
+export function parseDhcpPools(out: Map<string, SnmpValue>): LcosDhcpPool[] {
+  const byName = new Map<string, Partial<LcosDhcpPool>>();
+  for (const [oid, value] of out) {
+    const row = splitRow(oid, DHCP_NET_LIST.base);
+    if (!row) continue;
+    const name = decodeSingleText(row.idx);
+    if (!name) continue;
+    let e = byName.get(name);
+    if (!e) { e = {}; byName.set(name, e); }
+    switch (row.col) {
+      case DHCP_NET_LIST.COL_NAME: break; // echoes the index — nothing to store
+      case DHCP_NET_LIST.COL_START: e.startIp = String(value).trim(); break;
+      case DHCP_NET_LIST.COL_END: e.endIp = String(value).trim(); break;
+      case DHCP_NET_LIST.COL_NETMASK: e.netmask = String(value).trim(); break;
+      case DHCP_NET_LIST.COL_GATEWAY: e.gateway = String(value).trim(); break;
+    }
+  }
+  return [...byName.entries()].map(([name, e]) => ({
+    name,
+    startIp: e.startIp ?? '',
+    endIp: e.endIp ?? '',
+    netmask: e.netmask ?? '0.0.0.0',
+    gateway: e.gateway ?? '0.0.0.0',
+  }));
 }
 
 /**
