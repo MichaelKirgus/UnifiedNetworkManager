@@ -124,7 +124,7 @@ export const SETTING_DESCRIPTORS: SettingDescriptor[] = [
     default: 'config',
     pattern: '^(config|planned|all)$',
     help:
-      'Which sections the scheduled backup archives. config = identity+settings+devices, planned = documented networks/hosts + plans, all = everything including live inventory.',
+      'Which sections the scheduled backup archives. config = identity+settings+devices+automations, planned = documented networks/hosts + plans, all = everything including live inventory.',
   },
   {
     key: 'autoBackupDestination',
@@ -145,6 +145,18 @@ export const SETTING_DESCRIPTORS: SettingDescriptor[] = [
     maxLength: 128,
     help:
       'Full plugin id of the file-repo instance that receives scheduled backups — only used when autoBackupDestination is "repo". Empty = local volume.',
+  },
+
+  // Actions & Schedules (automation engine; see workers/automations.ts). Master
+  // switch for the whole feature — off = no trigger evaluation at all.
+  {
+    key: 'automationsEnabled',
+    label: 'Actions & Schedules enabled',
+    type: 'boolean',
+    category: 'General',
+    default: true,
+    help:
+      'Master switch for the automation engine (the Actions & Schedules page). When off, no triggers are evaluated and no rules fire — existing rules keep their state and resume when re-enabled.',
   },
 
   // Telemetry / worker cadence (previously the only tunable knobs, on the Workers page).
@@ -627,7 +639,9 @@ export const SETTING_DESCRIPTORS: SettingDescriptor[] = [
     category: 'Certificate Authority',
     default: '1.2',
     envVar: 'UNM_CA_TLS_MIN_VERSION',
-    pattern: '^(1\.2|1\.3)$',
+    // Double-escape: the string literal must contain a backslash so that
+    // `new RegExp(pattern)` sees `\.` (literal dot) rather than `.` (any char).
+    pattern: '^(1\\.2|1\\.3)$',
     onChange: () => require('./ca/stepCaConfig').writeStepCaConfig(),
     help:
       'Minimum TLS version the CA\'s own listener negotiates (and the floor UNM documents for plugin listeners). 1.2 is the default; 1.3 requires all clients to support it.',
@@ -797,6 +811,33 @@ export const SETTING_DESCRIPTORS: SettingDescriptor[] = [
     maxLength: 128,
     help:
       'Internal pointer to the currently active GeoIP file in the central repository — written by the geoip worker after each successful refresh. Do not edit manually; clear it to force a re-download on the next cycle.',
+  },
+
+  // CVE vulnerability tracking (Security page) — the cve worker queries an OSINT
+  // provider (OSV.dev today, commercial providers later via the CveProvider
+  // interface) for every distinct package installed in the fleet and matches
+  // the advisories against each device's versions. Egress goes through the same
+  // web-fetch plugin as GeoIP (webFetchProxyUrl/TimeoutMs/MaxBytes apply).
+  {
+    key: 'cveEnabled',
+    label: 'CVE vulnerability tracking',
+    type: 'boolean',
+    category: 'CVE Tracking',
+    default: true,
+    help:
+      'Master switch for the CVE worker. When enabled it periodically fetches advisories (OSV.dev) for every package installed on your devices and matches them against the installed versions — results appear on the Security page. Disable to stop fetching; existing findings stay in place.',
+  },
+  {
+    key: 'cveFetchIntervalHours',
+    label: 'Advisory refresh interval',
+    type: 'integer',
+    category: 'CVE Tracking',
+    unit: 'h',
+    min: 1,
+    max: 8_760,
+    default: 24,
+    help:
+      'How often the worker re-queries the advisory provider (default 24 h — OSV.dev publishes new advisories continuously). The manual "Refresh now" button on the Security page bypasses the interval. Device-side matching is recomputed on every beat regardless, so a package upgrade clears its findings without waiting for the next fetch.',
   },
 ];
 
@@ -1041,7 +1082,7 @@ export async function updateSetting(key: string, rawValue: unknown): Promise<Set
     try {
       await d.onChange();
     } catch (err) {
-      console.error(`[settings] onChange hook for "${key}" failed:`, err);
+      console.error(`[settings] onChange hook for "${key}" failed: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
   return viewFor(d, await getEffectiveValues());
@@ -1061,7 +1102,7 @@ export async function resetSetting(key: string): Promise<SettingView> {
     try {
       await d.onChange();
     } catch (err) {
-      console.error(`[settings] onChange hook for "${key}" failed:`, err);
+      console.error(`[settings] onChange hook for "${key}" failed: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
   return viewFor(d, await getEffectiveValues());

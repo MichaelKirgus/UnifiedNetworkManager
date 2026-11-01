@@ -57,6 +57,13 @@ const UPDATE_SETTLE_MS: Record<string, number> = {
   // App upgrades redeploy containers server-side; image pulls refresh the store.
   'containers.upgrade': 60_000,
   'images.update': 30_000,
+  // Container lifecycle changes invalidate the container inventory (state +
+  // startedAt) — settle briefly so the forced re-poll catches the SETTLED state
+  // instead of a mid-transition snapshot. The webapp's live probe covers the
+  // gap until this refresh lands.
+  'containers.restart': 15_000,
+  'containers.start': 10_000,
+  'containers.stop': 10_000,
   // A firmware update installs a new boot environment and REBOOTS — give it
   // time to come back before the re-poll (best-effort: unreachable is fine).
   'system.firmware.update': 600_000,

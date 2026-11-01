@@ -16,6 +16,7 @@ import { configBackupActions } from './configBackup';
 import { userActions } from './users';
 import { l2TopologyAction } from './l2Topology';
 import { networkIntentActions } from './networkIntents';
+import { dnsIntentActions } from './dnsIntents';
 
 /**
  * The action registry — the single source of truth for everything this plugin
@@ -47,6 +48,8 @@ const ALL_ACTIONS: ActionDescriptor[] = [
   ...userActions,
   l2TopologyAction,
   ...networkIntentActions,
+  // Canonical DNS intents (dns.set / dns.delete) — fan-out via plan workflow.
+  ...dnsIntentActions,
 ];
 
 const byId = new Map<string, ActionDescriptor>(ALL_ACTIONS.map((a) => [a.id, a]));

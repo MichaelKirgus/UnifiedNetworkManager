@@ -1,7 +1,5 @@
-import { useEffect } from 'react';
 import { useNavigate, useLocation, Navigate, Route, Routes } from 'react-router-dom';
 import { ReactNode } from 'react';
-import { useQuery } from '@tanstack/react-query';
 import Login from './pages/Login';
 import Devices from './pages/Devices';
 import DeviceDetail from './pages/DeviceDetail';
@@ -9,12 +7,16 @@ import DeviceConfig from './pages/DeviceConfig';
 import Secrets from './pages/Secrets';
 import Plans from './pages/Plans';
 import PlanDetail from './pages/PlanDetail';
+import Automations from './pages/Automations';
 import Plugins from './pages/Plugins';
 import Sites from './pages/Sites';
 import Layers from './pages/Layers';
 import Networks from './pages/Networks';
 import NetworkRolloutPage from './pages/NetworkRolloutPage';
 import Hosts from './pages/Hosts';
+import Dns from './pages/Dns';
+import DnsRolloutPage from './pages/DnsRolloutPage';
+import Dhcp from './pages/Dhcp';
 import DocumentedHosts from './pages/DocumentedHosts';
 import DocumentedNetworks from './pages/DocumentedNetworks';
 import DocumentedHostImportPage from './pages/DocumentedHostImportPage';
@@ -54,7 +56,7 @@ import Settings from './pages/Settings';
 import CredentialPolicies from './pages/CredentialPolicies';
 import MyAccount from './pages/MyAccount';
 import OnboardingPage from './pages/OnboardingPage';
-import { api } from './api/client';
+import { OnboardingRedirect } from './components/OnboardingRedirect';
 import { useInstanceTitle } from './hooks/useInstanceTitle';
 import { can } from './auth/permissions';
 
@@ -69,6 +71,12 @@ const PAGE_PERMISSIONS: Array<{ path: string; permission?: string | string[] }> 
   // Full-page rollout wizard — same read perm as the Networks page it lives on.
   { path: '/networks/rollout', permission: 'networks:read' },
   { path: '/hosts', permission: 'hosts:read' },
+  // Cross-device static DNS entry inventory (OPNsense/OpenWrt/RouterOS/LCOS).
+  { path: '/dns', permission: 'dns:read' },
+  // Full-page rollout wizard — same read perm as the DNS page it lives on.
+  { path: '/dns/rollout', permission: 'dns:read' },
+  // Cross-device DHCP inventory (server networks + static reservations).
+  { path: '/dhcp', permission: 'dhcp:read' },
   { path: '/documented-hosts', permission: 'documented-hosts:read' },
   // Full-page "import from live inventory" wizard — mutates documented rows, so it
   // is gated on the write perm (the endpoint requires documented-hosts:write).
@@ -125,6 +133,8 @@ const PAGE_PERMISSIONS: Array<{ path: string; permission?: string | string[] }> 
   // Global readers OR personal-area users (own secrets) may open the page.
   { path: '/secrets', permission: ['secrets:read', 'secrets:self-write'] },
   { path: '/plans', permission: 'plans:read' },
+  // ITTT-style automation rules (Actions & Schedules page).
+  { path: '/automations', permission: 'automations:read' },
   { path: '/plugins', permission: 'plugins:read' },
   { path: '/users', permission: 'users:read' },
   { path: '/roles', permission: 'users:write' },
@@ -153,26 +163,10 @@ function HomeRedirect() {
   return <Navigate to={target} replace />;
 }
 
-/**
- * First-run onboarding redirect: the seeded `admin` account is sent to the
- * setup wizard exactly once — when it has a session token, is not already on
- * /onboarding (or its login page), and `users.onboardedAt` is still NULL.
- * Completing or skipping the wizard stamps the flag, so this never fires again.
- */
-function OnboardingRedirect() {
-  const navigate = useNavigate();
-  const location = useLocation();
-  const meQuery = useQuery({ queryKey: ['me'], queryFn: api.me });
-
-  useEffect(() => {
-    if (!localStorage.getItem('accessToken')) return;
-    if (location.pathname === '/onboarding' || location.pathname.startsWith('/login')) return;
-    const me = meQuery.data;
-    if (me && me.username === 'admin' && !me.onboardedAt) navigate('/onboarding', { replace: true });
-  }, [meQuery.data, location.pathname, navigate]);
-
-  return null;
-}
+// First-run onboarding redirect (components/OnboardingRedirect.tsx): the seeded
+// `admin` account is sent to the setup wizard exactly once — when it has a session
+// token, is not already on /onboarding (or its login page), and users.onboardedAt
+// is still NULL. Completing or skipping the wizard stamps the flag.
 
 export default function App() {
   // Reflect the instance display name in the browser tab title on every page.
@@ -194,12 +188,19 @@ export default function App() {
       <Route path="/devices/:deviceId/config" element={<Page permission="devices:read"><DeviceConfig /></Page>} />
       <Route path="/plans" element={<Page permission="plans:read"><Plans /></Page>} />
       <Route path="/plans/:id" element={<Page permission="plans:read"><PlanDetail /></Page>} />
+      <Route path="/automations" element={<Page permission="automations:read"><Automations /></Page>} />
       <Route path="/plugins" element={<Page permission="plugins:read"><Plugins /></Page>} />
       <Route path="/sites" element={<Page permission="sites:read"><Sites /></Page>} />
       <Route path="/networks" element={<Page permission="networks:read"><Networks /></Page>} />
       {/* Full-page rollout wizard (replaces the old dialog) — same read perm as /networks. */}
       <Route path="/networks/rollout" element={<Page permission="networks:read"><NetworkRolloutPage /></Page>} />
       <Route path="/hosts" element={<Page permission="hosts:read"><Hosts /></Page>} />
+      {/* Cross-device static DNS entries — grouped by lowercase name. */}
+      <Route path="/dns" element={<Page permission="dns:read"><Dns /></Page>} />
+      {/* Full-page rollout wizard (same read perm as /dns). */}
+      <Route path="/dns/rollout" element={<Page permission="dns:read"><DnsRolloutPage /></Page>} />
+      {/* Cross-device DHCP inventory — server networks + static reservations. */}
+      <Route path="/dhcp" element={<Page permission="dhcp:read"><Dhcp /></Page>} />
       {/* User-maintained host documentation (permanent inventory + CSV import). */}
       <Route path="/documented-hosts" element={<Page permission="documented-hosts:read"><DocumentedHosts /></Page>} />
       {/* Full-page "import from live inventory" wizard (replaces the old modal) — write-gated. */}

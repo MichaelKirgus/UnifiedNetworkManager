@@ -32,6 +32,7 @@ import {
   StateRequestBody,
 } from './types';
 import { DeviceSupport } from './deviceSupport';
+import type { AutomationTemplate } from './automations';
 
 /** Extra /discover fields beyond the identity core (all optional). */
 export interface DiscoveryExtras {
@@ -62,8 +63,9 @@ export interface DiscoveryExtras {
   /** File-repo storage backends: backend kind (e.g. 'local-filesystem'). The API
    *  broker only needs the `fileRepo` capability on /discover; this field is
    *  informational for the webapp's repo picker. */
-  fileRepo?: Record<string, unknown>;
-}
+  fileRepo?: Record<string, unknown>;  /** Ready-made automation rule drafts (see automations.ts) — advertised in
+   *  /discover and served by GET /automations/templates alongside built-ins. */
+  automationTemplates?: AutomationTemplate[];}
 
 export interface PluginServerOptions {
   identity: PluginIdentity;
@@ -146,6 +148,9 @@ export function buildDiscoverPayload(identity: PluginIdentity, extras?: Discover
     ...(e.identityProvider !== undefined ? { identityProvider: e.identityProvider } : {}),
     ...(e.secretsProvider !== undefined ? { secretsProvider: e.secretsProvider } : {}),
     ...(e.fileRepo !== undefined ? { fileRepo: e.fileRepo } : {}),
+    ...(Array.isArray(e.automationTemplates) && e.automationTemplates.length > 0
+      ? { automationTemplates: e.automationTemplates }
+      : {}),
   };
 }
 

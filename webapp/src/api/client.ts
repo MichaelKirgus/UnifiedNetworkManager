@@ -1,4 +1,12 @@
-const BASE = import.meta.env.VITE_API_URL ?? 'http://localhost:3000/v1';
+// API base URL, baked in at build time (Vite inlines VITE_* at build).
+// - Unset → "/v1" (relative): the browser calls the API on the SAME origin as
+//   the webapp. This is the default for pre-built images and the recommended
+//   reverse-proxy layout — one public URL serves UI + API, no CORS needed, and
+//   rate limiting sees real client IPs via X-Forwarded-For (docs/REVERSE-PROXY.md).
+// - Absolute URL (e.g. http://localhost:3000/v1): cross-origin access, used by
+//   the dev setup where the vite server on :8080 talks to the host-run API on
+//   :3000. Set via VITE_API_URL at build time.
+const BASE = import.meta.env.VITE_API_URL || '/v1';
 
 /** API error that may carry per-field validation messages (e.g. plugin settings). */
 export class ApiError extends Error {
@@ -6,15 +14,18 @@ export class ApiError extends Error {
   /** Machine-readable error code when the API provides one (e.g. 'no_2fa_enrolled'). */
   code?: string;
   fieldErrors?: Record<string, string>;
+  /** Human-readable validation detail lines — present on e.g. automation draft rejections. */
+  details?: string[];
   /** Session-credential candidates — present on `credential_selection_required` errors. */
   candidates?: SessionCredentialCandidate[];
-  constructor(message: string, status: number, fieldErrors?: Record<string, string>, code?: string, candidates?: SessionCredentialCandidate[]) {
+  constructor(message: string, status: number, fieldErrors?: Record<string, string>, code?: string, candidates?: SessionCredentialCandidate[], details?: string[]) {
     super(message);
     this.name = 'ApiError';
     this.status = status;
     this.fieldErrors = fieldErrors;
     this.code = code;
     if (candidates) this.candidates = candidates;
+    if (details) this.details = details;
   }
 }
 
@@ -884,6 +895,18 @@ export interface MailAliasRow {
   collectedAt: string;
 }
 
+/** Which CVEs an update resolves — computed by the API from the fleet's advisory data. */
+export interface FixesSummary {
+  total: number;
+  critical: number;
+  high: number;
+  medium: number;
+  low: number;
+  unknown: number;
+  /** Highest-severity CVE ids first (capped) — for tooltips/links. */
+  topIds: string[];
+}
+
 /** One available update on one device, as reported by a plugin's `updates` metric. */
 export interface UpdateRow {
   deviceId: string;
@@ -912,7 +935,44 @@ export interface UpdateRow {
   /** Prefilled input for applyActionId. */
   applyInput?: Record<string, unknown>;
   extra?: Record<string, unknown>;
+  /** CVEs this update resolves (os-package rows with a known current+latest version only). */
+  fixesCves?: FixesSummary | null;
   collectedAt: string;
+}
+
+/** One installed package on one device that matches a known CVE advisory. */
+export interface CveVulnerabilityRow {
+  deviceId: string;
+  pluginId: string;
+  ecosystem: string;
+  packageName: string;
+  cveId: string;
+  /** Installed version of the affected package (null = unversioned, conservatively flagged). */
+  installedVersion?: string | null;
+  severityScore?: number | null;
+  severityRank: 'critical' | 'high' | 'medium' | 'low' | 'unknown';
+  summary?: string | null;
+  url?: string | null;
+  extra?: Record<string, unknown>;
+  collectedAt: string;
+  deviceName?: string | null;
+  managementAddress?: string | null;
+  siteName?: string | null;
+  pluginName?: string | null;
+}
+
+export interface CveVulnerabilitiesResponse {
+  rows: CveVulnerabilityRow[];
+}
+
+/** Fleet-wide CVE tracking status + severity distribution. */
+export interface CveSummaryResponse {
+  bySeverity: { critical: number; high: number; medium: number; low: number; unknown: number };
+  affectedDevices: number;
+  totalMatches: number;
+  lastAttemptAt?: string | null;
+  lastSuccessAt?: string | null;
+  lastError?: string | null;
 }
 
 /** The "UNM itself" card on the Updates page (stack self-update info). */
@@ -1504,6 +1564,86 @@ export interface RouteRow {
    * (OPNsense), rtgTag/peer/rawType (LCOS). */
   extra?: Record<string, unknown>;
   collectedAt: string;
+}
+
+// --- Static DNS entries (cross-device inventory, see GET /dns) -----------------
+
+/** One device+plugin instance that holds a static DNS entry. */
+export interface DnsDeviceMember {
+  deviceId: string;
+  pluginId: string;
+  /** The addresses THIS device holds for the name (drift is visible per chip). Record type per address is derived from its shape (v4 = A, v6 = AAAA). */
+  ips: string[];
+  /** Distinct non-empty domain suffixes configured on this device for the name (empty when the vendor has no separate field — e.g. only OPNsense unbound splits hostname + domain). */
+  domains?: string[];
+  /** Distinct non-empty notes configured on this device for the name. */
+  descriptions?: string[];
+  deviceName?: string | null;
+  managementAddress?: string | null;
+  siteName?: string | null;
+  /** Display name of the reporting plugin instance. */
+  pluginName?: string | null;
+}
+
+/** One static DNS name as presented by GET /dns — merged across devices.
+ * `name` is lowercase (the grouping key); an entry present on several devices
+ * carries one chip per device+plugin instance. */
+export interface DnsRow {
+  name: string;
+  /** All addresses of this name anywhere, IPv4 first. Record type per address is derived from its shape (v4 = A, v6 = AAAA). */
+  ips: string[];
+  /** Distinct non-empty domain suffixes for the name across all devices (empty when no device splits hostname + domain — only OPNsense unbound does). */
+  domains?: string[];
+  /** Distinct non-empty notes for the name across all devices. */
+  descriptions?: string[];
+  devices: DnsDeviceMember[];
+}
+
+// --- DHCP inventory (cross-device, see GET /dhcp) --------------------------------
+
+/** One configured DHCP server network/pool range on one device. */
+export interface DhcpNetworkRow {
+  deviceId: string;
+  pluginId: string;
+  name: string;
+  iface?: string | null;
+  rangeStart: string;
+  rangeEnd: string;
+  cidr?: string | null;
+  leaseTimeSeconds?: number | null;
+  gateway?: string | null;
+  dnsServers?: string | null;
+  /** Vendor-side row identity used for deletion (dnsmasq range uuid, Kea subnet id…). */
+  refId?: string | null;
+  deviceName?: string | null;
+  managementAddress?: string | null;
+  siteName?: string | null;
+  pluginName?: string | null;
+}
+
+/** One static DHCP reservation (MAC → fixed IP) on one device. */
+export interface DhcpReservationRow {
+  deviceId: string;
+  pluginId: string;
+  mac: string;
+  ip?: string | null;
+  hostname?: string | null;
+  /** Serving interface the mapping is scoped to (OPNsense staticmaps are per-interface). Null = not exposed. */
+  iface?: string | null;
+  /** Vendor-side row identity used for deletion (e.g. OPNsense uuid). Null = delete by MAC. */
+  refId?: string | null;
+  /** Vendor lease status when exposed (RouterOS 'bound'/'free') — badges live rows. */
+  status?: string | null;
+  deviceName?: string | null;
+  managementAddress?: string | null;
+  siteName?: string | null;
+  pluginName?: string | null;
+}
+
+/** Response of GET /dhcp — flat per-device rows (no cross-device merge). */
+export interface DhcpOverview {
+  networks: DhcpNetworkRow[];
+  reservations: DhcpReservationRow[];
 }
 
 /** One structured log entry emitted by a plugin (see GET /logs). */
@@ -2194,6 +2334,8 @@ export interface BackupManifest {
   instanceName?: string;
   buildTag?: string;
   scope: string;
+  /** True when the archive carries a passphrase-encrypted device-credentials envelope. */
+  secretsEncrypted?: boolean;
   sections: Record<string, { rowCount: number; tables: Record<string, number> }>;
 }
 
@@ -2227,6 +2369,8 @@ export interface SectionMergeReport {
   section: string;
   tables: TableMergeResult[];
   warnings: string[];
+  /** Set when this section failed and rolled back — the other sections still applied. */
+  error?: string;
 }
 
 /** A replication target row — the peer token is never returned. */
@@ -2955,10 +3099,21 @@ export interface ConsoleTicketResponse {
 /** Builds the browser-facing console WebSocket URL for one minted ticket.
  *  The API proxies it verbatim to the plugin's /console endpoint — binary frames
  *  are raw terminal I/O, text frames carry JSON control messages ({ type: 'ready' |
- *  'resize' | 'exit' | 'error', … }). */
+ *  'resize' | 'exit' | 'error', … }).
+ *
+ *  WebSocket URLs must be absolute (ws:// or wss://). When BASE is a relative
+ *  path (reverse-proxy / same-origin setup) the scheme + origin are derived from
+ *  window.location — https pages get wss, http pages get ws. */
 export function consoleSocketUrl(deviceId: string, ticket: string): string {
   const base = BASE.replace(/\/$/, '');
-  const wsBase = base.replace(/^http/i, 'ws');
+  let wsBase: string;
+  if (/^https?:/i.test(base)) {
+    wsBase = base.replace(/^http/i, 'ws');
+  } else {
+    // Relative BASE — same origin as the webapp (reverse proxy in front).
+    const loc = window.location;
+    wsBase = `${loc.protocol === 'https:' ? 'wss' : 'ws'}://${loc.host}${base}`;
+  }
   return `${wsBase}/devices/${encodeURIComponent(deviceId)}/console/ws?ticket=${encodeURIComponent(ticket)}`;
 }
 
@@ -3053,6 +3208,268 @@ export interface PlanDetail extends Plan {
   steps: PlanStep[];
 }
 
+// --- Automations (Actions & Schedules) ---------------------------------------
+
+/** Which devices a trigger/action applies to — any-rule-matches, empty = all. */
+export interface AutomationDeviceScope {
+  siteIds?: string[];
+  tags?: string[];
+  deviceIds?: string[];
+}
+
+export type AutomationScheduleSpec =
+  | { kind: 'cron'; expr: string }
+  | { kind: 'interval'; everyMinutes: number }
+  | { kind: 'dailyAt'; time: string }; // "HH:MM" (24h, server local)
+
+export interface AutomationScheduleTrigger { id: string; type: 'schedule'; schedule: AutomationScheduleSpec; }
+
+export const METRIC_COMPARATORS = ['>', '>=', '<', '<=', '=', '!='] as const;
+export type MetricComparator = (typeof METRIC_COMPARATORS)[number];
+
+export interface AutomationMetricTrigger {
+  id: string;
+  type: 'metric';
+  scope?: AutomationDeviceScope;
+  pluginId?: string;
+  metricKey: string;
+  mode: 'compare' | 'regex';
+  comparator?: MetricComparator;
+  value?: number | string;
+  pattern?: string;
+  /** Seconds the condition must hold before firing (0/absent = immediate). */
+  durationSec?: number;
+}
+
+export const LOG_LEVELS = ['debug', 'info', 'warn', 'error'] as const;
+export type LogLevel = (typeof LOG_LEVELS)[number];
+
+export interface AutomationLogTrigger {
+  id: string;
+  type: 'log';
+  source: 'plugin' | 'firewall';
+  scope?: AutomationDeviceScope;
+  pluginId?: string;
+  levels?: LogLevel[];
+  pattern: string;
+}
+
+export const DEVICE_STATUSES = ['unknown', 'online', 'degraded', 'critical', 'offline'] as const;
+export type DeviceStatusValue = (typeof DEVICE_STATUSES)[number];
+
+export interface AutomationDeviceStatusTrigger {
+  id: string;
+  type: 'deviceStatus';
+  scope?: AutomationDeviceScope;
+  toStatuses: DeviceStatusValue[];
+}
+
+/** Flow direction a flow trigger watches (either endpoint of an observed tuple). */
+export const FLOW_DIRECTIONS = ['any', 'src', 'dst'] as const;
+export type FlowDirectionValue = (typeof FLOW_DIRECTIONS)[number];
+
+/** Endpoint classification filter for flow triggers. */
+export const FLOW_CLASSES = ['internal', 'internet', 'unknown'] as const;
+export type FlowClassValue = (typeof FLOW_CLASSES)[number];
+
+/**
+ * Fires when network traffic observed by the flow collector crosses a threshold,
+ * measured over a sliding window of the aggregate tables. durationSec>0 requires
+ * the condition to hold continuously that long before firing.
+ */
+export interface AutomationFlowTrigger {
+  id: string;
+  type: 'flow';
+  scope?: AutomationDeviceScope;
+  direction?: FlowDirectionValue;
+  endpointClass?: FlowClassValue;
+  ip?: string;
+  /** Sliding window length in seconds (default 300). */
+  windowSec?: number;
+  comparator: MetricComparator;
+  thresholdBytes: number;
+  durationSec?: number;
+}
+
+/**
+ * Fires when NEW lines appear in a container's log output — the worker tails the
+ * app through the plugin's containers.logs.read action and dedupes against a
+ * persisted seen-line ring buffer. First run seeds without firing.
+ */
+export interface AutomationContainerLogTrigger {
+  id: string;
+  type: 'containerLog';
+  scope?: AutomationDeviceScope;
+  /** Plugin providing containers.logs.read (ix-truenas or docker). */
+  pluginId: string;
+  /** App / container name as shown on the Containers page. */
+  appName: string;
+  tail?: number;
+  pattern: string;
+}
+
+/**
+ * Fires on UPDATE transitions in device_updates (the Updates page's data): a row
+ * appearing, its version advancing, or the row disappearing. `condition` selects
+ * which transitions fire ('available' = appeared/advanced, 'resolved' = gone).
+ * `defer` holds each firing until the next occurrence of its schedule spec;
+ * `maxWaitHours` caps how long an event waits before firing immediately.
+ */
+export interface AutomationUpdateTrigger {
+  id: string;
+  type: 'updateAvailable';
+  scope?: AutomationDeviceScope;
+  pluginId?: string;
+  kinds?: string[];
+  names?: string[];
+  namePattern?: string;
+  condition: 'available' | 'resolved';
+  rebootRequired?: boolean;
+  defer?: { schedule: AutomationScheduleSpec; maxWaitHours?: number };
+}
+
+export type AutomationTriggerBlock =
+  | AutomationScheduleTrigger
+  | AutomationMetricTrigger
+  | AutomationLogTrigger
+  | AutomationDeviceStatusTrigger
+  | AutomationFlowTrigger
+  | AutomationContainerLogTrigger
+  | AutomationUpdateTrigger;
+
+/** Severity values for automation notification actions (same set as the notification center). */
+export const AUTOMATION_NOTIFICATION_SEVERITIES = ['info', 'warning', 'critical'] as const;
+export type AutomationNotificationSeverity = (typeof AUTOMATION_NOTIFICATION_SEVERITIES)[number];
+
+export interface AutomationIntentAction {
+  id: string;
+  type: 'intent';
+  /** Required unless resolveFromTrigger fills it at fire time. */
+  pluginId?: string;
+  /** Catalog action id (plugins.actionDescriptors). Required unless resolveFromTrigger fills it. */
+  actionId?: string;
+  devices: { scope?: AutomationDeviceScope; deviceIds?: string[] };
+  input?: Record<string, unknown>;
+  /** Fill pluginId/actionId/input from the firing update row's apply path (updateAvailable triggers only). */
+  resolveFromTrigger?: 'update';
+  /** Skip execution when the firing update row requires a reboot. */
+  requireNoReboot?: boolean;
+}
+
+export interface AutomationWebhookAction {
+  id: string;
+  type: 'webhook';
+  url: string;
+  method?: 'GET' | 'POST' | 'PUT' | 'PATCH';
+  headers?: Record<string, string>;
+  bodyTemplate?: string;
+}
+
+export interface AutomationNotificationAction {
+  id: string;
+  type: 'notification';
+  severity: AutomationNotificationSeverity;
+  titleTemplate: string;
+  messageTemplate: string;
+}
+
+export const BACKUP_PRESETS = ['config', 'planned', 'all'] as const;
+export type BackupPresetValue = (typeof BACKUP_PRESETS)[number];
+
+export interface AutomationInternalAction {
+  id: string;
+  type: 'internal';
+  kind: 'backup' | 'replicationSync';
+  preset?: BackupPresetValue;
+  sections?: string[];
+  destination?: 'local' | 'repo';
+  targetId?: string;
+}
+
+export type AutomationActionBlock =
+  | AutomationIntentAction
+  | AutomationWebhookAction
+  | AutomationNotificationAction
+  | AutomationInternalAction;
+
+/** Payload for POST /automations and PATCH /automations/:id. */
+export interface AutomationDraft {
+  name: string;
+  description?: string | null;
+  enabled?: boolean;
+  triggers: AutomationTriggerBlock[];
+  actions: AutomationActionBlock[];
+  cooldownSec?: number;
+}
+
+/** One ready-made rule draft from the template catalog (built-in or plugin-advertised). */
+export interface AutomationTemplate {
+  id: string;
+  name: string;
+  description?: string;
+  /** 'builtin' or the advertising plugin's id. */
+  source: string;
+  /** Display name of the source ('Built-in' for built-ins, else the plugin name). */
+  sourceName: string;
+  draft: AutomationDraft;
+}
+
+/** A rule as served by GET /automations (with computed next-run previews). */
+export interface Automation {
+  id: string;
+  name: string;
+  description?: string | null;
+  enabled: boolean;
+  triggers: AutomationTriggerBlock[];
+  actions: AutomationActionBlock[];
+  cooldownSec: number;
+  lastFiredAt: string | null;
+  createdBy?: string | null;
+  createdAt: string;
+  updatedAt: string;
+  /** triggerId → next ISO occurrence (schedule triggers only). */
+  schedulePreviews: Record<string, string | null>;
+  /** Earliest firing time across open deferral windows of deferred updateAvailable triggers (null = none pending). */
+  nextUpdateRun?: string | null;
+}
+
+/** One row of a rule's run history. */
+export interface AutomationRun {
+  id: string;
+  automationId: string;
+  firedAt: string;
+  triggerType: 'schedule' | 'metric' | 'log' | 'deviceStatus' | 'flow' | 'containerLog' | 'updateAvailable';
+  context: Record<string, unknown>;
+  /** 'skipped' = every action was deliberately skipped (e.g. requireNoReboot guard). */
+  status: 'succeeded' | 'failed' | 'partial' | 'skipped';
+  error?: string | null;
+  planIds: string[];
+}
+
+/** Predicted outcome of one action block in a dry run (nothing was executed). */
+export interface SimulatedAction {
+  id: string;
+  type: 'intent' | 'webhook' | 'notification' | 'internal';
+  /** would-run = would execute; skipped = deliberately skipped; error = would fail to resolve/build. */
+  status: 'would-run' | 'skipped' | 'error';
+  summary: string;
+  /** For intent actions that resolve cleanly — the exact plan a real apply would build (built then torn down). */
+  plan?: {
+    pluginId: string;
+    actionId: string;
+    deviceIds: string[];
+    steps: Array<{ stepIndex: number; deviceId: string; actionId: string }>;
+  };
+  detail?: string | null;
+}
+
+/** One simulated firing of a trigger block in a dry run. */
+export interface SimulatedFiring {
+  trigger: AutomationTriggerBlock;
+  label: string;
+  actions: SimulatedAction[];
+}
+
 function getToken(): string | null {
   return localStorage.getItem('accessToken');
 }
@@ -3072,12 +3489,14 @@ async function apiFetch<T>(path: string, opts?: RequestInit): Promise<T> {
     let fieldErrors: Record<string, string> | undefined;
     let code: string | undefined;
     let candidates: SessionCredentialCandidate[] | undefined;
+    let details: string[] | undefined;
     try {
       const body = await res.json();
       if (body?.error) message = body.error;
       if (body?.fieldErrors && typeof body.fieldErrors === 'object') fieldErrors = body.fieldErrors;
       if (typeof body?.code === 'string') code = body.code;
       if (Array.isArray(body?.candidates)) candidates = body.candidates as SessionCredentialCandidate[];
+      if (Array.isArray(body?.details) && body.details.every((d: unknown) => typeof d === 'string')) details = body.details as string[];
     } catch {
       // ignore body parse errors, fall back to generic message
     }
@@ -3089,7 +3508,7 @@ async function apiFetch<T>(path: string, opts?: RequestInit): Promise<T> {
       localStorage.removeItem('accessToken');
       window.location.assign('/login' + (code === 'user_disabled' ? '?reason=disabled' : ''));
     }
-    throw new ApiError(message, res.status, fieldErrors, code, candidates);
+    throw new ApiError(message, res.status, fieldErrors, code, candidates, details);
   }
   if (res.status === 204) {
     return undefined as T;
@@ -3498,6 +3917,22 @@ export const api = {
     const suffix = qs.toString() ? `?${qs.toString()}` : '';
     return apiFetch<RouteRow[]>(`/routes${suffix}`);
   },
+  /** Static DNS entries across devices, grouped by lowercase name. */
+  dns: (params?: { deviceId?: string; siteId?: string }) => {
+    const qs = new URLSearchParams();
+    if (params?.deviceId) qs.set('deviceId', params.deviceId);
+    if (params?.siteId) qs.set('siteId', params.siteId);
+    const suffix = qs.toString() ? `?${qs.toString()}` : '';
+    return apiFetch<DnsRow[]>(`/dns${suffix}`);
+  },
+  /** Configured DHCP networks + static reservations across devices. */
+  dhcp: (params?: { deviceId?: string; siteId?: string }) => {
+    const qs = new URLSearchParams();
+    if (params?.deviceId) qs.set('deviceId', params.deviceId);
+    if (params?.siteId) qs.set('siteId', params.siteId);
+    const suffix = qs.toString() ? `?${qs.toString()}` : '';
+    return apiFetch<DhcpOverview>(`/dhcp${suffix}`);
+  },
   wifi: (params?: { siteId?: string }) => {
     const qs = new URLSearchParams();
     if (params?.siteId) qs.set('siteId', params.siteId);
@@ -3597,8 +4032,10 @@ export const api = {
   backupMeta: () => apiFetch<BackupMeta>('/backups/meta'),
   /** Lists stored backups, newest first (enriched with destination state). */
   listBackups: () => apiFetch<{ backups: BackupEntry[] }>('/backups'),
-  /** Creates a backup into the local volume or a file-repo instance. */
-  createBackup: (body: { name?: string; preset?: string; sections?: string[]; destination: 'local' | 'repo'; providerId?: string }) =>
+  /** Creates a backup into the local volume or a file-repo instance.
+   * `passphrase` is required when sections contains 'secrets' — it encrypts the
+   * decrypted credentials into a portable envelope (never stored). */
+  createBackup: (body: { name?: string; preset?: string; sections?: string[]; destination: 'local' | 'repo'; providerId?: string; passphrase?: string }) =>
     apiFetch<{ backup: BackupEntry }>('/backups', { method: 'POST', body: JSON.stringify(body) }),
   /** Deletes a stored backup (metadata + bytes on its bound destination). */
   deleteBackup: (id: string) => apiFetch<void>(`/backups/${encodeURIComponent(id)}`, { method: 'DELETE' }),
@@ -3634,8 +4071,9 @@ export const api = {
     }
     return res.json() as Promise<{ pendingId: string; manifest: BackupManifest }>;
   },
-  /** Merge-applies a staged upload or stored backup (safe upsert-by-PK). */
-  applyBackupRestore: (body: { pendingId?: string; backupId?: string; sections?: string[] }) =>
+  /** Merge-applies a staged upload or stored backup (safe upsert-by-PK).
+   * `passphrase` unlocks the secrets envelope when the archive carries one. */
+  applyBackupRestore: (body: { pendingId?: string; backupId?: string; sections?: string[]; passphrase?: string }) =>
     apiFetch<{ report: SectionMergeReport[] }>('/backups/restore/apply', { method: 'POST', body: JSON.stringify(body) }),
   /** Discards a staged restore upload without applying. */
   discardPendingRestore: (pendingId: string) => apiFetch<void>(`/backups/restore/pending/${encodeURIComponent(pendingId)}`, { method: 'DELETE' }),
@@ -3668,6 +4106,22 @@ export const api = {
     const suffix = qs.toString() ? `?${qs.toString()}` : '';
     return apiFetch<SecurityChecksResponse>(`/security-checks${suffix}`);
   },
+  /** CVE matches on installed packages — one row per (device × package × advisory). */
+  cveVulnerabilities: (params?: { deviceId?: string; siteId?: string; severityRank?: 'critical' | 'high' | 'medium' | 'low' | 'unknown'; ecosystem?: string; q?: string }) => {
+    const qs = new URLSearchParams();
+    if (params?.deviceId) qs.set('deviceId', params.deviceId);
+    if (params?.siteId) qs.set('siteId', params.siteId);
+    if (params?.severityRank) qs.set('severityRank', params.severityRank);
+    if (params?.ecosystem) qs.set('ecosystem', params.ecosystem);
+    if (params?.q) qs.set('q', params.q);
+    const suffix = qs.toString() ? `?${qs.toString()}` : '';
+    return apiFetch<CveVulnerabilitiesResponse>(`/cve/vulnerabilities${suffix}`);
+  },
+  /** Fleet-wide CVE tracking status + severity distribution (Security page header). */
+  cveSummary: () => apiFetch<CveSummaryResponse>('/cve/summary'),
+  /** Run one advisory fetch cycle now — blocks ~3.5 min, so the UI must not await it inline. */
+  refreshCveAdvisories: () => apiFetch<{ lastAttemptAt?: string | null; lastSuccessAt?: string | null; lastError?: string }>(
+    '/cve/refresh', { method: 'POST' }),
   /** Physical + logical topology graph for the Topology page. */
   topology: (params?: { siteId?: string; includeHosts?: boolean; tags?: string[]; layer?: string; hostLimit?: number }) => {
     const qs = new URLSearchParams();
@@ -4028,4 +4482,32 @@ export const api = {
     apiFetch<{ setting: SettingView }>(`/settings/${encodeURIComponent(key)}`, { method: 'PUT', body: JSON.stringify({ value }) }),
   resetSetting: (key: string) =>
     apiFetch<{ setting: SettingView }>(`/settings/${encodeURIComponent(key)}`, { method: 'DELETE' }),
+  // Actions & Schedules (automation rules).
+  automations: () => apiFetch<{ automations: Automation[] }>('/automations'),
+  /** Template catalog — built-ins + plugin-advertised rule drafts. */
+  automationTemplates: () => apiFetch<{ templates: AutomationTemplate[] }>('/automations/templates'),
+  createAutomation: (body: AutomationDraft) =>
+    apiFetch<Automation>('/automations', { method: 'POST', body: JSON.stringify(body) }),
+  updateAutomation: (id: string, body: Partial<AutomationDraft>) =>
+    apiFetch<Automation>(`/automations/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify(body) }),
+  deleteAutomation: (id: string) =>
+    apiFetch<{ deleted: boolean }>(`/automations/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+  /** Manually trigger the rule now. mode "apply" runs for real against currently-available update rows; default is a wiring check. */
+  testAutomation: (id: string, opts?: { mode?: 'test' | 'apply' }) =>
+    apiFetch<{ run: AutomationRun; runs?: AutomationRun[] }>(`/automations/${encodeURIComponent(id)}/test`, { method: 'POST', body: JSON.stringify(opts?.mode ? { mode: opts.mode } : {}) }),
+  /** Simulate the rule without executing anything — predicts what a manual apply would do (zero side effects). */
+  dryRunAutomation: (id: string) =>
+    apiFetch<{ firings: SimulatedFiring[] }>(`/automations/${encodeURIComponent(id)}/dry-run`, { method: 'POST', body: JSON.stringify({}) }),
+  automationRuns: (id: string, limit = 50) =>
+    apiFetch<{ runs: AutomationRun[] }>(`/automations/${encodeURIComponent(id)}/runs?limit=${limit}`),
+  /** Upcoming occurrences of a schedule spec (builder "next runs" hint). */
+  previewSchedule: (kind: 'cron' | 'interval' | 'dailyAt', expr: string, count = 5) => {
+    // The OpenAPI validator rejects unencoded reserved chars — `*` must be %2A.
+    const fullEncode = (s: string) => encodeURIComponent(s).replace(/\*/g, '%2A');
+    return apiFetch<{ runs: string[] }>(`/automations/preview-schedule?kind=${kind}&expr=${fullEncode(expr)}&count=${count}`);
+  },
+  /** Dry-run a log trigger's pattern against recent logs (no firing, no state). */
+  testAutomationPattern: (body: { source: 'plugin' | 'firewall'; pluginId?: string; levels?: LogLevel[]; pattern: string }) =>
+    apiFetch<{ count: number; matches: Array<{ deviceId: string | null; message: string; axisValue: string | number }> }>(
+      '/automations/test-pattern', { method: 'POST', body: JSON.stringify(body) }),
 };

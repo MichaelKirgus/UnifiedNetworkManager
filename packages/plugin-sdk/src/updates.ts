@@ -571,6 +571,153 @@ export async function detectPackageManager(backend: UpdateExecBackend): Promise<
   return null;
 }
 
+// ---------------------------------------------------------------------------
+// Installed-package inventory (capability 'installedPackages' → CVE tracking)
+// ---------------------------------------------------------------------------
+
+/** One installed package as reported by a package manager. */
+export interface InstalledPackage {
+  name: string;
+  /** Exact installed version (dpkg epoch/revision, apk `-rN`, rpm `epoch:ver-rel`). */
+  version: string | null;
+}
+
+/** Result of an installed-package listing. */
+export interface InstalledPackagesResult {
+  /** The detected manager id ('apt' | 'dnf' | …); null when none was found. */
+  pm: string | null;
+  /** Ecosystem tag for the CVE worker — release-aware where it matters (apk →
+   *  `alpine:v3.19`, because OSV.dev's Alpine source is keyed per release). */
+  ecosystemTag: string | null;
+  packages: InstalledPackage[];
+}
+
+/** Splits "name-version" lines where the NAME may contain dashes but the VERSION
+ *  always starts with a digit (pacman `linux-firmware-20240207-1`, apk
+ *  `python3-pip-2.3.1-r0`). The boundary is the first `-` immediately followed by
+ *  a digit — name dashes are never followed by digits in these ecosystems. */
+function splitNameVersionLines(stdout: string): InstalledPackage[] {
+  const out: InstalledPackage[] = [];
+  for (const line of stdout.split('\n')) {
+    const m = line.trim().match(/^([^\s-][\w.+:-]*?)-(\d[\w.+:-]*)$/);
+    if (m) out.push({ name: m[1], version: m[2] });
+  }
+  return out;
+}
+
+/** Per-manager "list ALL installed packages with exact versions" commands.
+ *  Deliberately separate from listUpgradable — CVE matching needs the FULL set,
+ *  not just what has an update available. */
+const INSTALLED_LISTERS: Record<string, { cmd(): string; parse(stdout: string): InstalledPackage[] }> = {
+  // dpkg-query is the stable machine-readable form (apt's own listing output
+  // varies by locale/version). '|' can't appear in a package name.
+  apt: {
+    cmd: () => "dpkg-query -W -f='${Package}|${Version}\\n' 2>/dev/null || true",
+    parse(stdout) {
+      const out: InstalledPackage[] = [];
+      for (const line of stdout.split('\n')) {
+        const i = line.indexOf('|');
+        if (i <= 0) continue;
+        const name = line.slice(0, i).trim();
+        const version = line.slice(i + 1).trim();
+        if (name && version) out.push({ name, version });
+      }
+      return out;
+    },
+  },
+  dnf: {
+    // %{EPOCH:%{VERSION}}-%{RELEASE} → "1:2.34-5" when an epoch is set, else plain.
+    cmd: () => 'rpm -q --queryformat "%{NAME}\\t%{EPOCH:%{VERSION}}-%{RELEASE}\\n" 2>/dev/null || true',
+    parse(stdout) {
+      const out: InstalledPackage[] = [];
+      for (const line of stdout.split('\n')) {
+        const i = line.indexOf('\t');
+        if (i <= 0) continue;
+        const name = line.slice(0, i).trim();
+        const version = line.slice(i + 1).trim();
+        if (name && version) out.push({ name, version });
+      }
+      return out;
+    },
+  },
+  yum: { cmd: () => INSTALLED_LISTERS.dnf.cmd(), parse: (s) => INSTALLED_LISTERS.dnf.parse(s) },
+  pacman: {
+    // "name-version" — names may contain dashes, versions start with a digit.
+    cmd: () => 'pacman -Q 2>/dev/null || true',
+    parse(stdout) { return splitNameVersionLines(stdout); },
+  },
+  apk: {
+    // "name-version-rN" — same name/version boundary rule as pacman.
+    cmd: () => 'apk info -v 2>/dev/null || true',
+    parse(stdout) { return splitNameVersionLines(stdout); },
+  },
+};
+
+/** Reads the Alpine release line ("3.19") from /etc/alpine-release; null on failure. */
+export async function readAlpineRelease(backend: UpdateExecBackend): Promise<string | null> {
+  try {
+    const r = await backend.exec('cat /etc/alpine-release 2>/dev/null || true');
+    const m = (r.stdout ?? '').trim().match(/(\d+\.\d+)/);
+    return m ? m[1] : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Lists ALL installed packages with their exact versions over SSH. Uses the
+ * same manager detection as the Updates page, then runs that manager's full
+ * listing (dpkg-query / rpm -q / pacman -Q / apk info). Returns `pm: null` and
+ * no packages when nothing is recognized (e.g. NixOS) — callers must treat
+ * that as "no data" (omit the metric key), NOT as an authoritative empty list.
+ * Never throws; a failed exec yields pm + empty packages so the caller can log.
+ */
+export async function listInstalledPackages(backend: UpdateExecBackend): Promise<InstalledPackagesResult> {
+  const ids = await readOsReleaseIds(backend); // one shared round-trip (detection re-probes commands only)
+  if (ids.length > 0) {
+    for (const adapter of PACKAGE_MANAGER_ADAPTERS) {
+      if (adapter.distros.some((d) => ids.includes(d))) return listWithAdapter(backend, adapter, ids);
+    }
+  }
+  for (const adapter of PACKAGE_MANAGER_ADAPTERS) {
+    if (await adapter.detect(backend)) return listWithAdapter(backend, adapter, ids);
+  }
+  return { pm: null, ecosystemTag: null, packages: [] };
+}
+
+/** Runs one manager's full listing and derives the CVE-worker ecosystem tag. */
+async function listWithAdapter(
+  backend: UpdateExecBackend,
+  adapter: PmAdapter,
+  osIds: string[],
+): Promise<InstalledPackagesResult> {
+  // The tag is what the API maps onto OSV.dev sources — it must be the DISTRO,
+  // not the manager (apt serves both Debian and Ubuntu; OSV keys them together
+  // but the tag stays honest). apk needs a RELEASE-SPECIFIC tag (alpine:v3.19):
+  // OSV's Alpine source is keyed per release and plain "Alpine" matches nothing
+  // for versioned queries (live-verified 2026-10).
+  let ecosystemTag: string;
+  if (adapter.id === 'apk') {
+    const rel = await readAlpineRelease(backend);
+    ecosystemTag = rel ? `alpine:v${rel}` : 'alpine';
+  } else {
+    ecosystemTag = osIds[0] ?? adapter.id; // most-specific ID first, manager id as last resort
+  }
+
+  try {
+    const r = await backend.exec(INSTALLED_LISTERS[adapter.id].cmd());
+    if (r.code !== 0) return { pm: adapter.id, ecosystemTag, packages: [] };
+    // One row per name — a package can't be installed twice under one manager.
+    const byName = new Map<string, InstalledPackage>();
+    for (const p of INSTALLED_LISTERS[adapter.id].parse(r.stdout)) {
+      if (!byName.has(p.name)) byName.set(p.name, p);
+    }
+    return { pm: adapter.id, ecosystemTag, packages: [...byName.values()] };
+  } catch {
+    return { pm: adapter.id, ecosystemTag, packages: [] };
+  }
+}
+
 export interface SshUpdatesOptions {
   /** Catalog action id applied per package row (omit → rows without Update button). */
   applyActionId?: string;

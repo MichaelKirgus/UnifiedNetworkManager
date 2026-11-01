@@ -28,9 +28,11 @@ export async function reloadService(ssh: SshBackend, name: string): Promise<void
   await ssh.exec(`/etc/init.d/${name} restart >/dev/null 2>&1 || /etc/init.d/${name} enable >/dev/null 2>&1 || true`).catch(() => undefined);
 }
 
-/** Standard success result with details. */
-export function okResult(details?: Record<string, unknown>): ActionResult {
-  return { success: true, applied: true, verified: false, ...(details ? { details } : {}) };
+/** Standard success result with details. `verified` is TOP-LEVEL on
+ * ActionResult (SDK contract) — the plan executor reads it to decide
+ * succeeded vs unverified; default false = applied but not confirmed. */
+export function okResult(details?: Record<string, unknown>, verified = false): ActionResult {
+  return { success: true, applied: true, verified, ...(details ? { details } : {}) };
 }
 
 /** Standard failure result. */
