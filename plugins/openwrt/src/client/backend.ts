@@ -549,6 +549,122 @@ export class Backend {
     return rows;
   }
 
+  /** Configured DHCP server ranges + static reservations (uci dhcp) → DHCP page.
+   * Ranges live on the per-interface `dhcp_config` sections in TWO forms:
+   *   - stock OpenWrt: `.option start <offset>` + `.option limit <count|end-ip>` —
+   *     RELATIVE to the subnet base, resolved against the interface's own network
+   *     (live rows first, uci network as fallback); a `limit` that is NOT a full
+   *     IPv4 address is treated as a pool SIZE.
+   *   - explicit: `.option='start end'` — two absolute IPv4s in one field.
+   * Lease time is `.lease_time`; the gateway (`.gateway`) rides along when set.
+   * Statics are the same @host/@map sections dnsEntries() reads. null when no SSH
+   * path or read failed — load-bearing: an absent key never wipes stored rows. */
+  async dhcpConfig(): Promise<{ networks: Record<string, unknown>[] | null; reservations: Record<string, unknown>[] | null }> {
+    if (!this.sshBackend) return { networks: null, reservations: null };
+    // One round-trip for BOTH packages — the network tree is needed to resolve
+    // stock-form offsets against each interface's subnet base. An empty map means
+    // the SSH transport itself failed → null (keep stored rows).
+    const uciSections = await this.sshBackend.runSections([
+      { name: 'dhcp', cmd: 'uci show dhcp 2>/dev/null || true' },
+      { name: 'network', cmd: 'uci show network 2>/dev/null || true' },
+    ]).catch(() => new Map<string, string>());
+    const dhcpOut = uciSections.get('dhcp');
+    if (dhcpOut === undefined) return { networks: null, reservations: null };
+    const tree = parseUciShow(dhcpOut);
+    const netTree = parseUciShow(uciSections.get('network') ?? '');
+
+    // Subnet base + broadcast per interface name — live rows first (authoritative),
+    // uci network as fallback for interfaces the dump didn't surface. The broadcast
+    // matters: dnsmasq's default pool END is the subnet broadcast when `limit` is unset.
+    const [liveRows] = await Promise.all([this.networks().catch(() => [] as NetworkRow[])]);
+    const bases = new Map<string, { base: number; broadcast: number }>();
+    for (const row of liveRows) {
+      if (row.version !== 'v4' || !row.ip || row.prefix === null || row.prefix === undefined) continue;
+      const ip = ipToNum(row.ip);
+      const mask = prefixMask(row.prefix);
+      if (Number.isNaN(ip) || Number.isNaN(mask)) continue;
+      bases.set(row.name, { base: (ip & mask) >>> 0, broadcast: (~mask >>> 0 | ip) >>> 0 });
+    }
+    for (const [key, options] of Object.entries(netTree['network'] ?? {})) {
+      if (bases.has(key)) continue;
+      const ipaddr = uciOpt(options, 'ipaddr');
+      if (!ipaddr) continue;
+      // Modern OpenWrt: `ipaddr='192.168.x.y/24'` carries the prefix itself and
+      // has NO separate netmask option — only require a netmask for bare quads.
+      const netmask = uciOpt(options, 'netmask') ?? uciOpt(options, 'netmasklen');
+      if (!ipaddr.includes('/') && !netmask) continue;
+      const resolved = subnetBaseAndBroadcastFromUci(ipaddr, netmask);
+      if (resolved) bases.set(key, resolved);
+    }
+
+    const sections = tree['dhcp'] ?? {};
+    const networks: Record<string, unknown>[] = [];
+    const reservations: Record<string, unknown>[] = [];
+    for (const [key, options] of Object.entries(sections)) {
+      if (key.startsWith('@host[') || key.startsWith('@map[')) {
+        const mac = uciOpt(options, 'mac');
+        const ip = uciOpt(options, 'ip');
+        const hostname = uciOpt(options, 'name') ?? uciOpt(options, 'hostname');
+        if (mac) reservations.push({ mac: mac.toLowerCase(), ...(ip ? { ip } : {}), ...(hostname ? { hostname } : {}) });
+        continue;
+      }
+      // Explicit absolute range in one field ("start end") wins over the stock form.
+      // uci list values land as option[0]/option[1] — accept both shapes.
+      const option = uciOpt(options, 'option') ?? uciOpt(options, 'option[0]');
+      let start: number | null = null;
+      let end: number | null = null;
+      if (option) {
+        const parts = option.trim().split(/\s+/);
+        if (parts.length >= 2 && /^\d{1,3}(\.\d{1,3}){3}$/.test(parts[0]) && /^\d{1,3}(\.\d{1,3}){3}$/.test(parts[parts.length - 1])) {
+          start = ipToNum(parts[0]);
+          end = ipToNum(parts[parts.length - 1]);
+        } else if (parts.length === 1 && /^\d{1,3}(\.\d{1,3}){3}$/.test(parts[0])) {
+          // List form: option[0]=start, option[1]=end.
+          const endPart = uciOpt(options, 'option[1]');
+          if (endPart && /^\d{1,3}(\.\d{1,3}){3}$/.test(endPart.trim())) {
+            start = ipToNum(parts[0]);
+            end = ipToNum(endPart.trim());
+          }
+        }
+      }
+      if (start === null || end === null) {
+        // Stock form: offsets relative to the subnet base. `limit` is a pool SIZE
+        // (dnsmasq semantics — stock default start=100 limit=150 → .100–.249),
+        // unless it parses as a full IPv4 address (then an absolute end). No limit
+        // at all → dnsmasq defaults the pool to the subnet broadcast.
+        const startRaw = uciOpt(options, 'start');
+        if (!startRaw) continue;
+        const sub = bases.get(key);
+        if (!sub) continue; // can't resolve the offset — skip this section
+        const s = Number(startRaw.trim());
+        if (!Number.isFinite(s)) continue;
+        start = (sub.base + Math.round(s)) >>> 0;
+        const limitRaw = uciOpt(options, 'limit');
+        if (limitRaw && /^\d{1,3}(\.\d{1,3}){3}$/.test(limitRaw.trim())) {
+          end = ipToNum(limitRaw.trim());
+        } else if (limitRaw) {
+          const l = Number(limitRaw.trim());
+          if (!Number.isFinite(l)) continue;
+          end = (start + Math.round(l) - 1) >>> 0; // size → last address of the pool
+        } else {
+          end = sub.broadcast; // dnsmasq default: pool runs to the broadcast
+        }
+      }
+      // Lease time: `leasetime` is the stock option name; accept `lease_time` too.
+      const leaseTimeSeconds = parseLeaseTimeOption(uciOpt(options, 'leasetime') ?? uciOpt(options, 'lease_time'));
+      const gateway = uciOpt(options, 'gateway');
+      networks.push({
+        name: key,
+        interface: null,
+        rangeStart: numToIp(start),
+        rangeEnd: numToIp(end ?? start),
+        ...(gateway ? { gateway } : {}),
+        ...(leaseTimeSeconds !== null ? { leaseTimeSeconds } : {}),
+      });
+    }
+    return { networks, reservations };
+  }
+
   /** Routes — LuCI mode derives from the interface dump; SSH uses `ip route`. */
   async routes(): Promise<RouteRow[]> {
     if (this.luciClient) {
@@ -739,11 +855,13 @@ export class Backend {
 
   /** Full inventory snapshot (15-min cadence). */
   async collectInventory(certificates: CertificateRow[]): Promise<InventorySnapshot> {
-    const [board, networks, neighborsRes, leases, dnsEntries, routes, tunnels, wifi, firewall, services, filesystems] = await Promise.all([
+    const [board, networks, neighborsRes, leases, dhcpConfig, dnsEntries, routes, tunnels, wifi, firewall, services, filesystems] = await Promise.all([
       this.boardInfo().catch(() => null),
       this.networks().catch(() => [] as NetworkRow[]),
       this.neighbors().catch(() => ({ arp: [], ndp: [] })),
       this.dhcpLeases().catch(() => [] as HostRow[]),
+      // null on failure — load-bearing (absent key never wipes stored rows).
+      this.dhcpConfig(),
       // null on failure — load-bearing (absent key never wipes stored rows).
       this.dnsEntries(),
       this.routes().catch(() => [] as RouteRow[]),
@@ -761,6 +879,8 @@ export class Backend {
       arp: neighborsRes.arp,
       ndp: neighborsRes.ndp,
       dhcpLeases: leases,
+      dhcpNetworks: dhcpConfig.networks,
+      dhcpReservations: dhcpConfig.reservations,
       dnsEntries,
       routes,
       tunnels,
@@ -866,6 +986,72 @@ function str(v: unknown): string | undefined {
 function num(v: unknown): number | null {
   const n = typeof v === 'number' ? v : Number(v);
   return Number.isFinite(n) ? n : null;
+}
+
+/** IPv4 dotted-quad → unsigned 32-bit int (NaN when not a valid address). */
+function ipToNum(ip: string): number {
+  const m = ip.trim().match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+  if (!m) return NaN;
+  let n = 0;
+  for (let i = 1; i <= 4; i++) {
+    const octet = Number(m[i]);
+    if (octet > 255) return NaN;
+    n = n * 256 + octet;
+  }
+  return n >>> 0;
+}
+
+/** Unsigned 32-bit int → IPv4 dotted-quad. */
+function numToIp(n: number): string {
+  const v = Math.round(n) >>> 0;
+  return `${(v >>> 24) & 255}.${(v >>> 16) & 255}.${(v >>> 8) & 255}.${v & 255}`;
+}
+
+/** CIDR prefix → network mask (NaN for out-of-range prefixes). */
+function prefixMask(prefix: number): number {
+  if (!Number.isInteger(prefix) || prefix < 1 || prefix > 32) return NaN;
+  return (0xFFFFFFFF << (32 - prefix)) >>> 0;
+}
+
+/** Subnet base + broadcast from a uci network section's ipaddr + netmask.
+ * Modern OpenWrt stores `ipaddr='192.168.x.y/24'` (CIDR, no separate netmask);
+ * older builds use a bare dotted quad + `netmask` (dotted or /len). Handle both:
+ * the prefix may ride on ipaddr OR on netmask. */
+function subnetBaseAndBroadcastFromUci(ipaddrRaw: string, netmaskRaw?: string): { base: number; broadcast: number } | null {
+  const addr = ipaddrRaw.trim();
+  // Split an embedded CIDR prefix off the address first.
+  const cidrM = addr.match(/^(\d{1,3}(?:\.\d{1,3}){3})\/(\d{1,2})$/);
+  const bareIp = cidrM ? cidrM[1] : addr;
+  let prefix: number | null = cidrM ? Number(cidrM[2]) : null;
+  // A separate netmask may still carry the prefix (older builds).
+  if (prefix === null && netmaskRaw) {
+    const nm = netmaskRaw.trim();
+    const lenM = nm.match(/^\/?(\d{1,2})$/);
+    if (lenM) prefix = Number(lenM[1]);
+    else {
+      // Dotted mask — validate it is contiguous before using it. A contiguous
+      // mask's inverse is of the form 2^k-1, so k = log2(inv+1) and prefix=32-k.
+      const m = ipToNum(nm);
+      if (!Number.isNaN(m)) {
+        const inv = (~m) >>> 0;
+        if ((inv & (inv + 1)) === 0) prefix = 32 - Math.log2(inv + 1);
+      }
+    }
+  }
+  if (prefix === null) return null;
+  const mask = prefixMask(prefix);
+  const ip = ipToNum(bareIp);
+  if (Number.isNaN(ip) || Number.isNaN(mask)) return null;
+  return { base: (ip & mask) >>> 0, broadcast: (~mask >>> 0 | ip) >>> 0 };
+}
+
+/** Parses a dnsmasq-style lease-time option ("60m", "2h", "1d", bare seconds). */
+function parseLeaseTimeOption(raw: string | undefined): number | null {
+  if (!raw) return null;
+  const m = raw.trim().match(/^(\d+)([smhd])?$/);
+  if (!m) return null;
+  const mult = { s: 1, m: 60, h: 3_600, d: 86_400 }[m[2] ?? 's'] ?? 1;
+  return Number(m[1]) * mult;
 }
 
 /** Parses `ubus call network interface dump` → NetworkRow[]. */

@@ -163,6 +163,11 @@ export async function collectMonitoring(
     if (inventory.arp.length > 0) metrics['arp'] = inventory.arp;
     if (inventory.ndp.length > 0) metrics['ndp'] = inventory.ndp;
     if (inventory.dhcpLeases.length > 0) metrics['dhcpLeases'] = inventory.dhcpLeases;
+    // Configured DHCP networks + static reservations for the cross-device DHCP page.
+    // ALWAYS emitted when the read succeeded (even empty: an authoritative wipe),
+    // omitted on failure (null → keep previous rows).
+    if (Array.isArray(inventory.dhcpNetworks)) metrics['dhcpNetworks'] = inventory.dhcpNetworks;
+    if (Array.isArray(inventory.dhcpReservations)) metrics['dhcpReservations'] = inventory.dhcpReservations;
     // Static DNS entries — ALWAYS emitted when the read succeeded (even empty:
     // an authoritative wipe), omitted on failure (null → keep previous rows).
     if (Array.isArray(inventory.dnsEntries)) metrics['dnsEntries'] = inventory.dnsEntries;

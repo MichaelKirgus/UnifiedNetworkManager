@@ -1599,6 +1599,53 @@ export interface DnsRow {
   devices: DnsDeviceMember[];
 }
 
+// --- DHCP inventory (cross-device, see GET /dhcp) --------------------------------
+
+/** One configured DHCP server network/pool range on one device. */
+export interface DhcpNetworkRow {
+  deviceId: string;
+  pluginId: string;
+  name: string;
+  iface?: string | null;
+  rangeStart: string;
+  rangeEnd: string;
+  cidr?: string | null;
+  leaseTimeSeconds?: number | null;
+  gateway?: string | null;
+  dnsServers?: string | null;
+  /** Vendor-side row identity used for deletion (dnsmasq range uuid, Kea subnet id…). */
+  refId?: string | null;
+  deviceName?: string | null;
+  managementAddress?: string | null;
+  siteName?: string | null;
+  pluginName?: string | null;
+}
+
+/** One static DHCP reservation (MAC → fixed IP) on one device. */
+export interface DhcpReservationRow {
+  deviceId: string;
+  pluginId: string;
+  mac: string;
+  ip?: string | null;
+  hostname?: string | null;
+  /** Serving interface the mapping is scoped to (OPNsense staticmaps are per-interface). Null = not exposed. */
+  iface?: string | null;
+  /** Vendor-side row identity used for deletion (e.g. OPNsense uuid). Null = delete by MAC. */
+  refId?: string | null;
+  /** Vendor lease status when exposed (RouterOS 'bound'/'free') — badges live rows. */
+  status?: string | null;
+  deviceName?: string | null;
+  managementAddress?: string | null;
+  siteName?: string | null;
+  pluginName?: string | null;
+}
+
+/** Response of GET /dhcp — flat per-device rows (no cross-device merge). */
+export interface DhcpOverview {
+  networks: DhcpNetworkRow[];
+  reservations: DhcpReservationRow[];
+}
+
 /** One structured log entry emitted by a plugin (see GET /logs). */
 export interface LogEntry {
   id: string;
@@ -2287,6 +2334,8 @@ export interface BackupManifest {
   instanceName?: string;
   buildTag?: string;
   scope: string;
+  /** True when the archive carries a passphrase-encrypted device-credentials envelope. */
+  secretsEncrypted?: boolean;
   sections: Record<string, { rowCount: number; tables: Record<string, number> }>;
 }
 
@@ -2320,6 +2369,8 @@ export interface SectionMergeReport {
   section: string;
   tables: TableMergeResult[];
   warnings: string[];
+  /** Set when this section failed and rolled back — the other sections still applied. */
+  error?: string;
 }
 
 /** A replication target row — the peer token is never returned. */
@@ -3378,6 +3429,8 @@ export interface Automation {
   updatedAt: string;
   /** triggerId → next ISO occurrence (schedule triggers only). */
   schedulePreviews: Record<string, string | null>;
+  /** Earliest firing time across open deferral windows of deferred updateAvailable triggers (null = none pending). */
+  nextUpdateRun?: string | null;
 }
 
 /** One row of a rule's run history. */
@@ -3391,6 +3444,30 @@ export interface AutomationRun {
   status: 'succeeded' | 'failed' | 'partial' | 'skipped';
   error?: string | null;
   planIds: string[];
+}
+
+/** Predicted outcome of one action block in a dry run (nothing was executed). */
+export interface SimulatedAction {
+  id: string;
+  type: 'intent' | 'webhook' | 'notification' | 'internal';
+  /** would-run = would execute; skipped = deliberately skipped; error = would fail to resolve/build. */
+  status: 'would-run' | 'skipped' | 'error';
+  summary: string;
+  /** For intent actions that resolve cleanly — the exact plan a real apply would build (built then torn down). */
+  plan?: {
+    pluginId: string;
+    actionId: string;
+    deviceIds: string[];
+    steps: Array<{ stepIndex: number; deviceId: string; actionId: string }>;
+  };
+  detail?: string | null;
+}
+
+/** One simulated firing of a trigger block in a dry run. */
+export interface SimulatedFiring {
+  trigger: AutomationTriggerBlock;
+  label: string;
+  actions: SimulatedAction[];
 }
 
 function getToken(): string | null {
@@ -3848,6 +3925,14 @@ export const api = {
     const suffix = qs.toString() ? `?${qs.toString()}` : '';
     return apiFetch<DnsRow[]>(`/dns${suffix}`);
   },
+  /** Configured DHCP networks + static reservations across devices. */
+  dhcp: (params?: { deviceId?: string; siteId?: string }) => {
+    const qs = new URLSearchParams();
+    if (params?.deviceId) qs.set('deviceId', params.deviceId);
+    if (params?.siteId) qs.set('siteId', params.siteId);
+    const suffix = qs.toString() ? `?${qs.toString()}` : '';
+    return apiFetch<DhcpOverview>(`/dhcp${suffix}`);
+  },
   wifi: (params?: { siteId?: string }) => {
     const qs = new URLSearchParams();
     if (params?.siteId) qs.set('siteId', params.siteId);
@@ -3947,8 +4032,10 @@ export const api = {
   backupMeta: () => apiFetch<BackupMeta>('/backups/meta'),
   /** Lists stored backups, newest first (enriched with destination state). */
   listBackups: () => apiFetch<{ backups: BackupEntry[] }>('/backups'),
-  /** Creates a backup into the local volume or a file-repo instance. */
-  createBackup: (body: { name?: string; preset?: string; sections?: string[]; destination: 'local' | 'repo'; providerId?: string }) =>
+  /** Creates a backup into the local volume or a file-repo instance.
+   * `passphrase` is required when sections contains 'secrets' — it encrypts the
+   * decrypted credentials into a portable envelope (never stored). */
+  createBackup: (body: { name?: string; preset?: string; sections?: string[]; destination: 'local' | 'repo'; providerId?: string; passphrase?: string }) =>
     apiFetch<{ backup: BackupEntry }>('/backups', { method: 'POST', body: JSON.stringify(body) }),
   /** Deletes a stored backup (metadata + bytes on its bound destination). */
   deleteBackup: (id: string) => apiFetch<void>(`/backups/${encodeURIComponent(id)}`, { method: 'DELETE' }),
@@ -3984,8 +4071,9 @@ export const api = {
     }
     return res.json() as Promise<{ pendingId: string; manifest: BackupManifest }>;
   },
-  /** Merge-applies a staged upload or stored backup (safe upsert-by-PK). */
-  applyBackupRestore: (body: { pendingId?: string; backupId?: string; sections?: string[] }) =>
+  /** Merge-applies a staged upload or stored backup (safe upsert-by-PK).
+   * `passphrase` unlocks the secrets envelope when the archive carries one. */
+  applyBackupRestore: (body: { pendingId?: string; backupId?: string; sections?: string[]; passphrase?: string }) =>
     apiFetch<{ report: SectionMergeReport[] }>('/backups/restore/apply', { method: 'POST', body: JSON.stringify(body) }),
   /** Discards a staged restore upload without applying. */
   discardPendingRestore: (pendingId: string) => apiFetch<void>(`/backups/restore/pending/${encodeURIComponent(pendingId)}`, { method: 'DELETE' }),
@@ -4404,9 +4492,12 @@ export const api = {
     apiFetch<Automation>(`/automations/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify(body) }),
   deleteAutomation: (id: string) =>
     apiFetch<{ deleted: boolean }>(`/automations/${encodeURIComponent(id)}`, { method: 'DELETE' }),
-  /** Run the rule's actions once now (verify wiring before relying on it). */
-  testAutomation: (id: string) =>
-    apiFetch<{ run: AutomationRun }>(`/automations/${encodeURIComponent(id)}/test`, { method: 'POST' }),
+  /** Manually trigger the rule now. mode "apply" runs for real against currently-available update rows; default is a wiring check. */
+  testAutomation: (id: string, opts?: { mode?: 'test' | 'apply' }) =>
+    apiFetch<{ run: AutomationRun; runs?: AutomationRun[] }>(`/automations/${encodeURIComponent(id)}/test`, { method: 'POST', body: JSON.stringify(opts?.mode ? { mode: opts.mode } : {}) }),
+  /** Simulate the rule without executing anything — predicts what a manual apply would do (zero side effects). */
+  dryRunAutomation: (id: string) =>
+    apiFetch<{ firings: SimulatedFiring[] }>(`/automations/${encodeURIComponent(id)}/dry-run`, { method: 'POST', body: JSON.stringify({}) }),
   automationRuns: (id: string, limit = 50) =>
     apiFetch<{ runs: AutomationRun[] }>(`/automations/${encodeURIComponent(id)}/runs?limit=${limit}`),
   /** Upcoming occurrences of a schedule spec (builder "next runs" hint). */

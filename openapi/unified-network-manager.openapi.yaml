@@ -4712,6 +4712,51 @@ paths:
         '401':
           description: Authentication required
 
+  /dhcp:
+    get:
+      tags: [Inventory]
+      summary: List configured DHCP networks + static reservations across devices
+      description: >-
+        Cross-device view of the normalized `device_dhcp_networks` and
+        `device_dhcp_reservations` inventory tables, populated by the telemetry
+        worker from each dhcp-capable plugin's server configuration (RouterOS
+        /ip/pool + /ip/dhcp-server/network, OPNsense Kea subnets or dnsmasq
+        ranges, OpenWrt uci dhcp .option=range). Rows are upserted per poll;
+        rows not refreshed within the stale window are swept away. Response is
+        `{ networks: [...], reservations: [...] }` — flat per-device rows (no
+        cross-device merge). Live leases are NOT here — they live in /hosts
+        (source 'dhcp').
+      parameters:
+        - in: query
+          name: deviceId
+          required: false
+          schema: { type: string }
+          description: Filter to one device
+        - in: query
+          name: siteId
+          required: false
+          schema: { type: string }
+          description: Filter to devices belonging to a site
+      responses:
+        '200':
+          description: DHCP network + reservation rows (device + plugin identity included)
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [networks, reservations]
+                properties:
+                  networks:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/DhcpNetworkRow'
+                  reservations:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/DhcpReservationRow'
+        '401':
+          description: Authentication required
+
   /documented-hosts:
     get:
       tags: [Inventory]
@@ -7703,7 +7748,7 @@ paths:
         required: true
         content:
           application/json:
-            schema: { $ref: '#/components/schemas/AutomationDraft' }
+            schema: { $ref: '#/components/schemas/AutomationDraftPatch' }
       responses:
         '200':
           description: The updated rule
@@ -7740,12 +7785,28 @@ paths:
   /automations/{id}/test:
     post:
       tags: [Automations]
-      summary: Run the rule's actions once now (verify wiring before relying on it)
+      summary: Manually trigger the rule now (wiring check, or apply currently-available updates)
+      description: >-
+        Optional body { "mode": "apply" } runs for real — updateAvailable triggers
+        resolve the CURRENTLY available device_updates rows and fire once per row
+        (defer schedules are bypassed). Omitted or { "mode": "test" } is the legacy
+        wiring check: the first trigger block fires once with a bare context.
       parameters:
         - in: path
           name: id
           required: true
           schema: { type: string }
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                mode:
+                  type: string
+                  enum: [test, apply]
+                  description: "apply = run for real against live update rows (default test)"
       responses:
         '200':
           description: The run row just written
@@ -7762,6 +7823,40 @@ paths:
           description: Rule not found
         '500':
           description: Test run failed
+
+  /automations/{id}/dry-run:
+    post:
+      tags: [Automations]
+      summary: Simulate the rule without executing anything (dry run)
+      description: >-
+        Predicts what a manual apply would do, with zero side effects. updateAvailable
+        triggers resolve the CURRENTLY available device_updates rows and produce one
+        simulated firing per row; other trigger types produce one bare-context firing
+        each. Every action is SIMULATED — intent actions build a real plan via the same
+        createPlanCore path (the deterministic plugin /plan call) to report its exact
+        steps, then tear it down. No run rows are written, no deferral windows touched,
+        nothing enqueued or applied.
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: The simulated firings (what would happen if the rule fired now)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AutomationDryRunResponse' }
+        '400':
+          description: Rule has no triggers or actions to simulate
+        '401':
+          description: Authentication required
+        '403':
+          description: Missing automations:write permission
+        '404':
+          description: Rule not found
+        '500':
+          description: Dry run failed
 
   /automations/{id}/runs:
     get:
@@ -8896,6 +8991,50 @@ components:
                 type: array
                 items: { type: string }
                 description: "Distinct non-empty notes configured on this device for the name"
+
+    DhcpNetworkRow:
+      type: object
+      description: >-
+        One configured DHCP server network/pool range on one device, as reported
+        by a plugin's `dhcpNetworks` metric. A scope with several ranges yields
+        multiple rows (identity = name + rangeStart).
+      required: [deviceId, pluginId, name, rangeStart, rangeEnd]
+      properties:
+        deviceId: { type: string }
+        deviceName: { type: [string, 'null'], description: "Display name of the device" }
+        managementAddress: { type: [string, 'null'] }
+        siteName: { type: [string, 'null'] }
+        pluginId: { type: string, description: "Plugin instance id (multi-instance ids carry a :instance suffix)" }
+        pluginName: { type: [string, 'null'], description: "Display name of the plugin instance that reported this row" }
+        name: { type: string, description: "Network/scope name as configured, or the serving interface when the vendor has no name" }
+        iface: { type: [string, 'null'], description: "Serving interface (e.g. bridge1, lan). Null = not exposed by the vendor" }
+        rangeStart: { type: string, description: "First address of the lease range" }
+        rangeEnd: { type: string, description: "Last address of the lease range" }
+        cidr: { type: [string, 'null'], description: "Subnet CIDR covering the range (derived by the plugin when known)" }
+        leaseTimeSeconds: { type: [integer, 'null'], description: "Lease time in seconds as configured. Null = vendor default / not exposed" }
+        gateway: { type: [string, 'null'], description: "Gateway address handed out to clients" }
+        dnsServers: { type: [string, 'null'], description: "DNS servers handed out to clients (comma-joined)" }
+        refId: { type: [string, 'null'], description: "Vendor-side row identity used for deletion (dnsmasq range uuid, Kea subnet id…). Null = no stable handle" }
+
+    DhcpReservationRow:
+      type: object
+      description: >-
+        One static DHCP reservation (MAC → fixed IP) on one device, as reported
+        by a plugin's `dhcpReservations` metric. Identity = mac per device+plugin.
+      required: [deviceId, pluginId, mac]
+      properties:
+        deviceId: { type: string }
+        deviceName: { type: [string, 'null'], description: "Display name of the device" }
+        managementAddress: { type: [string, 'null'] }
+        siteName: { type: [string, 'null'] }
+        pluginId: { type: string, description: "Plugin instance id (multi-instance ids carry a :instance suffix)" }
+        pluginName: { type: [string, 'null'], description: "Display name of the plugin instance that reported this row" }
+        mac: { type: string, description: "Client MAC address, lowercase colon form" }
+        ip: { type: [string, 'null'], description: "Fixed IP the client always receives. Null = name-only mapping" }
+        hostname: { type: [string, 'null'], description: "Hostname bound to the reservation (when the vendor has one)" }
+        iface: { type: [string, 'null'], description: "Serving interface the mapping is scoped to (OPNsense staticmaps are per-interface). Null = not exposed" }
+        refId: { type: [string, 'null'], description: "Vendor-side row identity used for deletion (e.g. OPNsense uuid). Null = delete by MAC" }
+        status: { type: [string, 'null'], description: "Vendor lease status when exposed (e.g. RouterOS bound/free) — some vendors keep static bindings and active dynamic leases in one table; the page badges live rows" }
 
     DocumentedHostIp:
       type: object
@@ -12060,9 +12199,12 @@ components:
         preset: { type: string, enum: [config, planned, all], description: Preset bundle; ignored when sections is given }
         sections:
           type: array
-          items: { type: string, enum: [identity, settings, devices, documented, plans, liveInventory] }
+          items: { type: string, enum: [identity, settings, devices, documented, plans, automations, secrets, liveInventory] }
         destination: { type: string, enum: [local, repo] }
         providerId: { type: string, description: File-repo plugin instance id (required for destination=repo) }
+        passphrase:
+          type: string
+          description: "Required when sections contains 'secrets' — encrypts the decrypted credentials into a portable envelope (scrypt + AES-256-GCM). Never stored; needed again to restore on another instance. The secrets section is in no preset and never crosses replication."
     BackupEntry:
       type: object
       required: [id, name, scope, sections, sizeBytes, sha256, source, createdAt]
@@ -12090,6 +12232,7 @@ components:
         instanceName: { type: string }
         buildTag: { type: string }
         scope: { type: string }
+        secretsEncrypted: { type: boolean, description: "True when the archive carries a passphrase-encrypted device-credentials envelope (restore requires the passphrase)" }
         sections:
           type: object
           additionalProperties:
@@ -12116,6 +12259,9 @@ components:
           type: array
           items: { type: string }
           description: "Subset of the archive's sections (default: all present)"
+        passphrase:
+          type: string
+          description: "Required when applying an archive that carries a 'secrets' envelope — unlocks it. Secrets are re-encrypted under this instance's provider key with their original ids preserved."
     SectionMergeReport:
       type: object
       required: [section, tables]
@@ -12428,6 +12574,23 @@ components:
           items: { $ref: '#/components/schemas/AutomationActionBlock' }
         cooldownSec: { type: integer, minimum: 0, default: 0, description: "Minimum seconds between two firings (event-trigger throttle)" }
 
+    AutomationDraftPatch:
+      description: Partial automation update — every field is optional; omitted fields keep their current values.
+      type: object
+      properties:
+        name: { type: string, minLength: 1, maxLength: 200 }
+        description: { type: ['string', 'null'] }
+        enabled: { type: boolean }
+        triggers:
+          type: array
+          minItems: 1
+          items: { $ref: '#/components/schemas/AutomationTriggerBlock' }
+        actions:
+          type: array
+          minItems: 1
+          items: { $ref: '#/components/schemas/AutomationActionBlock' }
+        cooldownSec: { type: integer, minimum: 0 }
+
     Automation:
       allOf:
         - $ref: '#/components/schemas/AutomationDraft'
@@ -12439,6 +12602,14 @@ components:
             createdBy: { type: string, nullable: true }
             createdAt: { type: string, format: date-time }
             updatedAt: { type: string, format: date-time }
+            nextUpdateRun:
+              description: >-
+                Earliest firing time across the rule's open deferral windows for
+                deferred updateAvailable triggers (the maintenance slot its pending
+                updates will fire at). Null when no window is open. Computed on list;
+                not part of create/patch payloads.
+              type: ['string', 'null']
+              format: date-time
 
     AutomationResponse:
       type: object
@@ -12502,9 +12673,9 @@ components:
         id: { type: string }
         automationId: { type: string }
         firedAt: { type: string, format: date-time }
-        triggerType: { type: string, enum: [schedule, metric, log, deviceStatus, flow, containerLog] }
+        triggerType: { type: string, enum: [schedule, metric, log, deviceStatus, flow, containerLog, updateAvailable] }
         context: { type: object, additionalProperties: true, description: "Trigger context at firing time" }
-        status: { type: string, enum: [succeeded, failed, partial] }
+        status: { type: string, enum: [succeeded, failed, partial, skipped] }
         error: { type: string, nullable: true }
         planIds: { type: array, items: { type: string }, description: "Plans created by intent actions" }
 
@@ -12513,6 +12684,10 @@ components:
       required: [run]
       properties:
         run: { $ref: '#/components/schemas/AutomationRun' }
+        runs:
+          type: array
+          description: "All run rows written by this trigger (apply mode with an updateAvailable trigger writes one per live row)"
+          items: { $ref: '#/components/schemas/AutomationRun' }
 
     AutomationRunsResponse:
       type: object
@@ -12521,3 +12696,58 @@ components:
         runs:
           type: array
           items: { $ref: '#/components/schemas/AutomationRun' }
+
+    SimulatedAction:
+      description: "Predicted outcome of one action block in a dry run (nothing was executed)."
+      type: object
+      required: [id, type, status, summary]
+      properties:
+        id: { type: string }
+        type: { type: string, enum: [intent, webhook, notification, internal] }
+        status:
+          type: string
+          enum: [would-run, skipped, error]
+          description: "would-run = would execute; skipped = deliberately skipped (e.g. requireNoReboot); error = would fail to resolve/build"
+        summary: { type: string, description: "One-line human description of what would happen." }
+        plan:
+          description: "For intent actions that resolve cleanly — the exact plan a real apply would build (built then torn down)."
+          type: object
+          required: [pluginId, actionId, deviceIds, steps]
+          properties:
+            pluginId: { type: string }
+            actionId: { type: string }
+            deviceIds:
+              type: array
+              items: { type: string }
+            steps:
+              type: array
+              items:
+                type: object
+                required: [stepIndex, deviceId, actionId]
+                properties:
+                  stepIndex: { type: integer }
+                  deviceId: { type: string }
+                  actionId: { type: string }
+        detail:
+          description: "Skip reason or error message (null when not applicable)."
+          type: ['string', 'null']
+
+    SimulatedFiring:
+      description: "One simulated firing of a trigger block in a dry run."
+      type: object
+      required: [trigger, label, actions]
+      properties:
+        trigger: { $ref: '#/components/schemas/AutomationTriggerBlock' }
+        label: { type: string, description: "Human label — e.g. 'update web09 (KIRGUSBANDE)' or 'schedule (dailyAt)'." }
+        actions:
+          type: array
+          items: { $ref: '#/components/schemas/SimulatedAction' }
+
+    AutomationDryRunResponse:
+      type: object
+      required: [firings]
+      properties:
+        firings:
+          description: "One entry per simulated firing (updateAvailable triggers produce one per currently-available row)."
+          type: array
+          items: { $ref: '#/components/schemas/SimulatedFiring' }

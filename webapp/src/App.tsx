@@ -1,7 +1,5 @@
-import { useEffect } from 'react';
 import { useNavigate, useLocation, Navigate, Route, Routes } from 'react-router-dom';
 import { ReactNode } from 'react';
-import { useQuery } from '@tanstack/react-query';
 import Login from './pages/Login';
 import Devices from './pages/Devices';
 import DeviceDetail from './pages/DeviceDetail';
@@ -18,6 +16,7 @@ import NetworkRolloutPage from './pages/NetworkRolloutPage';
 import Hosts from './pages/Hosts';
 import Dns from './pages/Dns';
 import DnsRolloutPage from './pages/DnsRolloutPage';
+import Dhcp from './pages/Dhcp';
 import DocumentedHosts from './pages/DocumentedHosts';
 import DocumentedNetworks from './pages/DocumentedNetworks';
 import DocumentedHostImportPage from './pages/DocumentedHostImportPage';
@@ -57,7 +56,7 @@ import Settings from './pages/Settings';
 import CredentialPolicies from './pages/CredentialPolicies';
 import MyAccount from './pages/MyAccount';
 import OnboardingPage from './pages/OnboardingPage';
-import { api } from './api/client';
+import { OnboardingRedirect } from './components/OnboardingRedirect';
 import { useInstanceTitle } from './hooks/useInstanceTitle';
 import { can } from './auth/permissions';
 
@@ -76,6 +75,8 @@ const PAGE_PERMISSIONS: Array<{ path: string; permission?: string | string[] }> 
   { path: '/dns', permission: 'dns:read' },
   // Full-page rollout wizard — same read perm as the DNS page it lives on.
   { path: '/dns/rollout', permission: 'dns:read' },
+  // Cross-device DHCP inventory (server networks + static reservations).
+  { path: '/dhcp', permission: 'dhcp:read' },
   { path: '/documented-hosts', permission: 'documented-hosts:read' },
   // Full-page "import from live inventory" wizard — mutates documented rows, so it
   // is gated on the write perm (the endpoint requires documented-hosts:write).
@@ -162,26 +163,10 @@ function HomeRedirect() {
   return <Navigate to={target} replace />;
 }
 
-/**
- * First-run onboarding redirect: the seeded `admin` account is sent to the
- * setup wizard exactly once — when it has a session token, is not already on
- * /onboarding (or its login page), and `users.onboardedAt` is still NULL.
- * Completing or skipping the wizard stamps the flag, so this never fires again.
- */
-function OnboardingRedirect() {
-  const navigate = useNavigate();
-  const location = useLocation();
-  const meQuery = useQuery({ queryKey: ['me'], queryFn: api.me });
-
-  useEffect(() => {
-    if (!localStorage.getItem('accessToken')) return;
-    if (location.pathname === '/onboarding' || location.pathname.startsWith('/login')) return;
-    const me = meQuery.data;
-    if (me && me.username === 'admin' && !me.onboardedAt) navigate('/onboarding', { replace: true });
-  }, [meQuery.data, location.pathname, navigate]);
-
-  return null;
-}
+// First-run onboarding redirect (components/OnboardingRedirect.tsx): the seeded
+// `admin` account is sent to the setup wizard exactly once — when it has a session
+// token, is not already on /onboarding (or its login page), and users.onboardedAt
+// is still NULL. Completing or skipping the wizard stamps the flag.
 
 export default function App() {
   // Reflect the instance display name in the browser tab title on every page.
@@ -214,6 +199,8 @@ export default function App() {
       <Route path="/dns" element={<Page permission="dns:read"><Dns /></Page>} />
       {/* Full-page rollout wizard (same read perm as /dns). */}
       <Route path="/dns/rollout" element={<Page permission="dns:read"><DnsRolloutPage /></Page>} />
+      {/* Cross-device DHCP inventory — server networks + static reservations. */}
+      <Route path="/dhcp" element={<Page permission="dhcp:read"><Dhcp /></Page>} />
       {/* User-maintained host documentation (permanent inventory + CSV import). */}
       <Route path="/documented-hosts" element={<Page permission="documented-hosts:read"><DocumentedHosts /></Page>} />
       {/* Full-page "import from live inventory" wizard (replaces the old modal) — write-gated. */}
