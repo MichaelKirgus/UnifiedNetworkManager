@@ -94,6 +94,27 @@ export interface RosDnsEntryRow {
   description?: string; // the record's `comment` field, when set
 }
 
+/** One configured DHCP server network range → `metrics['dhcpNetworks']` (DHCP page). */
+export interface RosDhcpNetworkRow {
+  name: string; // pool/server name as configured (fallback: serving interface)
+  iface?: string | null; // /ip/dhcp-server `interface`
+  rangeStart: string; // first address of the pool range
+  rangeEnd: string; // last address of the pool range
+  cidr?: string | null; // derived from the range when it fits one subnet, else null
+  leaseTimeSeconds?: number | null; // /ip/dhcp-server `lease-time` normalized to seconds
+  gateway?: string | null; // /ip/dhcp-server/network `gateway`, when set
+  dnsServers?: string | null; // /ip/dhcp-server/network `dns-server` (comma-joined)
+}
+
+/** One static DHCP lease binding → `metrics['dhcpReservations']` (DHCP page). */
+export interface RosDhcpReservationRow {
+  mac: string;
+  ip?: string | null;
+  hostname?: string | null;
+  /** Vendor lease status ('bound'/'free'/…) — the table mixes static + dynamic rows. */
+  status?: string | null;
+}
+
 export interface RosWlanClientRow {
   mac: string;
   ip: string;
@@ -147,6 +168,10 @@ export interface RouterOsSnapshot {
   addresses: RosAddressRow[];
   arp: RosArpRow[];
   dhcpLeases: RosDhcpLeaseRow[];
+  /** Configured DHCP server networks (/ip/dhcp-server + /ip/pool) → DHCP page. null = read failed (key omitted, never wipes). */
+  dhcpNetworks: RosDhcpNetworkRow[] | null;
+  /** Static lease bindings (/ip/dhcp-server/lease static=true) → DHCP page. null = read failed. */
+  dhcpReservations: RosDhcpReservationRow[] | null;
   /** Static DNS host records (/ip/dns/static) → DNS page. null = read failed (key omitted, never wipes). */
   dnsEntries: RosDnsEntryRow[] | null;
   routes: RosRouteRow[];
@@ -169,6 +194,42 @@ function parseUptimeSeconds(raw: string | undefined): number | null {
   const s = Number(m[4] ?? 0);
   if (!Number.isFinite(d + h + min + s)) return null;
   return Math.floor(d * 86_400 + h * 3_600 + min * 60 + s);
+}
+
+/** Derives the subnet CIDR covering an IPv4 lease range (start–end), or null when the
+ * range doesn't fit a single /8..30 (e.g. a pool spanning subnets). */
+function deriveCidrFromRange(start: string, end: string): string | null {
+  const s = ipv4ToLong(start);
+  const e = ipv4ToLong(end);
+  if (s === null || e === null || e < s) return null;
+  // The subnet must contain both endpoints: find the smallest prefix whose network
+  // covers [start, end]. Walk prefixes from /30 down to /8.
+  for (let prefix = 30; prefix >= 8; prefix--) {
+    const mask = (~0 << (32 - prefix)) >>> 0;
+    // `>>> 0` is load-bearing: bitwise ops yield SIGNED int32, and any IPv4 with a
+    // first octet ≥ 128 (e.g. 192.x) would compare as negative without it.
+    const network = (s & mask) >>> 0;
+    if (network <= s && e < network + ((1 << (32 - prefix)) >>> 0)) {
+      return longToIpv4(network) + '/' + prefix;
+    }
+  }
+  return null;
+}
+
+function ipv4ToLong(ip: string): number | null {
+  const m = ip.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+  if (!m) return null;
+  let v = 0;
+  for (let i = 1; i <= 4; i++) {
+    const octet = Number(m[i]);
+    if (octet > 255) return null;
+    v = (v << 8) | octet;
+  }
+  return v >>> 0;
+}
+
+function longToIpv4(v: number): string {
+  return [(v >>> 24) & 255, (v >>> 16) & 255, (v >>> 8) & 255, v & 255].join('.');
 }
 
 /** Normalizes a MAC to lowercase colon form ("AA:BB:CC:DD:EE:FF"); null when absent/invalid. */
@@ -388,12 +449,15 @@ export async function collectSnapshot(client: RouterOsClient): Promise<RouterOsS
   // failing the whole poll. Total budget stays well under the API's 10 s cap:
   // per-request timeout × 2 (auto scheme fallback) ≈ 8 s worst case, and the
   // batch runs concurrently.
-  const [identityRes, ifaceRes, addrRes, arpRes, dhcpRes, dnsStaticRes, routeRes, fwFilterRes, fwNatRes, fwAddrListRes, wlanRes, clockRes] = await Promise.allSettled([
+  const [identityRes, ifaceRes, addrRes, arpRes, dhcpRes, dhcpServerRes, dhcpPoolRes, dhcpNetEntryRes, dnsStaticRes, routeRes, fwFilterRes, fwNatRes, fwAddrListRes, wlanRes, clockRes] = await Promise.allSettled([
     client.get('/system/identity'),
     client.get<Record<string, unknown>[]>('/interface'),
     client.get<Record<string, unknown>[]>('/ip/address'),
     client.get<Record<string, unknown>[]>('/arp'),
     client.get<Record<string, unknown>[]>('/ip/dhcp-server/lease'),
+    client.get<Record<string, unknown>[]>('/ip/dhcp-server'), // DHCP server config (DHCP page)
+    client.get<Record<string, unknown>[]>('/ip/pool'), // address pools behind the servers (DHCP page)
+    client.get<Record<string, unknown>[]>('/ip/dhcp-server/network'), // per-range options: gateway + DNS (DHCP page)
     client.get<Record<string, unknown>[]>('/ip/dns/static'), // static DNS host records (DNS page)
     client.get<Record<string, unknown>[]>('/ip/route'),
     client.get<Record<string, unknown>[]>('/ip/firewall/filter'), // firewall filter rules (forward/input/output)
@@ -433,6 +497,8 @@ export async function collectSnapshot(client: RouterOsClient): Promise<RouterOsS
     addresses: [],
     arp: [],
     dhcpLeases: [],
+    dhcpNetworks: null,
+    dhcpReservations: null,
     dnsEntries: null,
     routes: [],
     firewallRules: [],
@@ -529,6 +595,67 @@ export async function collectSnapshot(client: RouterOsClient): Promise<RouterOsS
         intf: rosString(row, ['interface']) ?? null,
       });
     }
+  }
+
+  // --- DHCP server config (/ip/dhcp-server + /ip/pool) → dhcpNetworks -----------------
+  // One row per (server × pool range): the server carries interface + lease-time, the
+  // pool carries the address ranges. A pool shared by several servers yields one row
+  // per server (identity = name|rangeStart). null on failure — load-bearing: an absent
+  // key never wipes stored rows, while a present-but-empty array is authoritative.
+  if (dhcpServerRes.status === 'fulfilled' && Array.isArray(dhcpServerRes.value)) {
+    const pools: Record<string, unknown>[] = dhcpPoolRes.status === 'fulfilled' && Array.isArray(dhcpPoolRes.value) ? (dhcpPoolRes.value as Record<string, unknown>[]) : [];
+    // Per-range options (gateway + DNS servers) live on /ip/dhcp-server/network —
+    // match by the address-range string.
+    const netEntries: Record<string, unknown>[] = dhcpNetEntryRes.status === 'fulfilled' && Array.isArray(dhcpNetEntryRes.value) ? (dhcpNetEntryRes.value as Record<string, unknown>[]) : [];
+    const rows: RosDhcpNetworkRow[] = [];
+    for (const raw of dhcpServerRes.value) {
+      if (!raw || typeof raw !== 'object') continue;
+      const server = raw as Record<string, unknown>;
+      const iface = rosString(server, ['interface']);
+      const poolName = rosString(server, ['address-pool']) ?? '';
+      const leaseTimeSeconds = parseUptimeSeconds(rosString(server, ['lease-time']));
+      const pool = pools.find((p) => rosString(p, ['name']) === poolName);
+      const rangesRaw = (rosString(pool ?? {}, ['ranges']) ?? '').split(',').map((s) => s.trim()).filter(Boolean);
+      if (rangesRaw.length === 0) continue; // server without a resolvable pool — nothing to show
+      for (const range of rangesRaw) {
+        const [start, end] = range.split('-');
+        if (!start || !end) continue;
+        const netEntry = netEntries.find((n) => rosString(n, ['address-range']) === range);
+        rows.push({
+          name: poolName || iface || 'dhcp',
+          iface: iface ?? null,
+          rangeStart: start,
+          rangeEnd: end,
+          cidr: deriveCidrFromRange(start, end),
+          leaseTimeSeconds,
+          gateway: rosString(netEntry ?? {}, ['gateway']) ?? null,
+          dnsServers: (rosString(netEntry ?? {}, ['dns-server']) ?? '').trim() || null,
+        });
+      }
+    }
+    snapshot.dhcpNetworks = rows;
+  }
+
+  // --- DHCP static lease bindings (/ip/dhcp-server/lease) → dhcpReservations ----------
+  // The lease table mixes static bindings with active dynamic leases — emit every row
+  // that carries a MAC + address and let the page badge live ones via `status` (the
+  // same rows already feed dhcpLeases[]). null on failure.
+  if (dhcpRes.status === 'fulfilled' && Array.isArray(dhcpRes.value)) {
+    const rows: RosDhcpReservationRow[] = [];
+    for (const raw of dhcpRes.value) {
+      if (!raw || typeof raw !== 'object') continue;
+      const row = raw as Record<string, unknown>;
+      const mac = normMac(rosString(row, ['mac-address']));
+      const ip = rosString(row, ['address']);
+      if (!mac || !ip) continue;
+      rows.push({
+        mac,
+        ip,
+        hostname: rosString(row, ['host-name', 'hostname']) ?? null,
+        status: rosString(row, ['status']) ?? null,
+      });
+    }
+    snapshot.dhcpReservations = rows;
   }
 
   // --- static DNS hosts (/ip/dns/static) ---------------------------------------------
@@ -861,6 +988,28 @@ export function buildMetrics(s: RouterOsSnapshot, selectedModel?: string | null,
   // dhcpLeases[] → hosts table with source 'dhcp' (hostname + expiry enrich the row).
   if (s.dhcpLeases.length > 0) {
     m['dhcpLeases'] = s.dhcpLeases.map((x) => ({ mac: x.mac, ip: x.ip, hostname: x.hostname ?? undefined, expiry: x.expiry ?? undefined, intf: x.intf ?? undefined }));
+  }
+
+  // dhcpNetworks[] → cross-device DHCP page (present-but-empty is authoritative;
+  // null = read failed → key omitted so a transient error never wipes rows).
+  if (Array.isArray(s.dhcpNetworks)) {
+    m['dhcpNetworks'] = s.dhcpNetworks.map((x) => ({
+      name: x.name,
+      interface: x.iface ?? undefined,
+      rangeStart: x.rangeStart,
+      rangeEnd: x.rangeEnd,
+      cidr: x.cidr ?? undefined,
+      leaseTimeSeconds: x.leaseTimeSeconds ?? undefined,
+      gateway: x.gateway ?? undefined,
+      dnsServers: x.dnsServers ?? undefined,
+    }));
+  }
+
+  // dhcpReservations[] → cross-device DHCP page (present-but-empty is authoritative;
+  // null = read failed). RouterOS keeps static bindings and active dynamic leases in
+  // one table — `status` lets the page badge live rows.
+  if (Array.isArray(s.dhcpReservations)) {
+    m['dhcpReservations'] = s.dhcpReservations.map((x) => ({ mac: x.mac, ip: x.ip ?? undefined, hostname: x.hostname ?? undefined, status: x.status ?? undefined }));
   }
 
   // dnsEntries[] → cross-device DNS page (present-but-empty is authoritative;

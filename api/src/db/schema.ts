@@ -873,6 +873,88 @@ export const deviceDnsEntries = pgTable(
   }
 );
 
+// One row per configured DHCP server network/pool on one device, as reported by a
+// plugin's `dhcpNetworks` metric. Powers the cross-device DHCP page with the same
+// upsert-per-poll + delete-on-absent + 24h-sweep lifecycle as tunnels/routes/dns.
+// Vendors normalize to {name, rangeStart, rangeEnd, …} at collection time (RouterOS
+// /ip/pool + /ip/dhcp-server/network; OPNsense Kea subnets or dnsmasq ranges; OpenWrt
+// uci dhcp .option=range). One row per (device, plugin, name, rangeStart) — a named
+// scope with several ranges yields multiple rows.
+export const deviceDhcpNetworks = pgTable(
+  'device_dhcp_networks',
+  {
+    deviceId: text('deviceId').notNull(),
+    pluginId: text('pluginId').notNull(),
+    // Network/scope name as configured, or the serving interface when the vendor has no name.
+    name: text('name').notNull(),
+    // Serving interface (e.g. `bridge1`, `lan`). NULL = vendor doesn't expose it.
+    iface: text('iface'),
+    // First address of the lease range. Part of the PK — a scope with several ranges yields rows.
+    rangeStart: text('rangeStart').notNull(),
+    // Last address of the lease range.
+    rangeEnd: text('rangeEnd').notNull(),
+    // Subnet CIDR covering the range (derived by the plugin when known). NULL = unknown.
+    cidr: text('cidr'),
+    // Lease time in seconds as configured on the device. NULL = vendor default / not exposed.
+    leaseTimeSeconds: integer('leaseTimeSeconds'),
+    // Gateway address handed out to clients. NULL = not exposed.
+    gateway: text('gateway'),
+    // DNS servers handed out to clients (comma-joined). NULL = not exposed.
+    dnsServers: text('dnsServers'),
+    // Vendor-side row identity used for deletion (dnsmasq range uuid, Kea subnet id…). NULL = no stable handle.
+    refId: text('refId'),
+    collectedAt: text('collectedAt').notNull(),
+  },
+  (table) => {
+    return {
+      pkDhcpNetworks: primaryKey({
+        name: 'device_dhcp_networks_pkey',
+        columns: [table.deviceId, table.pluginId, table.name, table.rangeStart],
+      }),
+      idxDhcpNetworksDevice: index('idx_device_dhcp_networks_device').on(table.deviceId),
+    };
+  }
+);
+
+// One row per static DHCP reservation (MAC → fixed IP) on one device, as reported by a
+// plugin's `dhcpReservations` metric. Same lifecycle as the other inventory tables.
+// Vendors normalize to {mac, ip?, hostname?} at collection time (RouterOS
+// /ip/dhcp-server/lease static; OPNsense Kea reservations or dnsmasq staticmaps; OpenWrt
+// uci dhcp @host/@map). `refId` is the vendor-side row identity used for deletion
+// (OPNsense uuid, …); NULL = delete by MAC. One row per (device, plugin, mac) — a MAC
+// with several fixed IPs on one device collapses to the last-seen IP (rare; vendors
+// key reservations by MAC).
+export const deviceDhcpReservations = pgTable(
+  'device_dhcp_reservations',
+  {
+    deviceId: text('deviceId').notNull(),
+    pluginId: text('pluginId').notNull(),
+    // Client MAC address, lowercase colon form. Part of the PK.
+    mac: text('mac').notNull(),
+    // Fixed IP the client always receives. NULL = name-only mapping (no fixed IP).
+    ip: text('ip'),
+    // Hostname bound to the reservation (when the vendor has one).
+    hostname: text('hostname'),
+    // Serving interface the mapping is scoped to (OPNsense staticmaps are per-interface). NULL = not exposed.
+    iface: text('iface'),
+    // Vendor-specific row identifier used for deletion (OPNsense uuid, …). NULL = delete by MAC.
+    refId: text('refId'),
+    // Vendor lease status when exposed (e.g. RouterOS 'bound'/'free') — some vendors keep
+    // static bindings and active dynamic leases in one table; the page badges live rows.
+    status: text('status'),
+    collectedAt: text('collectedAt').notNull(),
+  },
+  (table) => {
+    return {
+      pkDhcpReservations: primaryKey({
+        name: 'device_dhcp_reservations_pkey',
+        columns: [table.deviceId, table.pluginId, table.mac],
+      }),
+      idxDhcpReservationsDevice: index('idx_device_dhcp_reservations_device').on(table.deviceId),
+    };
+  }
+);
+
 // One row per firewall rule (filter + NAT kinds) on one device, as reported by a
 // plugin's `firewallRules` metric. Powers the cross-device Firewall page with the
 // same upsert-per-poll + delete-on-absent + 24h-sweep lifecycle as tunnels/routes.

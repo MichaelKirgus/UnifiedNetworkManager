@@ -150,6 +150,10 @@ export interface InventorySnapshot {
   arp: HostRow[];
   ndp: HostRow[];
   dhcpLeases: HostRow[];
+  /** Configured DHCP server ranges (uci dhcp .option=range) + statics (@host/@map).
+   * null = read failed → key omitted, never wipes. */
+  dhcpNetworks: Record<string, unknown>[] | null;
+  dhcpReservations: Record<string, unknown>[] | null;
   /** Static DNS host entries (uci dhcp @host/@map). null = read failed → key omitted, never wipes. */
   dnsEntries: DnsEntryRow[] | null;
   routes: RouteRow[];
