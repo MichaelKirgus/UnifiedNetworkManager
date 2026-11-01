@@ -19,6 +19,13 @@ import {
   resolveFileRepoProvider,
   storeBlobViaProvider,
 } from './fileRepoBroker';
+import { createSecret, getSecret, listSecretProviders, SECRETS_PROVIDER_UUID } from './secretsProvider';
+import {
+  EnvelopeSecret,
+  SecretEnvelope,
+  unwrapSecrets,
+  wrapSecrets,
+} from './secretEnvelope';
 
 /**
  * Backup / restore service for UNM's own database.
@@ -64,18 +71,20 @@ const PENDING_DIR = path.join(BACKUP_DIR, '.pending');
 // Sections & presets
 // ---------------------------------------------------------------------------
 
-export const SECTION_KEYS = ['identity', 'settings', 'devices', 'documented', 'plans', 'liveInventory'] as const;
+export const SECTION_KEYS = ['identity', 'settings', 'devices', 'documented', 'plans', 'automations', 'secrets', 'liveInventory'] as const;
 export type SectionKey = (typeof SECTION_KEYS)[number];
 
-/** Presets are just bundles of sections. */
+/** Presets are just bundles of sections. `secrets` is deliberately in NO preset —
+ *  it only ships when the caller opts in explicitly (it requires a passphrase). */
 export const PRESETS: Record<string, readonly string[]> = {
-  config: ['identity', 'settings', 'devices'],
+  config: ['identity', 'settings', 'devices', 'automations'],
   planned: ['documented', 'plans'],
   all: [...SECTION_KEYS],
 };
 
-/** Sections that may cross instance boundaries via replication (no live inventory). */
-export const PORTABLE_SECTIONS: readonly SectionKey[] = ['identity', 'settings', 'devices', 'documented', 'plans'];
+/** Sections that may cross instance boundaries via replication (no live inventory,
+ *  no secrets — credentials only travel in an explicit, passphrase-encrypted backup). */
+export const PORTABLE_SECTIONS: readonly SectionKey[] = ['identity', 'settings', 'devices', 'documented', 'plans', 'automations'];
 
 // ---------------------------------------------------------------------------
 // Exclusion lists — the ONLY place data is kept out of backups.
@@ -132,7 +141,8 @@ const DEVICE_TABLES: ReadonlySet<string> = new Set([
   'network_layers',
   'devices',
   'device_ips',
-  'secrets',
+  // NOTE: `secrets` is NOT here — it has its own section (passphrase-encrypted
+  // envelope). Raw ciphertext rows are useless on another instance anyway.
   'device_plugins',
   'device_session_credentials',
   'plugin_settings',
@@ -140,12 +150,24 @@ const DEVICE_TABLES: ReadonlySet<string> = new Set([
   'plugin_state',
 ]);
 
+/** Actions & Schedules (automation engine) — rules, their run audit trail and per-trigger state. */
+const AUTOMATION_TABLES: ReadonlySet<string> = new Set([
+  'automations',
+  'automation_runs',
+  'automation_state',
+]);
+
+/** The `secrets` section is virtual — no raw table rows, only the envelope. */
+const SECRET_TABLES: ReadonlySet<string> = new Set(['secrets']);
+
 function sectionForTable(name: string): SectionKey {
   if (IDENTITY_TABLES.has(name)) return 'identity';
   if (name === 'system_settings') return 'settings';
+  if (SECRET_TABLES.has(name)) return 'secrets';
   if (name.startsWith('documented_')) return 'documented';
   if (name === 'plans' || name === 'plan_steps') return 'plans';
   if (DEVICE_TABLES.has(name)) return 'devices';
+  if (AUTOMATION_TABLES.has(name)) return 'automations';
   // Safe fallback: unknown/new tables are treated as regenerable inventory —
   // still covered by scope "all", never polluting config/planned backups.
   return 'liveInventory';
@@ -158,7 +180,7 @@ const RESTORE_ORDER: Record<string, number> = {
   roles: 2,
   users: 3,
   credential_policies: 4,
-  secrets: 5,
+  // (secrets is ordered below — it imports AFTER the tables that reference it)
   devices: 6,
   device_ips: 7,
   device_plugins: 8,
@@ -166,14 +188,20 @@ const RESTORE_ORDER: Record<string, number> = {
   device_session_credentials: 10,
   device_port_roles: 11,
   plugin_state: 12,
-  system_settings: 13,
-  notification_prefs: 14,
-  user_preferences: 15,
-  documented_networks: 16,
-  documented_hosts: 17,
-  documented_host_ips: 18,
-  plans: 19,
+  // Secrets AFTER all tables that reference them (device_plugins, plan_steps via
+  // secretRefs, session credentials) — so on import the references already exist.
+  secrets: 13,
+  system_settings: 14,
+  notification_prefs: 15,
+  user_preferences: 16,
+  documented_networks: 17,
+  documented_hosts: 18,
+  documented_host_ips: 19,
+  plans: 20,
   plan_steps: 20,
+  automations: 22,
+  automation_runs: 23,
+  automation_state: 24,
 };
 const RESTORE_ORDER_DEFAULT = 30;
 
@@ -290,22 +318,58 @@ export interface BackupManifest {
   instanceName: string;
   buildTag: string;
   scope: string;
+  /** True when the archive carries a passphrase-encrypted secrets envelope. */
+  secretsEncrypted?: boolean;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   sections: Record<string, { rowCount: number; tables: Record<string, number> }>;
 }
 
 export interface BackupArchive {
   manifest: BackupManifest;
+  // Table sections map table → row arrays; the virtual `secrets` section maps
+  // `envelope` → [SecretEnvelope] and carries a numeric `rowCount` instead.
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  data: Record<string, Record<string, any[]>>;
+  data: Record<string, Record<string, any>>;
 }
 
-/** Loads the rows of every requested section (exclusions applied). */
+/** Loads the rows of every requested section (exclusions applied).
+ * `passphrase` is required when the `secrets` section is selected — it encrypts
+ * the decrypted credential values into a portable envelope. */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-export async function buildBackup(sections: string[]): Promise<Record<string, Record<string, any[]>>> {
+export async function buildBackup(sections: string[], passphrase?: string): Promise<Record<string, Record<string, any>>> {
   assertKnownSections(sections);
   const data: BackupArchive['data'] = {};
   for (const section of sections) {
+    if (section === 'secrets') {
+      // Virtual section — never raw ciphertext rows (undecryptable elsewhere).
+      if (!passphrase) throw new BackupError('The "secrets" section requires a passphrase to encrypt the credentials');
+      const rows = await db.select().from(schema.secrets);
+      const envelopeSecrets: EnvelopeSecret[] = [];
+      for (const r of rows) {
+        try {
+          const dec = await getSecret(r.id); // decrypted via the owning provider
+          envelopeSecrets.push({
+            id: r.id,
+            label: r.label ?? null,
+            type: r.type,
+            providerId: r.providerId ?? null,
+            userId: r.userId,
+            expiresAt: r.expiresAt ?? null,
+            interactiveLoginAllowed: r.interactiveLoginAllowed === true,
+            fileAccessAllowed: r.fileAccessAllowed === true,
+            createdAt: r.createdAt,
+            fields: dec.fields,
+          });
+        } catch (err) {
+          // A secret whose provider is offline/undecryptable must not block the
+          // whole backup — it is skipped and reported in the manifest.
+          console.warn(`[backup] skipping undecryptable secret ${r.id}: ${(err as Error).message}`);
+        }
+      }
+      const envelope = wrapSecrets(envelopeSecrets, passphrase);
+      data[section] = { envelope: [envelope], rowCount: envelopeSecrets.length };
+      continue;
+    }
     const byTable: Record<string, unknown[]> = {};
     let rowCount = 0;
     for (const meta of tablesInSection(section as SectionKey)) {
@@ -329,10 +393,15 @@ export async function buildBackup(sections: string[]): Promise<Record<string, Re
 }
 
 /** Builds a full archive (manifest + data) for the given sections. */
-export async function buildArchive(sections: string[]): Promise<BackupArchive> {
-  const [instanceName, data] = await Promise.all([getEffectiveSettingValue('instanceName'), buildBackup(sections)]);
+export async function buildArchive(sections: string[], opts: { passphrase?: string } = {}): Promise<BackupArchive> {
+  const [instanceName, data] = await Promise.all([getEffectiveSettingValue('instanceName'), buildBackup(sections, opts.passphrase)]);
   const manifestSections: BackupManifest['sections'] = {};
   for (const [section, byTable] of Object.entries(data)) {
+    if (section === 'secrets') {
+      // Virtual section — rowCount is the number of wrapped secrets.
+      manifestSections[section] = { rowCount: Number((byTable as Record<string, unknown>).rowCount ?? 0), tables: {} };
+      continue;
+    }
     const tables: Record<string, number> = {};
     let rowCount = 0;
     for (const [table, rows] of Object.entries(byTable)) {
@@ -349,6 +418,7 @@ export async function buildArchive(sections: string[]): Promise<BackupArchive> {
       instanceName: typeof instanceName === 'string' ? instanceName : '',
       buildTag: process.env.UNM_BUILD_TAG ?? '',
       scope: scopeForSections(sections),
+      secretsEncrypted: Boolean(data.secrets),
       sections: manifestSections,
     },
     data,
@@ -516,6 +586,8 @@ export interface SectionMergeReport {
   section: string;
   tables: TableMergeResult[];
   warnings: string[];
+  /** Set when this section failed and rolled back (only with continueOnSectionError). */
+  error?: string;
 }
 
 function pkKey(meta: TableMeta, row: Record<string, unknown>): string {
@@ -615,6 +687,11 @@ export interface ApplyOptions {
   sections?: string[];
   /** Setting keys to skip (replication exclusion policy). */
   excludeSettingKeys?: ReadonlySet<string>;
+  /** Keep applying remaining sections when one fails — each failed section rolls back on its own and is reported with `error`. Default false = stop at the first failure. */
+  continueOnSectionError?: boolean;
+  /** Passphrase for the secrets envelope (required when the archive carries a
+   *  `secrets` section that is being applied). Never stored. */
+  passphrase?: string;
 }
 
 /**
@@ -634,6 +711,14 @@ export async function applyArchive(archive: BackupArchive, opts: ApplyOptions = 
     warnings.push(`Archive was exported by build "${archive.manifest.buildTag}" (this instance runs "${process.env.UNM_BUILD_TAG}")`);
   }
 
+  // Legacy archives (pre portable-secrets) carried raw CIPHERTEXT secret rows in
+  // the devices section — undecryptable on another instance and now skipped. Tell
+  // the user their credentials need a fresh backup with the secrets section.
+  const legacySecretRows = Array.isArray(archive.data.devices?.secrets) ? (archive.data.devices.secrets as unknown[]).length : 0;
+  if (legacySecretRows > 0 && !archive.manifest.secretsEncrypted) {
+    warnings.push(`${legacySecretRows} device credential(s) in this archive are encrypted for the source instance only and were NOT imported — create a new backup with the "secrets" section to transfer credentials`);
+  }
+
   const reports: SectionMergeReport[] = [];
   for (const section of wanted) {
     const byTable = archive.data[section] ?? {};
@@ -642,6 +727,26 @@ export async function applyArchive(archive: BackupArchive, opts: ApplyOptions = 
       const rows = (byTable['system_settings'] ?? []) as any[];
       const { result, warnings: w } = await mergeSettings(rows, opts.excludeSettingKeys);
       reports.push({ section, tables: [result], warnings: [...warnings, ...w] });
+      continue;
+    }
+    if (section === 'secrets') {
+      // Virtual section — passphrase-encrypted envelope, imported via the
+      // provider broker (re-encrypted under THIS instance's keys). Not a DB tx:
+      // each secret is an independent provider round-trip; failures are reported
+      // per-secret in `skipped` so one bad type never blocks the rest.
+      const envRows = byTable['envelope'];
+      if (!Array.isArray(envRows) || envRows.length === 0) {
+        reports.push({ section, tables: [], warnings: ['Archive has an empty secrets envelope'] });
+        continue;
+      }
+      try {
+        if (!opts.passphrase) throw new BackupError('Applying the "secrets" section requires the backup passphrase');
+        const result = await applySecrets(unwrapSecrets(envRows[0] as SecretEnvelope, opts.passphrase));
+        reports.push({ section, tables: [{ table: 'secrets', created: result.imported, updated: 0, skipped: result.skipped }], warnings: result.warnings });
+      } catch (err) {
+        if (!opts.continueOnSectionError) throw new BackupError(`Section "${section}" failed to apply: ${(err as Error).message}`, 409);
+        reports.push({ section, tables: [], warnings: [], error: (err as Error).message });
+      }
       continue;
     }
     const report: SectionMergeReport = { section, tables: [], warnings: [] };
@@ -655,11 +760,64 @@ export async function applyArchive(archive: BackupArchive, opts: ApplyOptions = 
         }
       });
     } catch (err) {
-      throw new BackupError(`Section "${section}" failed to apply: ${(err as Error).message}`, 409);
+      if (!opts.continueOnSectionError) throw new BackupError(`Section "${section}" failed to apply: ${(err as Error).message}`, 409);
+      report.error = (err as Error).message;
     }
     reports.push(report);
   }
   return reports;
+}
+
+/**
+ * Imports decrypted secrets into THIS instance via the provider broker.
+ * Original ids are preserved so device/plan/session references keep working;
+ * existing ids are skipped (never overwritten — safe-merge semantics). The
+ * source user is mapped to a local user when present, else falls back to admin.
+ */
+async function applySecrets(secrets: EnvelopeSecret[]): Promise<{ imported: number; skipped: number; warnings: string[] }> {
+  const providers = await listSecretProviders();
+  // Map the source provider to one that EXISTS on this instance. The built-in
+  // secrets-provider has a deterministic UUID (SECRETS_PROVIDER_UUID) and is
+  // present in every standard deployment; multi-instance plugins advertise
+  // `<uuid>:<instanceId>`. No match → omit the id so the broker falls back to
+  // its default resolution (never pass an unknown provider — that would 400).
+  const targetProviderId = (sourceId: string | null): string | undefined => {
+    if (!sourceId) return undefined;
+    const byUuid = providers.find((p) => p.id === sourceId || p.id.startsWith(`${sourceId}:`));
+    return byUuid?.id ?? (sourceId === SECRETS_PROVIDER_UUID ? SECRETS_PROVIDER_UUID : undefined);
+  };
+
+  // Source user → local user map (identity section is restored before secrets).
+  const localUsers = await db.select({ id: schema.users.id, username: schema.users.username }).from(schema.users);
+  const adminId = localUsers.find((u) => u.username === 'admin')?.id ?? localUsers[0]?.id;
+  if (!adminId) throw new BackupError('No local users exist — restore the identity section first');
+
+  let imported = 0;
+  let skipped = 0;
+  const warnings: string[] = [];
+  for (const s of secrets) {
+    try {
+      const existing = await db.select({ id: schema.secrets.id }).from(schema.secrets).where(eq(schema.secrets.id, s.id));
+      if (existing.length > 0) { skipped += 1; continue; } // safe merge — never overwrite
+      const userId = localUsers.find((u) => u.id === s.userId)?.id ?? adminId;
+      await createSecret({
+        id: s.id, // pin the original id — device/plan/session refs keep working
+        type: s.type,
+        providerId: targetProviderId(s.providerId),
+        fields: s.fields,
+        label: s.label ?? undefined,
+        expiresAt: s.expiresAt ?? undefined,
+        userId,
+        interactiveLoginAllowed: s.interactiveLoginAllowed,
+        fileAccessAllowed: s.fileAccessAllowed,
+      });
+      imported += 1;
+    } catch (err) {
+      skipped += 1;
+      warnings.push(`Secret "${s.label ?? s.id}" (${s.type}) not imported: ${(err as Error).message}`);
+    }
+  }
+  return { imported, skipped, warnings };
 }
 
 /** Rejects non-portable sections (used by the replication inbound endpoint). */

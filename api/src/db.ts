@@ -628,6 +628,50 @@ export async function initDb(): Promise<void> {
   // hostname + domain). NULL = the vendor has no separate field (name is full).
   await pool.query(`ALTER TABLE device_dns_entries ADD COLUMN IF NOT EXISTS "domain" TEXT`);
 
+  // DHCP networks inventory table (DHCP page) — same lifecycle as tunnels/routes/dns.
+  // One row per configured DHCP server network/pool range, normalized by the plugin.
+  // PK = deviceId+pluginId+name+rangeStart so a scope with several ranges yields rows;
+  // delete-on-absent at ingest keys on name|rangeStart pairs (a snapshot never wipes another).
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS device_dhcp_networks (
+      "deviceId" TEXT NOT NULL,
+      "pluginId" TEXT NOT NULL,
+      name TEXT NOT NULL,
+      iface TEXT,
+      "rangeStart" TEXT NOT NULL,
+      "rangeEnd" TEXT NOT NULL,
+      cidr TEXT,
+      "leaseTimeSeconds" INTEGER,
+      gateway TEXT,
+      "dnsServers" TEXT,
+      "refId" TEXT,
+      "collectedAt" TEXT NOT NULL,
+      PRIMARY KEY ("deviceId", "pluginId", name, "rangeStart")
+    )`);
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS idx_device_dhcp_networks_device ON device_dhcp_networks ("deviceId")`);
+
+  // DHCP reservations inventory table (DHCP page) — same lifecycle as the other tables.
+  // One row per static MAC→IP reservation, normalized by the plugin. PK = deviceId+pluginId+mac;
+  // delete-on-absent at ingest keys on mac (a snapshot never wipes another).
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS device_dhcp_reservations (
+      "deviceId" TEXT NOT NULL,
+      "pluginId" TEXT NOT NULL,
+      mac TEXT NOT NULL,
+      ip TEXT,
+      hostname TEXT,
+      iface TEXT,
+      "refId" TEXT,
+      status TEXT,
+      "collectedAt" TEXT NOT NULL,
+      PRIMARY KEY ("deviceId", "pluginId", mac)
+    )`);
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS idx_device_dhcp_reservations_device ON device_dhcp_reservations ("deviceId")`);
+  // iface was added after the table first shipped in dev — idempotent upgrade for existing DBs.
+  await pool.query(`ALTER TABLE device_dhcp_reservations ADD COLUMN IF NOT EXISTS iface TEXT`);
+
   // Firewall rules inventory table (Firewall page) — same lifecycle as tunnels/routes.
   // One row per firewall rule (filter + NAT kinds) on one device, normalized by the
   // plugin to a unified shape. PK = deviceId+pluginId+ruleType+vendorRuleId so

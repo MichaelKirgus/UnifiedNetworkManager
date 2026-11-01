@@ -124,7 +124,7 @@ export const SETTING_DESCRIPTORS: SettingDescriptor[] = [
     default: 'config',
     pattern: '^(config|planned|all)$',
     help:
-      'Which sections the scheduled backup archives. config = identity+settings+devices, planned = documented networks/hosts + plans, all = everything including live inventory.',
+      'Which sections the scheduled backup archives. config = identity+settings+devices+automations, planned = documented networks/hosts + plans, all = everything including live inventory.',
   },
   {
     key: 'autoBackupDestination',

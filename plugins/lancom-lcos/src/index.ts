@@ -763,6 +763,39 @@ app.post('/monitoring', async (req, res) => {
       }));
     if (emitInventory && leaseRows.length > 0) metrics['dhcpLeases'] = leaseRows;
 
+    // dhcpReservations[] → cross-device DHCP reservations page. The
+    // Setup/DHCP/Hosts config mirror is a CONFIG table: an EMPTY array is
+    // authoritative (the user deleted the last reservation), so emit it
+    // unconditionally when the inventory walk ran — same present-vs-absent
+    // contract as dnsEntries. LCOS keys reservations by MAC and scopes each to
+    // a DHCP pool (network name) → `interface` carries the network name.
+    if (emitInventory) {
+      const resvRows = snapshot.dhcpHosts.map((h) => ({
+        mac: h.mac,
+        ip: h.ip || null,
+        hostname: h.hostname || null,
+        interface: h.networkName || null,
+      }));
+      metrics['dhcpReservations'] = resvRows;
+
+      // dhcpNetworks[] → the DHCP page's network dropdown (powers the reservation
+      // dialog's scope selection). LCOS pools are NOT bound to an interface — they
+      // are keyed by network name, which is exactly what the reservation's
+      // `interface` field carries; emitting it as the row's interface makes the
+      // dialog send the selected pool name through. Same present-vs-absent
+      // contract: empty array = no pools configured (authoritative).
+      const poolRows = snapshot.dhcpPools
+        .filter((p) => p.startIp !== '')
+        .map((p) => ({
+          name: p.name,
+          rangeStart: p.startIp,
+          rangeEnd: p.endIp || p.startIp,
+          interface: p.name, // the pool's scope key — what dhcp.staticMapping.add expects
+          gateway: p.gateway === '0.0.0.0' ? null : p.gateway,
+        }));
+      metrics['dhcpNetworks'] = poolRows;
+    }
+
     // dnsEntries[] → cross-device DNS page. The Setup/DNS/DNS-List config mirror
     // is always present on LCOS routers, so an EMPTY array is authoritative
     // (the user deleted the last entry) — emit it unconditionally when the
