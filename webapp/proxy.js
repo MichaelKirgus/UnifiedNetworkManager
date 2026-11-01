@@ -114,6 +114,15 @@ function proxyRequest(req, res) {
   req.pipe(upstream);
 }
 
+/** Format a flat rawHeaders array (name, value, name, value, …) as "Name: Value" lines. */
+function formatRawHeaders(rawHeaders) {
+  const lines = [];
+  for (let i = 0; i < rawHeaders.length; i += 2) {
+    lines.push(`${rawHeaders[i]}: ${rawHeaders[i + 1]}`);
+  }
+  return lines.join('\r\n');
+}
+
 /** WebSocket upgrade (SSH console): pipe the raw sockets both ways once the API accepts. */
 function proxyUpgrade(req, socket) {
   const headers = { ...req.headers, host: target.host };
@@ -134,7 +143,7 @@ function proxyUpgrade(req, socket) {
     upRes.on('end', () => {
       socket.write(
         `HTTP/1.1 ${upRes.statusCode || 502}\r\n` +
-          upRes.rawHeaders.map((h) => `${h[0]}: ${h[1]}`).join('\r\n') +
+          formatRawHeaders(upRes.rawHeaders) +
           '\r\n\r\n' +
         Buffer.concat(body).toString('binary')
       );
@@ -144,7 +153,7 @@ function proxyUpgrade(req, socket) {
   upstream.on('upgrade', (upRes, upSocket) => {
     socket.write(
       `HTTP/1.1 101 Switching Protocols\r\n` +
-        upRes.rawHeaders.map((h) => `${h[0]}: ${h[1]}`).join('\r\n') +
+        formatRawHeaders(upRes.rawHeaders) +
         '\r\n\r\n'
     );
     upSocket.pipe(socket);
