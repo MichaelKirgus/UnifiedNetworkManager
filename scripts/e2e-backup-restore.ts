@@ -136,6 +136,17 @@ async function main(): Promise<void> {
   const archivedSections = Object.keys(archive.data ?? {});
   check('planned preset archives documented+plans only', JSON.stringify([...archivedSections].sort()) === JSON.stringify(['documented', 'plans']), archivedSections);
 
+  // Explicit section list covering ALL seven sections — this is what the webapp
+  // sends for the "all" preset. Guards against a stale OpenAPI enum on
+  // BackupCreateRequest.sections (the spec's enum must stay in sync with
+  // SECTION_KEYS or every request containing a new section fails with 400).
+  const allSections = ['identity', 'settings', 'devices', 'documented', 'plans', 'automations', 'liveInventory'];
+  const allRes = await authed('POST', '/backups', { name: 'e2e-all-sections', sections: allSections, destination: 'local' });
+  const allBody = (await allRes.json()) as { backup?: Record<string, unknown> } | null;
+  check('create with explicit all-seven sections → 201 (OpenAPI enum in sync)', allRes.status === 201, { status: allRes.status, body: allBody });
+  const allBackupId = String(allBody?.backup?.id ?? '');
+  if (allBackupId) await authed('DELETE', `/backups/${allBackupId}`);
+
   // Re-upload the SAME archive → apply sections=[documented] → idempotent merge.
   const upRes = await fetch(`${API}/backups/restore/upload`, { method: 'POST', headers: { 'Content-Type': 'application/octet-stream', 'x-backup-name': 'e2e-planned.unmbak.gz', Authorization: `Bearer ${token}` }, body: bytes });
   check('re-upload staged → 201 + manifest preview', upRes.status === 201, { status: upRes.status });

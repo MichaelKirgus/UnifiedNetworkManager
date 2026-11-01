@@ -5,6 +5,7 @@ import { DndContext, closestCenter, PointerSensor, KeyboardSensor, useSensor, us
 import { SortableContext, verticalListSortingStrategy, useSortable, arrayMove } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
 import { allowedSecretTypes, api, CredentialSlotDescriptor, DevicePluginAssignmentInput, Plugin, Secret, pluginIconUrl } from '../api/client';
+import { newId } from '../utils/uuid';
 import { isDeviceAssignablePlugin, PluginCatalogPicker } from './PluginCatalogPicker';
 
 interface RowState {
@@ -16,7 +17,7 @@ interface RowState {
   slotSecrets: Record<string, string>;
 }
 
-const emptyRow = (): RowState => ({ id: crypto.randomUUID(), pluginId: '', secretId: '', slotSecrets: {} });
+const emptyRow = (): RowState => ({ id: newId('row'), pluginId: '', secretId: '', slotSecrets: {} });
 
 /** One draggable assignment row: grip handle + position badge (1 = primary) +
  * plugin/credential pickers. The whole card is the sortable element; only the
@@ -270,7 +271,7 @@ export const PluginAssignmentBuilder = forwardRef<PluginAssignmentBuilderHandle,
   const [rows, setRows] = useState<RowState[]>(() =>
     initial.length > 0
       ? initial.map((a) => ({
-          id: crypto.randomUUID(),
+          id: newId('row'),
           pluginId: a.pluginId,
           secretId: a.secretId ?? '',
           slotSecrets: Object.fromEntries(
