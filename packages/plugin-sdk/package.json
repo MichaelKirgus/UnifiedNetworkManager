@@ -23,6 +23,6 @@
     "@types/node": "^26.6.4",
     "@types/ssh2": "^1.15.6",
     "@types/ws": "^8.18.1",
-    "typescript": "^5.3.2"
+    "typescript": "^7.0.2"
   }
 }
