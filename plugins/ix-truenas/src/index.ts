@@ -326,7 +326,12 @@ const identity = resolvePluginIdentity({
   // per-container work. Container lifecycle intents (containers.restart / .start
   // / .stop) now also get the settle+inventory-refresh plan tail, so the DB
   // catches up right after the action settles.
-  version: '0.28.0',
+  // 0.29.0 — canonical intent containers.image.set: change a container's image
+  // tag or switch it to another image entirely. Custom apps are reconfigured via
+  // app.update (the matched `image:` fields of their structured config are
+  // rewritten and the app redeployed); catalog apps have no editable compose
+  // config and are skipped with a note — version bumps stay on containers.upgrade.
+  version: '0.29.0',
   vendors: ['truenas'],
   capabilities: ['monitoring', 'configuration', 'planning', 'deviceState', 'ssh', 'probe', 'filesystem', 'sshConsole', 'updates', 'quickActions'],
 });

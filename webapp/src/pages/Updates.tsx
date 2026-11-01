@@ -1,6 +1,7 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { ArrowUpCircle, CheckCircle2, ExternalLink, Layers, Loader2, Lock, RefreshCw, Rocket, ShieldCheck, Unlock, Zap } from 'lucide-react';
+import { ArrowUpCircle, CheckCircle2, ExternalLink, Layers, Loader2, Lock, RefreshCw, Rocket, ShieldCheck, Unlock, Zap, Workflow } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { DialogShell } from '../components/DialogShell';
 import { Layout } from '../components/Layout';
 import { DataTable, DataTableColumn, type ExpandChildContext } from '../components/DataTable';
@@ -362,8 +363,12 @@ function buildDeviceTree(rows: UpdateRow[]): { devices: UpdateNode[]; childrenBy
 // Page
 // ---------------------------------------------------------------------------
 
+/** sessionStorage key for a rule draft handed off from another page (Updates quick-create). */
+export const AUTOMATION_DRAFT_STORAGE_KEY = 'unm.pendingAutomationDraft';
+
 export default function Updates() {
   const queryClient = useQueryClient();
+  const navigate = useNavigate();
   const { mode } = useExecutionMode();
   const readOnly = mode === 'readonly';
   const canApply = can('configs:apply'); // server enforces it too; this only gates the UI
@@ -617,6 +622,47 @@ export default function Updates() {
     void firePlanSteps(`Release ${row.name} from hold`, [
       { pluginId: row.pluginId, actionId: 'packages.unhold', deviceId: row.deviceId, input: { package: row.name } },
     ]);
+  }
+
+  /** Quick-create handoff: build an updateAvailable rule draft from the selected
+   * rows (kinds/names/plugin pre-filled, no-reboot guards on by default), stash it
+   * in sessionStorage and open the Automations page — which consumes it into a
+   * pre-filled builder. Nothing is created until the user saves there. */
+  function createAutomationFromSelection() {
+    const rows = selectedChildren;
+    if (rows.length === 0) return;
+    const kinds = [...new Set(rows.map((r) => r.kind))].sort();
+    const names = [...new Set(rows.map((r) => r.name))];
+    const pluginIds = [...new Set(rows.map((r) => r.pluginId))];
+    const trigger: Record<string, unknown> = {
+      id: 't-update',
+      type: 'updateAvailable',
+      condition: 'available',
+      kinds,
+      // A handful of exact names is a useful pre-fill; a long list isn't.
+      ...(names.length <= 5 ? { names } : {}),
+      ...(pluginIds.length === 1 ? { pluginId: pluginIds[0] } : {}),
+      rebootRequired: false,
+    };
+    const draft = {
+      name: `Auto-update ${kinds.join(' / ')} (no reboot)`,
+      description: `Created from the Updates page selection of ${rows.length} update${rows.length === 1 ? '' : 's'}. Applies via each row's plugin apply action; reboot-required rows are skipped.`,
+      enabled: true,
+      cooldownSec: 3600,
+      triggers: [trigger],
+      actions: [
+        { id: 'a-apply', type: 'intent', resolveFromTrigger: 'update', requireNoReboot: true, devices: {} },
+        {
+          id: 'a-note', type: 'notification', severity: 'info',
+          titleTemplate: 'Update applied on {{device.name}}',
+          messageTemplate: '{{update.kind}} "{{update.name}}" updated to {{update.latestVersion}} by automation.',
+        },
+      ],
+    };
+    try {
+      sessionStorage.setItem(AUTOMATION_DRAFT_STORAGE_KEY, JSON.stringify(draft));
+    } catch { /* storage full/blocked — the navigation still works */ }
+    navigate('/automations');
   }
 
   /** Child-row action: just this one update, with its own prefilled input. */
@@ -998,6 +1044,16 @@ export default function Updates() {
             >
               Update selected ({selectedStepCount})
             </button>
+            {can('automations:write') && (
+              <button
+                type="button"
+                onClick={createAutomationFromSelection}
+                title="Open the Automations page with a pre-filled rule for these updates (editable before saving)"
+                className="inline-flex items-center gap-1.5 rounded-md border border-border bg-card px-2.5 py-1 text-xs font-medium text-secondary hover:bg-background"
+              >
+                <Workflow className="h-3.5 w-3.5" /> Create automation
+              </button>
+            )}
             <button
               type="button"
               onClick={() => setSelectedChildKeys(new Set())}

@@ -4,6 +4,7 @@
  */
 
 import {
+  diffUpdateTransitions,
   evaluateFlowCondition,
   evaluateMetricCondition,
   evaluateSchedules,
@@ -11,14 +12,17 @@ import {
   isScheduleDue,
   nextScheduleRun,
   parseJsonField,
+  pendingWindowState,
   previewSchedule,
   renderTemplate,
   scopeMatchesDevice,
   splitLogLines,
   templateVarsFor,
+  updatePendingStateKey,
+  updateRowMatches,
   validateAutomationDraft,
 } from './engine';
-import type { AutomationDraft, MetricTrigger, ScheduleTrigger } from './types';
+import type { ActionBlock, AutomationDraft, MetricTrigger, ScheduleTrigger, TriggerBlock } from './types';
 
 // ── Draft validation ─────────────────────────────────────────────────────────
 
@@ -509,5 +513,229 @@ describe('parseJsonField', () => {
     expect(parseJsonField('{oops', 'fallback')).toBe('fallback');
     // JSON "null" → fallback (the ?? guard)
     expect(parseJsonField('null', 'fallback')).toBe('fallback');
+  });
+});
+
+// ── Update triggers (row matching, transition diffing, deferral math) ───────
+
+describe('updateRowMatches', () => {
+  const row = { kind: 'docker-image', name: 'nginx:1.27', currentVersion: '1.26', latestVersion: '1.27', rebootRequired: false };
+
+  it('matches everything with no filters', () => {
+    expect(updateRowMatches({}, row)).toBe(true);
+  });
+
+  it('filters by kinds (absent = all)', () => {
+    expect(updateRowMatches({ kinds: ['docker-image'] }, row)).toBe(true);
+    expect(updateRowMatches({ kinds: ['firmware'] }, row)).toBe(false);
+    expect(updateRowMatches({ kinds: [] }, row)).toBe(true); // empty list = no filter
+  });
+
+  it('filters by exact names', () => {
+    expect(updateRowMatches({ names: ['nginx:1.27'] }, row)).toBe(true);
+    expect(updateRowMatches({ names: ['redis'] }, row)).toBe(false);
+  });
+
+  it('filters by namePattern with search semantics', () => {
+    expect(updateRowMatches({ namePattern: '^nginx' }, row)).toBe(true);
+    expect(updateRowMatches({ namePattern: 'redis' }, row)).toBe(false);
+    expect(updateRowMatches({ namePattern: '[' }, row)).toBe(false); // invalid regex → no match, no throw
+  });
+
+  it('rebootRequired filter never matches null flags (unknown ≠ safe)', () => {
+    const unknown = { ...row, rebootRequired: null };
+    expect(updateRowMatches({ rebootRequired: false }, unknown)).toBe(false);
+    expect(updateRowMatches({ rebootRequired: true }, unknown)).toBe(false);
+    expect(updateRowMatches({ rebootRequired: false }, row)).toBe(true);
+    const reboot = { ...row, rebootRequired: true };
+    expect(updateRowMatches({ rebootRequired: true }, reboot)).toBe(true);
+  });
+
+  it('combines filters with AND semantics', () => {
+    expect(updateRowMatches({ kinds: ['docker-image'], namePattern: 'nginx' }, row)).toBe(true);
+    expect(updateRowMatches({ kinds: ['firmware'], namePattern: 'nginx' }, row)).toBe(false);
+  });
+});
+
+describe('diffUpdateTransitions', () => {
+  const mk = (over: Partial<{ kind: string; name: string; currentVersion: string | null; latestVersion: string | null }>) => ({
+    kind: over.kind ?? 'firmware',
+    name: over.name ?? 'os',
+    currentVersion: over.currentVersion !== undefined ? over.currentVersion : '1.0',
+    latestVersion: over.latestVersion !== undefined ? over.latestVersion : '2.0',
+    rebootRequired: false,
+  });
+
+  it('emits appeared for new rows and disappeared for removed ones', () => {
+    const out = diffUpdateTransitions([], [mk({ name: 'os' }), mk({ kind: 'app', name: 'nginx' })]);
+    expect(out).toHaveLength(2);
+    expect(out.every((t) => t.transition === 'appeared')).toBe(true);
+
+    const gone = diffUpdateTransitions([mk({ name: 'os' })], []);
+    expect(gone).toEqual([{ kind: 'firmware', name: 'os', transition: 'disappeared', currentVersion: '1.0', latestVersion: '2.0', rebootRequired: false, applyActionId: null }]);
+  });
+
+  it('emits advanced when the version changes in place (either direction)', () => {
+    const out = diffUpdateTransitions([mk({ latestVersion: '2.0' })], [mk({ latestVersion: '2.1' })]);
+    expect(out).toHaveLength(1);
+    expect(out[0].transition).toBe('advanced');
+    expect(out[0].latestVersion).toBe('2.1');
+
+    const down = diffUpdateTransitions([mk({ currentVersion: '2.0', latestVersion: '3.0' })], [mk({ currentVersion: '3.0', latestVersion: '3.0' })]);
+    expect(down[0].transition).toBe('advanced'); // applied in place — still a transition
+  });
+
+  it('emits NOTHING when the row is unchanged (no per-poll re-firing)', () => {
+    const out = diffUpdateTransitions([mk({})], [mk({})]);
+    expect(out).toEqual([]);
+  });
+
+  it('handles mixed transitions in one poll', () => {
+    const prev = [mk({ name: 'os' }), mk({ kind: 'app', name: 'nginx' })];
+    const next = [mk({ name: 'os', latestVersion: '2.1' }), mk({ kind: 'app', name: 'redis' })];
+    const out = diffUpdateTransitions(prev, next);
+    expect(out).toHaveLength(3);
+    expect(out.find((t) => t.name === 'os')?.transition).toBe('advanced');
+    expect(out.find((t) => t.name === 'nginx')?.transition).toBe('disappeared');
+    expect(out.find((t) => t.name === 'redis')?.transition).toBe('appeared');
+  });
+
+  it('carries the apply path on transitions', () => {
+    const out = diffUpdateTransitions([], [{ ...mk({}), applyActionId: 'update.apply', applyInput: { channel: 'stable' } }]);
+    expect(out[0].applyActionId).toBe('update.apply');
+    expect(out[0].applyInput).toEqual({ channel: 'stable' });
+  });
+});
+
+describe('pendingWindowState (deferral due-checks)', () => {
+  const T0 = '2026-10-18T12:00:30.000Z'; // window anchor
+  const ms = (iso: string) => new Date(iso).getTime();
+
+  it('interval defer is due once the interval has elapsed', () => {
+    const defer = { schedule: { kind: 'interval' as const, everyMinutes: 5 } };
+    expect(pendingWindowState(defer, T0, ms('2026-10-18T12:04:00Z'))).toBe('pending');
+    expect(pendingWindowState(defer, T0, ms('2026-10-18T12:05:30Z'))).toBe('due'); // exactly at the slot
+    expect(pendingWindowState(defer, T0, ms('2026-10-18T12:05:31Z'))).toBe('due');
+  });
+
+  it('cron defer is due at the next occurrence after the anchor', () => {
+    const defer = { schedule: { kind: 'cron' as const, expr: '*/15 * * * *' } };
+    expect(pendingWindowState(defer, T0, ms('2026-10-18T12:14:59Z'))).toBe('pending');
+    expect(pendingWindowState(defer, T0, ms('2026-10-18T12:15:00Z'))).toBe('due');
+  });
+
+  it('maxWaitHours fires immediately when the bound elapses before the slot', () => {
+    const defer = { schedule: { kind: 'interval' as const, everyMinutes: 120 }, maxWaitHours: 1 }; // slot at +2h, bound at +1h
+    expect(pendingWindowState(defer, T0, ms('2026-10-18T13:00:29Z'))).toBe('pending');
+    expect(pendingWindowState(defer, T0, ms('2026-10-18T13:00:30Z'))).toBe('max-wait-exceeded'); // exactly 1h waited
+  });
+
+  it('due wins over max-wait when both are satisfied', () => {
+    const defer = { schedule: { kind: 'interval' as const, everyMinutes: 5 }, maxWaitHours: 0.1 };
+    expect(pendingWindowState(defer, T0, ms('2026-10-18T12:05:30Z'))).toBe('due'); // slot hit at exactly the bound — due takes precedence
+  });
+
+  it('unbounded deferral (no maxWaitHours) is run-asap: a missed slot fires on the next check', () => {
+    const defer = { schedule: { kind: 'interval' as const, everyMinutes: 60 } }; // slot at +1h
+    expect(pendingWindowState(defer, T0, ms('2026-10-18T12:30:30Z'))).toBe('pending'); // before the slot
+    expect(pendingWindowState(defer, T0, ms('2026-10-25T12:00:00Z'))).toBe('due'); // a week later — the missed slot is due now
+  });
+
+  it('returns pending for an invalid cron (validation should have caught it)', () => {
+    const defer = { schedule: { kind: 'cron' as const, expr: 'garbage' } };
+    expect(pendingWindowState(defer, T0, ms('2026-10-18T13:00:00Z'))).toBe('pending');
+  });
+});
+
+describe('updatePendingStateKey', () => {
+  it('is stable and unique per (device, plugin, kind, name)', () => {
+    expect(updatePendingStateKey('d1', 'p1', 'firmware', 'os')).toBe('pending:d1|p1|firmware|os');
+    expect(updatePendingStateKey('d1', 'p1', 'firmware', 'os')).toBe(updatePendingStateKey('d1', 'p1', 'firmware', 'os'));
+    expect(updatePendingStateKey('d2', 'p1', 'firmware', 'os')).not.toBe(updatePendingStateKey('d1', 'p1', 'firmware', 'os'));
+  });
+});
+
+describe('validateAutomationDraft — updateAvailable triggers + intent guards', () => {
+  const base = (triggers: unknown[], actions?: unknown[]): AutomationDraft => ({
+    name: 'Update rule',
+    triggers: triggers as TriggerBlock[],
+    actions: (actions ?? [{ id: 'a1', type: 'notification', severity: 'info', titleTemplate: 't', messageTemplate: 'm' }]) as ActionBlock[],
+  });
+
+  it('accepts a minimal updateAvailable trigger (unbounded deferral optional)', () => {
+    expect(validateAutomationDraft(base([{ id: 't1', type: 'updateAvailable', condition: 'available' }]))).toEqual([]);
+    expect(validateAutomationDraft(base([{ id: 't1', type: 'updateAvailable', condition: 'resolved', kinds: ['docker-image'], rebootRequired: false }]))).toEqual([]);
+  });
+
+  it('rejects an unknown condition', () => {
+    const bad = validateAutomationDraft(base([{ id: 't1', type: 'updateAvailable', condition: 'whenever' }]));
+    expect(bad.some((e) => e.includes('condition'))).toBe(true);
+  });
+
+  it('validates kinds / names / namePattern', () => {
+    const badKinds = validateAutomationDraft(base([{ id: 't1', type: 'updateAvailable', condition: 'available', kinds: [''] }]));
+    expect(badKinds.some((e) => e.includes('kinds'))).toBe(true);
+
+    const badNames = validateAutomationDraft(base([{ id: 't1', type: 'updateAvailable', condition: 'available', names: [42] }]));
+    expect(badNames.some((e) => e.includes('names'))).toBe(true);
+
+    const badPattern = validateAutomationDraft(base([{ id: 't1', type: 'updateAvailable', condition: 'available', namePattern: '[' }]));
+    expect(badPattern.some((e) => e.includes('invalid regex'))).toBe(true);
+  });
+
+  it('validates the defer schedule + maxWaitHours', () => {
+    const good = validateAutomationDraft(base([{ id: 't1', type: 'updateAvailable', condition: 'available', defer: { schedule: { kind: 'dailyAt', time: '02:00' }, maxWaitHours: 48 } }]));
+    expect(good).toEqual([]);
+
+    const badCron = validateAutomationDraft(base([{ id: 't1', type: 'updateAvailable', condition: 'available', defer: { schedule: { kind: 'cron', expr: 'nope' } } }]));
+    expect(badCron.some((e) => e.includes('invalid cron'))).toBe(true);
+
+    const badTime = validateAutomationDraft(base([{ id: 't1', type: 'updateAvailable', condition: 'available', defer: { schedule: { kind: 'dailyAt', time: '25:99' } } }]));
+    expect(badTime.some((e) => e.includes('HH:MM'))).toBe(true);
+
+    const badMax = validateAutomationDraft(base([{ id: 't1', type: 'updateAvailable', condition: 'available', defer: { schedule: { kind: 'interval', everyMinutes: 5 }, maxWaitHours: -1 } }]));
+    expect(badMax.some((e) => e.includes('maxWaitHours'))).toBe(true);
+
+    const missingSchedule = validateAutomationDraft(base([{ id: 't1', type: 'updateAvailable', condition: 'available', defer: {} }]));
+    expect(missingSchedule.some((e) => e.includes('defer.schedule'))).toBe(true);
+  });
+
+  it('accepts intent actions with resolveFromTrigger (no pluginId/actionId needed)', () => {
+    const good = validateAutomationDraft(base(
+      [{ id: 't1', type: 'updateAvailable', condition: 'available' }],
+      [{ id: 'a1', type: 'intent', devices: {}, resolveFromTrigger: 'update', requireNoReboot: true }]
+    ));
+    expect(good).toEqual([]);
+  });
+
+  it('still requires pluginId/actionId for plain intent actions and rejects bad resolveFromTrigger values', () => {
+    const missing = validateAutomationDraft(base(
+      [{ id: 't1', type: 'updateAvailable', condition: 'available' }],
+      [{ id: 'a1', type: 'intent', devices: {} }]
+    ));
+    expect(missing.some((e) => e.includes('pluginId is required'))).toBe(true);
+
+    const badResolve = validateAutomationDraft(base(
+      [{ id: 't1', type: 'updateAvailable', condition: 'available' }],
+      [{ id: 'a1', type: 'intent', pluginId: 'p', actionId: 'a', devices: {}, resolveFromTrigger: 'metric' }]
+    ));
+    expect(badResolve.some((e) => e.includes('resolveFromTrigger'))).toBe(true);
+  });
+
+  it('renders update.* template tokens', () => {
+    const vars = templateVarsFor('Auto-update', {
+      triggerType: 'updateAvailable',
+      device: { name: 'NAS01' },
+      updateKind: 'docker-image',
+      updateName: 'nginx:1.27',
+      updateCurrentVersion: '1.26',
+      updateLatestVersion: '1.27',
+      firedAtIso: 'now',
+    });
+    expect(renderTemplate('{{device.name}}: {{update.kind}} {{update.name}} {{update.currentVersion}} → {{update.latestVersion}}', vars))
+      .toBe('NAS01: docker-image nginx:1.27 1.26 → 1.27');
+
+    const without = templateVarsFor('X', { triggerType: 'schedule', firedAtIso: 'now' });
+    expect(renderTemplate('{{update.name}}', without)).toBe('{{update.name}}'); // left literal when absent
   });
 });

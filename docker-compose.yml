@@ -16,6 +16,10 @@
 # token with full agent capabilities, so exposing it on all interfaces is a
 # deliberate choice. If you need remote MCP access, add your own mapping in .env
 # or a reverse proxy (with auth), e.g. UNM_MCP_PORT=8081.
+#
+# Postgres is likewise NOT published to the host — api/mcp reach it over the
+# internal compose network only. Re-add a "5432:5432" ports entry if you need
+# psql-from-host (bind 127.0.0.1, not 0.0.0.0).
 
 version: "3.9"
 services:
@@ -25,8 +29,6 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:-unm}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-unm}
       POSTGRES_DB: ${POSTGRES_DB:-unm}
-    ports:
-      - 5432:5432
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -60,12 +62,15 @@ services:
       - 3000:3000
     environment:
       - PORT=3000
-      - JWT_SECRET=dev-secret
-      - DATABASE_URL=postgresql://unm:unm@postgres:5432/unm
+      - JWT_SECRET=${JWT_SECRET:-dev-secret}
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-unm}:${POSTGRES_PASSWORD:-unm}@postgres:5432/${POSTGRES_DB:-unm}
       - AUTH_PLUGIN_ID=${AUTH_PLUGIN_ID:-00000000-0000-4000-8000-000000000001}
       - PLUGIN_API_KEY=${PLUGIN_API_KEY:-dev-plugin-key}
       - WEBAUTHN_RP_ID=${WEBAUTHN_RP_ID:-localhost}
       - WEBAUTHN_ORIGIN=${WEBAUTHN_ORIGIN:-http://localhost:8080}
+      - UNM_CORS_ORIGINS=${UNM_CORS_ORIGINS:-}
+      - UNM_TRUST_PROXY=${UNM_TRUST_PROXY:-}
+      - UNM_CLIENT_IP_HEADER=${UNM_CLIENT_IP_HEADER:-}
       - LOG_RETENTION_DAYS=${LOG_RETENTION_DAYS:-7}
       - FILE_REPO_PLUGIN_ID=${FILE_REPO_PLUGIN_ID:-00000000-0000-4000-8000-000000000011}
       - FILE_REPO_PATH=${FILE_REPO_PATH:-/data/file-repo}
@@ -703,7 +708,7 @@ services:
       - UNM_API_TOKEN=${UNM_API_TOKEN:-}
       - MCP_DEBUG_KEY=${MCP_DEBUG_KEY:-dev-mcp-debug-key}
       - MCP_KEY=${MCP_KEY:-}
-      - DATABASE_URL=postgresql://unm:unm@postgres:5432/unm
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-unm}:${POSTGRES_PASSWORD:-unm}@postgres:5432/${POSTGRES_DB:-unm}
       - UNM_DEFAULT_GATEWAY=${UNM_DEFAULT_GATEWAY:-}
       - UNM_RUN_AS_ROOT=${UNM_RUN_AS_ROOT:-}
       - UNM_SKIP_CHOWN=${UNM_SKIP_CHOWN:-}
@@ -803,7 +808,7 @@ services:
     image: ${UNM_REGISTRY:-ghcr.io/michaelkirgus/unifiednetworkmanager}/secrets-provider-plugin:${UNM_IMAGE_TAG:-dev}
   webapp:
     ports:
-      - ${UNM_WEB_PORT:-8080}:5173
+      - ${UNM_WEB_PORT:-8080}:8080
     environment:
       - UNM_DEFAULT_GATEWAY=${UNM_DEFAULT_GATEWAY:-}
       - UNM_RUN_AS_ROOT=${UNM_RUN_AS_ROOT:-}
@@ -813,7 +818,7 @@ services:
     healthcheck:
       test:
         - CMD-SHELL
-        - node -e 'require("http").get({host:"127.0.0.1",port:5173,path:"/manifest.json"},function(r){process.exit(r.statusCode===200?0:1)}).on("error",function(){process.exit(1)})'
+        - node -e 'require("http").get({host:"127.0.0.1",port:8080,path:"/manifest.json"},function(r){process.exit(r.statusCode===200?0:1)}).on("error",function(){process.exit(1)})'
       interval: 30s
       timeout: 10s
       retries: 3

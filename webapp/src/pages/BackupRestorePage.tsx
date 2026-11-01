@@ -4,6 +4,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import clsx from 'clsx';
 import { ArchiveRestore, Check, FileUp, Loader2 } from 'lucide-react';
 import { api, BackupEntry, BackupManifest, SectionMergeReport } from '../api/client';
+import { takePendingRestoreFile } from '../pendingRestoreFile';
 import { WizardLayout } from '../components/Wizard';
 
 /**
@@ -36,6 +37,8 @@ const SECTION_LABELS: Record<string, string> = {
   devices: 'Devices & plugins',
   documented: 'Documented networks/hosts',
   plans: 'Plans',
+  automations: 'Automations (rules, runs, trigger state)',
+  secrets: 'Secrets (device credentials — passphrase-encrypted)',
   liveInventory: 'Live inventory (regenerable)',
 };
 
@@ -45,16 +48,19 @@ export default function BackupRestorePage() {
   const [searchParams] = useSearchParams();
   const from = searchParams.get('from') ?? '/backups';
   const storedBackupId = searchParams.get('backupId');
-  const uploadHint = searchParams.get('upload');
 
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   // --- Source state -------------------------------------------------------------
   const [sourceType, setSourceType] = useState<'none' | 'upload' | 'stored'>('none');
+  /** Name of the archive picked on the Backups page (or via Replace) — display only. */
+  const [pickedName, setPickedName] = useState<string | null>(null);
   const [pendingId, setPendingId] = useState<string | null>(null);
   const [manifest, setManifest] = useState<BackupManifest | null>(null);
   const [storedEntry, setStoredEntry] = useState<BackupEntry | null>(null);
   const [selectedSections, setSelectedSections] = useState<Set<string>>(new Set());
+  /** Passphrase for the archive's secrets envelope (required to import credentials). */
+  const [restorePassphrase, setRestorePassphrase] = useState('');
 
   // --- Wizard state ---------------------------------------------------------------
   const [step, setStep] = useState<1 | 2 | 3>(1);
@@ -78,6 +84,15 @@ export default function BackupRestorePage() {
     if (manifest) setSelectedSections(new Set(Object.keys(manifest.sections)));
   }, [manifest]);
 
+  /** True when the chosen archive carries a passphrase-encrypted secrets envelope. */
+  const archiveHasSecrets = sourceType === 'upload'
+    ? Boolean(manifest?.secretsEncrypted)
+    : storedEntry
+      ? sectionsOf(storedEntry).includes('secrets') // the section only exists when exported with a passphrase
+      : false;
+  /** The secrets toggle is on AND the archive actually has an envelope to unlock. */
+  const needsPassphrase = archiveHasSecrets && selectedSections.has('secrets');
+
   const stageUpload = useMutation({
     mutationFn: (file: File) => api.uploadBackupForRestore(file),
     onSuccess: (res) => {
@@ -87,13 +102,27 @@ export default function BackupRestorePage() {
     },
   });
 
+  // Consume the archive handed off by the Backups page's "Upload archive…" button.
+  // A closed file dialog is not re-readable by script, so without this handoff
+  // the user would have to pick the same file a second time. take-once semantics
+  // keep StrictMode's double effect run idempotent (the second call gets null).
+  useEffect(() => {
+    const f = takePendingRestoreFile();
+    if (!f) return;
+    setPickedName(f.name);
+    stageUpload.mutate(f);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   const applyMutation = useMutation({
-    mutationFn: () =>
-      sourceType === 'upload' && pendingId
-        ? api.applyBackupRestore({ pendingId, sections: [...selectedSections] })
+    mutationFn: () => {
+      const body = { sections: [...selectedSections], ...(needsPassphrase ? { passphrase: restorePassphrase } : {}) };
+      return sourceType === 'upload' && pendingId
+        ? api.applyBackupRestore({ pendingId, ...body })
         : storedEntry
-          ? api.applyBackupRestore({ backupId: storedEntry.id, sections: [...selectedSections] })
-          : Promise.reject(new Error('No source selected')),
+          ? api.applyBackupRestore({ backupId: storedEntry.id, ...body })
+          : Promise.reject(new Error('No source selected'));
+    },
     onSuccess: (res) => {
       setReport(res.report);
       setStep(3);
@@ -155,12 +184,12 @@ export default function BackupRestorePage() {
             <h3 className="mb-2 flex items-center gap-2 text-sm font-semibold"><FileUp className="h-4 w-4 text-primary" /> Upload an archive</h3>
             {sourceType === 'upload' && manifest ? (
               <div className="flex items-center justify-between gap-2 rounded-md border border-success/40 bg-success/10 px-3 py-2 text-sm">
-                <span className="font-medium">{uploadHint ?? 'Archive staged'} — ready to preview</span>
+                <span className="font-medium">{pickedName ?? 'Archive staged'} — ready to preview</span>
                 <button type="button" onClick={() => fileInputRef.current?.click()} className="text-xs text-secondary underline hover:text-foreground">Replace</button>
               </div>
             ) : (
               <>
-                <p className="mb-2 text-xs text-faint">A .unmbak.gz archive exported from any UNM instance{uploadHint ? ` — you picked "${uploadHint}" on the Backups page` : ''}.</p>
+                <p className="mb-2 text-xs text-faint">A .unmbak.gz archive exported from any UNM instance. If you picked one on the Backups page it is staged automatically — no second selection needed.</p>
                 <button type="button" onClick={() => fileInputRef.current?.click()} className="inline-flex items-center gap-2 rounded-md border border-border px-3 py-1.5 text-sm hover:bg-muted">
                   Choose archive…
                 </button>
@@ -171,7 +200,7 @@ export default function BackupRestorePage() {
               type="file"
               accept=".unmbak.gz,application/gzip,application/octet-stream"
               className="hidden"
-              onChange={(e) => { const f = e.target.files?.[0]; if (f) stageUpload.mutate(f); e.target.value = ''; }}
+              onChange={(e) => { const f = e.target.files?.[0]; if (f) { setPickedName(f.name); stageUpload.mutate(f); } e.target.value = ''; }}
             />
           </div>
 
@@ -243,6 +272,15 @@ export default function BackupRestorePage() {
             <p className="rounded-md border border-border bg-background px-3 py-2 text-xs text-faint">{buildTagNote}</p>
           )}
 
+          {/* Apply failures must be visible HERE — step 1's banner never shows once the user is on Preview. */}
+          {applyMutation.isError && (
+            <div className="rounded-md border border-danger-border bg-danger px-3 py-2 text-sm text-danger-fg">
+              <p className="font-medium">Apply failed</p>
+              <p>{(applyMutation.error as Error).message}</p>
+              <p className="mt-1 text-xs opacity-80">Sections applied before the failure stay merged (each section is its own transaction) — uncheck the failing section and retry.</p>
+            </div>
+          )}
+
           {/* Section toggles */}
           <div className="space-y-1">
             {previewRows.map(({ key, rowCount }) => (
@@ -251,13 +289,34 @@ export default function BackupRestorePage() {
                   <input type="checkbox" checked={selectedSections.has(key)} onChange={() => toggleSection(key)} />
                   {SECTION_LABELS[key] ?? key}
                 </span>
-                <span className="text-xs text-faint">{rowCount != null ? `${rowCount.toLocaleString()} rows` : 'row counts available after download'}</span>
+                <span className="text-xs text-faint">{key === 'secrets'
+                  ? (rowCount != null ? `${rowCount.toLocaleString()} credential(s)` : '')
+                  : rowCount != null ? `${rowCount.toLocaleString()} rows` : 'row counts available after download'}</span>
               </label>
             ))}
           </div>
 
           {manifest && (
             <p className="text-xs text-faint">Archive total: {totalRows.toLocaleString()} rows across {manifestSections.length} section(s), exported {new Date(manifest.exportedAt).toLocaleString()}.</p>
+          )}
+
+          {/* Passphrase unlock for the secrets envelope */}
+          {needsPassphrase && (
+            <div className="rounded-md border border-warning/60 bg-background p-3">
+              <label className="block text-sm">
+                <span className="mb-1 block text-xs font-medium uppercase tracking-wide text-faint">Credentials passphrase *</span>
+                <input
+                  type="password"
+                  className="w-72 rounded-md border border-border bg-background px-2 py-1.5"
+                  value={restorePassphrase}
+                  onChange={(e) => setRestorePassphrase(e.target.value)}
+                  placeholder="The passphrase used when the backup was created"
+                />
+              </label>
+              <p className="mt-1 text-xs text-faint">
+                The archive's device credentials are encrypted with this passphrase. A wrong passphrase fails only the secrets section — all other sections still merge.
+              </p>
+            </div>
           )}
 
           {/* Apply */}
@@ -271,7 +330,7 @@ export default function BackupRestorePage() {
               <button type="button" onClick={() => setStep(1)} className="rounded-md px-3 py-1.5 text-sm text-secondary hover:bg-muted">Back to source</button>
               <button
                 type="button"
-                disabled={selectedSections.size === 0 || !!versionWarning}
+                disabled={selectedSections.size === 0 || !!versionWarning || (needsPassphrase && restorePassphrase === '')}
                 onClick={() => applyMutation.mutate()}
                 className="inline-flex items-center gap-2 rounded-md bg-primary px-4 py-1.5 text-sm font-medium text-white hover:bg-primary-hover disabled:opacity-50"
               >
@@ -285,6 +344,18 @@ export default function BackupRestorePage() {
       {/* ================= STEP 3 — report ================= */}
       {step === 3 && report && (
         <div className="space-y-4">
+          {/* Sections that failed rolled back on their own — the rest applied. Say so loudly. */}
+          {report.some((r) => r.error) && (
+            <div className="rounded-md border border-danger-border bg-danger px-3 py-2 text-sm text-danger-fg">
+              <p className="font-medium">Some sections failed and were rolled back — the others applied.</p>
+              <ul className="mt-1 list-inside list-disc space-y-0.5 text-xs">
+                {report.filter((r) => r.error).map((r) => (
+                  <li key={r.section}>Section "{r.section}": {r.error}</li>
+                ))}
+              </ul>
+            </div>
+          )}
+
           <div className="flex flex-wrap gap-2 text-sm">
             <span className="rounded bg-success px-2 py-1 font-medium text-success-fg">{createdTotal.toLocaleString()} created</span>
             <span className="rounded bg-info px-2 py-1 font-medium text-info-fg">{updatedTotal.toLocaleString()} updated (merged)</span>

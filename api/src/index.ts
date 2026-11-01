@@ -6,6 +6,7 @@ import * as OpenApiValidator from 'express-openapi-validator';
 import { loadOpenApiSpec, resolveOpenApiPath } from './openapi';
 import { getEffectiveSettingValue } from './systemSettings';
 import { initDb, backfillSecrets, backfillAdminPermissions, backfillDeviceSites, backfillAdminRole, backfillInteractiveLoginPermission, backfillDeviceAllPermission } from './db';
+import { ensureSchemaBootstrapped } from './schemaBootstrap';
 import authRouter from './routes/auth';
 import devicesRouter from './routes/devices';
 import pluginsRouter from './routes/plugins';
@@ -59,6 +60,7 @@ import { startAutomationEvaluatorWorker } from './workers/automations';
 import { LEADER_KEYS, runAsLeader } from './workers/leader';
 import { initWorker } from './workers/stats';
 import { attachConsoleProxy } from './consoleProxy';
+import { clientIpKeyGenerator, parseTrustProxy } from './utils/clientIp';
 import { setPluginTransports } from './utils/pluginHttp';
 import { startApiMtls } from './ca/apiMtls';
 import { apiVersion } from './version';
@@ -66,6 +68,36 @@ import { db } from './db';
 
 const PORT = Number(process.env.PORT ?? 3000);
 const API_PREFIX = '/v1';
+
+/**
+ * Explicitly allowed CORS origins, from UNM_CORS_ORIGINS (comma-separated).
+ * WEBAUTHN_ORIGIN is folded in too: the webapp origin that passkeys are bound
+ * to and the origin browsers may call cross-origin should be the same list —
+ * keeping them separate invites a misconfiguration where one works and the
+ * other doesn't. Read at request time (cheap string split) so `docker compose`
+ * env changes apply on restart without code coupling.
+ */
+function corsAllowedOrigins(): string[] {
+  const raw = [process.env.UNM_CORS_ORIGINS ?? '', process.env.WEBAUTHN_ORIGIN ?? '']
+    .join(',')
+    .split(',')
+    .map((o) => o.trim())
+    .filter(Boolean);
+  return [...new Set(raw)];
+}
+
+/**
+ * True for any http(s)://localhost:<port> or http(s)://127.0.0.1:<port>. These
+ * loopback origins are ALWAYS allowed regardless of configuration: the
+ * development webapp is served from http://localhost:8080 without a
+ * fully-qualified domain name, and local scripts/probes hit the API cross-origin
+ * all the time — both must keep working out of the box on every machine. This
+ * only ever widens access for loopback origins (unreachable off-host anyway);
+ * it is deliberately not configurable away.
+ */
+function isLocalhostOrigin(origin: string): boolean {
+  return /^(https?:\/\/)(localhost|127\.0\.0\.1)(:\d+)?\/?$/.test(origin);
+}
 
 // General limiter applied to every /v1 route to guard database-backed
 // handlers against abuse/brute force. The per-window budget is a global setting
@@ -75,6 +107,18 @@ const API_PREFIX = '/v1';
 // the default budget applies (the limiter must never break request flow). The
 // auth endpoints keep their own tight, FIXED limiter below — brute-force
 // protection is not tunable from the UI.
+//
+// Client-IP resolution behind a reverse proxy: by default express-rate-limit
+// buckets on req.ip, which is the PROXY's address when UNM sits behind one —
+// collapsing every real client into a single bucket. Two env knobs fix that
+// (see docs/REVERSE-PROXY.md):
+//   UNM_TRUST_PROXY        → app.set('trust proxy', …) so req.ip comes from the
+//                            leftmost X-Forwarded-For entry of TRUSTED peers.
+//   UNM_CLIENT_IP_HEADER   → explicit client-IP header (e.g. Cloudflare's
+//                            CF-Connecting-IP); wins over everything else via
+//                            the keyGenerator below. Only set it if your proxy
+//                            is the sole path to the API — otherwise clients
+//                            can forge the header and reset their own bucket.
 const generalLimiter = rateLimit({
   windowMs: 60_000,
   limit: async () => {
@@ -84,6 +128,8 @@ const generalLimiter = rateLimit({
     } catch { /* fall through to the default budget */ }
     return 300;
   },
+  // undefined = library default (req.ip) — correct once trust proxy is set.
+  keyGenerator: clientIpKeyGenerator(),
   standardHeaders: true,
   legacyHeaders: false,
   // JSON body so the webapp's error handling shows a useful message instead of
@@ -98,12 +144,19 @@ const generalLimiter = rateLimit({
 const authLimiter = rateLimit({
   windowMs: 60_000,
   limit: 10,
+  // Same client-IP resolution as the general limiter (see above).
+  keyGenerator: clientIpKeyGenerator(),
   standardHeaders: true,
   legacyHeaders: false,
   message: { error: 'Too many login attempts' },
 });
 
 async function main(): Promise<void> {
+  // Fresh-install bootstrap: create the core schema if it doesn't exist yet.
+  // No-op on every existing deployment (one pg_class query); production images
+  // have no host-side `drizzle-kit push` step, so this is what makes a fresh
+  // database bootable. See src/schemaBootstrap.ts.
+  await ensureSchemaBootstrapped();
   await initDb();
   await backfillAdminRole();
   await backfillAdminPermissions();
@@ -129,9 +182,47 @@ async function main(): Promise<void> {
   const spec = loadOpenApiSpec();
   const specPath = resolveOpenApiPath();
 
+  // CORS: this is an admin API — never answer with a wildcard origin. Allowed
+  // origins come from UNM_CORS_ORIGINS (comma-separated, e.g.
+  // "https://unm.example.com") plus WEBAUTHN_ORIGIN so the passkey browser
+  // check and the CORS allowlist can't drift apart. Localhost/127.0.0.1 origins
+  // are ALWAYS allowed: the dev webapp runs on http://localhost:8080 (or any
+  // port) without a fully-qualified domain name, and local scripts/probes must
+  // keep working out of the box. Anything else gets no CORS headers at all —
+  // cross-origin browsers then block the response.
+  const corsOrigins = new Set<string>(corsAllowedOrigins());
+
   const app = express();
+
+  // Reverse-proxy support (UNM_TRUST_PROXY): when set, Express reads the real
+  // client IP from X-Forwarded-For for peers matching the policy — "1" trusts
+  // exactly one hop (a single proxy), a number N trusts N hops, and CIDR lists
+  // / named policies (loopback, link-local, …) trust whole networks. Without
+  // it req.ip is always the direct TCP peer, which behind a proxy means every
+  // client shares the proxy's rate-limit bucket. See docs/REVERSE-PROXY.md.
+  //
+  // Deliberately NOT set to `false` when unset: express-rate-limit v8 throws
+  // ERR_ERL_UNEXPECTED_X_FORWARDED_FOR for XFF requests only when trust proxy
+  // is strictly false, while the default (undefined) ignores the header — so
+  // leaving it untouched keeps pre-existing proxy deployments working until
+  // UNM_TRUST_PROXY is configured.
+  const trustProxy = parseTrustProxy(process.env.UNM_TRUST_PROXY);
+  if (trustProxy) { // truthy: unset/empty/"0" mean no trusted hops — leave the default alone
+    app.set('trust proxy', trustProxy);
+    console.log(`[api] trust proxy enabled: ${JSON.stringify(trustProxy)} — client IPs are read from X-Forwarded-For for matching peers`);
+  }
+
   app.use(helmet());
-  app.use(cors());
+  app.use(
+    cors({
+      origin(origin, callback) {
+        // No Origin header (same-origin request or non-browser client) → allow.
+        if (!origin || isLocalhostOrigin(origin) || corsOrigins.has(origin)) return callback(null, true);
+        console.warn(`[api] CORS: rejecting cross-origin request from ${origin} (not in UNM_CORS_ORIGINS/WEBAUTHN_ORIGIN)`);
+        return callback(null, false);
+      },
+    }),
+  );
   // Filesystem writes (POST /devices/:id/filesystem op=write) carry base64 file
   // contents — allow up to ~10 MiB of inbound JSON so a user can upload files that size.
   app.use(express.json({ limit: '12mb' }));

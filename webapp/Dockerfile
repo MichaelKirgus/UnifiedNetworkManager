@@ -11,7 +11,11 @@ WORKDIR /app
 # import.meta.env.VITE_* references during `vite build`), so it must be
 # supplied as a build arg rather than a runtime container environment
 # variable, which would have no effect on the already-built assets.
-ARG VITE_API_URL=http://localhost:3000/v1
+# Empty (the default) → the bundle uses the RELATIVE base "/v1": same-origin
+# access, i.e. the webapp and API are served under one hostname — the standard
+# reverse-proxy deployment (see docs/REVERSE-PROXY.md). Set an absolute URL
+# only for cross-origin setups (e.g. dev: http://localhost:3000/v1).
+ARG VITE_API_URL=
 ENV VITE_API_URL=${VITE_API_URL}
 
 COPY package*.json ./
@@ -23,13 +27,19 @@ RUN npm run build
 FROM node:20-alpine
 
 WORKDIR /app
+# `serve` stays for backward compatibility (compose files may override the CMD
+# with it); the DEFAULT runtime is proxy.js below.
 RUN npm install -g serve
 COPY --from=build /app/dist ./dist
+# Same-origin API proxy — see webapp/proxy.js. The bundle ships with the relative
+# "/v1" base, so the webapp container must forward /v1/* to the api service;
+# `serve` alone would answer every path (incl. /v1) with index.html.
+COPY proxy.js ./proxy.js
 # Bake the build tag into a manifest the UI can read (same origin, no API needed).
 ARG UNM_BUILD_TAG=
 RUN node -e "require('fs').writeFileSync('/app/dist/manifest.json', JSON.stringify({ buildTag: process.env.UNM_BUILD_TAG || '' }))"
 
-EXPOSE 5173
+EXPOSE 8080
 
 # Unprivileged runtime user (uid/gid 1001) — the entrypoint wrapper drops to it.
 RUN addgroup -g 1001 unm && adduser -u 1001 -G unm -D app \
@@ -214,4 +224,5 @@ UNM_PRIVDROP
 RUN chmod +x /usr/local/bin/unm-entrypoint.sh
 ENTRYPOINT ["/usr/local/bin/unm-entrypoint.sh"]
 
-CMD ["serve", "-s", "dist", "-l", "5173"]
+# Default: static SPA + /v1/* proxy to the api service (UNM_API_TARGET, PORT).
+CMD ["node", "proxy.js"]

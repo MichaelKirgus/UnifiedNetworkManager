@@ -219,7 +219,7 @@ function resolveVlanPorts(topo: L2Topology | null, attach: string, vlanRows: str
 }
 
 /** Adds one row to a table and verifies it appeared. Returns { ok, detail }. */
-async function cliAddRow(
+export async function cliAddRow(
   ctx: ActionContext,
   creds: SshCredentials,
   tablePath: string,
@@ -240,7 +240,7 @@ async function cliAddRow(
 }
 
 /** Deletes a single-key table row by name from the root prompt; idempotent. */
-async function cliDelRow(
+export async function cliDelRow(
   ctx: ActionContext,
   creds: SshCredentials,
   tablePath: string,

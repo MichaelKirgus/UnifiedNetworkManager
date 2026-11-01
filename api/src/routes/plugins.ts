@@ -147,7 +147,7 @@ router.get('/plugins/:id/icon', async (req, res) => {
       return;
     }
     // eslint-disable-next-line no-console
-    console.warn(`[plugins] icon proxy failed for ${id} (${path}):`, e.message);
+    console.warn(`[plugins] icon proxy failed for ${id} (${path}): ${e.message ?? 'unknown error'}`);
     res.status(502).json({ error: 'Failed to fetch icon from plugin' });
   }
 });
@@ -206,7 +206,7 @@ router.get('/plugins/:id/asset', async (req, res) => {
       return;
     }
     // eslint-disable-next-line no-console
-    console.warn(`[plugins] asset proxy failed for ${id} (${path}):`, e.message);
+    console.warn(`[plugins] asset proxy failed for ${id} (${path}): ${e.message ?? 'unknown error'}`);
     res.status(502).json({ error: 'Failed to fetch asset from plugin' });
   }
 });
@@ -254,7 +254,7 @@ router.post('/plugins/:id/tls/renew', requireAuth, requirePermission('ca:manage'
       res.status(502).json({ error: 'Plugin rejected the request (plugin API key mismatch?)' });
       return;
     }
-    console.warn(`[plugins] tls/renew failed for ${id}:`, e.message ?? err);
+    console.warn(`[plugins] tls/renew failed for ${id}: ${e.message ?? String(err)}`);
     res.status(502).json({ error: `Re-enrollment failed: ${e.response?.data?.error ?? e.message ?? 'unknown error'}` });
   }
 });

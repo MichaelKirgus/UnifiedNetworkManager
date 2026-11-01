@@ -34,15 +34,18 @@ import {
   createPluginServer,
   errorDescriptor,
   isTransientTransportError,
+  probeHandler,
   readSettings,
   resolvePluginIdentity,
   validateInput,
 } from '@unm/plugin-sdk';
+import type { ProbeRequestBody } from '@unm/plugin-sdk';
 import { NETCUP_SCP_DEVICE_SUPPORT } from './deviceSupport';
 import { ScpActionContext, registry as actionRegistry } from './actions';
 import { buildPlan, PlanningError } from './plan';
 import { collectScpMonitoring } from './monitoring';
-import { createScpClient, isAuthError, normalizeBaseUrl, ScpApiError } from './client/scpClient';
+import { collectScpVmStats } from './probe';
+import { createScpClient, DEFAULT_REFRESH_WINDOW_SEC, isAuthError, normalizeBaseUrl, ScpApiError } from './client/scpClient';
 
 // --- Identity -----------------------------------------------------------------
 const identity = resolvePluginIdentity({
@@ -52,7 +55,9 @@ const identity = resolvePluginIdentity({
     'netcup Server Control Panel integration — VM inventory/state/task metrics, network + firewall rule inventory into UNM, and plan-gated VM management (power, snapshots, ISO, image setup, firewall policies).',
   version: '0.1.0',
   vendors: ['netcup'],
-  capabilities: ['monitoring', 'inventory', 'configuration'],
+  // 'probe' — short-cycle live telemetry (POST /probe): per-VM CPU utilization
+  // for the VMs page's CPU column, from SCP's metrics/cpu time series.
+  capabilities: ['monitoring', 'inventory', 'configuration', 'probe'],
 });
 
 // --- Options --------------------------------------------------------------------
@@ -62,9 +67,20 @@ const PLUGIN_OPTIONS: PluginOptionDescriptor[] = [
     label: 'SCP API base URL',
     type: 'string' as const,
     default: 'https://servercontrolpanel.de/scp-core',
-    description: 'Base of the SCP REST API. The device managementAddress is used when set; this option is the fallback for multi-instance setups.',
+    description:
+      'Base of the SCP REST API. The device managementAddress is used when set (a bare host like servercontrolpanel.de is fine — https:// and /scp-core are added automatically); this option is the fallback for multi-instance setups.',
   },
   { key: 'timeoutMs', label: 'Request timeout (ms)', type: 'integer' as const, default: 15000, min: 2000, max: 60000, description: 'Per-request timeout for SCP API calls.' },
+  {
+    key: 'refreshWindowSec',
+    label: 'Refresh window (s)',
+    type: 'integer' as const,
+    default: DEFAULT_REFRESH_WINDOW_SEC,
+    min: 0,
+    max: 3600,
+    description:
+      'How long BEFORE an access token expires the plugin proactively exchanges the bound refresh token for a fresh one (covers clock skew + in-flight calls). 0 = only when actually expired.',
+  },
   {
     key: 'collectFirewall',
     label: 'Collect firewall rules into UNM',
@@ -104,8 +120,11 @@ const server = createPluginServer({
   // GET /plugins/:id/asset) — referenced from discovery.deviceSupport.
   assetsDir: path.join(__dirname, '../..'),
   discovery: {
-    // SCP authenticates with a long-lived OAuth2 Bearer token (Keycloak device-code flow).
+    // Two credential modes, both from netcup's Keycloak realm "scp": a static
+    // access token (apiKeyNoSecret) or — preferred — an OAuth2 refresh token
+    // (scpRefreshToken), which the plugin exchanges for fresh access tokens on demand.
     requiredSecretType: 'apiKeyNoSecret',
+    requiredSecretTypes: ['apiKeyNoSecret', 'scpRefreshToken'],
     metrics: METRIC_DESCRIPTORS,
     options: PLUGIN_OPTIONS,
     actions: actionRegistry.listCatalog(),
@@ -127,27 +146,35 @@ function hostOf(managementAddress: unknown): string {
 }
 
 /** Resolves effective options from injected settings. */
-function endpointsOf(settings: Record<string, unknown>, managementAddress: string): { baseUrl: string; timeoutMs: number } {
+function endpointsOf(settings: Record<string, unknown>, managementAddress: string): { baseUrl: string; timeoutMs: number; refreshWindowSec: number } {
   // The device's managementAddress wins (it is the per-device identity); the
   // option is a fallback for setups where the address was left empty.
   const raw = managementAddress !== '' ? managementAddress : (typeof settings['baseUrl'] === 'string' ? (settings['baseUrl'] as string) : '');
   return {
     baseUrl: normalizeBaseUrl(raw),
     timeoutMs: clampInt(settings['timeoutMs'], 2000, 60000, 15000),
+    refreshWindowSec: clampInt(settings['refreshWindowSec'], 0, 3600, DEFAULT_REFRESH_WINDOW_SEC),
   };
 }
 
-/** Resolves the SCP Bearer token from the request's credentials body. */
-function resolveCredentials(credentials: Record<string, unknown> | undefined): { token?: string; error?: string } {
+/** Resolves the SCP credential from the request's credentials body.
+ *  Accepts either secret type: `apiKeyNoSecret` (static access token in
+ *  `apiKey`) or `scpRefreshToken` (OAuth2 refresh token in `refreshToken`). */
+function resolveCredentials(credentials: Record<string, unknown> | undefined): { token?: string; refreshToken?: string; error?: string } {
   if (!credentials || typeof credentials !== 'object') return { error: 'Missing credentials' };
   const token = typeof credentials['apiKey'] === 'string' && credentials['apiKey'].length > 0 ? credentials['apiKey'].trim() : undefined;
   if (token) return { token };
-  return { error: 'Missing SCP API token — bind an "API Key (without secret)" containing your netcup SCP Bearer token to this device.' };
+  const refreshToken = typeof credentials['refreshToken'] === 'string' && credentials['refreshToken'].length > 0 ? credentials['refreshToken'].trim() : undefined;
+  if (refreshToken) return { refreshToken };
+  return {
+    error:
+      'Missing SCP credential — bind either an "API Key (without secret)" containing a static access token, or a "netcup SCP Refresh Token" secret (preferred: it auto-refreshes and only lapses after ~30 days of non-use).',
+  };
 }
 
 /** Builds a bound client for one SCP account. */
-function buildClient(baseUrl: string, token: string, timeoutMs?: number) {
-  return createScpClient({ baseUrl, token, timeoutMs });
+function buildClient(baseUrl: string, cred: { token?: string; refreshToken?: string }, timeoutMs?: number, refreshWindowSec?: number) {
+  return createScpClient({ baseUrl, token: cred.token, refreshToken: cred.refreshToken, timeoutMs, refreshWindowSec });
 }
 
 /** Human-readable message from an unknown rejection reason. */
@@ -189,13 +216,13 @@ async function handleMonitoring(req: Request, res: Response, body: Record<string
     return;
   }
 
-  const { token, error: credError } = resolveCredentials(body.credentials as Record<string, unknown> | undefined);
-  if (!token) {
+  const { token, refreshToken, error: credError } = resolveCredentials(body.credentials as Record<string, unknown> | undefined);
+  if (!token && !refreshToken) {
     res.status(200).json({ deviceId: deviceId ?? null, collectedAt: new Date().toISOString(), health: 'critical', metrics: { 'system.error': credError ?? 'Missing credentials' }, metricDescriptors: [errorDescriptor()] });
     return;
   }
 
-  const client = buildClient(ep.baseUrl, token, ep.timeoutMs);
+  const client = buildClient(ep.baseUrl, { token, refreshToken }, ep.timeoutMs, ep.refreshWindowSec);
   const fail = (health: Health, error: string): void => {
     res.status(200).json({ deviceId: deviceId ?? null, collectedAt: new Date().toISOString(), health, metrics: { 'system.error': error }, metricDescriptors: [errorDescriptor()], error });
   };
@@ -214,9 +241,54 @@ async function handleMonitoring(req: Request, res: Response, body: Record<string
       baseUrl: ep.baseUrl,
       collectFirewall: settings.collectFirewall !== false,
       logToApi: settings.logToApi === true,
+      refreshWindowSec: ep.refreshWindowSec,
     },
   });
 }
+
+// ---------------------------------------------------------------------------
+// POST /probe — SHORT-CYCLE live telemetry (capability 'probe'). The webapp's
+// VMs page polls this every 3 s through the API broker, requesting keys
+// `vmStates` + `vmStats`. SCP has no SSH and no per-poll state endpoint, so:
+//   - vmStats: per-VM CPU utilization from GET /servers/{id}/metrics/cpu (the
+//     latest point of each vCPU's rate series → percent of allocated cores).
+//     Cached in-process for 15 s — netcup is hit at most once per TTL, and a
+//     failed refresh keeps serving the last good snapshot.
+//   - vmStates: an EMPTY map. SCP has no cheap per-poll state endpoint, so we
+//     serve {} — but it MUST be present in the response: the webapp's live-probe
+//     memo early-returns when `vmStates` is absent and would drop vmStats too.
+//     With {}, the VMs page falls back to the inventory state from /monitoring
+//     (~30 s cadence) while still rendering the CPU column.
+// Unknown keys are ignored; an empty/absent list means "the default set".
+// ---------------------------------------------------------------------------
+const PROBE_KEYS = new Set(['vmStats']);
+
+app.post('/probe', probeHandler(async (body: ProbeRequestBody, req) => {
+  const settings = readSettings(req, PLUGIN_OPTIONS);
+  logger.setEnabled(settings.logToApi === true);
+
+  const ep = endpointsOf(settings, hostOf(body.managementAddress));
+  if (!ep.baseUrl) throw new Error('Missing managementAddress');
+
+  const { token, refreshToken, error: credError } = resolveCredentials(body.credentials as Record<string, unknown> | undefined);
+  if (!token && !refreshToken) throw new Error(credError ?? 'Missing credentials');
+
+  // Which keys did the caller ask for? Absent/empty = default set. Unknown ignored.
+  const requested = Array.isArray(body.keys) && body.keys.length > 0 ? body.keys : ['vmStats'];
+  const wanted = new Set(requested.filter((k) => PROBE_KEYS.has(k)));
+  if (wanted.size === 0) throw new Error(`No supported probe keys in [${requested.join(', ')}]`);
+
+  const client = buildClient(ep.baseUrl, { token, refreshToken }, ep.timeoutMs, ep.refreshWindowSec);
+
+  const metrics: Record<string, unknown> = {};
+  // MUST be present (even empty) — see the comment above. The webapp's live-probe
+  // memo drops the whole entry when vmStates is absent, which would hide vmStats.
+  metrics['vmStates'] = {};
+  if (wanted.has('vmStats')) {
+    metrics['vmStats'] = await collectScpVmStats(client, body.deviceId ?? 'unknown');
+  }
+  return { collectedAt: new Date().toISOString(), metrics };
+}, 'netcup-scp-plugin'));
 
 // ---------------------------------------------------------------------------
 // POST /config — executes ONE action step against one SCP account. The API's
@@ -253,8 +325,8 @@ app.post('/config', async (req, res) => {
     return;
   }
 
-  const { token, error: credError } = resolveCredentials(body.credentials as Record<string, unknown> | undefined);
-  if (!token) {
+  const { token, refreshToken, error: credError } = resolveCredentials(body.credentials as Record<string, unknown> | undefined);
+  if (!token && !refreshToken) {
     res.status(200).json({ success: false, result: { error: credError ?? 'Missing credentials' } });
     return;
   }
@@ -267,7 +339,7 @@ app.post('/config', async (req, res) => {
   }
 
   try {
-    const client = buildClient(ep.baseUrl, token, action.timeoutMs ?? ep.timeoutMs);
+    const client = buildClient(ep.baseUrl, { token, refreshToken }, action.timeoutMs ?? ep.timeoutMs, ep.refreshWindowSec);
     const ctx: ScpActionContext = { client, settings };
     const result = await action.execute(ctx, input);
     res.status(200).json({ success: result.success, result });

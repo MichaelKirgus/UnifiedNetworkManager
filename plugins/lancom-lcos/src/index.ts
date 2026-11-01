@@ -435,10 +435,13 @@ app.post('/monitoring', async (req, res) => {
     await assertPinned(req, managementAddress, webTransportOf(settings), portsOf(settings));
 
     // Slow path: targeted parallel LCOS walks (only the subtrees we use),
-    // TTL-cached per host with a quality gate against partial-failure data.
+    // TTL-cached per host with a quality gate against partial-failure data. A
+    // forced refresh ("Check now") bypasses the cache — otherwise an explicit
+    // re-poll could be answered from a snapshot up to inventoryTtlMs old and
+    // hide changes made seconds ago (e.g. a CLI-written DNS entry).
     const inventory = await getLcosInventory(host, creds, opts, {
       log: (level, message, context) => logger.warn(message, { deviceId, context }),
-    });
+    }, body.forceUpdateCheck === true);
     const snapshot = inventory.snapshot;
 
     if (!snapshot) {
@@ -759,6 +762,55 @@ app.post('/monitoring', async (req, res) => {
         expiry: d.expirySeconds !== null ? new Date(nowMs + d.expirySeconds * 1000).toISOString() : null,
       }));
     if (emitInventory && leaseRows.length > 0) metrics['dhcpLeases'] = leaseRows;
+
+    // dhcpReservations[] → cross-device DHCP reservations page. The
+    // Setup/DHCP/Hosts config mirror is a CONFIG table: an EMPTY array is
+    // authoritative (the user deleted the last reservation), so emit it
+    // unconditionally when the inventory walk ran — same present-vs-absent
+    // contract as dnsEntries. LCOS keys reservations by MAC and scopes each to
+    // a DHCP pool (network name) → `interface` carries the network name.
+    if (emitInventory) {
+      const resvRows = snapshot.dhcpHosts.map((h) => ({
+        mac: h.mac,
+        ip: h.ip || null,
+        hostname: h.hostname || null,
+        interface: h.networkName || null,
+      }));
+      metrics['dhcpReservations'] = resvRows;
+
+      // dhcpNetworks[] → the DHCP page's network dropdown (powers the reservation
+      // dialog's scope selection). LCOS pools are NOT bound to an interface — they
+      // are keyed by network name, which is exactly what the reservation's
+      // `interface` field carries; emitting it as the row's interface makes the
+      // dialog send the selected pool name through. Same present-vs-absent
+      // contract: empty array = no pools configured (authoritative).
+      const poolRows = snapshot.dhcpPools
+        .filter((p) => p.startIp !== '')
+        .map((p) => ({
+          name: p.name,
+          rangeStart: p.startIp,
+          rangeEnd: p.endIp || p.startIp,
+          interface: p.name, // the pool's scope key — what dhcp.staticMapping.add expects
+          gateway: p.gateway === '0.0.0.0' ? null : p.gateway,
+        }));
+      metrics['dhcpNetworks'] = poolRows;
+    }
+
+    // dnsEntries[] → cross-device DNS page. The Setup/DNS/DNS-List config mirror
+    // is always present on LCOS routers, so an EMPTY array is authoritative
+    // (the user deleted the last entry) — emit it unconditionally when the
+    // inventory walk ran. Rows without any address are dropped (nothing to show).
+    if (emitInventory) {
+      const dnsRows = snapshot.dnsEntries
+        .filter((d) => d.ip !== '' || d.ipv6 !== '')
+        .flatMap((d) => {
+          const rows: Array<Record<string, unknown>> = [];
+          if (d.ip !== '') rows.push({ name: d.name.toLowerCase(), ip: d.ip });
+          if (d.ipv6 !== '') rows.push({ name: d.name.toLowerCase(), ip: d.ipv6 });
+          return rows;
+        });
+      metrics['dnsEntries'] = dnsRows;
+    }
 
     // wlanClients[] → hosts table with source 'wlan' + WiFi page client counts.
     // ALL associated stations are emitted — IP-less ones included; host

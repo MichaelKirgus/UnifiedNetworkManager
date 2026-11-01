@@ -26,7 +26,9 @@ COPY api ./api
 RUN cd api && npm run build && npm prune --omit=dev --legacy-peer-deps
 # Prune devDependencies (typescript, ts-node-dev, jest, @types/*): the build above
 # already ran and nothing at runtime requires them — keeps images lean and free of
-# dev-only vulnerable packages.
+# dev-only vulnerable packages. NOTE: drizzle-kit is a RUNTIME dependency on purpose —
+# src/schemaBootstrap.ts runs `drizzle-kit push` at container boot to bootstrap fresh
+# databases and apply additive schema upgrades (production has no host-side setup.sh).
 
 WORKDIR /app/api
 EXPOSE 3000

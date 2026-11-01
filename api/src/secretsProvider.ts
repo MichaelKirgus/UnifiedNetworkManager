@@ -159,7 +159,7 @@ export async function resolveSecretsProvider(providerId?: string): Promise<Provi
     record = await findProviderById(configuredId);
     if (record && !isOnline(record, now)) {
       // eslint-disable-next-line no-console
-      console.warn(`[secrets] configured provider ${configuredId} is offline; falling back to secrets-provider`);
+      console.warn('[secrets] configured provider is offline; falling back to secrets-provider');
       record = null;
     }
   }
@@ -291,6 +291,9 @@ export async function createSecret(input: {
   /** Interactive-session usage flags (see schema.secrets). Default false. */
   interactiveLoginAllowed?: boolean;
   fileAccessAllowed?: boolean;
+  /** Explicit id to store under (cross-instance secret import — preserves
+   *  device/plan/session references). Omitted = provider mints a fresh UUID. */
+  id?: string;
 }): Promise<{ id: string; createdAt: string }> {
   const provider = await resolveSecretsProvider(input.providerId);
   return callProvider(provider, '/secrets', 'POST', {
@@ -301,6 +304,8 @@ export async function createSecret(input: {
     userId: input.userId,
     interactiveLoginAllowed: input.interactiveLoginAllowed ?? false,
     fileAccessAllowed: input.fileAccessAllowed ?? false,
+    // Pinned id for cross-instance import — the internal route validates it as a UUID.
+    ...(input.id ? { id: input.id } : {}),
   });
 }
 
