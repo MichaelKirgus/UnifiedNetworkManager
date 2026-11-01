@@ -22,6 +22,7 @@ import {
 import { DialogShell } from '../components/DialogShell';
 import { Layout } from '../components/Layout';
 import { StatusBadge } from '../components/StatusBadge';
+import { StepSegments } from '../components/PlanStepProgress';
 import { SchemaForm, validateSchema, defaultValues } from '../components/SchemaForm';
 import { ReauthDialog } from '../components/ReauthDialog';
 import { ScheduleDialog } from '../components/ScheduleDialog';
@@ -338,7 +339,7 @@ export default function PlanDetail() {
       {/* Payload — the raw intent inputs behind every execution of this plan. */}
       <section className="mb-5 rounded-md border border-border bg-card p-4 shadow-sm">
         <h2 className="mb-2 text-sm font-semibold text-foreground">Payload — intent inputs</h2>
-        <pre className="max-h-64 overflow-auto rounded bg-primary p-2 font-mono text-[11px] leading-relaxed text-code-fg">
+        <pre className="max-h-64 overflow-auto rounded bg-code-bg p-2 font-mono text-[11px] leading-relaxed text-code-fg">
           {Object.keys(plan.intentInputs ?? {}).length > 0 ? JSON.stringify(plan.intentInputs, null, 2) : '{}'}
         </pre>
       </section>
@@ -358,7 +359,16 @@ export default function PlanDetail() {
       {/* Steps */}
       <section className="rounded-md border border-border bg-card shadow-sm">
         <div className="flex items-center justify-between border-b border-border px-4 py-3">
-          <h2 className="text-sm font-semibold text-foreground">Steps</h2>
+          {/* One segment per step, colored by status — the run's state at a glance. */}
+          <h2 className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 text-sm font-semibold text-foreground">
+            Steps
+            {steps.length > 0 && (
+              <>
+                <StepSegments steps={steps} className="max-w-xs" />
+                <span className="text-xs font-normal tabular-nums text-faint">{doneCount}/{steps.length}</span>
+              </>
+            )}
+          </h2>
           {canApply && editable && (
             <AddStepButton plan={plan} onAdded={() => planQuery.refetch()} />
           )}
@@ -520,7 +530,7 @@ function StepRow({ step, position, total, editable, deviceName, actionLabel, onM
           <details open={Boolean(step.result)}>
             <summary className="cursor-pointer text-faint hover:text-secondary">Result</summary>
             {step.result ? (
-              <pre className="mt-1 max-h-64 overflow-auto rounded bg-primary p-2 font-mono text-[11px] leading-relaxed text-code-fg">
+              <pre className="mt-1 max-h-64 overflow-auto rounded bg-code-bg p-2 font-mono text-[11px] leading-relaxed text-code-fg">
                 {JSON.stringify(step.result, null, 2)}
               </pre>
             ) : (

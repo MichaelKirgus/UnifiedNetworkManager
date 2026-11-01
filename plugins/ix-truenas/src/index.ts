@@ -2,6 +2,7 @@ import path from 'path';
 import { Request, Response } from 'express';
 import {
   Health,
+  type HealthReason,
   MetricDescriptor,
   PluginOptionDescriptor,
   INVENTORY_INTERVAL_MS,
@@ -41,7 +42,9 @@ import {
   parseProbeTarget,
   CertificateRow,
   buildDeviceTimeInfo,
+  collectGpuRows,
   isUpdateAvailable,
+  type GpuRow,
   type SshCredentials,
   type SshTerminalSession,
   type UpdateRow,
@@ -51,6 +54,7 @@ import {
 import { IX_TRUENAS_DEVICE_SUPPORT } from './deviceSupport';
 import { TruenasClient, TruenasCredentials, TruenasRpcError, TruenasTransport } from './client/truenasClient';
 import {
+  collectProbeStartedAt,
   collectProbeStates,
   collectProbeStats,
   collectProbeVmStates,
@@ -93,6 +97,8 @@ export const PLUGIN_NAME = 'TrueNAS Plugin';
 const identity = resolvePluginIdentity({
   uuid: PLUGIN_UUID,
   name: PLUGIN_NAME,
+  description:
+    'TrueNAS SCALE management — apps/containers, VMs, ZFS pools, storage and firmware updates over the TrueNAS API + SSH.',
   // 0.5.0 — live PROBE endpoint (POST /probe, capability 'probe'): short-cycle
   // per-container CPU/RAM/I-O for the Containers page's on-demand polling
   // (1–5 s), served from ONE `docker stats --no-stream` over the shared SSH
@@ -286,7 +292,46 @@ const identity = resolvePluginIdentity({
   // app.query's container_details) via app.image.delete force=false, so docker's
   // own in-use protection still applies on the appliance. The Updates page's
   // docker-image rows now apply through refs[] too.
-  version: '0.23.0',
+  // 0.24.0 — Enclosure / drive-bay management on the Config page: /state gains a
+  // 'Drive Bays' section (kind:'enclosure') built from enclosure2.query — one LED
+  // bay per slot, grouped into bands per physical enclosure (controller first),
+  // with pool membership resolved from pool.query topology. NEW actions:
+  // enclosure.identify {enclosureId, slot, status} lights/clears the bay LED via
+  // enclosure2.set_slot_status; storage.disk-replace {pool, label, newDisk, force?}
+  // swaps a vdev's backing disk (pool.replace job — waits for it to settle);
+  // storage.disk-offline / storage.disk-online take one vdev offline and back
+  // (pool.offline / pool.online) with topology re-read verification. All writes
+  // are transport-tolerant.
+  // 0.25.0 — Virtual drive-bay fallback for hosts WITHOUT native enclosure
+  // management: when enclosure2.query returns [] the 'Drive Bays' section is now
+  // built from disk.query instead of being omitted — one bay per physical disk
+  // (external JBODs included), grouped into bands by pool, LED from the live
+  // vdev status, replace/offline/online actions for pooled disks. Native
+  // enclosure data always takes priority when present.
+  // 0.26.0 — /monitoring now reports `healthReasons` (SDK contract) for every
+  // non-ok health: worst active alerts, OFFLINE/DEGRADED pools, partial core-
+  // call failures. The UNM webapp shows them in the device status badge tooltip.
+  // 0.27.0 — GPU inventory + live metrics: emits the generic `gpus[]` metric at
+  // the inventory cadence from the appliance's own PCI-based `device.get_gpus`
+  // (NVIDIA/AMD/Intel, incl. enabled iGPUs), enriched with live counters via
+  // nvidia-smi / rocm-smi over the bound SSH slot when present. Gated by the new
+  // `collectGpus` option so GPU-less appliances skip both the RPC and the probe.
+  // 0.28.0 — Live container start times on the Containers page: probe requests
+  // that carry a `names` selection (the webapp's fast transition probe) now also
+  // return each selected container's REAL docker StartedAt via ONE batched
+  // `docker inspect --format '{{.Name}}|{{.State.StartedAt}}' name…` — so the
+  // Uptime column flips within seconds of a start/stop/restart instead of
+  // waiting for the next inventory poll + SSH enrichment cycle (up to ~40 min).
+  // The default page-wide probe stays a single `docker ps -a` with zero
+  // per-container work. Container lifecycle intents (containers.restart / .start
+  // / .stop) now also get the settle+inventory-refresh plan tail, so the DB
+  // catches up right after the action settles.
+  // 0.29.0 — canonical intent containers.image.set: change a container's image
+  // tag or switch it to another image entirely. Custom apps are reconfigured via
+  // app.update (the matched `image:` fields of their structured config are
+  // rewritten and the app redeployed); catalog apps have no editable compose
+  // config and are skipped with a note — version bumps stay on containers.upgrade.
+  version: '0.29.0',
   vendors: ['truenas'],
   capabilities: ['monitoring', 'configuration', 'planning', 'deviceState', 'ssh', 'probe', 'filesystem', 'sshConsole', 'updates', 'quickActions'],
 });
@@ -384,6 +429,14 @@ const PLUGIN_OPTIONS: PluginOptionDescriptor[] = [
     default: true,
     description:
       'Collect virtual machines (vm.query) for the VMs page — including their NIC MAC addresses (inserted into the Hosts page with source "VM") and live guest IPs via `virsh domifaddr` over SSH when an ssh slot is bound. Disable on hosts whose VMs are monitored by another plugin: no vm.query RPC traffic is sent to the appliance and previously collected rows are cleared.',
+  },
+  {
+    key: 'collectGpus',
+    label: 'Collect GPU data',
+    type: 'boolean' as const,
+    default: true,
+    description:
+      "Enumerate GPUs (NVIDIA / AMD / Intel, incl. enabled iGPUs) via the appliance's own PCI inventory and read live counters over SSH when a slot is bound. Disable on GPU-less appliances to skip the probe entirely.",
   },
   {
     key: 'uploadViaSftp',
@@ -868,6 +921,28 @@ function parseAlertSeverity(a: Record<string, unknown>): string {
   return sev ? sev.toUpperCase() : 'INFO';
 }
 
+/**
+ * Formats an alert's text with its args. TrueNAS ≥ 25 ships `text` as a Python
+ * template ("Replication "%(name)s" failed: %(message)s.") — the appliance web
+ * UI substitutes `args` client-side; we do the same so UNM surfaces (status
+ * tooltip, notification center) never show raw placeholders.
+ */
+function formatAlertText(a: Record<string, unknown>): string {
+  const text = pickString(a, ['text']) ?? '';
+  if (!text.includes('%(')) return text;
+  const args = a['args'];
+  if (!args || typeof args !== 'object') return text;
+  try {
+    // Unknown keys keep their original placeholder — never fabricate values.
+    return text.replace(/%\((\w+)\)s/g, (m, key: string) => {
+      const v = (args as Record<string, unknown>)[key];
+      return v === undefined ? m : String(v);
+    });
+  } catch {
+    return text;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Storage inventory (cross-device Storage page): `filesystems[]` + `disks[]`
 // metrics. Pools come from pool.query (already polled); datasets + zvols from
@@ -1171,7 +1246,8 @@ function smartAlertsOf(rawAlerts: Record<string, unknown>[]): Map<string, { leve
     const args = (a['args'] ?? {}) as Record<string, unknown>;
     const name = bareDiskName(pickString(args, ['name']) ?? '');
     if (!name) continue;
-    map.set(name, { level: parseAlertSeverity(a), text: pickString(a, ['text']) ?? '' });
+    // formatAlertText substitutes the %(key)s template args (TrueNAS ≥ 25).
+    map.set(name, { level: parseAlertSeverity(a), text: formatAlertText(a) });
   }
   return map;
 }
@@ -2031,6 +2107,9 @@ async function handleMonitoring(req: Request, res: Response): Promise<void> {
   // VM collection toggle — off = skip vm.query + the SSH virsh enrichment and
   // emit empty vms[]/vmHosts[] to clear stale rows (same contract as apps).
   const collectVms = settings.collectVms !== false;
+  // GPU collection toggle — off = no device.get_gpus RPC, no SSH vendor-tool
+  // probe, key omitted entirely (no wipe) so GPU-less stacks stay clean.
+  const collectGpus = settings.collectGpus !== false;
   // Window-based scheduling: the API sends collectInventory=false on metrics-only
   // polls. The health trio (system.info / pool.query / alert.list) ALWAYS runs so
   // device status stays live; the slow inventory RPCs + their metric keys are
@@ -2055,6 +2134,10 @@ async function handleMonitoring(req: Request, res: Response): Promise<void> {
   const metrics: Record<string, unknown> = {};
   let failures = 0;
   let firstError = '';
+  // Human-readable reasons for a non-ok health — sent as `healthReasons` so the
+  // UNM webapp can show them in the device status badge tooltip. One line per
+  // finding, worst first (the API re-sorts by severity anyway).
+  const healthReasons: HealthReason[] = [];
 
   // Core calls in parallel (the API's monitoring budget is ~30 s; the slowest
   // call dominates). allSettled (NOT all): a failed login (unreachable host /
@@ -2062,7 +2145,7 @@ async function handleMonitoring(req: Request, res: Response): Promise<void> {
   // before error handling. The last three are best-effort extras (networks
   // inventory + static routes + board serial/model) — their failure does NOT
   // count toward health.
-  const [sysInfoRes, poolsRes, alertsRes, ifacesRes, dmiRes, staticRoutesRes, datasetsRes, disksRes, datastoreRes, bootDisksRes, appsRes, dockerNetsRes, appImagesRes, vmsRes, updateAvailRes, updateConfigRes, bootStateRes, bootEnvsRes] = await Promise.allSettled([
+  const [sysInfoRes, poolsRes, alertsRes, ifacesRes, dmiRes, staticRoutesRes, datasetsRes, disksRes, datastoreRes, bootDisksRes, appsRes, dockerNetsRes, appImagesRes, vmsRes, updateAvailRes, updateConfigRes, bootStateRes, bootEnvsRes, gpusRes] = await Promise.allSettled([
     client.call<Record<string, unknown>>('system.info', [], creds),
     client.call<Record<string, unknown>[]>('pool.query', [], creds),
     client.call<Record<string, unknown>[]>('alert.list', [], creds),
@@ -2127,6 +2210,12 @@ async function handleMonitoring(req: Request, res: Response): Promise<void> {
     //     legacy `bootenv.*` namespace — queryBootEnvs falls back automatically.
     collectInventory ? client.call<Record<string, unknown>>('boot.get_state', [], creds) : Promise.resolve(undefined),
     collectInventory ? (async () => { const ctx: TruenasActionContext = { client, creds }; return queryBootEnvs(ctx); })() : Promise.resolve(undefined),
+    // GPU inventory (best-effort — never count toward health). The appliance's
+    // OWN PCI-based enumeration: one row per display controller with vendor +
+    // slot + host-availability flags. Skipped entirely when the `collectGpus`
+    // option is off — no RPC traffic at all. Missing method on older releases →
+    // key omitted (no wipe).
+    collectInventory && collectGpus ? client.call<Record<string, unknown>[]>('device.get_gpus', [], creds) : Promise.resolve(undefined),
   ]);
 
   // Shares-page live sessions (best-effort — never count toward health). The
@@ -2191,17 +2280,23 @@ async function handleMonitoring(req: Request, res: Response): Promise<void> {
     ['docker.network.query', dockerNetsRes],
     ['app.image.query', appImagesRes],
     ['vm.query', vmsRes],
+    ['device.get_gpus', gpusRes],
   ] as const) {
     // Not called when collection is disabled — don't log their "outcome".
     if (!collectApps && (label === 'app.query' || label === 'docker.network.query' || label === 'app.image.query')) continue;
     if (!collectVms && label === 'vm.query') continue;
-    if (!collectInventory && ['interface.query', 'system.dmidecode_info', 'staticroute.query', 'pool.dataset.query', 'disk.query', 'system.datastore', 'boot.get_disks'].includes(label)) continue;
+    if (!collectGpus && label === 'device.get_gpus') continue;
+    // device.get_gpus is gated on collectInventory too (AND collectGpus) — skip it
+    // here for the same reason as the other inventory RPCs.
+    if (!collectInventory && ['interface.query', 'system.dmidecode_info', 'staticroute.query', 'pool.dataset.query', 'disk.query', 'system.datastore', 'boot.get_disks', 'device.get_gpus'].includes(label)) continue;
     if (storageDebugLogged.has(`${host}|${label}`)) continue;
     storageDebugLogged.add(`${host}|${label}`);
     if (r.status === 'rejected') {
       console.warn(`[storage-debug] ${label} failed: ${errMsg(r.reason)}`);
     } else if (!Array.isArray(r.value) && label !== 'system.datastore') {
-      console.warn(`[storage-debug] ${label} returned non-array: ${JSON.stringify(r.value).slice(0, 200)}`);
+      // r.value is undefined when the call was skipped (option off / metrics-only
+      // poll) — JSON.stringify(undefined) is `undefined`, and .slice on it throws.
+      console.warn(`[storage-debug] ${label} returned non-array: ${(JSON.stringify(r.value) ?? 'undefined').slice(0, 200)}`);
     } else {
       const n = Array.isArray(r.value) ? r.value.length : Object.keys((r.value ?? {}) as object).length;
       console.log(`[storage-debug] ${label} ok (${n} entries)`);
@@ -2433,6 +2528,14 @@ async function handleMonitoring(req: Request, res: Response): Promise<void> {
         if (sev === 'CRITICAL') metrics['health.alertCritical'] = true;
         else if (sev === 'WARNING' && !metrics['health.alertWarning']) metrics['health.alertWarning'] = true;
       }
+      // Worst active alerts become status-reason lines (tooltip budget: 3).
+      const sevRank = (s: string) => (s === 'CRITICAL' ? 0 : s === 'WARNING' ? 1 : 2);
+      for (const a of [...active].sort((x, y) => sevRank(parseAlertSeverity(x)) - sevRank(parseAlertSeverity(y))).slice(0, 3)) {
+        const sev = parseAlertSeverity(a);
+        if (sev !== 'CRITICAL' && sev !== 'WARNING') continue;
+        const klass = pickString(a, ['klass']) ?? 'Unknown';
+        healthReasons.push({ severity: sev === 'CRITICAL' ? 'critical' : 'warning', message: `${klass}: ${formatAlertText(a)}`.slice(0, 160) });
+      }
     }
     alertsOk = true;
 
@@ -2451,7 +2554,9 @@ async function handleMonitoring(req: Request, res: Response): Promise<void> {
         const subject = key.slice(`alert:${klass}:`.length);
 
         const sev = parseAlertSeverity(a);
-        const text = pickString(a, ['text']) ?? klass;
+        // formatAlertText substitutes the %(key)s template args (TrueNAS ≥ 25) —
+        // raw placeholders must never reach the notification center.
+        const text = formatAlertText(a) || klass;
         const hostname = pickString(metrics, ['system.hostname']) ?? host;
         notifier.notify({
           severity: sev === 'CRITICAL' ? 'critical' : sev === 'WARNING' ? 'warning' : 'info',
@@ -2766,6 +2871,92 @@ async function handleMonitoring(req: Request, res: Response): Promise<void> {
     metrics['vmHosts'] = vmHosts;
   }
 
+  // --- device.get_gpus: GPU inventory (+ live counters over SSH) -------------
+  // Best-effort extra — never counts toward health. The appliance's own PCI
+  // enumeration is the authoritative INVENTORY (works without any vendor tool);
+  // when an ssh slot is bound we additionally run the shared SDK probe script
+  // (nvidia-smi / rocm-smi + sysfs) and merge its live counters onto the same
+  // rows by normalized PCI slot. Emitted even when EMPTY so a removed GPU
+  // vanishes on the next poll (present-but-empty is authoritative; an absent
+  // key would not wipe). Skipped entirely while collectGpus is off — no RPC or
+  // SSH traffic at all.
+  if (!collectGpus) {
+    /* option off — omit the key entirely (no wipe, zero GPU traffic) */
+  } else if (collectInventory && gpusRes.status === 'fulfilled' && Array.isArray(gpusRes.value)) {
+    const rawGpus = gpusRes.value as Record<string, unknown>[];
+    // TrueNAS reports addr.pci_slot as "domain:bus:device" (function omitted,
+    // e.g. "0000:00:02"); the SDK probe uses sysfs slots ("0000:41:00.0").
+    // Normalize to the full sysfs form for the PK + merge key while keeping
+    // the appliance's own value in extra.pci_slot_raw. Idempotent on input
+    // that is already normalized (the SSH-merge lookup re-normalizes rows).
+    const normSlot = (s?: string | null): string => {
+      if (!s) return '';
+      const t = s.trim().toLowerCase();
+      // Sysfs form is "domain:bus:device.fn" (TWO colons, one dot — see the
+      // SDK's parsePciGpuSection slot regex). TrueNAS omits the function.
+      let m = t.match(/^([0-9a-f]{4}):([0-9a-f]{2}):([0-9a-f]{2})(?:\.([0-7]))?$/); // domain:bus:device[.fn]
+      if (m) return `${m[1]}:${m[2]}:${m[3]}${m[4] ? `.${m[4]}` : '.0'}`;
+      m = t.match(/^([0-9a-f]{2}):([0-9a-f]{2})(?:\.([0-7]))?$/); // bus:device[.fn] (no domain)
+      if (m) return `0000:${m[1]}:${m[2]}${m[3] ? `.${m[3]}` : '.0'}`;
+      return t;
+    };
+    const rows: GpuRow[] = rawGpus.map((g) => {
+      const addr = (g['addr'] ?? {}) as Record<string, unknown>;
+      const rawSlot = pickString(addr, ['pci_slot']) ?? '';
+      // Store the normalized sysfs form — stable PK at ingest + merge key for
+      // the SSH live counters; keep the appliance's own value in extra.
+      const slot = normSlot(rawSlot) || rawSlot;
+      return {
+        name: pickString(g, ['description']) || `GPU ${slot}`,
+        vendor: pickString(g, ['vendor']) ?? undefined,
+        slot,
+        extra: {
+          pci_slot_raw: rawSlot || null,
+          available_to_host: g['available_to_host'] === true,
+          uses_system_critical_devices: g['uses_system_critical_devices'] === true,
+          ...(typeof g['critical_reason'] === 'string' ? { critical_reason: g['critical_reason'] } : {}),
+        },
+      };
+    });
+    // Live counters over the bound SSH slot (best-effort — a missing slot or a
+    // failed exec simply leaves the sysfs/RPC fields as-is). One combined
+    // round-trip via the shared SDK probe script.
+    const gpuSshCreds = resolveSshCredentials(body.credentials as Record<string, unknown> | undefined, { slotOnly: true });
+    if (gpuSshCreds) {
+      try {
+        const c = await sshPool.get(host, hostSshPort(host), gpuSshCreds, { hostKeyVerifier: dynamicSshHostVerifier(host, hostSshPort(host)) });
+        const liveRows = await collectGpuRows({ exec: (cmd, t) => c.exec(cmd, gpuSshCreds, t) });
+        if (liveRows !== null) {
+          for (const lr of liveRows) {
+            const target = rows.find((r) => normSlot(r.slot) === lr.slot);
+            if (!target) continue; // RPC row is authoritative for identity
+            // The appliance's description beats the SDK's "VENDOR GPU (slot)"
+            // FALLBACK name — only a real marketing name (nvidia-smi / rocm-smi
+            // / curated PCI table) may replace it. Vendor/driver fill in when
+            // the RPC row lacks them (TrueNAS reports neither for some cards).
+            if (!target.vendor && lr.vendor && lr.vendor !== 'UNKNOWN') target.vendor = lr.vendor;
+            if (!target.driver && lr.driver) target.driver = lr.driver;
+            if (lr.driverVersion) target.driverVersion = lr.driverVersion;
+            if (typeof lr.vramBytes === 'number') target.vramBytes = lr.vramBytes;
+            if (typeof lr.utilPercent === 'number') target.utilPercent = lr.utilPercent;
+            if (typeof lr.memUtilPercent === 'number') target.memUtilPercent = lr.memUtilPercent;
+            if (typeof lr.tempCelsius === 'number') target.tempCelsius = lr.tempCelsius;
+            if (typeof lr.powerWatts === 'number') target.powerWatts = lr.powerWatts;
+            if (typeof lr.coreClockMhz === 'number') target.coreClockMhz = lr.coreClockMhz;
+            if (typeof lr.maxCoreClockMhz === 'number') target.maxCoreClockMhz = lr.maxCoreClockMhz;
+            // A REAL marketing name from nvidia-smi / rocm-smi beats the PCI
+            // description — but never the SDK's "VENDOR GPU (slot)" fallback,
+            // which is strictly less informative than the appliance's own text.
+            if (lr.name && !/^[A-Z]+ GPU \(/.test(lr.name)) target.name = lr.name;
+          }
+        }
+      } catch {
+        /* best-effort — a failed GPU probe must never sink the poll */
+      }
+    }
+    metrics['gpus'] = rows;
+  }
+
   // --- system.dmidecode_info: board serial + real hardware model fallback ---
   // system.info's `model` is the CPU; the baseboard product name is the actual
   // appliance model. Serial: DMI values are often placeholders — skip those.
@@ -2785,13 +2976,22 @@ async function handleMonitoring(req: Request, res: Response): Promise<void> {
   if (failures === 3) {
     health = 'critical';
     metrics['system.error'] = firstError || 'All TrueNAS API calls failed';
+    healthReasons.push({ severity: 'critical', message: `All TrueNAS API calls failed${firstError ? ` — ${firstError}` : ''}`.slice(0, 160) });
   } else {
-    const poolRows = metrics['pools'] as { status?: string }[] | undefined;
-    const offlinePool = poolRows?.some((r) => r.status === 'OFFLINE');
-    const degradedPool = poolRows?.some((r) => r.status === 'DEGRADED' || r.status === 'FAULTED');
-    if (offlinePool || metrics['health.alertCritical']) health = 'critical';
-    else if (degradedPool || metrics['health.alertWarning'] || failures > 0) health = 'warning';
-    else health = sysInfoOk && poolsOk ? 'ok' : 'warning';
+    const poolRows = metrics['pools'] as { name?: string; status?: string }[] | undefined;
+    const offlinePools = (poolRows ?? []).filter((r) => r.status === 'OFFLINE');
+    const degradedPools = (poolRows ?? []).filter((r) => r.status === 'DEGRADED' || r.status === 'FAULTED');
+    for (const p of offlinePools.slice(0, 2)) healthReasons.push({ severity: 'critical', message: `Pool ${p.name} is OFFLINE` });
+    for (const p of degradedPools.slice(0, 2)) healthReasons.push({ severity: 'warning', message: `Pool ${p.name} is ${p.status}` });
+    if (offlinePools.length > 0 || metrics['health.alertCritical']) health = 'critical';
+    else if (degradedPools.length > 0 || metrics['health.alertWarning'] || failures > 0) {
+      health = 'warning';
+      // Partial core-call failure — say which call, not just "degraded".
+      if (failures > 0 && firstError) healthReasons.push({ severity: 'warning', message: `Monitoring partial — ${firstError}`.slice(0, 160) });
+    } else {
+      health = sysInfoOk && poolsOk ? 'ok' : 'warning';
+      if (health === 'warning') healthReasons.push({ severity: 'warning', message: 'Core monitoring calls did not all succeed' });
+    }
   }
 
   // Internal flags are not user-facing metrics.
@@ -2806,6 +3006,9 @@ async function handleMonitoring(req: Request, res: Response): Promise<void> {
     deviceId: deviceId ?? null,
     collectedAt: new Date().toISOString(),
     health,
+    // Human-readable reasons for a non-ok health (status-badge tooltip in the
+    // webapp) — omitted when healthy so old APIs see an unchanged response.
+    ...(health !== 'ok' && healthReasons.length > 0 ? { healthReasons: healthReasons.slice(0, 8) } : {}),
     metrics,
     metricDescriptors: descriptorsFromMetrics(metrics),
     // Echo of the effective settings — proof the API→plugin injection loop works.
@@ -2931,6 +3134,16 @@ function descriptorsFromMetrics(metrics: Record<string, unknown>): MetricDescrip
       visualization: 'table',
       columns: ['name', 'sizeBytes', 'createdAt', 'updateAvailable'],
       group: 'Storage',
+    });
+  }
+  if (Array.isArray(metrics['gpus']) && (metrics['gpus'] as unknown[]).length > 0) {
+    out.push({
+      key: 'gpus',
+      label: 'GPUs',
+      type: 'string',
+      visualization: 'table',
+      columns: ['name', 'vendor', 'slot', 'driver', 'driverVersion', 'vramBytes', 'utilPercent', 'tempCelsius'],
+      group: 'GPU',
     });
   }
   if ('system.error' in metrics) out.push(textMetric('system.error', 'Error', { group: 'System' }));
@@ -3125,13 +3338,19 @@ app.post('/state', stateHandler(async (body: StateRequestBody, req) => {
   await assertPinned(req, host, transport, ports);
 
   const client = getClient(host, transport, timeoutMs, ports);
-  const [sysInfoRes, poolsRes, ifacesRes, updateConfigRes] = await Promise.allSettled([
+  const [sysInfoRes, poolsRes, ifacesRes, updateConfigRes, enclosuresRes, disksRes] = await Promise.allSettled([
     client.call<Record<string, unknown>>('system.info', [], creds),
     client.call<Record<string, unknown>[]>('pool.query', [], creds),
     client.call<Record<string, unknown>[]>('interface.query', [], creds),
     // The configured update branch/profile — shown on the System item and
     // switchable via the update.profile.set action (best-effort like the rest).
     client.call<Record<string, unknown>>('update.config', [], creds),
+    // Drive bays for the enclosure tray — [] on non-iX hardware (the virtual
+    // disk.query fallback then takes over); filterable_api_method takes [filters, options].
+    client.call<Record<string, unknown>[]>('enclosure2.query', [[], {}], creds),
+    // Every physical disk (incl. external JBODs) — the virtual drive-bay view
+    // when no native enclosure management exists.
+    client.call<Record<string, unknown>[]>('disk.query', [], creds),
   ]);
 
   return buildTruenasState({
@@ -3139,6 +3358,8 @@ app.post('/state', stateHandler(async (body: StateRequestBody, req) => {
     pools: poolsRes.status === 'fulfilled' && Array.isArray(poolsRes.value) ? poolsRes.value : [],
     ifaces: ifacesRes.status === 'fulfilled' && Array.isArray(ifacesRes.value) ? ifacesRes.value : [],
     updateConfig: updateConfigRes.status === 'fulfilled' ? updateConfigRes.value : undefined,
+    enclosures: enclosuresRes.status === 'fulfilled' && Array.isArray(enclosuresRes.value) ? enclosuresRes.value : [],
+    disks: disksRes.status === 'fulfilled' && Array.isArray(disksRes.value) ? disksRes.value : [],
   });
 }, 'ix-truenas-plugin'));
 
@@ -3226,9 +3447,14 @@ app.post('/probe', probeHandler(async (body: ProbeRequestBody, req) => {
     }
   }
 
-  const [stats, states, vmStates, vmStats, deviceTime] = await Promise.all([
+  const [stats, states, startedAt, vmStates, vmStats, deviceTime] = await Promise.all([
     wanted.has('containerStats') ? collectProbeStats(host, sshCreds, logFn) : Promise.resolve(null),
     wanted.has('containerStates') ? collectProbeStates(host, sshCreds, logFn, nameSel) : Promise.resolve(null),
+    // Real start times — ONLY for the selected names (the webapp's fast
+    // transition probe). One batched `docker inspect` over a handful of
+    // containers is cheap; doing it for every container on each page-wide poll
+    // would not be. Best-effort: null just means no startedAt in the response.
+    wanted.has('containerStates') && nameSel ? collectProbeStartedAt(host, sshCreds, nameSel, logFn) : Promise.resolve(null),
     wanted.has('vmStates') ? collectProbeVmStates(host, sshCreds, logFn, nameSel, uuidToName) : Promise.resolve(null),
     // vmStats needs NO names selection — the CPU percent is only meaningful
     // for everything at once (one domstats pass covers all domains anyway).
@@ -3255,7 +3481,13 @@ app.post('/probe', probeHandler(async (body: ProbeRequestBody, req) => {
     // valid answer (all containers stopped) and must reach the caller.
     if (!states) throw new Error('SSH docker ps probe returned no data');
     const flat: Record<string, ProbeContainerState> = {};
-    for (const [name, s] of states) flat[name] = s;
+    for (const [name, s] of states) {
+      const st: ProbeContainerState = { ...s };
+      // Live start time from the batched inspect (selected probes only).
+      const sa = startedAt?.get(name);
+      if (sa) st.startedAt = sa;
+      flat[name] = st;
+    }
     metrics['containerStates'] = flat;
   }
   if (wanted.has('vmStates')) {

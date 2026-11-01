@@ -13,10 +13,10 @@
  */
 
 import { randomBytes } from 'node:crypto';
-import { ActionDescriptor, ActionResult, compareVersions, configBackupFileName, createFileRepoClient, createRegistry, dynamicSshHostVerifier, FileRepoClient, INTENT_L2_TOPOLOGY_READ, INTENT_NETWORK_CREATE, INTENT_NETWORK_DELETE, L2Topology, pickNumber, pickString, pollUntil, PreflightInterfaceOption, PreflightResult, resolveSshCredentials, SshError } from '@unm/plugin-sdk';
+import { ActionDescriptor, ActionResult, compareVersions, configBackupFileName, createFileRepoClient, createRegistry, dynamicSshHostVerifier, FileRepoClient, INTENT_CONTAINERS_IMAGE_SET, INTENT_L2_TOPOLOGY_READ, INTENT_NETWORK_CREATE, INTENT_NETWORK_DELETE, L2Topology, pickNumber, pickString, pollUntil, PreflightInterfaceOption, PreflightResult, resolveSshCredentials, SshError } from '@unm/plugin-sdk';
 import { TruenasClient, TruenasCredentials, TruenasRpcError } from './client/truenasClient';
 import { hostSshPort, sshPool } from './ssh';
-import { normalizeVmDevice } from './enrichment';
+import { invalidateDockerEnrichment, normalizeVmDevice, sshHostOf } from './enrichment';
 import { fsSftpPool } from './index';
 
 /** Executor context for one /config step. */
@@ -1522,6 +1522,7 @@ const containersStopAction: ActionDescriptor<TruenasActionContext> = {
     // Verify: app.stop is a server-side job — every driven app must actually
     // reach STOPPED for this step to count as verified.
     const verified = Object.keys(errors).length === 0 && unconfirmed === 0 && (await verifyAppStates(ctx, toRun, new Set(['STOPPED'])));
+    if (stopped > 0) invalidateDockerEnrichment(sshHostOf(ctx.host ?? '')); // container facts changed — force a fresh docker inspect on the next poll
     return { success: Object.keys(errors).length === 0 && unconfirmed === 0, applied: true, verified, details: { stopped, skipped, missing, ...(Object.keys(notes).length ? { notes } : {}), ...(Object.keys(errors).length ? { errors } : {}) } };
   },
 };
@@ -1561,6 +1562,7 @@ const containersStartAction: ActionDescriptor<TruenasActionContext> = {
     }
     // Verify: every driven app must actually reach RUNNING.
     const verified = Object.keys(errors).length === 0 && unconfirmed === 0 && (await verifyAppStates(ctx, toRun, new Set(['RUNNING'])));
+    if (started > 0) invalidateDockerEnrichment(sshHostOf(ctx.host ?? '')); // container facts changed — force a fresh docker inspect on the next poll
     return { success: Object.keys(errors).length === 0 && unconfirmed === 0, applied: true, verified, details: { started, skipped, missing, ...(Object.keys(notes).length ? { notes } : {}), ...(Object.keys(errors).length ? { errors } : {}) } };
   },
 };
@@ -1615,6 +1617,7 @@ const containersRestartAction: ActionDescriptor<TruenasActionContext> = {
     }
     // Verify: a restart is only done when every driven app is RUNNING again.
     const verified = Object.keys(errors).length === 0 && unconfirmed === 0 && (await verifyAppStates(ctx, names.filter((n) => byName.has(n)), new Set(['RUNNING'])));
+    if (restarted > 0) invalidateDockerEnrichment(sshHostOf(ctx.host ?? '')); // container facts changed — force a fresh docker inspect on the next poll
     return { success: Object.keys(errors).length === 0 && unconfirmed === 0, applied: true, verified, details: { restarted, missing, ...(Object.keys(notes).length ? { notes } : {}), ...(Object.keys(errors).length ? { errors } : {}) } };
   },
 };
@@ -1682,6 +1685,7 @@ const containersUpgradeAction: ActionDescriptor<TruenasActionContext> = {
     // settle back into a stable state (RUNNING or STOPPED), not stay DEPLOYING.
     const upgradedNames = names.filter((n) => byName.has(n) && !skipped[n]);
     const verified = Object.keys(errors).length === 0 && unconfirmed === 0 && (await verifyAppStates(ctx, upgradedNames, new Set(['RUNNING', 'STOPPED'])));
+    if (upgraded > 0) invalidateDockerEnrichment(sshHostOf(ctx.host ?? '')); // redeployed containers have NEW start times — force a fresh docker inspect on the next poll
     return { success: Object.keys(errors).length === 0 && unconfirmed === 0, applied: true, verified, details: { upgraded, skipped, missing, ...(Object.keys(notes).length ? { notes } : {}), ...(Object.keys(errors).length ? { errors } : {}) } };
   },
 };
@@ -4882,6 +4886,258 @@ const storageDeleteAction: ActionDescriptor<TruenasActionContext> = {
 };
 
 // ---------------------------------------------------------------------------
+// Enclosure / drive-bay actions (Config page "Drive Bays" tray) — target the
+// documented TrueNAS JSON-RPC methods for physical disk management:
+//   enclosure2.set_slot_status   (bay LED identify; ENCLOSURE_WRITE)
+//   pool.replace                 (swap a vdev's backing disk; POOL_WRITE, @job)
+//   pool.offline / pool.online   (take a vdev offline / bring it back; POOL_WRITE)
+// All resolve the appliance's integer pool id from a pool NAME first (the RPCs
+// are id-keyed), and every write is transport-tolerant with state re-reads.
+// ---------------------------------------------------------------------------
+
+/** Resolves an appliance pool's integer id from its name (pool.query). */
+async function resolvePoolId(ctx: TruenasActionContext, poolName: string): Promise<number | null> {
+  const rows = await callWithRetry<Record<string, unknown>[]>(ctx, 'pool.query', [[['name', '=', poolName]]]);
+  for (const r of rows ?? []) {
+    if (!r || typeof r !== 'object') continue;
+    if (pickString(r, ['name']) === poolName) {
+      const id = pickNumber(r, ['id']);
+      return typeof id === 'number' ? id : null;
+    }
+  }
+  return null;
+}
+
+/** Walks a pool's topology and returns the status of the vdev whose `disk` or
+ *  `guid` matches `label` — used to verify offline/online effects. Null when the
+ *  pool is gone or no matching vdev exists (state unreadable → don't guess). */
+async function vdevStatusByLabel(ctx: TruenasActionContext, poolName: string, label: string): Promise<string | null> {
+  let rows: Record<string, unknown>[];
+  try {
+    rows = await ctx.client.call<Record<string, unknown>[]>('pool.query', [[['name', '=', poolName]]], ctx.creds);
+  } catch {
+    return null;
+  }
+  const pool = (rows ?? [])[0];
+  if (!pool) return null; // pool gone — can't confirm either way
+  const topo = pool['topology'];
+  let found: string | null = null;
+  const walk = (vdevs: unknown): void => {
+    if (!Array.isArray(vdevs)) return;
+    for (const v of vdevs) {
+      if (!v || typeof v !== 'object') continue;
+      const vd = v as Record<string, unknown>;
+      const disk = pickString(vd, ['disk']);
+      const guid = pickString(vd, ['guid']);
+      if ((disk && disk === label) || (guid && guid === label)) {
+        found = normState(pickString(vd, ['status']));
+        return; // first match wins — a disk appears once in the topology
+      }
+      walk(vd['children']);
+    }
+  };
+  if (topo && typeof topo === 'object') for (const cat of Object.values(topo as Record<string, unknown>)) walk(cat);
+  return found;
+}
+
+/** Lights (or clears) the physical bay LED — `enclosure2.set_slot_status`. The
+ *  operation is idempotent (setting a slot to its current state is a no-op), so
+ *  a lost transport response is safely re-dispatched. */
+const enclosureIdentifyAction: ActionDescriptor<TruenasActionContext> = {
+  id: 'enclosure.identify',
+  label: 'Identify drive (LED)',
+  description:
+    "Lights the physical bay LED of one installed disk (`enclosure2.set_slot_status`, ENCLOSURE_WRITE) so you can find it in a rack. status='ON' lights it, 'OFF' clears it. Only bays whose hardware supports identification offer this action.",
+  module: 'Storage',
+  riskLevel: 'write' as const,
+  deviceCount: 1 as const,
+  timeoutMs: 30_000,
+  inputSchema: {
+    enclosureId: { type: 'string', required: true, minLength: 1, description: 'Enclosure id (from the Drive Bays tray)' },
+    slot: { type: 'number', required: true, min: 1, description: 'Drive bay number within the enclosure' },
+    status: { type: 'string', required: false, enum: ['ON', 'OFF'], default: 'ON', description: "'ON' lights the bay LED; 'OFF' clears it" },
+  },
+  async execute(ctx: TruenasActionContext, input: Record<string, unknown>): Promise<ActionResult> {
+    const enclosureId = str(input, 'enclosureId');
+    if (!enclosureId || typeof input['slot'] !== 'number') return { success: false, details: { error: 'enclosureId and a numeric slot are required' } };
+    const slotRaw = input['slot']; // narrowed to number by the guard above
+    if (!Number.isFinite(slotRaw)) return { success: false, details: { error: 'enclosureId and a numeric slot are required' } };
+    const slot = Math.floor(slotRaw); // plain const — narrowing survives into closures
+    const status = str(input, 'status') === 'OFF' ? 'OFF' : 'ON';
+    try {
+      // Idempotent — re-dispatching the same set_slot_status on a transport drop is harmless.
+      const dr = await dispatchWrite(ctx, 'enclosure2.set_slot_status', [{ enclosure_id: enclosureId, slot, status }], { idempotentRetry: true });
+      return { success: true, applied: true, details: { enclosureId, slot, status, ...(dr.note ? { transportNote: dr.note } : {}) } };
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      if (/does not support identification/i.test(msg)) return { success: false, details: { error: `Bay ${slot} does not support LED identification on this hardware.` } };
+      return { success: false, details: { error: msg } };
+    }
+  },
+};
+
+/** Swaps the backing disk of a vdev — `pool.replace` (POOL_WRITE, @job). The job
+ *  formats + hot-swaps the new disk and copies settings; RESILVERING then runs in
+ *  the background independently. We wait for the swap JOB to settle (bounded) so
+ *  "success" means the disk was actually swapped in, not merely accepted. */
+const storageDiskReplaceAction: ActionDescriptor<TruenasActionContext> = {
+  id: 'storage.disk-replace',
+  label: 'Replace pool disk',
+  description:
+    "Replaces one disk of a ZFS pool with a spare (`pool.replace`, POOL_WRITE job). The appliance formats the new disk, hot-swaps it into the vdev and copies settings; resilvering continues in the background afterwards. DANGEROUS — pick the correct spare.",
+  module: 'Storage',
+  riskLevel: 'dangerous' as const,
+  deviceCount: 1 as const,
+  timeoutMs: 300_000,
+  inputSchema: {
+    pool: { type: 'string', required: true, minLength: 1, description: 'Pool name containing the disk to replace' },
+    label: { type: 'string', required: true, minLength: 1, description: 'Disk to replace — its device name (e.g. da0) or ZFS guid' },
+    newDisk: { type: 'string', required: true, minLength: 1, description: 'Replacement disk — its device name or identifier (from disk.get_unused)' },
+    force: { type: 'boolean', required: false, default: false, description: 'Force even if the new disk appears in use / not clean' },
+  },
+  async execute(ctx: TruenasActionContext, input: Record<string, unknown>): Promise<ActionResult> {
+    const poolName = str(input, 'pool');
+    const label = str(input, 'label');
+    const newDisk = str(input, 'newDisk');
+    if (!poolName || !label || !newDisk) return { success: false, details: { error: 'pool, label and newDisk are all required' } };
+    if (isBootPoolName(poolName)) return { success: false, details: { error: `Refusing to replace a disk in the OS boot pool — it holds TrueNAS itself.` } };
+    const force = input['force'] === true;
+
+    const poolId = await resolvePoolId(ctx, poolName);
+    if (poolId === null) return { success: false, details: { error: `Pool "${poolName}" not found on this appliance.`, pool: poolName } };
+
+    try {
+      // Transport-tolerant — a lost response is confirmed by re-reading the vdev's status.
+      const dr = await dispatchWrite(ctx, 'pool.replace', [poolId, { label, disk: newDisk, force }], {
+        timeoutMs: 60_000,
+        verify: async () => {
+          // Applied when the NEW disk now occupies this vdev (its status is no longer
+          // UNAVAIL/FAULTED and the topology references it). Best-effort signal.
+          const st = await vdevStatusByLabel(ctx, poolName, label);
+          if (st === null) return null;
+          return st !== 'UNAVAIL' && st !== 'OFFLINE';
+        },
+      });
+
+      // pool.replace is @job — the RPC resolves to a job id while the swap runs.
+      const r = dr.value as unknown;
+      let jobId: number | null = typeof r === 'number' ? r : (r && typeof r === 'object' && typeof (r as Record<string, unknown>)['id'] === 'number' ? ((r as Record<string, unknown>)['id'] as number) : null);
+
+      if (jobId !== null) {
+        const wait = await waitForJob(ctx, jobId, 240_000);
+        if (wait.state === 'RUNNING') return { success: true, applied: true, details: { pool: poolName, label, newDisk, jobId, note: 'Replace job still in progress on the appliance — resilvering will continue after it settles.' } };
+        if (wait.state !== 'SUCCESS' && wait.state !== 'FINISHED') return { success: false, details: { pool: poolName, label, newDisk, jobId, error: wait.error ?? `Replace job ended in state ${wait.state}` } };
+      }
+
+      // Post-apply verification — the vdev should now be ONLINE/DEGRADED (resilvering), not UNAVAIL.
+      let verified = !dr.unconfirmed;
+      const st = await vdevStatusByLabel(ctx, poolName, label);
+      if (st !== null) verified = st === 'ONLINE' || st === 'DEGRADED';
+
+      return { success: true, applied: true, verified, details: { pool: poolName, label, newDisk, force, ...(jobId !== null ? { jobId } : {}), ...(dr.note ? { transportNote: dr.note } : {}) } };
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      if (/not found|Label .* not found/i.test(msg)) return { success: false, details: { error: `Disk "${label}" was not found in pool "${poolName}".`, pool: poolName } };
+      if (/is in use by zpool|not clean|Force must be specified/i.test(msg)) return { success: false, details: { error: msg, hint: 'The replacement disk is busy or has partitions — set force=true to override.' } };
+      return { success: false, details: { error: msg, pool: poolName } };
+    }
+  },
+};
+
+/** Takes one vdev's backing disk OFFLINE — `pool.offline` (POOL_WRITE). DANGEROUS:
+ *  in a mirror/raidz this degrades redundancy; on a single-disk/stripe pool it
+ *  fails the whole pool. Verified by re-reading the vdev status to OFFLINE. */
+const storageDiskOfflineAction: ActionDescriptor<TruenasActionContext> = {
+  id: 'storage.disk-offline',
+  label: 'Take disk offline',
+  description:
+    "Takes one disk of a ZFS pool OFFLINE (`pool.offline`, POOL_WRITE). DANGEROUS — in a mirror/raidz this degrades redundancy, and on a single-disk or stripe pool it fails the entire pool. Use to pull a failing drive out for replacement; bring it back with 'Bring disk online'.",
+  module: 'Storage',
+  riskLevel: 'dangerous' as const,
+  deviceCount: 1 as const,
+  timeoutMs: 60_000,
+  inputSchema: {
+    pool: { type: 'string', required: true, minLength: 1, description: 'Pool name containing the disk' },
+    label: { type: 'string', required: true, minLength: 1, description: 'Disk to take offline — its device name (e.g. da0) or ZFS guid' },
+  },
+  async execute(ctx: TruenasActionContext, input: Record<string, unknown>): Promise<ActionResult> {
+    const poolName = str(input, 'pool');
+    const label = str(input, 'label');
+    if (!poolName || !label) return { success: false, details: { error: 'pool and label are required' } };
+    if (isBootPoolName(poolName)) return { success: false, details: { error: `Refusing to take a disk offline in the OS boot pool — it holds TrueNAS itself.` } };
+
+    const poolId = await resolvePoolId(ctx, poolName);
+    if (poolId === null) return { success: false, details: { error: `Pool "${poolName}" not found on this appliance.`, pool: poolName } };
+
+    // Pre-check — a label that is not in the pool topology must fail cleanly
+    // (the appliance would reject it too, but our own message names the disk).
+    const preStatus = await vdevStatusByLabel(ctx, poolName, label);
+    if (preStatus === null) return { success: false, details: { error: `Disk "${label}" was not found in pool "${poolName}".`, pool: poolName } };
+    if (preStatus === 'OFFLINE') return { success: true, applied: false, details: { pool: poolName, label, note: 'Disk is already offline.' } };
+
+    try {
+      // Transport-tolerant — a lost response is confirmed by re-reading the vdev status.
+      const dr = await dispatchWrite(ctx, 'pool.offline', [poolId, { label }], { verify: () => vdevStatusByLabel(ctx, poolName, label).then((s) => (s === null ? null : s === 'OFFLINE')) });
+      if (dr.unconfirmed) return { success: false, details: { error: 'Offline could not be confirmed (transport drop, state unreadable) — check the appliance.', pool: poolName, label } };
+
+      // Post-apply verification.
+      const st = await vdevStatusByLabel(ctx, poolName, label);
+      return { success: true, applied: true, verified: st === 'OFFLINE', details: { pool: poolName, label, status: st ?? 'unknown', ...(dr.note ? { transportNote: dr.note } : {}) } };
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      if (/already offline/i.test(msg)) return { success: true, applied: false, details: { pool: poolName, label, note: 'Disk is already offline.' } };
+      if (/not found|Label .* not found/i.test(msg)) return { success: false, details: { error: `Disk "${label}" was not found in pool "${poolName}".`, pool: poolName } };
+      return { success: false, details: { error: msg, pool: poolName } };
+    }
+  },
+};
+
+/** Brings one vdev's backing disk back ONLINE — `pool.online` (POOL_WRITE). The
+ *  inverse of take-disk-offline; verified by re-reading the vdev status to ONLINE. */
+const storageDiskOnlineAction: ActionDescriptor<TruenasActionContext> = {
+  id: 'storage.disk-online',
+  label: 'Bring disk online',
+  description:
+    "Brings one previously-offlined disk of a ZFS pool back ONLINE (`pool.online`, POOL_WRITE). The inverse of 'Take disk offline' — the vdev re-joins the pool and any needed resilvering starts automatically.",
+  module: 'Storage',
+  riskLevel: 'write' as const,
+  deviceCount: 1 as const,
+  timeoutMs: 60_000,
+  inputSchema: {
+    pool: { type: 'string', required: true, minLength: 1, description: 'Pool name containing the disk' },
+    label: { type: 'string', required: true, minLength: 1, description: 'Disk to bring online — its device name (e.g. da0) or ZFS guid' },
+  },
+  async execute(ctx: TruenasActionContext, input: Record<string, unknown>): Promise<ActionResult> {
+    const poolName = str(input, 'pool');
+    const label = str(input, 'label');
+    if (!poolName || !label) return { success: false, details: { error: 'pool and label are required' } };
+
+    const poolId = await resolvePoolId(ctx, poolName);
+    if (poolId === null) return { success: false, details: { error: `Pool "${poolName}" not found on this appliance.`, pool: poolName } };
+
+    // Pre-check — a label that is not in the pool topology must fail cleanly.
+    const preStatus = await vdevStatusByLabel(ctx, poolName, label);
+    if (preStatus === null) return { success: false, details: { error: `Disk "${label}" was not found in pool "${poolName}".`, pool: poolName } };
+    if (preStatus === 'ONLINE') return { success: true, applied: false, details: { pool: poolName, label, note: 'Disk is already online.' } };
+
+    try {
+      // Transport-tolerant — a lost response is confirmed by re-reading the vdev status.
+      const dr = await dispatchWrite(ctx, 'pool.online', [poolId, { label }], { verify: () => vdevStatusByLabel(ctx, poolName, label).then((s) => (s === null ? null : s === 'ONLINE')) });
+      if (dr.unconfirmed) return { success: false, details: { error: 'Online could not be confirmed (transport drop, state unreadable) — check the appliance.', pool: poolName, label } };
+
+      // Post-apply verification.
+      const st = await vdevStatusByLabel(ctx, poolName, label);
+      return { success: true, applied: true, verified: st === 'ONLINE', details: { pool: poolName, label, status: st ?? 'unknown', ...(dr.note ? { transportNote: dr.note } : {}) } };
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      if (/already online/i.test(msg)) return { success: true, applied: false, details: { pool: poolName, label, note: 'Disk is already online.' } };
+      if (/not found|Label .* not found/i.test(msg)) return { success: false, details: { error: `Disk "${label}" was not found in pool "${poolName}".`, pool: poolName } };
+      return { success: false, details: { error: msg, pool: poolName } };
+    }
+  },
+};
+
+// ---------------------------------------------------------------------------
 // File-share CRUD actions (Shares page) — a GENERIC contract any storage plugin
 // can implement. One action per protocol × operation, so the webapp's Shares page
 // offers create/edit/delete for SMB/CIFS, NFS, iSCSI and NVMe-oF shares and fans
@@ -5910,6 +6166,193 @@ const containersUpdateAction: ActionDescriptor<TruenasActionContext> = {
   },
 };
 
+// --- containers.image.set -----------------------------------------------------
+// Canonical fleet intent (SDK INTENT_CONTAINERS_IMAGE_SET): point one or more
+// containers at a different image — a tag bump ("app:v1.4.2" → "app:v1.4.3") or
+// an entirely new image ("redis:7" → "valkey:8"). TrueNAS 26 stores custom apps
+// as a STRUCTURED config ({networks, services}), so the matched `image:` fields
+// are rewritten in pure JS (no YAML parsing) and applied through the same
+// app.update path the compose editor uses — the appliance redeploys the app.
+// Catalog apps have no editable compose config → skipped with a note (their
+// version bumps stay on containers.upgrade).
+
+/** One image-change mapping as accepted by the canonical intent (defensive parse). */
+interface ImageSetMappingTn {
+  /** Optional container/service name scoping the match. */
+  name?: string;
+  /** Current image ref — the match key. */
+  from: string;
+  /** New full image ref. */
+  to: string;
+}
+
+function parseMappingsTn(input: Record<string, unknown>): ImageSetMappingTn[] {
+  const raw = input['mappings'];
+  if (!Array.isArray(raw)) return [];
+  const out: ImageSetMappingTn[] = [];
+  for (const m of raw) {
+    if (!m || typeof m !== 'object') continue;
+    const o = m as Record<string, unknown>;
+    const from = typeof o['from'] === 'string' ? o['from'].trim() : '';
+    const to = typeof o['to'] === 'string' ? o['to'].trim() : '';
+    if (from.length < 2 || to.length < 2) continue;
+    out.push({ ...(typeof o['name'] === 'string' && o['name'].trim() !== '' ? { name: o['name'].trim() } : {}), from, to });
+  }
+  return out;
+}
+
+/** Reads every app's structured config in ONE query (the same call the compose
+ *  editor uses — on a busy appliance this is slow, so it gets an explicit budget). */
+async function readAllAppConfigs(ctx: TruenasActionContext): Promise<Map<string, { cfg: Record<string, unknown>; customApp: boolean | null }>> {
+  const out = new Map<string, { cfg: Record<string, unknown>; customApp: boolean | null }>();
+  try {
+    const rows = await ctx.client.call<Record<string, unknown>[]>('app.query', [[], { extra: { retrieve_config: true } }], ctx.creds, 45_000);
+    for (const r of rows ?? []) {
+      const n = pickString(r, ['name']);
+      if (!n) continue;
+      const c = r['config'];
+      if (!c || typeof c !== 'object' || Array.isArray(c)) continue;
+      out.set(n, { cfg: c as Record<string, unknown>, customApp: typeof r['custom_app'] === 'boolean' ? (r['custom_app'] as boolean) : null });
+    }
+  } catch (e) {
+    throw new Error(`Could not read app configs: ${e instanceof Error ? e.message : String(e)}`);
+  }
+  return out;
+}
+
+/** The services map of a structured config ({services: {<svc>: {image, …}}}). */
+function servicesOfCfg(cfg: Record<string, unknown>): Map<string, Record<string, unknown>> {
+  const s = cfg['services'];
+  if (!s || typeof s !== 'object' || Array.isArray(s)) return new Map();
+  const out = new Map<string, Record<string, unknown>>();
+  for (const [k, v] of Object.entries(s as Record<string, unknown>)) {
+    if (v && typeof v === 'object' && !Array.isArray(v)) out.set(k, v as Record<string, unknown>);
+  }
+  return out;
+}
+
+const containersImageSetAction: ActionDescriptor<TruenasActionContext> = {
+  id: INTENT_CONTAINERS_IMAGE_SET,
+  label: 'Change container image(s)',
+  description:
+    'Points the selected containers at a different image — a tag bump (e.g. "app:v1.4.2" → "app:v1.4.3") or an entirely new image ("redis:7" → "valkey:8"). Custom apps are reconfigured via app.update and redeployed; catalog (app-store) apps have no editable compose config and are skipped with a note — use Update for their version bumps. Idempotent — a service already on the target ref is skipped.',
+  module: 'Containers',
+  riskLevel: 'write' as const,
+  // Single-device action (one step per device) — registered in CANONICAL_INTENTS
+  // so the plan API fans it out across a batch like every other fleet intent.
+  deviceCount: 1 as const,
+  timeoutMs: 900_000, // redeploy jobs include image pulls
+  inputSchema: {
+    mappings: {
+      type: 'array',
+      required: true,
+      items: {
+        type: 'object',
+        properties: {
+          name: { type: 'string', required: false, minLength: 1, maxLength: 200, description: 'Optional container/service name to scope the match (omit = every service using `from`)' },
+          from: { type: 'string', required: true, minLength: 2, maxLength: 512, description: 'Current image reference of the container(s) to change' },
+          to: { type: 'string', required: true, minLength: 2, maxLength: 512, description: 'New full image reference (tag bump or a different image entirely)' },
+        },
+      },
+      description: 'Image changes to apply on this device — one entry per container/service',
+    },
+  },
+  async execute(ctx: TruenasActionContext, input: Record<string, unknown>): Promise<ActionResult> {
+    const mappings = parseMappingsTn(input);
+    if (mappings.length === 0) return { success: false, details: { error: 'No image mappings provided' } };
+
+    // One query for every app's structured config — matching is done against the
+    // CONFIG (what will be deployed), not the live container state.
+    let configs: Map<string, { cfg: Record<string, unknown>; customApp: boolean | null }>;
+    try {
+      configs = await readAllAppConfigs(ctx);
+    } catch (e) {
+      return { success: false, details: { error: e instanceof Error ? e.message : String(e) } };
+    }
+
+    // Resolve every mapping to (app → service key → target ref). A service
+    // matches when its configured image equals `from` and — if the mapping names
+    // a container — the service key or `<app>-<service>` docker name equals it.
+    const targets = new Map<string, { svcKey: string; to: string }[]>(); // appName → hits
+    const missing: Record<string, string> = {};
+    for (const m of mappings) {
+      let hits = 0;
+      for (const [appName, entry] of configs.entries()) {
+        for (const [svcKey, svc] of servicesOfCfg(entry.cfg).entries()) {
+          const img = pickString(svc, ['image']);
+          if (typeof img !== 'string' || img.trim() !== m.from) continue;
+          if (m.name && svcKey !== m.name && `${appName}-${svcKey}` !== m.name) continue;
+          hits++;
+          targets.set(appName, [...(targets.get(appName) ?? []), { svcKey, to: m.to }]);
+        }
+      }
+      if (hits === 0) missing[`${m.from} → ${m.to}${m.name ? ` (${m.name})` : ''}`] = 'no custom app service with that image found';
+    }
+
+    // Idempotency + catalog-app split: a service already at its target is
+    // skipped; a CATALOG app cannot be reconfigured (its compose comes from the
+    // template) — reported as skipped, not failed.
+    const toApply = new Map<string, { svcKey: string; to: string }[]>(); // appName → services still needing the change
+    const skipped: Record<string, string> = {};
+    for (const [appName, hits] of targets.entries()) {
+      const entry = configs.get(appName);
+      if (!entry) continue;
+      if (entry.customApp === false) {
+        for (const h of hits) skipped[`${appName}/${h.svcKey}`] = 'catalog app — no editable compose config (use Update for version bumps)';
+        continue;
+      }
+      const svcs = servicesOfCfg(entry.cfg);
+      const still: { svcKey: string; to: string }[] = [];
+      for (const h of hits) {
+        if (pickString(svcs.get(h.svcKey) ?? {}, ['image']) === h.to) skipped[`${appName}/${h.svcKey}`] = `already configured with ${h.to}`;
+        else still.push(h);
+      }
+      if (still.length > 0) toApply.set(appName, still);
+    }
+
+    const errors: Record<string, string> = {};
+    let updatedApps = 0;
+    // Apply per app — one app.update redeploys the whole app with every matched
+    // service rewritten. Sequential: a redeploy restarts the app's containers.
+    for (const [appName, hits] of toApply.entries()) {
+      const entry = configs.get(appName);
+      if (!entry) continue;
+      try {
+        const svcs = servicesOfCfg(entry.cfg);
+        for (const h of hits) {
+          const svc = svcs.get(h.svcKey);
+          if (svc) svc['image'] = h.to;
+        }
+        // Re-serialize the structured config to editable YAML — the same round-trip
+        // the compose editor uses (read → serialize → app.update).
+        const yamlStr = serializeComposeYaml(entry.cfg);
+        if (yamlStr.trim() === '') throw new Error('no editable compose config found');
+        await dispatchWrite(ctx, 'app.update', [appName, { custom_compose_config_string: yamlStr }], { verify: appStateVerify(ctx, appName, new Set(['RUNNING']), new Set()) });
+        updatedApps++;
+      } catch (e) {
+        errors[appName] = e instanceof Error ? e.message : String(e);
+      }
+    }
+
+    // Verify: re-read the configs — every rewritten service must now carry its target.
+    let verified: boolean | undefined;
+    if (Object.keys(errors).length === 0 && updatedApps > 0) {
+      try {
+        const after = await readAllAppConfigs(ctx);
+        verified = true;
+        for (const [appName, hits] of toApply.entries()) {
+          const svcs = servicesOfCfg(after.get(appName)?.cfg ?? {});
+          for (const h of hits) if (pickString(svcs.get(h.svcKey) ?? {}, ['image']) !== h.to) verified = false;
+        }
+      } catch { /* verification read failed — applied but unverified */ }
+    } else if (Object.keys(errors).length === 0 && updatedApps === 0) {
+      verified = true; // nothing to apply — every match was already at its target
+    }
+
+    return { success: Object.keys(errors).length === 0, applied: updatedApps > 0, verified, details: { updatedApps, skipped, missing, ...(Object.keys(errors).length > 0 ? { errors } : {}) } };
+  },
+};
+
 // --- Catalog (app store) + install -------------------------------------------------
 // TrueNAS 25.04+/26 renamed the community-apps API: `communityapps.*` is gone,
 // replaced by `catalog.trains`, `catalog.apps({trains:[...]})` and
@@ -6762,6 +7205,10 @@ export const registry = createRegistry<TruenasActionContext>([
   storageMountAction,
   storageUnmountAction,
   storageDeleteAction,
+  enclosureIdentifyAction,
+  storageDiskReplaceAction,
+  storageDiskOfflineAction,
+  storageDiskOnlineAction,
   smbShareCreateAction,
   smbShareUpdateAction,
   smbShareDeleteAction,
@@ -6779,6 +7226,7 @@ export const registry = createRegistry<TruenasActionContext>([
   composeConfigReadAction,
   containersLogsReadAction,
   containersUpdateAction,
+  containersImageSetAction,
   catalogTemplatesListAction,
   templateDetailsReadAction,
   containersInstallAction,

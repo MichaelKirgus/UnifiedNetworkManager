@@ -1,6 +1,6 @@
 {
   "name": "unm-plugin-zabbix",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "license": "EUPL-1.2",
   "private": true,
   "description": "UnifiedNetworkManager plugin for Zabbix — fleet metrics from a Zabbix server (JSON-RPC API) + host inventory sync into Zabbix (create/update/delete).",

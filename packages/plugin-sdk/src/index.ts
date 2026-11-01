@@ -36,9 +36,9 @@ export { suggestPortLayout, portNumberFromKey } from './portLayout';
 export { INVENTORY_INTERVAL_MS, errorDescriptor, modelFirmwareDescriptors, gaugeMetric, textMetric, tableMetric } from './metrics';
 export { validateInput, isValidInput, createRegistry } from './actions';
 export type { ValidationIssue, ActionDescriptor, ActionRegistry } from './actions';
-export { PlanningError, STEP_TOKEN_PATTERN, shiftStepTokens, finalizePlan } from './planning';
+export { PlanningError, STEP_TOKEN_PATTERN, shiftStepTokens, finalizePlan, SYSTEM_STEP_WAIT, SYSTEM_STEP_INVENTORY_REFRESH, isSystemStepAction, appendSettleAndRefresh } from './planning';
 // Canonical fleet intents (cross-vendor network rollout contract). See intents.ts.
-export { INTENT_NETWORK_CREATE, INTENT_NETWORK_DELETE, CANONICAL_INTENTS, isCanonicalIntent, NETWORK_CREATE_SCHEMA, NETWORK_DELETE_SCHEMA, CANONICAL_INTENT_SCHEMAS } from './intents';
+export { INTENT_NETWORK_CREATE, INTENT_NETWORK_DELETE, INTENT_DNS_SET, INTENT_DNS_DELETE, INTENT_DNS_RENAME, INTENT_CONTAINERS_IMAGE_SET, CANONICAL_INTENTS, isCanonicalIntent, NETWORK_CREATE_SCHEMA, NETWORK_DELETE_SCHEMA, DNS_SET_SCHEMA, DNS_DELETE_SCHEMA, DNS_RENAME_SCHEMA, CONTAINER_IMAGE_SET_SCHEMA, CANONICAL_INTENT_SCHEMAS } from './intents';
 export type { PreflightConfidence, PreflightValue, PreflightResult, PreflightRequest, PreflightPort, PreflightInterfaceOption, PreflightCapabilities } from './intents';
 // L2 topology abstraction (interface layering: ports → bundles/bridges). See intents.ts.
 export { INTENT_L2_TOPOLOGY_READ, suggestL2AttachPoint, suggestL2VlanPorts, portTrunkStatus } from './intents';
@@ -79,14 +79,25 @@ export { queryNtp } from './ntp';
 export type { NtpQueryResult } from './ntp';
 // Update gathering (capability 'updates'): row contract + version comparison +
 // SSH package-manager adapters. See updates.ts.
-export { compareVersions, isUpdateAvailable, firmwareRow, extractMajorMinor, latestCatalogLine, catalogFirmwareRow, PACKAGE_MANAGER_ADAPTERS, detectPackageManager, readOsReleaseIds, listUpgradablePackages, runPackageUpgrade, runPackageUpgradeList, packageRequiresReboot, buildDetachedUpgradeScript, buildUpgradeStatusScript, parseDetachedUpgradeStatus, UPGRADE_DONE_MARKER, DETACHED_ALREADY_RUNNING_EXIT } from './updates';
+export { compareVersions, isUpdateAvailable, firmwareRow, extractMajorMinor, latestCatalogLine, catalogFirmwareRow, PACKAGE_MANAGER_ADAPTERS, detectPackageManager, readOsReleaseIds, listUpgradablePackages, listInstalledPackages, readAlpineRelease, runPackageUpgrade, runPackageUpgradeList, holdPackages, unholdPackages, listHeldPackages, runForceFullUpgrade, packageRequiresReboot, buildDetachedUpgradeScript, buildUpgradeStatusScript, parseDetachedUpgradeStatus, UPGRADE_DONE_MARKER, DETACHED_ALREADY_RUNNING_EXIT } from './updates';
+export type { InstalledPackage, InstalledPackagesResult } from './updates';
 export type { UpdateKind, UpdateRow, UpdateExecBackend, UpgradablePackage, PmAdapter, SshUpdatesOptions, PackageUpgradeResult, DetachedUpgradeStatus } from './updates';
 // Security checks (capability 'securityChecks'): row contract for the cross-device
 // Security page. See security.ts.
 export type { SecurityCheckKind, SecurityCheckRow } from './security';
+// DHCP inventory (generic `dhcpNetworks[]` / `dhcpReservations[]` metrics):
+// row contract for the cross-device DHCP page. See dhcp.ts.
+export type { DhcpNetworkRow, DhcpReservationRow } from './dhcp';
+// GPU detection + live metrics (generic `gpus[]` metric): PCI enumeration over
+// sysfs + nvidia-smi / rocm-smi parsers — vendor-neutral (NVIDIA/AMD/Intel). See gpu.ts.
+export { collectGpuRows, buildGpuProbeScript, parsePciGpuSection, parseNvidiaSmiSection, normalizeNvidiaSlot, detectGpuVendor, gpuNameFromPci } from './gpu';
+export type { GpuRow, GpuExecBackend, PciGpuEntry } from './gpu';
 // Generic plugin state store — persistent opaque JSON blobs in the UNM database
 // across polls/restarts (baselines, counters, TOFU fingerprints). See stateStore.ts.
 export { createPluginStateStore } from './stateStore';
+
+// Automation template advertisement (see automations.ts).
+export type { AutomationTemplate } from './automations';
 export type { PluginStateStore, PluginStateEntry, PluginStateRow, PluginStateStoreOptions } from './stateStore';
 // SSH access for plugins (shared transport + credential resolution). See ssh.ts.
 export { SshClient, createSshPool, resolveSshCredentials, resolveSlotFields, resolveRootSlotCredentials, wrapSudo, probePrivilege, shQuote, normalizeFingerprint, fingerprintMatches, computeFingerprint, normalizePrivateKey } from './ssh';

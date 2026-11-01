@@ -7,7 +7,6 @@ import {
   Radio,
   KeyRound,
   Laptop,
-  ListChecks,
   MapPin,
   Network,
   Puzzle,
@@ -28,6 +27,8 @@ import {
   Radar,
   FileKey2,
   Globe,
+  Globe2,
+  DatabaseBackup,
   NotebookPen,
   Settings2,
   UserRound,
@@ -37,6 +38,7 @@ import {
   Cog,
   Mail as MailIcon,
   ArrowUpCircle,
+  Workflow,
 } from 'lucide-react';
 import { can } from '../auth/permissions';
 import type { NavCountKey } from '../api/client';
@@ -62,6 +64,13 @@ export const NAV_ITEMS: NavItem[] = [
   // Cross-device inventory views (populated by the telemetry worker).
   { to: '/networks', label: 'Networks', icon: Network, requiresPermission: 'networks:read' },
   { to: '/hosts', label: 'Hosts', icon: Laptop, requiresPermission: 'hosts:read' },
+  // Cross-device static DNS entries — host records reported by dns-capable
+  // plugins (OPNsense, OpenWrt, RouterOS, LCOS), grouped by lowercase name.
+  { to: '/dns', label: 'DNS', icon: Globe2, requiresPermission: 'dns:read' },
+  // Cross-device DHCP inventory — configured server networks/ranges + static
+  // MAC→IP reservations (RouterOS, OPNsense, OpenWrt). Radio reads as address
+  // assignment/broadcast.
+  { to: '/dhcp', label: 'DHCP', icon: Radio, requiresPermission: 'dhcp:read' },
   // User-maintained host documentation — permanent inventory records with
   // live "discovered" matching (distinct from the live ARP/NDP Hosts page).
   { to: '/documented-hosts', label: 'Documented Hosts', icon: NotebookPen, requiresPermission: 'documented-hosts:read' },
@@ -105,6 +114,9 @@ export const NAV_ITEMS: NavItem[] = [
   // backups/scripts. Files live on a volume only the API mounts; metadata + usage
   // audit trail in Postgres (plugins reach it through /plugin/files/*).
   { to: '/files', label: 'Files', icon: FolderOpen, requiresPermission: 'files:read' },
+  // Backup / restore / replication of UNM's own database (section-based archives,
+  // safe-merge restore, one-way peer sync). Gated on instance:backup.
+  { to: '/backups', label: 'Backups', icon: DatabaseBackup, requiresPermission: 'instance:backup' },
   // Cross-device update center — firmware/packages/images available across devices,
   // plus the "UNM itself" self-update card. Badge = count of available updates.
   { to: '/updates', label: 'Updates', icon: ArrowUpCircle, requiresPermission: 'updates:read', countKey: 'updates' },
@@ -122,10 +134,11 @@ export const NAV_ITEMS: NavItem[] = [
   { to: '/sites', label: 'Sites', icon: MapPin, requiresPermission: 'sites:read' },
   // Global readers OR personal-area users (own secrets) may open the page.
   { to: '/secrets', label: 'Secrets', icon: KeyRound, requiresPermission: ['secrets:read', 'secrets:self-write'] },
-  // Config jobs still queued/running surface as a badge (actionable).
-  { to: '/config-jobs', label: 'Config Jobs', icon: ListChecks, requiresPermission: 'config-jobs:read', countKey: 'configJobs' },
   // Multi-device execution plans (create/execute additionally require configs:apply + 2FA).
   { to: '/plans', label: 'Plans', icon: RouteIcon, requiresPermission: 'plans:read', countKey: 'plans' },
+  // ITTT-style automation rules — schedule/metric/log/device-status triggers
+  // driving intent plans, webhooks, notifications or internal operations.
+  { to: '/automations', label: 'Actions & Schedules', icon: Workflow, requiresPermission: 'automations:read' },
   { to: '/plugins', label: 'Plugins', icon: Puzzle },
   // Only visible to users who may read user accounts/permissions.
   { to: '/users', label: 'Users', icon: UsersIcon, requiresPermission: 'users:read' },
@@ -150,7 +163,6 @@ export const MY_ACCOUNT_ITEM: NavItem = { to: '/my-account', label: 'My Account'
 // Solid status hues — centralized in index.css (--status-*).
 export const BADGE_COLORS: Record<NavCountKey, string> = {
   notifications: 'bg-status-critical',
-  configJobs: 'bg-status-warn',
   plans: 'bg-status-info',
   certificates: 'bg-status-critical',
   updates: 'bg-status-ok',

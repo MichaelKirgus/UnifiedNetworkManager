@@ -1,11 +1,10 @@
 import { Router } from 'express';
 import { v4 as uuidv4 } from 'uuid';
-import { db, Device, Plugin, Telemetry, ConfigJob } from '../db';
-import { requireAuth, requirePermission, require2FA, requireDeviceAccess } from '../auth/middleware';
+import { db, Device, Plugin, Telemetry } from '../db';
+import { requireAuth, requirePermission, requireDeviceAccess } from '../auth/middleware';
 import { allowedDeviceIds, invalidateDeviceAccessCache } from '../deviceAccess';
 import { mintConsoleTicket } from '../consoleTickets';
 import { DeviceConsoleError, resolveConsoleTarget } from '../deviceConsole';
-import { configJobQueue } from '../queue';
 import { asc, eq, and, desc, inArray } from 'drizzle-orm';
 import * as schema from '../db/schema';
 import { DeviceStateError, fetchDeviceState } from '../deviceState';
@@ -49,6 +48,43 @@ const router = Router();
 
 // readStringArray / parseStringArrayField come from utils/stringArrays (shared).
 
+/** One line of a device's status tooltip (see devices.healthReasons). */
+export interface DeviceHealthReason {
+  pluginId: string;
+  pluginName: string | null;
+  severity: 'warning' | 'critical';
+  message: string;
+}
+
+/** Tolerant parser for the persisted healthReasons JSON column. */
+function parseHealthReasonsField(raw: unknown): DeviceHealthReason[] {
+  if (typeof raw !== 'string' || raw.length === 0) return [];
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    const out: DeviceHealthReason[] = [];
+    for (const item of parsed) {
+      if (!item || typeof item !== 'object') continue;
+      const o = item as Record<string, unknown>;
+      const pluginIdRaw = o['pluginId'];
+      const pluginNameRaw = o['pluginName'];
+      const severityRaw = o['severity'];
+      const messageRaw = o['message'];
+      const message = typeof messageRaw === 'string' ? messageRaw.trim() : '';
+      if (!message) continue;
+      out.push({
+        pluginId: typeof pluginIdRaw === 'string' ? pluginIdRaw : '',
+        pluginName: typeof pluginNameRaw === 'string' ? pluginNameRaw : null,
+        severity: severityRaw === 'critical' ? 'critical' : 'warning',
+        message,
+      });
+    }
+    return out;
+  } catch {
+    return []; // corrupt JSON must never break the device list
+  }
+}
+
 function serializeDevice(row: Device, siteName?: string | null) {
   const deviceTypes = readStringArray(row.deviceTypes);
   return {
@@ -65,6 +101,9 @@ function serializeDevice(row: Device, siteName?: string | null) {
     siteId: row.siteId ?? undefined,
     siteName: siteName ?? null,
     status: row.status,
+    // Human-readable reasons for a non-ok status (worst-wins rollup of the
+    // last poll outcomes) — rendered as a tooltip on the webapp's badge.
+    healthReasons: parseHealthReasonsField(row.healthReasons),
     model: row.model ?? null,
     firmwareVersion: row.firmwareVersion ?? null,
     // Manual topology-layer override (null = auto-classify).
@@ -818,7 +857,7 @@ router.post('/devices/:id/ips', requireAuth, requirePermission('devices:write'),
 
 // DELETE /devices/:id/ips/:ipId - remove a secondary IP.
 router.delete('/devices/:id/ips/:ipId', requireAuth, requirePermission('devices:write'), requireDeviceAccess, async (req, res) => {
-  const deviceId = String(req.params.deviceId ?? '');
+  const deviceId = String(req.params.id ?? '');
   const ipId = String(req.params.ipId ?? '');
   try {
     await removeDeviceIp(deviceId, ipId);
@@ -874,7 +913,7 @@ router.post('/devices/:id/plugins', requireAuth, requirePermission('devices:writ
 //   { "extraCredentials": {...} }→ replace bound slot secrets (validated per slot type)
 //   any combination             → applied in one call
 router.patch('/devices/:id/plugins/:pluginId', requireAuth, requirePermission('devices:write'), requireDeviceAccess, async (req, res) => {
-  const deviceId = String(req.params.deviceId ?? '');
+  const deviceId = String(req.params.id ?? '');
   const pluginId = String(req.params.pluginId ?? '');
   const body = (req.body ?? {}) as Record<string, unknown>;
   try {
@@ -901,7 +940,7 @@ router.patch('/devices/:id/plugins/:pluginId', requireAuth, requirePermission('d
 
 // DELETE /devices/:id/plugins/:pluginId - remove an assignment.
 router.delete('/devices/:id/plugins/:pluginId', requireAuth, requirePermission('devices:write'), requireDeviceAccess, async (req, res) => {
-  const deviceId = String(req.params.deviceId ?? '');
+  const deviceId = String(req.params.id ?? '');
   const pluginId = String(req.params.pluginId ?? '');
   try {
     await removeAssignment(deviceId, pluginId);
@@ -936,7 +975,7 @@ router.put('/devices/:id/plugins/order', requireAuth, requirePermission('devices
 
 // GET /devices/:id/plugins/:pluginId/options - descriptors + this device's overrides.
 router.get('/devices/:id/plugins/:pluginId/options', requireAuth, requirePermission('devices:read'), requireDeviceAccess, async (req, res) => {
-  const deviceId = String(req.params.deviceId ?? '');
+  const deviceId = String(req.params.id ?? '');
   const pluginId = String(req.params.pluginId ?? '');
   try {
     const view = await getDevicePluginOptions(deviceId, pluginId);
@@ -950,7 +989,7 @@ router.get('/devices/:id/plugins/:pluginId/options', requireAuth, requirePermiss
 
 // PUT /devices/:id/plugins/:pluginId/settings - persist this device's overrides.
 router.put('/devices/:id/plugins/:pluginId/settings', requireAuth, requirePermission('plugins:manage'), requireDeviceAccess, async (req, res) => {
-  const deviceId = String(req.params.deviceId ?? '');
+  const deviceId = String(req.params.id ?? '');
   const pluginId = String(req.params.pluginId ?? '');
   const settings = (req.body ?? {}).settings as Record<string, unknown> | undefined;
   if (!settings || typeof settings !== 'object' || Array.isArray(settings)) {
@@ -974,7 +1013,7 @@ router.put('/devices/:id/plugins/:pluginId/settings', requireAuth, requirePermis
 
 // DELETE /devices/:id/plugins/:pluginId/settings - reset this device's overrides.
 router.delete('/devices/:id/plugins/:pluginId/settings', requireAuth, requirePermission('plugins:manage'), requireDeviceAccess, async (req, res) => {
-  const deviceId = String(req.params.deviceId ?? '');
+  const deviceId = String(req.params.id ?? '');
   const pluginId = String(req.params.pluginId ?? '');
   try {
     await resetDevicePluginSettings(deviceId, pluginId);
@@ -1022,6 +1061,8 @@ router.get('/devices/:id/monitoring', requireAuth, requirePermission('devices:re
         pluginId: a.pluginId,
         collectedAt: telemetry.collectedAt,
         health: telemetry.health,
+        // Plugin-reported reasons for this snapshot's non-ok health (null when healthy).
+        healthReasons: parseHealthReasonsField(telemetry.healthReasons),
         metrics: typeof telemetry.metrics === 'string' ? JSON.parse(telemetry.metrics) : telemetry.metrics,
         metricDescriptors: descriptors,
       };
@@ -1035,7 +1076,7 @@ router.get('/devices/:id/monitoring', requireAuth, requirePermission('devices:re
     'unknown'
   );
 
-  res.status(200).json({ deviceId, health, snapshots });
+  res.status(200).json({ deviceId, health, healthReasons: parseHealthReasonsField(device.healthReasons), snapshots });
 });
 
 // GET /devices/:id/state - LIVE device state from one assigned plugin's
@@ -1473,74 +1514,6 @@ router.get('/devices/:id/telemetry', requireAuth, requirePermission('devices:rea
 
   res.status(200).json({ deviceId, history });
 });
-
-router.post(
-  '/devices/:id/config-jobs',
-  requireAuth,
-  require2FA,
-  requirePermission('configs:apply'),
-  requireDeviceAccess,
-  async (req, res) => {
-    const deviceId = String(req.params.id ?? '');
-    const { action, payload, pluginId } = req.body ?? {};
-
-    if (!pluginId || typeof pluginId !== 'string') {
-      res.status(400).json({ error: '"pluginId" is required — pick which assigned plugin applies the change' });
-      return;
-    }
-
-    const device = await db.query.devices.findFirst({
-      where: (devices, { eq }) => eq(devices.id, deviceId),
-    });
-    if (!device) {
-      res.status(404).json({ error: 'Device not found' });
-      return;
-    }
-
-    const assignment = await db.query.devicePlugins.findFirst({
-      where: and(eq(schema.devicePlugins.deviceId, deviceId), eq(schema.devicePlugins.pluginId, pluginId)),
-    });
-    if (!assignment) {
-      res.status(400).json({ error: 'Plugin is not assigned to this device' });
-      return;
-    }
-
-    const id = uuidv4();
-    const createdAt = new Date().toISOString();
-
-    await db.insert(schema.configJobs).values({
-      id,
-      deviceId,
-      pluginId,
-      action,
-      status: 'queued',
-      payload: JSON.stringify(payload ?? {}),
-      result: null,
-      createdAt,
-      finishedAt: null,
-    });
-
-    configJobQueue.add(id, { jobId: id, deviceId });
-
-    const created = await db.query.configJobs.findFirst({
-      where: (configJobs, { eq }) => eq(configJobs.id, id),
-    });
-    if (!created) {
-      res.status(500).json({ error: 'Failed to retrieve created config job' });
-      return;
-    }
-    res.status(202).json({
-      id: created.id,
-      deviceId: created.deviceId,
-      pluginId: created.pluginId ?? undefined,
-      action: created.action,
-      status: created.status,
-      result: created.result ? (typeof created.result === 'string' ? JSON.parse(created.result) : created.result) : undefined,
-      createdAt: created.createdAt,
-      finishedAt: created.finishedAt ?? undefined,
-    });
-  }
-);
 
 // POST /devices/refresh - Force an immediate re-poll of one or more devices.
 // Bypasses the staggered scheduling windows (metrics AND inventory), so both

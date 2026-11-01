@@ -14,11 +14,20 @@ FROM smallstep/step-ca:0.30.2
 # NOTE: the base image runs as non-root user `step` (uid 1000). We switch to
 # root for one layer to set permissions + pre-create the mount points so fresh
 # named volumes inherit step-owned directories, then drop back to step.
+#
+# /data/ca is SHARED with the api container (which runs as uid/gid 1001): it
+# carries ca.json (rendered by the API) + root_ca.crt (mirrored here). The dir
+# is therefore group-writable for gid 1001 ("unm" — the api's `app` primary
+# group) with setgid, so BOTH sides can create files without any runtime chown.
+# step-ca's own state DB (/data/ca/db) stays step-owned (created at first boot).
 USER root
 COPY ca/entrypoint.sh /entrypoint-unm.sh
 RUN chmod 755 /entrypoint-unm.sh \
+    && addgroup -g 1001 unm \
     && mkdir -p /pki /data/ca \
-    && chown step:step /pki /data/ca
+    && chown step:step /pki \
+    && chown step:unm /data/ca \
+    && chmod 2775 /data/ca
 USER step
 
 ENTRYPOINT ["/bin/sh", "/entrypoint-unm.sh"]

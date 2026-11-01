@@ -5,12 +5,12 @@ import type { ExtraCredentials } from '../types/credentialSlots';
  * Decrypts every bound credential slot of an assignment, keyed by slot name.
  * Workers merge the result into the plugin request body as
  * `credentials.slots.<name>` — the PRIMARY credential stays at the top level
- * of `credentials`, unchanged (see workers/telemetry.ts, configJob.ts,
- * planExecutor.ts). A single failing slot never sinks the whole call: it is
- * logged and skipped so the plugin can still serve everything else.
+ * of `credentials`, unchanged (see workers/telemetry.ts, planExecutor.ts).
+ * A single failing slot never sinks the whole call: it is logged and skipped
+ * so the plugin can still serve everything else.
  *
- * `fresh` bypasses the decrypted-secret cache — write paths (config jobs,
- * plan steps) must apply with current credentials; the poll path may use the
+ * `fresh` bypasses the decrypted-secret cache — write paths (plan steps)
+ * must apply with current credentials; the poll path may use the
  * cached values to keep secrets-provider load flat at scale.
  */
 export async function decryptCredentialSlots(

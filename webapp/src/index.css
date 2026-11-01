@@ -90,7 +90,9 @@
   --accent-hover: 129 140 248;     /* indigo-400           */
   --accent-solid: 99 102 241;      /* indigo-500 (selected)*/
 
-  /* Text on solid primary surfaces (code blocks, etc.). */
+  /* Code block surface — payload JSON, log excerpts. Light = slate-900 (the
+   * classic dark-on-light code panel). Dark themes override both tokens below. */
+  --code-bg: 15 23 42;             /* slate-900            */
   --code-fg: 241 245 249;          /* slate-100            */
 
   /* Modal/backdrop overlay. */
@@ -111,6 +113,8 @@
   --topo-node: 51 65 85;           /* slate-700            */
   --topo-cable: 148 163 184;       /* slate-400 (inferred) */
   --topo-tunnel: 100 116 139;      /* slate-500            */
+  --topo-wireless: 203 213 225;    /* slate-300 (WLAN link)*/
+  --topo-traffic: 56 189 248;      /* sky-400 (flow accent)*/
 }
 
 /* Dark styles — `.dark` enables dark mode; the paired style class selects the
@@ -182,7 +186,10 @@
   --success-solid-hover: 24 120 50;
 
   --focus-ring: 139 139 139;        /* #8b8b8b                       */
-  --accent-hover: 122 162 247;      /* indigo-400                    */}
+  --accent-hover: 122 162 247;      /* indigo-400                    */
+
+  --code-bg: 30 30 30;              /* #1e1e1e VS Code editor bg     */
+  --code-fg: 212 212 212;           /* #d4d4d4 default text          */}
 
 /* Slate — the original dark palette (slate-950 canvas). */
 .theme-slate {
@@ -238,9 +245,48 @@
   --accent-cyan: 8 51 68;         /* cyan-950               */
   --accent-cyan-fg: 103 232 249;  /* cyan-300               */
   --accent-cyan-border: 21 94 117;/* cyan-800               */
-}
+
+  --code-bg: 2 6 23;               /* slate-950 (page canvas)    */
+  --code-fg: 226 232 240;          /* slate-200                  */}
 
 body {
   background-color: rgb(var(--background));
   color: rgb(var(--foreground));
+}
+
+/* ---------------------------------------------------------------------------
+ * xyflow (React Flow) theming — Topology page.
+ *
+ * The canvas wrapper and node cards use app tokens (bg-card/border-border), so
+ * the built-in widgets must too. xyflow's own defaults are one fixed light set
+ * plus one fixed dark palette (.react-flow.dark via its colorMode prop) — that
+ * produced white Controls/MiniMap boxes with invisible icons on a dark canvas,
+ * and can't distinguish our Black vs Slate themes or track live theme switches.
+ * Instead we re-point xyflow's --xy-* hooks at the design tokens below; the
+ * selectors key off the <html> classes that useTheme.ts toggles (single source
+ * of truth), so every widget follows the active theme instantly.
+ * ------------------------------------------------------------------------- */
+
+.react-flow {
+  /* Canvas surface = card, dots = faint hints (matches the page chrome). */
+  --xy-background-color: rgb(var(--card));
+  --xy-background-pattern-dots-color-default: rgb(var(--faint) / 0.5);
+
+  /* Zoom controls — panel + buttons from the app palette. */
+  --xy-controls-button-background-color: rgb(var(--muted));
+  --xy-controls-button-background-color-hover: rgb(var(--border));
+  --xy-controls-button-color: rgb(var(--secondary));
+  --xy-controls-button-color-hover: rgb(var(--foreground));
+  --xy-controls-button-border-color: rgb(var(--border));
+
+  /* MiniMap — canvas + viewport mask from the app palette. Node colors come
+   * from the MiniMap nodeColor prop (the fixed --topo-* graph hues). */
+  --xy-minimap-background-color: rgb(var(--card));
+  --xy-minimap-mask-background-color: rgb(var(--overlay) / 0.35);
+}
+
+.dark .react-flow {
+  /* Dark themes need a lighter mask so the viewport rectangle stays visible
+   * over the dark minimap canvas (the light default is near-invisible). */
+  --xy-minimap-mask-background-color: rgb(255 255 255 / 0.18);
 }

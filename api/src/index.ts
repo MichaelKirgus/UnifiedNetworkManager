@@ -4,7 +4,9 @@ import helmet from 'helmet';
 import rateLimit from 'express-rate-limit';
 import * as OpenApiValidator from 'express-openapi-validator';
 import { loadOpenApiSpec, resolveOpenApiPath } from './openapi';
+import { getEffectiveSettingValue } from './systemSettings';
 import { initDb, backfillSecrets, backfillAdminPermissions, backfillDeviceSites, backfillAdminRole, backfillInteractiveLoginPermission, backfillDeviceAllPermission } from './db';
+import { ensureSchemaBootstrapped } from './schemaBootstrap';
 import authRouter from './routes/auth';
 import devicesRouter from './routes/devices';
 import pluginsRouter from './routes/plugins';
@@ -16,8 +18,8 @@ import credentialPoliciesRouter from './routes/credentialPolicies';
 import rolesRouter from './routes/roles';
 import tokensRouter from './routes/tokens';
 import { internalRouter } from './routes/internal';
-import configJobsRouter, { configJobsListRouter } from './routes/configJobs';
 import plansRouter from './routes/plans';
+import automationsRouter from './routes/automations';
 import networksRouter from './routes/networks';
 import flowsRouter from './routes/flows';
 import geoipRouter from './routes/geoip';
@@ -26,6 +28,7 @@ import documentedHostsRouter from './routes/documentedHosts';
 import documentedNetworksRouter from './routes/documentedNetworks';
 import updatesRouter from './routes/updates';
 import securityChecksRouter from './routes/securityChecks';
+import cveRouter from './routes/cve';
 import topologyRouter from './routes/topology';
 import logsRouter from './routes/logs';
 import notificationsRouter from './routes/notifications';
@@ -34,24 +37,30 @@ import settingsRouter from './routes/settings';
 import caRouter from './routes/ca';
 import countsRouter from './routes/counts';
 import { filesRouter, internalFileRepoRouter } from './routes/files';
+import { backupsRouter } from './routes/backups';
 import { startNotificationsWorker } from './workers/notifications';
 import { startTelemetryWorker } from './workers/telemetry';
 import { startTelemetryRetentionWorker } from './workers/telemetryRetention';
 import { startFirewallEventRetentionWorker } from './workers/firewallEventRetention';
 import { startHostStateRetentionWorker } from './workers/hostStateRetention';
 import { startPluginDiscovery } from './plugins/discovery';
-import { startConfigJobWorker } from './workers/configJob';
 import { startPlanExecutorWorker } from './workers/planExecutor';
 import { startPlanSchedulerWorker } from './workers/planScheduler';
 import { startLogRetentionWorker } from './workers/logRetention';
 import { startPluginMetricsWorker } from './workers/pluginMetrics';
 import { startNtpReferencesWorker } from './workers/ntpReferences';
+import { startUpdateCheckWorker } from './workers/updateCheck';
 import { startGeoIpWorker } from './workers/geoip';
+import { startCveWorker } from './cve/worker';
 import { startFlowsWorker } from './workers/flows';
 import { startInactiveUsersWorker } from './workers/inactiveUsers';
+import { startReplicationSchedulerWorker } from './workers/replication';
+import { startAutoBackupWorker } from './workers/autoBackup';
+import { startAutomationEvaluatorWorker } from './workers/automations';
 import { LEADER_KEYS, runAsLeader } from './workers/leader';
 import { initWorker } from './workers/stats';
 import { attachConsoleProxy } from './consoleProxy';
+import { clientIpKeyGenerator, parseTrustProxy } from './utils/clientIp';
 import { setPluginTransports } from './utils/pluginHttp';
 import { startApiMtls } from './ca/apiMtls';
 import { apiVersion } from './version';
@@ -60,13 +69,74 @@ import { db } from './db';
 const PORT = Number(process.env.PORT ?? 3000);
 const API_PREFIX = '/v1';
 
+/**
+ * Explicitly allowed CORS origins, from UNM_CORS_ORIGINS (comma-separated).
+ * WEBAUTHN_ORIGIN is folded in too: the webapp origin that passkeys are bound
+ * to and the origin browsers may call cross-origin should be the same list —
+ * keeping them separate invites a misconfiguration where one works and the
+ * other doesn't. Read at request time (cheap string split) so `docker compose`
+ * env changes apply on restart without code coupling.
+ */
+function corsAllowedOrigins(): string[] {
+  const raw = [process.env.UNM_CORS_ORIGINS ?? '', process.env.WEBAUTHN_ORIGIN ?? '']
+    .join(',')
+    .split(',')
+    .map((o) => o.trim())
+    .filter(Boolean);
+  return [...new Set(raw)];
+}
+
+/**
+ * True for any http(s)://localhost:<port> or http(s)://127.0.0.1:<port>. These
+ * loopback origins are ALWAYS allowed regardless of configuration: the
+ * development webapp is served from http://localhost:8080 without a
+ * fully-qualified domain name, and local scripts/probes hit the API cross-origin
+ * all the time — both must keep working out of the box on every machine. This
+ * only ever widens access for loopback origins (unreachable off-host anyway);
+ * it is deliberately not configurable away.
+ */
+function isLocalhostOrigin(origin: string): boolean {
+  return /^(https?:\/\/)(localhost|127\.0\.0\.1)(:\d+)?\/?$/.test(origin);
+}
+
 // General limiter applied to every /v1 route to guard database-backed
-// handlers against abuse/brute force.
+// handlers against abuse/brute force. The per-window budget is a global setting
+// (apiRateLimitPerMinute) so busy multi-user deployments — where the webapp's
+// 30 s page polls share one IP bucket behind NAT — can raise or lower it without
+// a code change. Read live through the short-TTL settings cache; on any hiccup
+// the default budget applies (the limiter must never break request flow). The
+// auth endpoints keep their own tight, FIXED limiter below — brute-force
+// protection is not tunable from the UI.
+//
+// Client-IP resolution behind a reverse proxy: by default express-rate-limit
+// buckets on req.ip, which is the PROXY's address when UNM sits behind one —
+// collapsing every real client into a single bucket. Two env knobs fix that
+// (see docs/REVERSE-PROXY.md):
+//   UNM_TRUST_PROXY        → app.set('trust proxy', …) so req.ip comes from the
+//                            leftmost X-Forwarded-For entry of TRUSTED peers.
+//   UNM_CLIENT_IP_HEADER   → explicit client-IP header (e.g. Cloudflare's
+//                            CF-Connecting-IP); wins over everything else via
+//                            the keyGenerator below. Only set it if your proxy
+//                            is the sole path to the API — otherwise clients
+//                            can forge the header and reset their own bucket.
 const generalLimiter = rateLimit({
   windowMs: 60_000,
-  limit: 300,
+  limit: async () => {
+    try {
+      const v = await getEffectiveSettingValue('apiRateLimitPerMinute');
+      if (typeof v === 'number' && Number.isFinite(v)) return Math.max(1, Math.trunc(v));
+    } catch { /* fall through to the default budget */ }
+    return 300;
+  },
+  // undefined = library default (req.ip) — correct once trust proxy is set.
+  keyGenerator: clientIpKeyGenerator(),
   standardHeaders: true,
   legacyHeaders: false,
+  // JSON body so the webapp's error handling shows a useful message instead of
+  // a bare "API error 429" (the default is a plain-text string).
+  message: {
+    error: 'Too many requests — the API rate limit was exceeded. Wait a minute and try again; an admin can raise the budget under Settings → Security ("API rate limit per client").',
+  },
 });
 
 // Tighter limiter for the authentication endpoints, matching the OpenAPI
@@ -74,12 +144,19 @@ const generalLimiter = rateLimit({
 const authLimiter = rateLimit({
   windowMs: 60_000,
   limit: 10,
+  // Same client-IP resolution as the general limiter (see above).
+  keyGenerator: clientIpKeyGenerator(),
   standardHeaders: true,
   legacyHeaders: false,
   message: { error: 'Too many login attempts' },
 });
 
 async function main(): Promise<void> {
+  // Fresh-install bootstrap: create the core schema if it doesn't exist yet.
+  // No-op on every existing deployment (one pg_class query); production images
+  // have no host-side `drizzle-kit push` step, so this is what makes a fresh
+  // database bootable. See src/schemaBootstrap.ts.
+  await ensureSchemaBootstrapped();
   await initDb();
   await backfillAdminRole();
   await backfillAdminPermissions();
@@ -105,9 +182,47 @@ async function main(): Promise<void> {
   const spec = loadOpenApiSpec();
   const specPath = resolveOpenApiPath();
 
+  // CORS: this is an admin API — never answer with a wildcard origin. Allowed
+  // origins come from UNM_CORS_ORIGINS (comma-separated, e.g.
+  // "https://unm.example.com") plus WEBAUTHN_ORIGIN so the passkey browser
+  // check and the CORS allowlist can't drift apart. Localhost/127.0.0.1 origins
+  // are ALWAYS allowed: the dev webapp runs on http://localhost:8080 (or any
+  // port) without a fully-qualified domain name, and local scripts/probes must
+  // keep working out of the box. Anything else gets no CORS headers at all —
+  // cross-origin browsers then block the response.
+  const corsOrigins = new Set<string>(corsAllowedOrigins());
+
   const app = express();
+
+  // Reverse-proxy support (UNM_TRUST_PROXY): when set, Express reads the real
+  // client IP from X-Forwarded-For for peers matching the policy — "1" trusts
+  // exactly one hop (a single proxy), a number N trusts N hops, and CIDR lists
+  // / named policies (loopback, link-local, …) trust whole networks. Without
+  // it req.ip is always the direct TCP peer, which behind a proxy means every
+  // client shares the proxy's rate-limit bucket. See docs/REVERSE-PROXY.md.
+  //
+  // Deliberately NOT set to `false` when unset: express-rate-limit v8 throws
+  // ERR_ERL_UNEXPECTED_X_FORWARDED_FOR for XFF requests only when trust proxy
+  // is strictly false, while the default (undefined) ignores the header — so
+  // leaving it untouched keeps pre-existing proxy deployments working until
+  // UNM_TRUST_PROXY is configured.
+  const trustProxy = parseTrustProxy(process.env.UNM_TRUST_PROXY);
+  if (trustProxy) { // truthy: unset/empty/"0" mean no trusted hops — leave the default alone
+    app.set('trust proxy', trustProxy);
+    console.log(`[api] trust proxy enabled: ${JSON.stringify(trustProxy)} — client IPs are read from X-Forwarded-For for matching peers`);
+  }
+
   app.use(helmet());
-  app.use(cors());
+  app.use(
+    cors({
+      origin(origin, callback) {
+        // No Origin header (same-origin request or non-browser client) → allow.
+        if (!origin || isLocalhostOrigin(origin) || corsOrigins.has(origin)) return callback(null, true);
+        console.warn(`[api] CORS: rejecting cross-origin request from ${origin} (not in UNM_CORS_ORIGINS/WEBAUTHN_ORIGIN)`);
+        return callback(null, false);
+      },
+    }),
+  );
   // Filesystem writes (POST /devices/:id/filesystem op=write) carry base64 file
   // contents — allow up to ~10 MiB of inbound JSON so a user can upload files that size.
   app.use(express.json({ limit: '12mb' }));
@@ -136,7 +251,6 @@ async function main(): Promise<void> {
   // plugin routes are namespaced under /plugin/* (user data included) so they
   // never shadow public paths like POST /users — see routes/internal.ts.
   api.use(infoRouter);
-  api.use(configJobsListRouter);
   api.use(internalRouter());
   // Central file repository — internal plugin routes (/plugin/files/*, gated by
   // x-plugin-api-key). Mounted before the OpenAPI validator like the other
@@ -166,7 +280,6 @@ async function main(): Promise<void> {
   api.use(rolesRouter);
   // API tokens (self-service + admin) — long-lived bearer credentials for agents.
   api.use(tokensRouter);
-  api.use(configJobsRouter);
   // Cross-device inventory views (/networks, /hosts) — self-defining paths.
   api.use(networksRouter);
   // Traffic visibility (Flows page): top talkers, internet egress, device
@@ -184,6 +297,9 @@ async function main(): Promise<void> {
   api.use(updatesRouter);
   // Cross-device security findings (Security page) — actionable checks only.
   api.use(securityChecksRouter);
+  // CVE vulnerability tracking (Security page): per-device matches, summary
+  // counts + manual advisory refresh. All gated on security:read.
+  api.use(cveRouter);
   // Physical + logical topology graph for the Topology page (self-defining path).
   api.use(topologyRouter);
   // Plugin log entries (global view + per-device section in DeviceDetail).
@@ -203,6 +319,11 @@ async function main(): Promise<void> {
   // The plans router defines its own /plans/... paths (like the devices router),
   // so it is mounted without an extra prefix.
   api.use(plansRouter);
+  // Backup / restore of UNM's own database (/backups/*, instance:backup).
+  api.use(backupsRouter);
+  // Actions & Schedules — automation rules CRUD + test-run + run history
+  // (self-defining /automations/... paths; engine in workers/automations.ts).
+  api.use(automationsRouter);
 
   // OpenAPI validation error handler.
   api.use(
@@ -257,8 +378,6 @@ async function main(): Promise<void> {
       console.log('[api] UNM_TLS not set — skipping API self-enrollment (plain HTTP only)');
     }
 
-    startConfigJobWorker();
-
     void runAsLeader(LEADER_KEYS.telemetry, 'telemetry', () => startTelemetryWorker()).then((stop) => workerStops.push(stop));
     void runAsLeader(LEADER_KEYS.planExecutor, 'planExecutor', () => startPlanExecutorWorker()).then((stop) => workerStops.push(stop));
     // Scheduled plans: flips due 'scheduled' plans to executing (leader-gated).
@@ -284,6 +403,12 @@ async function main(): Promise<void> {
     void runAsLeader(LEADER_KEYS.pluginMetrics, 'pluginMetrics', () => startPluginMetricsWorker()).then((stop) => workerStops.push(stop));
     // Public NTP reference polling (Time page "Time base" card — fleet time-base check).
     void runAsLeader(LEADER_KEYS.ntpReferences, 'ntpReferences', () => startNtpReferencesWorker()).then((stop) => workerStops.push(stop));
+    // Stack self-update check: proactively notifies the admin when a newer UNM release is available.
+    void runAsLeader(LEADER_KEYS.stackUpdates, 'stackUpdates', () => startUpdateCheckWorker()).then((stop) => workerStops.push(stop));
+    // Replication scheduler: runs due replication target syncs (leader-gated).
+    void runAsLeader(LEADER_KEYS.replication, 'replication', () => startReplicationSchedulerWorker()).then((stop) => workerStops.push(stop));
+    // Auto-backup scheduler: creates scheduled backups per the autoBackup* settings.
+    void runAsLeader(LEADER_KEYS.autoBackup, 'autoBackup', () => startAutoBackupWorker()).then((stop) => workerStops.push(stop));
     // Notification maintenance: auto-resolve recovered device states + retention.
     void runAsLeader(LEADER_KEYS.notifications, 'notifications', () => startNotificationsWorker()).then((stop) => workerStops.push(stop));
     // Inactivity auto-disable (credential policy inactiveDisableAfterDays).
@@ -294,6 +419,13 @@ async function main(): Promise<void> {
 
     // GeoIP database refresh (leader-gated; cadence from geoipFetchIntervalHours).
     void runAsLeader(LEADER_KEYS.geoip, 'geoip', () => startGeoIpWorker()).then((stop) => workerStops.push(stop));
+
+    // CVE advisory fetch + device matching (Security page; cadence from cveFetchIntervalHours).
+    void runAsLeader(LEADER_KEYS.cve, 'cve', () => startCveWorker()).then((stop) => workerStops.push(stop));
+
+    // Actions & Schedules: evaluates automation rule triggers and fires their
+    // actions (leader-gated; gated by the automationsEnabled setting).
+    void runAsLeader(LEADER_KEYS.automationEvaluator, 'automationEvaluator', () => startAutomationEvaluatorWorker()).then((stop) => workerStops.push(stop));
 
     // CA config rendering: the API owns ca.json (rendered from global settings)
     // on the shared volume; the CA service SIGHUPs itself when it changes.

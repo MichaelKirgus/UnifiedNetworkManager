@@ -6,12 +6,12 @@ set -e
 # --- Configuration -----------------------------------------------------------
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 API_PORT=3000
-WEB_PORT=5173
+WEB_PORT=8080
 LOG_DIR="$(mktemp -d "${TMPDIR:-/tmp}/unm-dev.XXXXXX")"
 DEV_PIDS=()
 
 # Plugin service discovery — NO hard-coded plugin list in this script. The set
-# of plugins and their host ports are read from docker-compose.yml at start
+# of plugins and their host ports are read from docker-compose.dev.yml at start
 # time, so a third-party plugin added to the compose file is picked up here
 # (waited for + exported to the dev API) with zero changes to setup.sh.
 declare -A PLUGIN_PORTS=()   # service name -> published TCP port
@@ -35,9 +35,9 @@ discover_plugin_services() {
       }
     });
   ')"; then
-    fail "Could not parse docker-compose.yml (needs Docker Compose v2 with 'config --format json')."
+    fail "Could not parse docker-compose.dev.yml (needs Docker Compose v2 with 'config --format json')."
   fi
-  [ -n "$lines" ] || fail "No *-plugin services with a published TCP port found in docker-compose.yml."
+  [ -n "$lines" ] || fail "No *-plugin services with a published TCP port found in docker-compose.dev.yml."
   while read -r svc port; do
     PLUGIN_PORTS["$svc"]="$port"
     PLUGIN_SERVICES+=("$svc")
@@ -53,6 +53,30 @@ build_host_port_map() {
     out+="${svc}:${PLUGIN_PORTS[$svc]}"
   done
   printf '%s' "$out"
+}
+
+# Load Postgres credentials from .env into the environment, mirroring compose's
+# ${POSTGRES_*:-unm} fallbacks (empty or unset → unm). Compose reads .env on its
+# own; this exists so the HOST-side tools that talk to the DB — `drizzle-kit push`
+# and the host-run API dev server — use the same credentials instead of the
+# hardcoded unm/unm. Values are read as-is (the recommended `openssl rand -hex 32`
+# password is URL-safe); exotic characters would need percent-encoding in DATABASE_URL.
+load_postgres_env() {
+  local f="$ROOT/.env" key val
+  for key in POSTGRES_USER POSTGRES_PASSWORD POSTGRES_DB; do
+    if [ -f "$f" ]; then
+      # Last matching line wins (matches compose); trim whitespace + one quote pair.
+      val="$(grep -E "^[[:space:]]*${key}=" "$f" | tail -n1 | cut -d= -f2- | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+      case "$val" in
+        \"*\") val="${val#\"}"; val="${val%\"}" ;;
+        \'*\') val="${val#\'}"; val="${val%\'}" ;;
+      esac
+      [ -n "$val" ] && export "$key=$val"
+    fi
+  done
+  : "${POSTGRES_USER:=unm}"
+  : "${POSTGRES_PASSWORD:=unm}"
+  : "${POSTGRES_DB:=unm}"
 }
 
 # All TCP ports to free during cleanup (API + webapp + every discovered plugin).
@@ -84,6 +108,9 @@ fi
 
 # Run a docker compose command (v2 plugin or legacy binary) with the chosen prefix.
 docker_compose() {
+  # All dev-mode compose commands target the DEV compose file (build: blocks +
+  # hot-reload sources); the standard docker-compose.yml is for end users.
+  set -- -f docker-compose.dev.yml "$@"
   if [ -n "$DOCKER_SUDO" ]; then S="$DOCKER_SUDO"; else S=""; fi
   if command -v docker-compose &> /dev/null; then
     $S docker-compose "$@"
@@ -184,7 +211,7 @@ kill_dev_processes() {
     done
 
     # Strategy 2: free the dev ports (kills whatever is actually serving).
-    # Plugin ports are discovered from docker-compose.yml at start of run;
+    # Plugin ports are discovered from docker-compose.dev.yml at start of run;
     # on a first-ever cleanup they may be empty — API/webapp still covered.
     for p in $(all_dev_ports); do
       fuser -k "${p}/tcp" >/dev/null 2>&1 || true
@@ -228,7 +255,7 @@ trap cleanup EXIT INT TERM
 
 # --- Pre-flight: kill lingering processes from previous runs -----------------
 # An aborted/crashed setup.sh can leave orphaned dev servers holding ports
-# 3000/5173. Every subsequent run then fails with EADDRINUSE while the OLD
+# 3000/8080. Every subsequent run then fails with EADDRINUSE while the OLD
 # code keeps serving — so always start from a clean slate.
 kill_lingering() {
   # Stale compose containers (e.g. an old api container publishing :3000)
@@ -250,6 +277,13 @@ if ! command -v docker-compose &> /dev/null && ! docker compose version &> /dev/
 fi
 
 ensure_docker_daemon
+
+# Load Postgres credentials from .env and export a host-side DATABASE_URL so the
+# local tools (drizzle-kit push, host-run API) match what compose uses. Points at
+# localhost:5432 because these run on the HOST, not in the compose network — which
+# is exactly why the dev compose keeps a loopback-only 127.0.0.1:5432 bind.
+load_postgres_env
+export DATABASE_URL="${DATABASE_URL:-postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@localhost:5432/${POSTGRES_DB}}"
 
 # 2. Install dependencies
 echo "📦 Installing dependencies..."
@@ -286,7 +320,7 @@ ok "Plugins + MCP server built (in parallel)."
 
 # 7. Start the plugin containers (--build: always reflect current source;
 #    reusing stale images silently serves old code — a past source of bugs).
-#    The service list is DISCOVERED from docker-compose.yml above — adding a
+#    The service list is DISCOVERED from docker-compose.dev.yml above — adding a
 #    third-party plugin there is all that's needed to have it built + waited on.
 echo "🌐 Starting plugin containers..."
 docker_compose up -d --build mcp "${PLUGIN_SERVICES[@]}"

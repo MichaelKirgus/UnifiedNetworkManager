@@ -30,8 +30,29 @@ export const INTENT_NETWORK_DELETE = 'network.delete' as const;
 // Reserved for the tunnel-abstraction round (WireGuard/IPsec/OpenSSL):
 //   INTENT_TUNNEL_CREATE = 'tunnel.create', INTENT_TUNNEL_DELETE = 'tunnel.delete'.
 
+/**
+ * Canonical intent ids for static DNS host entries (hostname → IP) — the
+ * cross-vendor abstraction behind UNM's DNS page: one entry rolled out to every
+ * device that keeps a local hosts table (OPNsense dnsmasq/unbound, OpenWrt UCI
+ * `dhcp` host sections, RouterOS `/ip/dns/static`, LCOS `Setup/DNS/DNS-List`).
+ */
+export const INTENT_DNS_SET = 'dns.set' as const;
+export const INTENT_DNS_DELETE = 'dns.delete' as const;
+/** Rename a static DNS entry in place — every address (and any per-record
+ * domain/description) of the old name moves to the new name. */
+export const INTENT_DNS_RENAME = 'dns.rename' as const;
+
+/**
+ * Canonical intent ids for container image management — the cross-vendor
+ * abstraction behind UNM's Containers page: point one or more containers at a
+ * different image (a tag bump like `app:v1.4.2` → `app:v1.4.3`, or a whole new
+ * image like switching redis providers). Implemented by every plugin that can
+ * drive docker workloads (generic Docker Engine API, TrueNAS SCALE apps).
+ */
+export const INTENT_CONTAINERS_IMAGE_SET = 'containers.image.set' as const;
+
 /** All canonical intent ids, in rollout order. */
-export const CANONICAL_INTENTS: readonly string[] = [INTENT_NETWORK_CREATE, INTENT_NETWORK_DELETE];
+export const CANONICAL_INTENTS: readonly string[] = [INTENT_NETWORK_CREATE, INTENT_NETWORK_DELETE, INTENT_DNS_SET, INTENT_DNS_DELETE, INTENT_DNS_RENAME, INTENT_CONTAINERS_IMAGE_SET];
 
 // ---------------------------------------------------------------------------
 // L2 topology — the cross-vendor abstraction for interface layering
@@ -288,10 +309,87 @@ export const NETWORK_DELETE_SCHEMA: InputSchema = {
   name: { type: 'string', required: true, minLength: 1, maxLength: 64, description: 'Network name to remove' },
 };
 
+// ---------------------------------------------------------------------------
+// dns.set / dns.delete — "add/remove static DNS entry NAME → IP on all devices"
+// ---------------------------------------------------------------------------
+
+/**
+ * Canonical input schema for `dns.set` (idempotent upsert). Vendors keep the
+ * entry in different places but all address it by hostname: OPNsense dnsmasq
+ * host records / unbound local-zone overrides, OpenWrt UCI `dhcp` `@host`/`@map`
+ * sections, RouterOS `/ip/dns/static`, LCOS `Setup/DNS/DNS-List`. A plugin that
+ * already has the name with a DIFFERENT address updates it in place.
+ */
+export const DNS_SET_SCHEMA: InputSchema = {
+  name: { type: 'string', required: true, minLength: 1, maxLength: 253, description: 'Hostname (RFC 1123; stored lowercase by UNM)' },
+  ip: { type: 'string', required: true, pattern: '^\\d{1,3}(\\.\\d{1,3}){3}$|^[0-9a-fA-F:.]*:[0-9a-fA-F:.]*$', description: 'IPv4 or IPv6 address the hostname resolves to (record type A/AAAA is derived from the address shape)' },
+  ipv6: { type: 'string', required: false, pattern: '^[0-9a-fA-F:.]*:[0-9a-fA-F:.]*$', description: 'Optional second family — write BOTH v4 and v6 into one entry (LCOS DNS-List dual row). Vendors without a per-name multi-address model ignore it.' },
+  domain: { type: 'string', required: false, maxLength: 253, description: 'Optional domain suffix. Only vendors that split a record into bare-hostname + domain persist it (OPNsense unbound); other plugins ignore it.' },
+  description: { type: 'string', required: false, maxLength: 255, description: 'Optional free-text note for the entry. Only vendors with a native field persist it (RouterOS /ip/dns/static `comment`, OPNsense unbound); other plugins ignore it.' },
+};
+
+/** Canonical input schema for `dns.delete` (name-addressed, idempotent). */
+export const DNS_DELETE_SCHEMA: InputSchema = {
+  name: { type: 'string', required: true, minLength: 1, maxLength: 253, description: 'Hostname to remove' },
+  ip: { type: 'string', pattern: '^\\d{1,3}(\\.\\d{1,3}){3}$|^[0-9a-fA-F:.]*:[0-9a-fA-F:.]*$', description: 'Optional — when the name maps to several addresses, remove only this one' },
+  description: { type: 'string', required: false, maxLength: 255, description: 'Optional — accepted for contract symmetry; deletion is by name(+ip) and never matches on the note.' },
+};
+
+/**
+ * Canonical input schema for `dns.rename` (name-addressed, idempotent). Renames
+ * a static DNS entry IN PLACE: every address of the old name moves to the new
+ * name, preserving per-record data the vendor stores alongside it (OPNsense
+ * unbound domain + description, RouterOS comment, LCOS dual v4+v6 row). A
+ * plugin that already holds `newName` with a different address reports an error
+ * rather than merging — the caller must delete or rename that entry first.
+ */
+export const DNS_RENAME_SCHEMA: InputSchema = {
+  name: { type: 'string', required: true, minLength: 1, maxLength: 253, description: 'Current hostname to rename (stored lowercase by UNM)' },
+  newName: { type: 'string', required: true, minLength: 1, maxLength: 253, description: 'New hostname for the entry' },
+};
+
+// ---------------------------------------------------------------------------
+// containers.image.set — "point these containers at a different image"
+// ---------------------------------------------------------------------------
+
+/**
+ * Canonical input schema for `containers.image.set`. One step targets ONE device
+ * and carries every mapping that applies to it (the webapp groups its selection
+ * per device). Each mapping is matched by the container's CURRENT image ref:
+ *   - `from` = the exact ref the container runs today (e.g. "ghcr.io/x/app:v1.4.2")
+ *   - `to`   = the new full ref — a tag bump ("…/app:v1.4.3"), a different tag
+ *     of the same repo, or an entirely different image ("redis:7" → "valkey:8").
+ *   - `name` = optional container/service name to scope the match (a multi-service
+ *     app may run several images; omit it to hit every service using `from`).
+ * Idempotent by contract: a container already running `to` is skipped, not failed.
+ * Vendors implement this natively — TrueNAS rewrites the app's compose config and
+ * redeploys (catalog apps are skipped with a note), bare Docker recreates the
+ * container via the Engine API preserving its full configuration.
+ */
+export const CONTAINER_IMAGE_SET_SCHEMA: InputSchema = {
+  mappings: {
+    type: 'array',
+    required: true,
+    items: {
+      type: 'object',
+      properties: {
+        name: { type: 'string', required: false, minLength: 1, maxLength: 200, description: 'Optional container/service name to scope the match (omit = every service using `from`)' },
+        from: { type: 'string', required: true, minLength: 2, maxLength: 512, description: 'Current image reference of the container(s) to change (exact ref as reported in inventory)' },
+        to: { type: 'string', required: true, minLength: 2, maxLength: 512, description: 'New full image reference (tag bump or a different image entirely)' },
+      },
+    },
+    description: 'Image changes to apply on this device — one entry per container/service',
+  },
+};
+
 /** Canonical intent → input schema lookup (the superset contract). */
 export const CANONICAL_INTENT_SCHEMAS: Record<string, InputSchema> = {
   [INTENT_NETWORK_CREATE]: NETWORK_CREATE_SCHEMA,
   [INTENT_NETWORK_DELETE]: NETWORK_DELETE_SCHEMA,
+  [INTENT_DNS_SET]: DNS_SET_SCHEMA,
+  [INTENT_DNS_DELETE]: DNS_DELETE_SCHEMA,
+  [INTENT_DNS_RENAME]: DNS_RENAME_SCHEMA,
+  [INTENT_CONTAINERS_IMAGE_SET]: CONTAINER_IMAGE_SET_SCHEMA,
 };
 
 // ---------------------------------------------------------------------------

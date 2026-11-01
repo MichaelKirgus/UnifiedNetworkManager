@@ -72,6 +72,8 @@ export const PLUGIN_NAME = 'LANCOM SX-Series Plugin';
 const identity = resolvePluginIdentity({
   uuid: PLUGIN_UUID,
   name: PLUGIN_NAME,
+  description:
+    'LANCOM SX-series switch monitoring (SNMP) — system/PSU/fans, ports + throughput, PoE and LAG/LACP plus config actions over SNMP SET.',
   // 0.1.0 — initial release: LCOS-SX switch monitoring (system/PSU/fans/temp,
   // ports + throughput, PoE, LAG/LACP) for BOTH firmware lines (unified 4.x tree
   // and legacy GS-2310 3.x tree, auto-detected), network/host inventory
@@ -323,10 +325,13 @@ app.post('/monitoring', async (req, res) => {
     await assertPinned(req, managementAddress, 'auto', portsOf(settings));
 
     // Slow path: targeted parallel LCOS-SX walks (only the subtrees we use),
-    // TTL-cached per host with a quality gate against partial-failure data.
+    // TTL-cached per host with a quality gate against partial-failure data. A
+    // forced refresh ("Check now") bypasses the cache — otherwise an explicit
+    // re-poll could be answered from a snapshot up to inventoryTtlMs old and
+    // hide changes made seconds ago (e.g. a CLI-written DNS entry).
     const inventory = await getSxInventory(host, creds, opts, {
       log: (level, message, context) => logger.warn(message, { deviceId, context }),
-    });
+    }, body.forceUpdateCheck === true);
     const snapshot = inventory.snapshot;
 
     if (!snapshot) {

@@ -1,5 +1,6 @@
 import type { TopologyNode as TopoNode } from '../../api/client';
 import { SideHandles } from './DeviceNode';
+import { TrafficBadge } from './TrafficBadge';
 
 /**
  * Segment node for the LOGICAL view — one merged logical network (VLAN/subnet
@@ -13,7 +14,7 @@ export function segmentHue(key: string): number {
   return h;
 }
 
-export function SegmentNode({ data }: { data: TopoNode & { kind: 'segment' } }) {
+export function SegmentNode({ data }: { data: (TopoNode & { kind: 'segment' }) & { trafficBytes?: number } }) {
   const hue = segmentHue(data.id);
   return (
     <div className="flex flex-col items-center gap-1">
@@ -22,7 +23,13 @@ export function SegmentNode({ data }: { data: TopoNode & { kind: 'segment' } }) 
         className="flex w-48 flex-col items-start gap-0.5 rounded-lg border-2 bg-card px-2.5 py-2 shadow-sm"
         style={{ borderColor: `hsl(${hue}, 65%, 55%)` }}
       >
-        <span className="text-[9px] font-semibold uppercase tracking-wide text-faint">Logical network</span>
+        {/* Traffic overlay badge rides the header line (no added card height). */}
+        <div className="flex w-full items-center justify-between gap-1">
+          <span className="text-[9px] font-semibold uppercase tracking-wide text-faint">Logical network</span>
+          {typeof data.trafficBytes === 'number' && data.trafficBytes > 0 && (
+            <TrafficBadge bytes={data.trafficBytes} />
+          )}
+        </div>
         <span className="truncate text-xs font-semibold text-foreground" title={data.label}>
           {data.vlanId !== null ? `VLAN ${data.vlanId}` : data.label}
         </span>

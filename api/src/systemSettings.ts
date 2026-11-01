@@ -94,6 +94,71 @@ export const SETTING_DESCRIPTORS: SettingDescriptor[] = [
       'Display name for this UNM instance. Shown in the webapp window title (browser tab) and on the login page — useful when several instances are open side by side.',
   },
 
+  // Scheduled auto-backup (leader-gated worker; see api/src/workers/autoBackup.ts).
+  {
+    key: 'autoBackupEnabled',
+    label: 'Auto-backup enabled',
+    type: 'boolean',
+    category: 'General',
+    default: false,
+    help:
+      'When on, the instance creates a backup automatically at the configured interval (leader-gated worker). The archive is named auto-backup-<preset>-<date> and appears in the Backups list like any manual one. Off by default — enable it from Settings or the first-run wizard.',
+  },
+  {
+    key: 'autoBackupIntervalMinutes',
+    label: 'Auto-backup interval',
+    type: 'integer',
+    category: 'General',
+    unit: 'min',
+    min: 15,
+    max: 7 * 24 * 60,
+    default: 24 * 60,
+    help:
+      'How often the auto-backup worker creates a new archive (minimum 15 minutes, maximum one week). A backup is due when no auto-backup-<preset>-* row exists from within this window — so it self-heals after downtime or manual deletes.',
+  },
+  {
+    key: 'autoBackupPreset',
+    label: 'Auto-backup preset',
+    type: 'string',
+    category: 'General',
+    default: 'config',
+    pattern: '^(config|planned|all)$',
+    help:
+      'Which sections the scheduled backup archives. config = identity+settings+devices+automations, planned = documented networks/hosts + plans, all = everything including live inventory.',
+  },
+  {
+    key: 'autoBackupDestination',
+    label: 'Auto-backup destination',
+    type: 'string',
+    category: 'General',
+    default: 'local',
+    pattern: '^(local|repo)$',
+    help:
+      'Where scheduled backups are stored: the local docker volume (unm-backups) or a file-repo plugin instance (see autoBackupProviderId).',
+  },
+  {
+    key: 'autoBackupProviderId',
+    label: 'Auto-backup file-repo instance',
+    type: 'string',
+    category: 'General',
+    default: '',
+    maxLength: 128,
+    help:
+      'Full plugin id of the file-repo instance that receives scheduled backups — only used when autoBackupDestination is "repo". Empty = local volume.',
+  },
+
+  // Actions & Schedules (automation engine; see workers/automations.ts). Master
+  // switch for the whole feature — off = no trigger evaluation at all.
+  {
+    key: 'automationsEnabled',
+    label: 'Actions & Schedules enabled',
+    type: 'boolean',
+    category: 'General',
+    default: true,
+    help:
+      'Master switch for the automation engine (the Actions & Schedules page). When off, no triggers are evaluated and no rules fire — existing rules keep their state and resume when re-enabled.',
+  },
+
   // Telemetry / worker cadence (previously the only tunable knobs, on the Workers page).
   {
     key: 'telemetryPollIntervalMs',
@@ -336,6 +401,19 @@ export const SETTING_DESCRIPTORS: SettingDescriptor[] = [
       'How long BEFORE a session expires the web UI starts warning the user (amber banner with an "Extend" button). Set to 0 to disable the warning — the session then ends silently at its expiry. The countdown chip in the top bar is always shown.',
   },
   {
+    key: 'apiRateLimitPerMinute',
+    label: 'API rate limit (per client)',
+    type: 'integer',
+    category: 'Security',
+    unit: 'req/min',
+    min: 1,
+    max: 10_000,
+    default: 300,
+    envVar: 'UNM_API_RATE_LIMIT_PER_MINUTE',
+    help:
+      'How many /v1 API requests one client (IP address) may make per rolling minute before the API answers 429 Too Many Requests. The webapp polls most pages every ~30 s, so several users behind one NAT share this budget — raise it if legitimate use trips the limit; lower it to be stricter against abuse. Login attempts have their own fixed, tighter limiter and are NOT affected by this setting. Takes effect immediately (5 s cache); no restart.',
+  },
+  {
     key: 'consoleTicketTtlMs',
     label: 'Console ticket lifetime',
     type: 'integer',
@@ -415,18 +493,45 @@ export const SETTING_DESCRIPTORS: SettingDescriptor[] = [
       'How often the API polls configured plugin endpoints for discovery (the mDNS/DNS-SD fallback). A new or restarted plugin appears within one interval.',
   },
 
-  // Stack self-update feed (Updates page "UNM itself" card). Empty = disabled —
-  // the card then shows current versions without a latest-version comparison.
+  // Stack self-update feed (Updates page "UNM itself" card + row). Defaults to
+  // the official public GitHub releases endpoint so a fresh install checks for
+  // UNM updates out of the box; set empty to disable, or point at your own
+  // manifest. Accepts a bare manifest ({latestVersion, notesUrl}), a GitHub
+  // /releases array, or a single GitHub release object (/releases/latest).
   {
     key: 'updateFeedUrl',
     label: 'Update feed URL',
     type: 'string',
     category: 'Updates',
-    default: '',
+    default: 'https://api.github.com/repos/MichaelKirgus/UnifiedNetworkManager/releases/latest',
     envVar: 'UNM_UPDATE_FEED_URL',
     maxLength: 2048,
     help:
-      'Optional HTTPS URL of a JSON release manifest for UNM itself (e.g. a GitHub releases asset). Expected shape: {"latestVersion":"1.2.3","notesUrl":"https://…"}. When set, the Updates page compares it against the running API version and shows an "update available" state; when empty, only current versions are shown.',
+      'HTTPS URL of a JSON release manifest for UNM itself. Defaults to the official public GitHub releases endpoint (…/releases/latest) so new installs check for updates automatically. Accepts a bare manifest {"latestVersion":"1.2.3","notesUrl":"https://…"}, a GitHub /releases array, or a single GitHub release object. Set empty to disable — then only current versions are shown and no update notification is raised.',
+  },
+  {
+    key: 'updateFeedCheckIntervalMs',
+    label: 'Update check interval',
+    type: 'integer',
+    category: 'Updates',
+    unit: 'ms',
+    min: 60_000,
+    max: 86_400_000,
+    default: 900_000,
+    envVar: 'UNM_UPDATE_FEED_CHECK_INTERVAL_MS',
+    help:
+      'How often the API actively re-checks the update feed and raises/clears the "UnifiedNetworkManager update available" notification. The Updates page itself refreshes on its own 30 s cadence; this only controls how promptly the admin is NOTIFIED (bell + badge) when a new release appears. Takes effect on the next beat; no restart.',
+  },
+  {
+    key: 'updateFeedWebFetchProviderId',
+    label: 'Update feed web-fetch instance',
+    type: 'string',
+    category: 'Updates',
+    default: '',
+    envVar: 'UNM_UPDATE_FEED_WEBFETCH_PROVIDER_ID',
+    maxLength: 128,
+    help:
+      'The web-fetch plugin instance (capability `webFetch`) that downloads the update feed — the API itself never opens outbound internet connections. Empty = auto-resolve: the built-in Web Fetch plugin if online, otherwise any registered online web-fetch provider. Set a specific plugin id to pin the check to one instance (e.g. an egress proxy in another network segment).',
   },
 
   // Central file repository — which file-repo plugin stores NEW uploads by default.
@@ -534,7 +639,9 @@ export const SETTING_DESCRIPTORS: SettingDescriptor[] = [
     category: 'Certificate Authority',
     default: '1.2',
     envVar: 'UNM_CA_TLS_MIN_VERSION',
-    pattern: '^(1\.2|1\.3)$',
+    // Double-escape: the string literal must contain a backslash so that
+    // `new RegExp(pattern)` sees `\.` (literal dot) rather than `.` (any char).
+    pattern: '^(1\\.2|1\\.3)$',
     onChange: () => require('./ca/stepCaConfig').writeStepCaConfig(),
     help:
       'Minimum TLS version the CA\'s own listener negotiates (and the floor UNM documents for plugin listeners). 1.2 is the default; 1.3 requires all clients to support it.',
@@ -704,6 +811,33 @@ export const SETTING_DESCRIPTORS: SettingDescriptor[] = [
     maxLength: 128,
     help:
       'Internal pointer to the currently active GeoIP file in the central repository — written by the geoip worker after each successful refresh. Do not edit manually; clear it to force a re-download on the next cycle.',
+  },
+
+  // CVE vulnerability tracking (Security page) — the cve worker queries an OSINT
+  // provider (OSV.dev today, commercial providers later via the CveProvider
+  // interface) for every distinct package installed in the fleet and matches
+  // the advisories against each device's versions. Egress goes through the same
+  // web-fetch plugin as GeoIP (webFetchProxyUrl/TimeoutMs/MaxBytes apply).
+  {
+    key: 'cveEnabled',
+    label: 'CVE vulnerability tracking',
+    type: 'boolean',
+    category: 'CVE Tracking',
+    default: true,
+    help:
+      'Master switch for the CVE worker. When enabled it periodically fetches advisories (OSV.dev) for every package installed on your devices and matches them against the installed versions — results appear on the Security page. Disable to stop fetching; existing findings stay in place.',
+  },
+  {
+    key: 'cveFetchIntervalHours',
+    label: 'Advisory refresh interval',
+    type: 'integer',
+    category: 'CVE Tracking',
+    unit: 'h',
+    min: 1,
+    max: 8_760,
+    default: 24,
+    help:
+      'How often the worker re-queries the advisory provider (default 24 h — OSV.dev publishes new advisories continuously). The manual "Refresh now" button on the Security page bypasses the interval. Device-side matching is recomputed on every beat regardless, so a package upgrade clears its findings without waiting for the next fetch.',
   },
 ];
 
@@ -948,7 +1082,7 @@ export async function updateSetting(key: string, rawValue: unknown): Promise<Set
     try {
       await d.onChange();
     } catch (err) {
-      console.error(`[settings] onChange hook for "${key}" failed:`, err);
+      console.error(`[settings] onChange hook for "${key}" failed: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
   return viewFor(d, await getEffectiveValues());
@@ -968,7 +1102,7 @@ export async function resetSetting(key: string): Promise<SettingView> {
     try {
       await d.onChange();
     } catch (err) {
-      console.error(`[settings] onChange hook for "${key}" failed:`, err);
+      console.error(`[settings] onChange hook for "${key}" failed: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
   return viewFor(d, await getEffectiveValues());

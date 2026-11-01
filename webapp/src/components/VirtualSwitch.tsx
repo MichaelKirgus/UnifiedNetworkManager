@@ -16,8 +16,8 @@ import { StateItem, SwitchLayout, SwitchPortGroup } from '../api/client';
  * (name, status, all fields incl. learned MACs) are available via tooltip.
  */
 
-/** LED color for a port status string (mirrors StatusBadge semantics). */
-function ledClass(status?: string | null): string {
+/** LED color for a port/bay status string (mirrors StatusBadge semantics). Shared with EnclosureTray. */
+export function ledClass(status?: string | null): string {
   switch ((status ?? '').toLowerCase()) {
     case 'up':
     case 'ok':
