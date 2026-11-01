@@ -181,7 +181,7 @@ export function internalRouter() {
 
   // GET /plugin/users/username/:username - look up a user by username (login step 1).
   router.get('/plugin/users/username/:username', pluginAuth, async (req: Request, res: Response) => {
-    const { username } = req.params;
+    const username = String(req.params.username ?? '');
     try {
       const row = await db.query.users.findFirst({
         where: (users, { eq }) => eq(users.username, username),
@@ -198,7 +198,7 @@ export function internalRouter() {
 
   // GET /plugin/users/:id - look up a user by id (login step 2 / TOTP verify).
   router.get('/plugin/users/:id', pluginAuth, async (req: Request, res: Response) => {
-    const { id } = req.params;
+    const id = String(req.params.id ?? '');
     try {
       const row = await db.query.users.findFirst({
         where: (users, { eq }) => eq(users.id, id),
@@ -253,7 +253,7 @@ export function internalRouter() {
 
   // PATCH /plugin/users/:id - update a user (password, totpSecret, roles, permissions).
   router.patch('/plugin/users/:id', pluginAuth, async (req: Request, res: Response) => {
-    const { id } = req.params;
+    const id = String(req.params.id ?? '');
     const { password, totpSecret, roles, permissions } = req.body ?? {};
     try {
       const existing = await db.query.users.findFirst({
@@ -293,7 +293,7 @@ export function internalRouter() {
 
   // DELETE /plugin/users/:id - remove a user.
   router.delete('/plugin/users/:id', pluginAuth, async (req: Request, res: Response) => {
-    const { id } = req.params;
+    const id = String(req.params.id ?? '');
     try {
       const existing = await db.query.users.findFirst({
         where: (users, { eq }) => eq(users.id, id),
@@ -343,15 +343,17 @@ export function internalRouter() {
 
   // POST /plugin/secrets - store a secret (ciphertext).
   router.post('/plugin/secrets', pluginAuth, async (req: Request, res: Response) => {
-    const { type, providerId, label, encryptedValue, userId, expiresAt, interactiveLoginAllowed, fileAccessAllowed } = req.body ?? {};
+    const { type, providerId, label, encryptedValue, userId, expiresAt, interactiveLoginAllowed, fileAccessAllowed, id } = req.body ?? {};
     if (!encryptedValue || !userId) {
       return res.status(400).json({ error: 'encryptedValue and userId are required' });
     }
     try {
-      const id = uuidv4();
+      // Optional explicit id (cross-instance secret import — preserves
+      // device/plan/session references to the id). Must be a well-formed UUID.
+      const finalId = typeof id === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id) ? id : uuidv4();
       const createdAt = new Date().toISOString();
       await db.insert(schema.secrets).values({
-        id,
+        id: finalId,
         type: type ?? 'apiKey',
         providerId: providerId ?? null,
         label: label ?? null,
@@ -362,7 +364,7 @@ export function internalRouter() {
         fileAccessAllowed: typeof fileAccessAllowed === 'boolean' ? fileAccessAllowed : false,
         createdAt,
       });
-      res.status(201).json({ id, createdAt });
+      res.status(201).json({ id: finalId, createdAt });
     } catch (error) {
       console.error('Error storing secret:', error);
       res.status(500).json({ error: 'Internal server error' });
@@ -371,7 +373,7 @@ export function internalRouter() {
 
   // GET /plugin/secrets/:id - fetch a secret (ciphertext).
   router.get('/plugin/secrets/:id', pluginAuth, async (req: Request, res: Response) => {
-    const { id } = req.params;
+    const id = String(req.params.id ?? '');
     try {
       const row = await db.query.secrets.findFirst({
         where: (secrets, { eq }) => eq(secrets.id, id),
@@ -404,7 +406,7 @@ export function internalRouter() {
   // type/providerId/userId are immutable. `expiresAt: null` clears the expiry
   // (absence leaves it); flag absence also leaves them untouched.
   router.patch('/plugin/secrets/:id', pluginAuth, async (req: Request, res: Response) => {
-    const { id } = req.params;
+    const id = String(req.params.id ?? '');
     const body = req.body ?? {};
     const { encryptedValue, label, interactiveLoginAllowed, fileAccessAllowed } = body;
     if (!encryptedValue || typeof encryptedValue !== 'string') {
@@ -435,7 +437,7 @@ export function internalRouter() {
 
   // DELETE /plugin/secrets/:id - remove a secret.
   router.delete('/plugin/secrets/:id', pluginAuth, async (req: Request, res: Response) => {
-    const { id } = req.params;
+    const id = String(req.params.id ?? '');
     try {
       await db.delete(schema.secrets).where(eq(schema.secrets.id, id));
       res.status(204).send();
@@ -453,7 +455,7 @@ export function internalRouter() {
 
   // GET /plugin/webauthn/user/:userId - all passkeys of one user (login step 2).
   router.get('/plugin/webauthn/user/:userId', pluginAuth, async (req: Request, res: Response) => {
-    const { userId } = req.params;
+    const userId = String(req.params.userId ?? '');
     try {
       const rows = await db.query.webauthnCredentials.findMany({
         where: eq(schema.webauthnCredentials.userId, userId),
@@ -477,7 +479,7 @@ export function internalRouter() {
   // successful assertion (replay protection; SimpleWebAuthn requires the stored
   // counter to be <= the reported one).
   router.patch('/plugin/webauthn/credentials/:id', pluginAuth, async (req: Request, res: Response) => {
-    const { id } = req.params;
+    const id = String(req.params.id ?? '');
     const { counter } = req.body ?? {};
     if (!Number.isInteger(counter) || counter < 0) {
       return res.status(400).json({ error: 'counter must be a non-negative integer' });
@@ -1112,7 +1114,7 @@ export function internalRouter() {
 
   /** GET /plugin/state/:pluginId?namespace=&deviceId= - list a plugin's state rows. */
   router.get('/plugin/state/:pluginId', pluginAuth, async (req: Request, res: Response) => {
-    const { pluginId } = req.params;
+    const pluginId = String(req.params.pluginId ?? '');
     try {
       if (!(await knownPlugin(pluginId))) return res.status(400).json({ error: `Unknown plugin id: ${pluginId}` });
       const namespace = typeof req.query.namespace === 'string' ? (req.query.namespace as string) : null;
@@ -1178,7 +1180,7 @@ export function internalRouter() {
    *  With `keys` (array) in the body, deletes exactly those keys within the
    *  namespace; otherwise deletes every row matching namespace/deviceId filters. */
   router.delete('/plugin/state/:pluginId', pluginAuth, async (req: Request, res: Response) => {
-    const { pluginId } = req.params;
+    const pluginId = String(req.params.pluginId ?? '');
     try {
       if (!(await knownPlugin(pluginId))) return res.status(400).json({ error: `Unknown plugin id: ${pluginId}` });
       const namespace = typeof req.query.namespace === 'string' ? (req.query.namespace as string) : null;

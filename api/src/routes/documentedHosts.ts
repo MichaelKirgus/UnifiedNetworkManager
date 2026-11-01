@@ -600,7 +600,7 @@ router.post('/documented-hosts', requireAuth, requirePermission('documented-host
 // of the provided fields; `ips` replaces the full address list when present).
 router.patch('/documented-hosts/:id', requireAuth, requirePermission('documented-hosts:write'), async (req: Request, res: Response) => {
   try {
-    const existing = await loadOneHost(req.params.id);
+    const existing = await loadOneHost(String(req.params.id ?? ''));
     if (!existing) {
       res.status(404).json({ error: 'Documented host not found' });
       return;
@@ -665,7 +665,7 @@ router.patch('/documented-hosts/:id', requireAuth, requirePermission('documented
 // DELETE /documented-hosts/:id — remove a documented host + its addresses.
 router.delete('/documented-hosts/:id', requireAuth, requirePermission('documented-hosts:write'), async (req: Request, res: Response) => {
   try {
-    const existing = await loadOneHost(req.params.id);
+    const existing = await loadOneHost(String(req.params.id ?? ''));
     if (!existing) {
       res.status(404).json({ error: 'Documented host not found' });
       return;

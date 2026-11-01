@@ -20,10 +20,14 @@ import {
   buildDetachedUpgradeScript,
   buildUpgradeStatusScript,
   detectPackageManager,
+  listHeldPackages,
   listUpgradablePackages,
   parseDetachedUpgradeStatus,
+  runForceFullUpgrade,
   runPackageUpgrade,
   runPackageUpgradeList,
+  holdPackages,
+  unholdPackages,
 } from '@unm/plugin-sdk';
 import type { DetachedUpgradeStatus } from '@unm/plugin-sdk';
 import type { ActionDescriptor } from './types';
@@ -88,7 +92,7 @@ export const PACKAGES_ACTIONS: ActionDescriptor[] = [
     id: 'packages.update',
     label: 'Update OS packages',
     description:
-      'Upgrades one package (input `package`), an explicit list (`packages`) or ALL upgradable packages when both are omitted. Runs the host package manager non-interactively, then verifies by re-querying the upgradable list. DANGEROUS — a full upgrade can restart services; use per-package updates for surgical changes.',
+      'Upgrades one package (input `package`), an explicit list (`packages`) or ALL upgradable packages when both are omitted. Runs the host package manager non-interactively, then verifies by re-querying the upgradable list. DANGEROUS — a full upgrade can restart services; use per-package updates for surgical changes. Set `force: true` to ALSO install held / kept-back packages (apt: dist-upgrade with --allow-change-held-packages); the hold flag stays set afterwards.',
     module: 'Packages',
     riskLevel: 'dangerous',
     deviceCount: 1,
@@ -97,6 +101,7 @@ export const PACKAGES_ACTIONS: ActionDescriptor[] = [
     inputSchema: {
       package: { type: 'string', description: 'Package name to upgrade (e.g. "curl"). Omit/empty = upgrade ALL upgradable packages.' },
       packages: { type: 'array', items: { type: 'string' }, description: 'Explicit list of package names to upgrade in ONE run (single lock acquisition). Takes precedence over `package`.' },
+      force: { type: 'boolean', default: false, description: 'Also install held / kept-back packages. Ignored when a specific `package`/`packages` list is given — those must be unheld first via packages.unhold.' },
     },
     execute: async (ctx, input) => {
       const pkgRaw = typeof input['package'] === 'string' ? (input['package'] as string).trim() : '';
@@ -112,7 +117,18 @@ export const PACKAGES_ACTIONS: ActionDescriptor[] = [
         if (!isSafePackageName(p)) return failResult(`Invalid package name: ${shq(p)}`);
       }
 
-      const res = pkgs.length > 0 ? await runPackageUpgradeList(ctx.backend, pkgs) : await runPackageUpgrade(ctx.backend, pkg);
+      // Force mode only makes sense for the FULL upgrade — a held package in an
+      // explicit list is a caller bug (the webapp excludes them), so refuse it.
+      const force = input['force'] === true;
+      if (force && (pkg || pkgs.length > 0)) {
+        return failResult('`force` only applies to the full upgrade — unheld specific packages first via packages.unhold.');
+      }
+
+      const res = force
+        ? await runForceFullUpgrade(ctx.backend)
+        : pkgs.length > 0
+          ? await runPackageUpgradeList(ctx.backend, pkgs)
+          : await runPackageUpgrade(ctx.backend, pkg);
       if (!res.ok) {
         return failResult(
           `Package upgrade failed (${res.pm ?? 'unknown manager'}): ${(res.stderr || res.stdout).slice(-500) || 'no output'}`
@@ -154,10 +170,89 @@ export const PACKAGES_ACTIONS: ActionDescriptor[] = [
           package: pkg ?? null,
           ...(pkgs.length > 0 ? { packages: pkgs } : {}),
           upgradedAll: pkg === undefined && pkgs.length === 0,
+          ...(force ? { forced: true, note: 'Held/kept-back packages were installed; their hold flags remain set.' } : {}),
           ...(pkg === undefined && pkgs.length === 0 && skippedCount > 0 ? { skippedRemaining } : {}),
         },
         verified // top-level flag — the plan executor marks the plan 'unverified' without it
       );
+    },
+  },
+  {
+    id: 'packages.hold',
+    label: 'Hold package(s) against updates',
+    description:
+      'Marks the given package(s) as HELD so bulk upgrades skip them on purpose (apt: `apt-mark hold`, dnf: version lock). The package stays listed as upgradable with a "held" badge until released via packages.unhold. Managers without a hold concept report not-supported.',
+    module: 'Packages',
+    riskLevel: 'write',
+    deviceCount: 1,
+    timeoutMs: 60_000,
+    inputSchema: {
+      package: { type: 'string', description: 'Package name to hold (e.g. "zabbix-agent2").' },
+      packages: { type: 'array', items: { type: 'string' }, description: 'Explicit list of package names to hold.' },
+    },
+    execute: async (ctx, input) => {
+      const pkgRaw = typeof input['package'] === 'string' ? (input['package'] as string).trim() : '';
+      const pkgsRaw = Array.isArray(input['packages']) ? input['packages'] : [];
+      const pkgs = [...(pkgRaw !== '' ? [pkgRaw] : []), ...pkgsRaw.filter((p): p is string => typeof p === 'string' && p.trim() !== '')].map((p) => p.trim());
+      if (pkgs.length === 0) return failResult('No package name given.');
+      for (const p of pkgs) {
+        if (!isSafePackageName(p)) return failResult(`Invalid package name: ${shq(p)}`);
+      }
+
+      const res = await holdPackages(ctx.backend, pkgs);
+      if (!res.ok) return failResult(res.error ?? 'Hold failed');
+
+      // Verify: every requested package must now be in the manager's held set.
+      let verified = false;
+      try {
+        const st = await listHeldPackages(ctx.backend);
+        if (st.supported) {
+          const heldSet = new Set(st.held.map((h) => h.split(' ')[0])); // dnf lists "name.arch"
+          verified = pkgs.every((p) => heldSet.has(p));
+        } else {
+          return okResult({ pm: res.pm, held: pkgs, note: 'Manager has no hold concept — nothing was changed.' }, false);
+        }
+      } catch { /* verification query failed */ }
+      return okResult({ pm: res.pm, held: pkgs }, verified);
+    },
+  },
+  {
+    id: 'packages.unhold',
+    label: 'Release package(s) from hold',
+    description:
+      'Releases previously held packages so bulk upgrades install them again (apt: `apt-mark unhold`, dnf: version lock remove). Idempotent — releasing a package that is not held succeeds. Managers without a hold concept report not-supported.',
+    module: 'Packages',
+    riskLevel: 'write',
+    deviceCount: 1,
+    timeoutMs: 60_000,
+    inputSchema: {
+      package: { type: 'string', description: 'Package name to release (e.g. "zabbix-agent2").' },
+      packages: { type: 'array', items: { type: 'string' }, description: 'Explicit list of package names to release.' },
+    },
+    execute: async (ctx, input) => {
+      const pkgRaw = typeof input['package'] === 'string' ? (input['package'] as string).trim() : '';
+      const pkgsRaw = Array.isArray(input['packages']) ? input['packages'] : [];
+      const pkgs = [...(pkgRaw !== '' ? [pkgRaw] : []), ...pkgsRaw.filter((p): p is string => typeof p === 'string' && p.trim() !== '')].map((p) => p.trim());
+      if (pkgs.length === 0) return failResult('No package name given.');
+      for (const p of pkgs) {
+        if (!isSafePackageName(p)) return failResult(`Invalid package name: ${shq(p)}`);
+      }
+
+      const res = await unholdPackages(ctx.backend, pkgs);
+      if (!res.ok) return failResult(res.error ?? 'Unhold failed');
+
+      // Verify: none of the requested packages may remain in the held set.
+      let verified = false;
+      try {
+        const st = await listHeldPackages(ctx.backend);
+        if (st.supported) {
+          const heldSet = new Set(st.held.map((h) => h.split(' ')[0])); // dnf lists "name.arch"
+          verified = !pkgs.some((p) => heldSet.has(p));
+        } else {
+          return okResult({ pm: res.pm, released: pkgs, note: 'Manager has no hold concept — nothing was changed.' }, false);
+        }
+      } catch { /* verification query failed */ }
+      return okResult({ pm: res.pm, released: pkgs }, verified);
     },
   },
   {

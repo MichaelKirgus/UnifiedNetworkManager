@@ -5,6 +5,7 @@ import * as schema from '../db/schema';
 import { requireAuth } from '../auth/middleware';
 import { allowedDeviceIds } from '../deviceAccess';
 import { countOpenForUser } from '../notifications';
+import { getStackUpdateInfo } from '../stackUpdates';
 
 const router = Router();
 
@@ -17,7 +18,7 @@ const router = Router();
  */
 interface CountSpec {
   /** Response key + the permission required to see it. */
-  key: 'notifications' | 'configJobs' | 'plans' | 'certificates' | 'updates' | 'securityChecks';
+  key: 'notifications' | 'plans' | 'certificates' | 'updates' | 'securityChecks' | 'cveVulnerabilities';
   permission: string;
   compute: (req: Request, userId: string) => Promise<number>;
 }
@@ -28,26 +29,6 @@ const COUNTS: CountSpec[] = [
     key: 'notifications',
     permission: 'notifications:read',
     compute: (_req, userId) => countOpenForUser(userId),
-  },
-  {
-    // Config jobs still in flight or waiting for a worker — scoped to the
-    // caller's devices (device-level access control).
-    key: 'configJobs',
-    permission: 'config-jobs:read',
-    compute: async (req) => {
-      const allowed = await allowedDeviceIds(req);
-      if (allowed !== null && allowed.size === 0) return 0;
-      const [row] = await db
-        .select({ n: sql<number>`count(*)::int` })
-        .from(schema.configJobs)
-        .where(
-          and(
-            inArray(schema.configJobs.status, ['queued', 'running']),
-            allowed !== null ? inArray(schema.configJobs.deviceId, [...allowed]) : undefined
-          )
-        );
-      return row?.n ?? 0;
-    },
   },
   {
     // Certificate endpoints that are NOT healthy right now: expired leaf or
@@ -120,17 +101,23 @@ const COUNTS: CountSpec[] = [
   },
   {
     // Available updates across the caller's devices. Only rows with available=
-    // true are ever persisted in device_updates, so a plain count is the badge.
+    // true are ever persisted in device_updates, so a plain count is the badge —
+    // PLUS one when UNM itself has an update available (the synthetic "UNM
+    // itself" row on the Updates page). The feed check is short-cached, so this
+    // stays cheap.
     key: 'updates',
     permission: 'updates:read',
     compute: async (req) => {
       const allowed = await allowedDeviceIds(req);
       if (allowed !== null && allowed.size === 0) return 0;
-      const [row] = await db
-        .select({ n: sql<number>`count(*)::int` })
-        .from(schema.deviceUpdates)
-        .where(allowed !== null ? inArray(schema.deviceUpdates.deviceId, [...allowed]) : undefined);
-      return row?.n ?? 0;
+      const [countRows, stack] = await Promise.all([
+        db
+          .select({ n: sql<number>`count(*)::int` })
+          .from(schema.deviceUpdates)
+          .where(allowed !== null ? inArray(schema.deviceUpdates.deviceId, [...allowed]) : undefined),
+        getStackUpdateInfo(),
+      ]);
+      return (countRows[0]?.n ?? 0) + (stack.available ? 1 : 0);
     },
   },
   {
@@ -147,6 +134,27 @@ const COUNTS: CountSpec[] = [
         .select({ n: sql<number>`count(*)::int` })
         .from(schema.deviceSecurityChecks)
         .where(allowed !== null ? inArray(schema.deviceSecurityChecks.deviceId, [...allowed]) : undefined);
+      return row?.n ?? 0;
+    },
+  },
+  {
+    // CRITICAL CVE matches across the caller's devices (device_cves is a pure
+    // derived view recomputed by the cve worker). Only critical rows light up
+    // the badge — lower severities stay visible on the Security page itself.
+    key: 'cveVulnerabilities',
+    permission: 'security:read',
+    compute: async (req) => {
+      const allowed = await allowedDeviceIds(req);
+      if (allowed !== null && allowed.size === 0) return 0;
+      const [row] = await db
+        .select({ n: sql<number>`count(*)::int` })
+        .from(schema.deviceCves)
+        .where(
+          and(
+            eq(schema.deviceCves.severityRank, 'critical'),
+            allowed !== null ? inArray(schema.deviceCves.deviceId, [...allowed]) : undefined
+          )
+        );
       return row?.n ?? 0;
     },
   },

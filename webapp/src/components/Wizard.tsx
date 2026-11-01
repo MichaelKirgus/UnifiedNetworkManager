@@ -1,7 +1,8 @@
-import { ReactNode } from 'react';
+import { ReactNode, useEffect } from 'react';
 import clsx from 'clsx';
 import { Check, X } from 'lucide-react';
 import { Layout } from './Layout';
+import { useNavLock } from './NavLock';
 
 /**
  * Reusable multi-step wizard shell.
@@ -76,8 +77,18 @@ interface WizardLayoutProps {
   children: ReactNode;
 }
 
-/** Full-page wizard: app shell + step indicator + content column. */
+/** Full-page wizard: app shell + step indicator + content column.
+ *
+ *  While mounted it holds the nav lock — the sidebar dims and stops navigating
+ *  so a stray click can't abandon an in-progress task. The lock is released on
+ *  unmount (Cancel / Done / route change). */
 export function WizardLayout({ title, icon, steps, current, onExit, hideCancel, actions, children }: WizardLayoutProps) {
+  const { lock, unlock } = useNavLock();
+  useEffect(() => {
+    lock('Finish this wizard first');
+    return () => unlock();
+  }, [lock, unlock]);
+
   return (
     <Layout
       title={

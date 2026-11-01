@@ -20,7 +20,6 @@ export const db = drizzle(pool, { schema });
 export type User = typeof schema.users.$inferSelect;
 export type Device = typeof schema.devices.$inferSelect;
 export type Plugin = typeof schema.plugins.$inferSelect;
-export type ConfigJob = typeof schema.configJobs.$inferSelect;
 export type Telemetry = typeof schema.telemetry.$inferSelect;
 export type Secret = typeof schema.secrets.$inferSelect;
 
@@ -38,6 +37,11 @@ export async function initDb(): Promise<void> {
   await pool.query(
     `ALTER TABLE telemetry ADD COLUMN IF NOT EXISTS "metricDescriptors" TEXT`
   );
+
+  // Defensive migrations for status transparency: plugin-reported health
+  // reasons per snapshot + the derived worst-wins reasons on the device row.
+  await pool.query(`ALTER TABLE telemetry ADD COLUMN IF NOT EXISTS "healthReasons" TEXT`);
+  await pool.query(`ALTER TABLE devices ADD COLUMN IF NOT EXISTS "healthReasons" TEXT`);
 
   // Defensive migrations for plugin options: descriptor cache column + the
   // settings table. Same rationale as above — host-dev hot reload may run
@@ -209,6 +213,12 @@ export async function initDb(): Promise<void> {
   // Device support metadata — license/help/docs + supported-device matrix with
   // capability/intent gating conditions (see schema.plugins.deviceSupport).
   await pool.query(`ALTER TABLE plugins ADD COLUMN IF NOT EXISTS "deviceSupport" TEXT`);
+  // Short catalog description for the webapp's plugin picker (see
+  // schema.plugins.description) — advertised in /discover, NULL when undeclared.
+  await pool.query(`ALTER TABLE plugins ADD COLUMN IF NOT EXISTS "description" TEXT`);
+  // Ready-made automation rule drafts advertised in /discover (see
+  // schema.plugins.automationTemplates) — served by GET /automations/templates.
+  await pool.query(`ALTER TABLE plugins ADD COLUMN IF NOT EXISTS "automationTemplates" TEXT`);
   // mTLS state (Stage 1): discovery persists whether a plugin is serving TLS
   // with a CA-signed leaf; the API's pluginHttp factory picks https+client-cert.
   await pool.query(`ALTER TABLE plugins ADD COLUMN IF NOT EXISTS "tlsLive" BOOLEAN`);
@@ -594,6 +604,73 @@ export async function initDb(): Promise<void> {
     )`);
   await pool.query(`
     CREATE INDEX IF NOT EXISTS idx_routes_device ON routes ("deviceId")`);
+
+  // DNS entries inventory table (DNS page) — same lifecycle as tunnels/routes.
+  // One row per static DNS host entry on one device; `name` is lowercased at
+  // ingest so the page groups case-insensitively. PK = deviceId+pluginId+name+ip
+  // so a name with several addresses yields multiple rows, and delete-on-absent
+  // at ingest keys on name|ip pairs (a plugin's snapshot never wipes another).
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS device_dns_entries (
+      "deviceId" TEXT NOT NULL,
+      "pluginId" TEXT NOT NULL,
+      name TEXT NOT NULL,
+      ip TEXT NOT NULL,
+      "collectedAt" TEXT NOT NULL,
+      PRIMARY KEY ("deviceId", "pluginId", name, ip)
+    )`);
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS idx_device_dns_entries_device ON device_dns_entries ("deviceId")`);
+  // Optional free-text note per entry (e.g. RouterOS /ip/dns/static `comment`).
+  // NULL = the vendor has no native field for it. Idempotent — pre-existing rows keep NULL.
+  await pool.query(`ALTER TABLE device_dns_entries ADD COLUMN IF NOT EXISTS description TEXT`);
+  // Optional domain suffix per entry (OPNsense unbound splits records into bare
+  // hostname + domain). NULL = the vendor has no separate field (name is full).
+  await pool.query(`ALTER TABLE device_dns_entries ADD COLUMN IF NOT EXISTS "domain" TEXT`);
+
+  // DHCP networks inventory table (DHCP page) — same lifecycle as tunnels/routes/dns.
+  // One row per configured DHCP server network/pool range, normalized by the plugin.
+  // PK = deviceId+pluginId+name+rangeStart so a scope with several ranges yields rows;
+  // delete-on-absent at ingest keys on name|rangeStart pairs (a snapshot never wipes another).
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS device_dhcp_networks (
+      "deviceId" TEXT NOT NULL,
+      "pluginId" TEXT NOT NULL,
+      name TEXT NOT NULL,
+      iface TEXT,
+      "rangeStart" TEXT NOT NULL,
+      "rangeEnd" TEXT NOT NULL,
+      cidr TEXT,
+      "leaseTimeSeconds" INTEGER,
+      gateway TEXT,
+      "dnsServers" TEXT,
+      "refId" TEXT,
+      "collectedAt" TEXT NOT NULL,
+      PRIMARY KEY ("deviceId", "pluginId", name, "rangeStart")
+    )`);
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS idx_device_dhcp_networks_device ON device_dhcp_networks ("deviceId")`);
+
+  // DHCP reservations inventory table (DHCP page) — same lifecycle as the other tables.
+  // One row per static MAC→IP reservation, normalized by the plugin. PK = deviceId+pluginId+mac;
+  // delete-on-absent at ingest keys on mac (a snapshot never wipes another).
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS device_dhcp_reservations (
+      "deviceId" TEXT NOT NULL,
+      "pluginId" TEXT NOT NULL,
+      mac TEXT NOT NULL,
+      ip TEXT,
+      hostname TEXT,
+      iface TEXT,
+      "refId" TEXT,
+      status TEXT,
+      "collectedAt" TEXT NOT NULL,
+      PRIMARY KEY ("deviceId", "pluginId", mac)
+    )`);
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS idx_device_dhcp_reservations_device ON device_dhcp_reservations ("deviceId")`);
+  // iface was added after the table first shipped in dev — idempotent upgrade for existing DBs.
+  await pool.query(`ALTER TABLE device_dhcp_reservations ADD COLUMN IF NOT EXISTS iface TEXT`);
 
   // Firewall rules inventory table (Firewall page) — same lifecycle as tunnels/routes.
   // One row per firewall rule (filter + NAT kinds) on one device, normalized by the
@@ -1041,6 +1118,34 @@ export async function initDb(): Promise<void> {
   await pool.query(`
     CREATE INDEX IF NOT EXISTS idx_vms_device ON vms ("deviceId")`);
 
+  // GPUs inventory table (DeviceDetail GPU cards) — one row per card, upserted
+  // per poll from the plugin's `gpus` metric. Same lifecycle as containers/vms
+  // (upsert + delete-on-absent + 24h sweep). PK includes the PCI slot so a
+  // multi-GPU host keeps one row per card; live counters (util/temp/power/
+  // clocks) are refreshed in place on every inventory poll.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS gpus (
+      "deviceId" TEXT NOT NULL,
+      "pluginId" TEXT NOT NULL,
+      name TEXT NOT NULL,
+      vendor TEXT NOT NULL DEFAULT 'UNKNOWN',
+      slot TEXT NOT NULL,
+      driver TEXT,
+      "driverVersion" TEXT,
+      "vramBytes" DOUBLE PRECISION,
+      "utilPercent" INTEGER,
+      "memUtilPercent" INTEGER,
+      "tempCelsius" INTEGER,
+      "powerWatts" DOUBLE PRECISION,
+      "coreClockMhz" INTEGER,
+      "maxCoreClockMhz" INTEGER,
+      extra TEXT NOT NULL DEFAULT '{}',
+      "collectedAt" TEXT NOT NULL,
+      PRIMARY KEY ("deviceId", "pluginId", slot)
+    )`);
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS idx_gpus_device ON gpus ("deviceId")`);
+
   // Device updates inventory table (Updates page) — one row per available update,
   // upserted per poll from the plugin's `updates` metric (capability 'updates').
   // Same lifecycle as containers (upsert + delete-on-absent + 24h sweep). Only
@@ -1086,6 +1191,67 @@ export async function initDb(): Promise<void> {
     )`);
   await pool.query(`
     CREATE INDEX IF NOT EXISTS idx_device_security_checks_device ON device_security_checks ("deviceId")`);
+
+  // Installed-package inventory (CVE tracking) — one row per package, upserted
+  // per poll from the plugin's `installedPackages` metric. Same lifecycle as
+  // containers (upsert + delete-on-absent + 24h sweep). See schema.devicePackages.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS device_packages (
+      "deviceId" TEXT NOT NULL,
+      "pluginId" TEXT NOT NULL,
+      name TEXT NOT NULL,
+      version TEXT,
+      ecosystem TEXT NOT NULL DEFAULT 'unknown',
+      extra TEXT NOT NULL DEFAULT '{}',
+      "collectedAt" TEXT NOT NULL,
+      PRIMARY KEY ("deviceId", "pluginId", name)
+    )`);
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS idx_device_packages_device ON device_packages ("deviceId")`);
+
+  // CVE advisory knowledge base (Security page) — one row per (ecosystem,
+  // package, advisory). Worker-managed only: fetched from an OSINT provider and
+  // pruned for packages no longer in the fleet. NOT swept (global knowledge,
+  // not per-device inventory). See schema.cveAdvisories.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS cve_advisories (
+      ecosystem TEXT NOT NULL,
+      "packageName" TEXT NOT NULL,
+      id TEXT NOT NULL,
+      "severityScore" DOUBLE PRECISION,
+      "severityRank" TEXT NOT NULL DEFAULT 'unknown',
+      "affectedRanges" JSONB NOT NULL DEFAULT '[]'::jsonb,
+      summary TEXT,
+      url TEXT,
+      "publishedAt" TEXT,
+      provider TEXT NOT NULL DEFAULT 'osv',
+      "collectedAt" TEXT NOT NULL,
+      PRIMARY KEY (ecosystem, "packageName", id)
+    )`);
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS idx_cve_advisories_pkg ON cve_advisories (ecosystem, "packageName")`);
+
+  // Per-device CVE matches (Security page) — the join of device_packages with
+  // cve_advisories, recomputed wholesale by the CVE worker each cycle. Swept
+  // like other inventory so offline devices drop out of the views. See schema.deviceCves.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS device_cves (
+      "deviceId" TEXT NOT NULL,
+      "pluginId" TEXT NOT NULL,
+      ecosystem TEXT NOT NULL,
+      "packageName" TEXT NOT NULL,
+      "cveId" TEXT NOT NULL,
+      "installedVersion" TEXT,
+      "severityScore" DOUBLE PRECISION,
+      "severityRank" TEXT NOT NULL DEFAULT 'unknown',
+      summary TEXT,
+      url TEXT,
+      extra TEXT NOT NULL DEFAULT '{}',
+      "collectedAt" TEXT NOT NULL,
+      PRIMARY KEY ("deviceId", "pluginId", ecosystem, "packageName", "cveId")
+    )`);
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS idx_device_cves_device ON device_cves ("deviceId")`);
 
   // Generic per-plugin persistent state (see schema.pluginState). Plugins store
   // opaque JSON blobs here across polls/restarts via the internal /plugin/state/*
@@ -1570,6 +1736,89 @@ await pool.query(`ALTER TABLE flow_micro ADD COLUMN IF NOT EXISTS "agentCount" I
     )`);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_repo_file_uses_file ON repo_file_uses ("fileId")`);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_repo_file_uses_device ON repo_file_uses ("deviceId")`);
+
+  // Stored UNM backups (see src/backup.ts + routes/backups.ts). Metadata only —
+  // the archive bytes live on the api-local volume (source='local') or in a
+  // file-repo plugin named by providerId (content-addressed by sha256).
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS backups (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      scope TEXT NOT NULL DEFAULT 'all',
+      sections TEXT NOT NULL DEFAULT '[]',
+      "sizeBytes" BIGINT NOT NULL DEFAULT 0,
+      sha256 TEXT NOT NULL,
+      source TEXT NOT NULL DEFAULT 'local',
+      "providerId" TEXT,
+      "createdAt" TEXT NOT NULL
+    )`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_backups_source ON backups (source, "providerId")`);
+
+  // Replication targets — one-way sync peers of this instance (see
+  // routes/backups.ts /replication/* + workers/replication.ts).
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS replication_targets (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      "baseUrl" TEXT NOT NULL,
+      token TEXT NOT NULL,
+      direction TEXT NOT NULL DEFAULT 'push',
+      enabled BOOLEAN NOT NULL DEFAULT TRUE,
+      "intervalMinutes" INTEGER,
+      "excludeKeys" TEXT NOT NULL DEFAULT '[]',
+      "lastSyncAt" TEXT,
+      "lastSyncStatus" TEXT,
+      "lastError" TEXT,
+      "lastReport" TEXT NOT NULL DEFAULT '{}',
+      "createdAt" TEXT NOT NULL
+    )`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_replication_targets_enabled ON replication_targets (enabled)`);
+
+  // Actions & Schedules (automation engine) — see schema.automations /
+  // automationRuns / automationState. Trigger and action blocks are opaque JSON
+  // TEXT validated in automations/types.ts, so new block types need no migration.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS automations (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      description TEXT,
+      enabled BOOLEAN NOT NULL DEFAULT TRUE,
+      triggers TEXT NOT NULL DEFAULT '[]',
+      actions TEXT NOT NULL DEFAULT '[]',
+      "cooldownSec" INTEGER NOT NULL DEFAULT 0,
+      "lastFiredAt" TEXT,
+      "createdBy" TEXT,
+      "createdAt" TEXT NOT NULL,
+      "updatedAt" TEXT NOT NULL
+    )`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_automations_enabled ON automations (enabled)`);
+
+  // One row per rule firing — the audit trail behind the Runs view. Swept by
+  // the retention worker after automationRunRetentionDays.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS automation_runs (
+      id TEXT PRIMARY KEY,
+      "automationId" TEXT NOT NULL,
+      "firedAt" TEXT NOT NULL,
+      "triggerType" TEXT NOT NULL,
+      context TEXT NOT NULL DEFAULT '{}',
+      status TEXT NOT NULL DEFAULT 'succeeded',
+      error TEXT,
+      "planIds" TEXT NOT NULL DEFAULT '[]'
+    )`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_automation_runs_automation_id ON automation_runs ("automationId")`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_automation_runs_fired_at ON automation_runs ("firedAt")`);
+
+  // Per-trigger evaluation state (log watermarks, sustained-condition windows).
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS automation_state (
+      "automationId" TEXT NOT NULL,
+      "triggerId" TEXT NOT NULL,
+      "stateKey" TEXT NOT NULL,
+      value TEXT NOT NULL DEFAULT '{}',
+      "updatedAt" TEXT NOT NULL,
+      PRIMARY KEY ("automationId", "triggerId", "stateKey")
+    )`);
 
   const existingAdmin = await db.query.users.findFirst({
     where: (users, { eq }) => eq(users.username, 'admin'),

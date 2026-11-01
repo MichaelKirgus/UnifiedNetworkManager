@@ -684,7 +684,7 @@ router.post('/documented-networks', requireAuth, requirePermission('documented-n
 // `ntpServers` arrays are replaced wholesale when present).
 router.patch('/documented-networks/:id', requireAuth, requirePermission('documented-networks:write'), async (req: Request, res: Response) => {
   try {
-    const existing = await loadOneNetwork(req.params.id);
+    const existing = await loadOneNetwork(String(req.params.id ?? ''));
     if (!existing) {
       res.status(404).json({ error: 'Documented network not found' });
       return;
@@ -756,7 +756,7 @@ router.patch('/documented-networks/:id', requireAuth, requirePermission('documen
 // DELETE /documented-networks/:id — remove a documented network.
 router.delete('/documented-networks/:id', requireAuth, requirePermission('documented-networks:write'), async (req: Request, res: Response) => {
   try {
-    const existing = await loadOneNetwork(req.params.id);
+    const existing = await loadOneNetwork(String(req.params.id ?? ''));
     if (!existing) {
       res.status(404).json({ error: 'Documented network not found' });
       return;

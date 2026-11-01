@@ -270,6 +270,87 @@ export interface PmAdapter {
    *  meaningful distinction from a plain full `upgrade` (dnf/yum/pacman/apk's
    *  bulk update already resolves deps). */
   distUpgrade?(): string[] | null;
+  /** Shell command(s) that HOLD one package against upgrades. Optional — only
+   *  managers with an explicit hold concept implement it (apt `apt-mark hold`,
+   *  dnf `dnf version lock add`). Omitted → the plugin reports "not supported". */
+  holdPackage?(pkg: string): string[];
+  /** Shell command(s) that release a previously held package. Optional, same
+   *  availability as {@link holdPackage}. */
+  unholdPackage?(pkg: string): string[];
+  /** List the names of all currently held packages (one per line in stdout).
+   *  Optional, same availability as {@link holdPackage}. */
+  listHeld?(): string;
+  /** Shell command(s) that upgrade ALL upgradable packages INCLUDING held and
+   *  kept-back ones. Optional — apt: `dist-upgrade -y --allow-change-held-packages`
+   *  (upgrades in place, keeps the hold flag set afterwards). Omitted → no force
+   *  path for this manager. */
+  upgradeForceAll?(): string[];
+}
+
+/** Runs a single-line command and returns its trimmed stdout lines (no empty). */
+async function execLines(backend: UpdateExecBackend, cmd: string): Promise<string[]> {
+  const r = await backend.exec(cmd);
+  return r.stdout.split('\n').map((l) => l.trim()).filter(Boolean);
+}
+
+/** Holds the given packages on the host (one command per package — holds are a
+ *  rare admin action, round-trips don't matter). Returns the manager id or null. */
+export async function holdPackages(backend: UpdateExecBackend, pkgs: string[]): Promise<{ ok: boolean; pm: string | null; error?: string }> {
+  const adapter = await detectPackageManager(backend);
+  if (!adapter) return { ok: false, pm: null, error: 'No known package manager detected on this host' };
+  if (!adapter.holdPackage) return { ok: false, pm: adapter.id, error: `Package holding is not supported by ${adapter.id}` };
+  for (const p of pkgs) {
+    try {
+      const r = await backend.exec(['set -e', ...adapter.holdPackage(p)].join('\n'));
+      if (r.code !== 0) return { ok: false, pm: adapter.id, error: `Holding ${p} failed: ${(r.stderr || r.stdout).slice(-300)}` };
+    } catch (err) {
+      return { ok: false, pm: adapter.id, error: `Holding ${p} failed: ${(err as Error).message}` };
+    }
+  }
+  return { ok: true, pm: adapter.id };
+}
+
+/** Releases the given packages from a hold. Same contract as {@link holdPackages}. */
+export async function unholdPackages(backend: UpdateExecBackend, pkgs: string[]): Promise<{ ok: boolean; pm: string | null; error?: string }> {
+  const adapter = await detectPackageManager(backend);
+  if (!adapter) return { ok: false, pm: null, error: 'No known package manager detected on this host' };
+  if (!adapter.unholdPackage) return { ok: false, pm: adapter.id, error: `Releasing holds is not supported by ${adapter.id}` };
+  for (const p of pkgs) {
+    try {
+      const r = await backend.exec(['set -e', ...adapter.unholdPackage(p)].join('\n'));
+      if (r.code !== 0) return { ok: false, pm: adapter.id, error: `Releasing ${p} failed: ${(r.stderr || r.stdout).slice(-300)}` };
+    } catch (err) {
+      return { ok: false, pm: adapter.id, error: `Releasing ${p} failed: ${(err as Error).message}` };
+    }
+  }
+  return { ok: true, pm: adapter.id };
+}
+
+/** Lists the names of all currently held packages; [] when unsupported or none. */
+export async function listHeldPackages(backend: UpdateExecBackend): Promise<{ pm: string | null; supported: boolean; held: string[] }> {
+  const adapter = await detectPackageManager(backend);
+  if (!adapter) return { pm: null, supported: false, held: [] };
+  if (!adapter.listHeld) return { pm: adapter.id, supported: false, held: [] };
+  try {
+    return { pm: adapter.id, supported: true, held: await execLines(backend, adapter.listHeld()) };
+  } catch {
+    return { pm: adapter.id, supported: true, held: [] };
+  }
+}
+
+/** Upgrades ALL upgradable packages including held/kept-back ones. Returns the
+ *  same result shape as {@link runPackageUpgrade}. */
+export async function runForceFullUpgrade(backend: UpdateExecBackend, timeoutMs = DEFAULT_UPGRADE_TIMEOUT_MS): Promise<PackageUpgradeResult> {
+  const adapter = await detectPackageManager(backend);
+  if (!adapter) return { ok: false, stdout: '', stderr: 'No known package manager detected on this host', pm: null };
+  if (!adapter.upgradeForceAll) return { ok: false, stdout: '', stderr: `Forcing held packages is not supported by ${adapter.id}`, pm: adapter.id };
+  const script = ['set -e', ...adapter.upgradeForceAll()].join('\n');
+  try {
+    const r = await backend.exec(script, timeoutMs);
+    return { ok: r.code === 0, stdout: r.stdout, stderr: r.stderr ?? '', pm: adapter.id };
+  } catch (err) {
+    return { ok: false, stdout: '', stderr: (err as Error).message, pm: adapter.id };
+  }
 }
 
 /**
@@ -385,6 +466,17 @@ export const PACKAGE_MANAGER_ADAPTERS: PmAdapter[] = [
       'export DEBIAN_FRONTEND=noninteractive',
       'apt-get -o Dpkg::Lock::Timeout=300 dist-upgrade -y',
     ],
+    // apt-mark is the admin's hold mechanism — `upgrade` skips held packages on
+    // purpose, and an EXPLICIT list containing one hard-fails without this flag.
+    holdPackage: (pkg) => [`apt-mark hold ${pkg}`],
+    unholdPackage: (pkg) => [`apt-mark unhold ${pkg}`],
+    listHeld: () => 'apt-mark showhold 2>/dev/null || true',
+    // Force = dist-upgrade that also installs held packages. The hold flag stays
+    // SET afterwards — forcing upgrades the version once, it does not release the pin.
+    upgradeForceAll: () => [
+      'export DEBIAN_FRONTEND=noninteractive',
+      'apt-get -o Dpkg::Lock::Timeout=300 dist-upgrade -y --allow-change-held-packages',
+    ],
   },
   {
     id: 'dnf',
@@ -402,6 +494,12 @@ export const PACKAGE_MANAGER_ADAPTERS: PmAdapter[] = [
     },
     upgrade: (pkg) => [pkg ? `dnf -y upgrade ${pkg}` : 'dnf -y upgrade'],
     upgradeMany: (pkgs) => [`dnf -y upgrade ${pkgs.join(' ')}`],
+    // dnf's hold mechanism is version locking (`dnf version lock add`). Locked
+    // packages are skipped by `upgrade` just like apt holds. No force form — a
+    // locked package must be unlocked first (packages.unhold), then upgraded.
+    holdPackage: (pkg) => [`dnf -q version lock add ${pkg}`],
+    unholdPackage: (pkg) => [`dnf -q version lock remove ${pkg}`],
+    listHeld: () => 'dnf -q version lock list 2>/dev/null || true',
   },
   {
     id: 'yum',
@@ -471,6 +569,153 @@ export async function detectPackageManager(backend: UpdateExecBackend): Promise<
     if (await adapter.detect(backend)) return adapter;
   }
   return null;
+}
+
+// ---------------------------------------------------------------------------
+// Installed-package inventory (capability 'installedPackages' → CVE tracking)
+// ---------------------------------------------------------------------------
+
+/** One installed package as reported by a package manager. */
+export interface InstalledPackage {
+  name: string;
+  /** Exact installed version (dpkg epoch/revision, apk `-rN`, rpm `epoch:ver-rel`). */
+  version: string | null;
+}
+
+/** Result of an installed-package listing. */
+export interface InstalledPackagesResult {
+  /** The detected manager id ('apt' | 'dnf' | …); null when none was found. */
+  pm: string | null;
+  /** Ecosystem tag for the CVE worker — release-aware where it matters (apk →
+   *  `alpine:v3.19`, because OSV.dev's Alpine source is keyed per release). */
+  ecosystemTag: string | null;
+  packages: InstalledPackage[];
+}
+
+/** Splits "name-version" lines where the NAME may contain dashes but the VERSION
+ *  always starts with a digit (pacman `linux-firmware-20240207-1`, apk
+ *  `python3-pip-2.3.1-r0`). The boundary is the first `-` immediately followed by
+ *  a digit — name dashes are never followed by digits in these ecosystems. */
+function splitNameVersionLines(stdout: string): InstalledPackage[] {
+  const out: InstalledPackage[] = [];
+  for (const line of stdout.split('\n')) {
+    const m = line.trim().match(/^([^\s-][\w.+:-]*?)-(\d[\w.+:-]*)$/);
+    if (m) out.push({ name: m[1], version: m[2] });
+  }
+  return out;
+}
+
+/** Per-manager "list ALL installed packages with exact versions" commands.
+ *  Deliberately separate from listUpgradable — CVE matching needs the FULL set,
+ *  not just what has an update available. */
+const INSTALLED_LISTERS: Record<string, { cmd(): string; parse(stdout: string): InstalledPackage[] }> = {
+  // dpkg-query is the stable machine-readable form (apt's own listing output
+  // varies by locale/version). '|' can't appear in a package name.
+  apt: {
+    cmd: () => "dpkg-query -W -f='${Package}|${Version}\\n' 2>/dev/null || true",
+    parse(stdout) {
+      const out: InstalledPackage[] = [];
+      for (const line of stdout.split('\n')) {
+        const i = line.indexOf('|');
+        if (i <= 0) continue;
+        const name = line.slice(0, i).trim();
+        const version = line.slice(i + 1).trim();
+        if (name && version) out.push({ name, version });
+      }
+      return out;
+    },
+  },
+  dnf: {
+    // %{EPOCH:%{VERSION}}-%{RELEASE} → "1:2.34-5" when an epoch is set, else plain.
+    cmd: () => 'rpm -q --queryformat "%{NAME}\\t%{EPOCH:%{VERSION}}-%{RELEASE}\\n" 2>/dev/null || true',
+    parse(stdout) {
+      const out: InstalledPackage[] = [];
+      for (const line of stdout.split('\n')) {
+        const i = line.indexOf('\t');
+        if (i <= 0) continue;
+        const name = line.slice(0, i).trim();
+        const version = line.slice(i + 1).trim();
+        if (name && version) out.push({ name, version });
+      }
+      return out;
+    },
+  },
+  yum: { cmd: () => INSTALLED_LISTERS.dnf.cmd(), parse: (s) => INSTALLED_LISTERS.dnf.parse(s) },
+  pacman: {
+    // "name-version" — names may contain dashes, versions start with a digit.
+    cmd: () => 'pacman -Q 2>/dev/null || true',
+    parse(stdout) { return splitNameVersionLines(stdout); },
+  },
+  apk: {
+    // "name-version-rN" — same name/version boundary rule as pacman.
+    cmd: () => 'apk info -v 2>/dev/null || true',
+    parse(stdout) { return splitNameVersionLines(stdout); },
+  },
+};
+
+/** Reads the Alpine release line ("3.19") from /etc/alpine-release; null on failure. */
+export async function readAlpineRelease(backend: UpdateExecBackend): Promise<string | null> {
+  try {
+    const r = await backend.exec('cat /etc/alpine-release 2>/dev/null || true');
+    const m = (r.stdout ?? '').trim().match(/(\d+\.\d+)/);
+    return m ? m[1] : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Lists ALL installed packages with their exact versions over SSH. Uses the
+ * same manager detection as the Updates page, then runs that manager's full
+ * listing (dpkg-query / rpm -q / pacman -Q / apk info). Returns `pm: null` and
+ * no packages when nothing is recognized (e.g. NixOS) — callers must treat
+ * that as "no data" (omit the metric key), NOT as an authoritative empty list.
+ * Never throws; a failed exec yields pm + empty packages so the caller can log.
+ */
+export async function listInstalledPackages(backend: UpdateExecBackend): Promise<InstalledPackagesResult> {
+  const ids = await readOsReleaseIds(backend); // one shared round-trip (detection re-probes commands only)
+  if (ids.length > 0) {
+    for (const adapter of PACKAGE_MANAGER_ADAPTERS) {
+      if (adapter.distros.some((d) => ids.includes(d))) return listWithAdapter(backend, adapter, ids);
+    }
+  }
+  for (const adapter of PACKAGE_MANAGER_ADAPTERS) {
+    if (await adapter.detect(backend)) return listWithAdapter(backend, adapter, ids);
+  }
+  return { pm: null, ecosystemTag: null, packages: [] };
+}
+
+/** Runs one manager's full listing and derives the CVE-worker ecosystem tag. */
+async function listWithAdapter(
+  backend: UpdateExecBackend,
+  adapter: PmAdapter,
+  osIds: string[],
+): Promise<InstalledPackagesResult> {
+  // The tag is what the API maps onto OSV.dev sources — it must be the DISTRO,
+  // not the manager (apt serves both Debian and Ubuntu; OSV keys them together
+  // but the tag stays honest). apk needs a RELEASE-SPECIFIC tag (alpine:v3.19):
+  // OSV's Alpine source is keyed per release and plain "Alpine" matches nothing
+  // for versioned queries (live-verified 2026-10).
+  let ecosystemTag: string;
+  if (adapter.id === 'apk') {
+    const rel = await readAlpineRelease(backend);
+    ecosystemTag = rel ? `alpine:v${rel}` : 'alpine';
+  } else {
+    ecosystemTag = osIds[0] ?? adapter.id; // most-specific ID first, manager id as last resort
+  }
+
+  try {
+    const r = await backend.exec(INSTALLED_LISTERS[adapter.id].cmd());
+    if (r.code !== 0) return { pm: adapter.id, ecosystemTag, packages: [] };
+    // One row per name — a package can't be installed twice under one manager.
+    const byName = new Map<string, InstalledPackage>();
+    for (const p of INSTALLED_LISTERS[adapter.id].parse(r.stdout)) {
+      if (!byName.has(p.name)) byName.set(p.name, p);
+    }
+    return { pm: adapter.id, ecosystemTag, packages: [...byName.values()] };
+  } catch {
+    return { pm: adapter.id, ecosystemTag, packages: [] };
+  }
 }
 
 export interface SshUpdatesOptions {

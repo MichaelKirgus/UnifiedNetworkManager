@@ -24,12 +24,17 @@ RUN cd packages/plugin-sdk && npm install --legacy-peer-deps && npm run build
 COPY mcp/package*.json ./mcp/
 RUN cd mcp && npm install --legacy-peer-deps
 
+
+
 COPY mcp/tsconfig.json ./mcp/
 COPY mcp/src ./mcp/src
 # The spec is resolved from here at runtime (UNM_OPENAPI_SPEC below).
 COPY openapi/unified-network-manager.openapi.yaml /app/openapi/
 
-RUN cd mcp && npm run build
+RUN cd mcp && npm run build && npm prune --omit=dev --legacy-peer-deps
+# Prune devDependencies (typescript, ts-node-dev, jest, @types/*): the build above
+# already ran and nothing at runtime requires them — keeps images lean and free of
+# dev-only vulnerable packages.
 
 WORKDIR /app/mcp
 
@@ -37,5 +42,20 @@ ENV MCP_PORT=3901 \
     UNM_OPENAPI_SPEC=/app/openapi/unified-network-manager.openapi.yaml
 
 EXPOSE 3901
+
+# Unprivileged runtime user (uid/gid 1001) — the entrypoint wrapper drops to it.
+# NOTE: /data/ca is mounted :ro by compose — do NOT pre-create or chown it here.
+RUN addgroup -g 1001 unm && adduser -u 1001 -G unm -D app \
+    && mkdir -p /data/tls && chown -R 1001:1001 /data/tls
+
+# Privilege-drop helper — joins UNM_DOCKER_GID, drops to `app`, re-execs the app.
+COPY scripts/unm-privdrop.js /usr/local/lib/unm-privdrop.js
+
+# UNM entrypoint wrapper — macvlan gateway (UNM_DEFAULT_GATEWAY), data-dir chown
+# (UNM_CHOWN_PATHS, skip via UNM_SKIP_CHOWN=1) and privilege drop to `app`
+# (opt out with UNM_RUN_AS_ROOT=1). See scripts/docker-entrypoint.sh.
+COPY scripts/docker-entrypoint.sh /usr/local/bin/unm-entrypoint.sh
+RUN chmod +x /usr/local/bin/unm-entrypoint.sh
+ENTRYPOINT ["/usr/local/bin/unm-entrypoint.sh"]
 
 CMD ["npm", "start"]

@@ -32,6 +32,7 @@ import {
   StateRequestBody,
 } from './types';
 import { DeviceSupport } from './deviceSupport';
+import type { AutomationTemplate } from './automations';
 
 /** Extra /discover fields beyond the identity core (all optional). */
 export interface DiscoveryExtras {
@@ -62,8 +63,9 @@ export interface DiscoveryExtras {
   /** File-repo storage backends: backend kind (e.g. 'local-filesystem'). The API
    *  broker only needs the `fileRepo` capability on /discover; this field is
    *  informational for the webapp's repo picker. */
-  fileRepo?: Record<string, unknown>;
-}
+  fileRepo?: Record<string, unknown>;  /** Ready-made automation rule drafts (see automations.ts) — advertised in
+   *  /discover and served by GET /automations/templates alongside built-ins. */
+  automationTemplates?: AutomationTemplate[];}
 
 export interface PluginServerOptions {
   identity: PluginIdentity;
@@ -121,6 +123,9 @@ export function buildDiscoverPayload(identity: PluginIdentity, extras?: Discover
   return {
     uuid: identity.effectiveUuid,
     name: identity.displayName,
+    // Short catalog description (see PluginIdentity.description) — the webapp's
+    // plugin picker renders it under the display name. Absent when undeclared.
+    ...(identity.description ? { description: identity.description } : {}),
     version: identity.version,
     vendors: identity.vendors,
     capabilities: identity.capabilities,
@@ -143,6 +148,9 @@ export function buildDiscoverPayload(identity: PluginIdentity, extras?: Discover
     ...(e.identityProvider !== undefined ? { identityProvider: e.identityProvider } : {}),
     ...(e.secretsProvider !== undefined ? { secretsProvider: e.secretsProvider } : {}),
     ...(e.fileRepo !== undefined ? { fileRepo: e.fileRepo } : {}),
+    ...(Array.isArray(e.automationTemplates) && e.automationTemplates.length > 0
+      ? { automationTemplates: e.automationTemplates }
+      : {}),
   };
 }
 
@@ -456,6 +464,29 @@ export function createPluginServer(opts: PluginServerOptions): PluginServer {
           const registrationOn = opts.registration ?? process.env.PLUGIN_API_KEY !== undefined;
           if (registrationOn) {
             startRegistration(identity, () => buildDiscoverPayload(identity, discoveryWrapped));
+          }
+          // Dedicated plain-HTTP liveness listener for container orchestration
+          // (Docker healthcheck): a SECOND, minimal server on HEALTH_PORT
+          // (default identity.port + 1 = 4081) that serves ONLY GET /healthz —
+          // no discovery, no metrics, no credentials — and NEVER goes behind
+          // mTLS. That keeps the daemon's probe trivial (plain HTTP, no client
+          // cert) whether or not UNM_TLS=1, while the main listener on
+          // identity.port keeps its full route set + TLS swap untouched. Not
+          // published to the host; reachable from the compose network only.
+          const healthPort = Number(process.env.HEALTH_PORT ?? identity.port + 1);
+          if (healthPort !== identity.port) {
+            const healthApp = express();
+            healthApp.get('/healthz', (_req: Request, res: Response) => {
+              res.status(200).json({ status: 'ok' });
+            });
+            const healthServer = healthApp.listen(healthPort, () => {
+              console.log(`[${logTag}] health listener on :${healthPort} (plain HTTP, /healthz only)`);
+            });
+            // A busy port must never take the plugin down — the main listener
+            // is already up; log and drop the liveness side-channel.
+            healthServer.on('error', (err) => {
+              console.warn(`[${logTag}] health listener on :${healthPort} failed:`, err.message);
+            });
           }
           resolve(identity.port);
         });

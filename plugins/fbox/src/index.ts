@@ -42,6 +42,8 @@ export const PLUGIN_NAME = 'FBox Plugin';
 const identity = resolvePluginIdentity({
   uuid: PLUGIN_UUID,
   name: PLUGIN_NAME,
+  description:
+    'Monitoring + inventory for AVM F!Box routers — system, WAN/LAN/WiFi metrics and LAN device discovery over a web-UI session.',
   version: '0.1.0',
   vendors: ['avm'],
   capabilities: ['monitoring', 'inventory', 'quickActions'],

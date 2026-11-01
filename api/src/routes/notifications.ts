@@ -193,7 +193,7 @@ router.delete(
   requirePermission('notifications:read'),
   async (req, res: Response) => {
     try {
-      await resolveNotification(req.params.id);
+      await resolveNotification(String(req.params.id ?? ''));
       res.json({ ok: true });
     } catch (err) {
       const e = err as { status?: number; message?: string };

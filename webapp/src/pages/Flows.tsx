@@ -3,6 +3,7 @@ import { useQuery } from '@tanstack/react-query';
 import { Activity, Globe, Radio, ArrowLeftRight, Server, X } from 'lucide-react';
 import { Layout } from '../components/Layout';
 import { DataTable, DataTableColumn } from '../components/DataTable';
+import { TimeRangeFilter, resolveTimeRangeIso, type TimeRangeValue } from '../components/TimeRangeFilter';
 import { formatBytes, formatNumber } from '../components/formatMetric';
 import { can } from '../auth/permissions';
 import { api, FlowTalker, FlowInternetDevice, FlowInternetCountry, FlowPair, FlowPortRow, FlowNetworkRow } from '../api/client';
@@ -23,23 +24,6 @@ const PROTO_NAMES: Record<number, string> = {
 function portLabel(port: number): string {
   return PORT_NAMES[port] ? `${port} (${PORT_NAMES[port]})` : String(port);
 }
-
-/** Time-range presets (v1: presets only — the API resolves `from`/`to`). */
-const TIME_RANGES = [
-  { value: '1h', label: 'Last hour' },
-  { value: '24h', label: 'Last 24 hours' },
-  { value: '7d', label: 'Last 7 days' },
-  { value: '30d', label: 'Last 30 days' },
-] as const;
-
-type TimeRange = (typeof TIME_RANGES)[number]['value'];
-
-const RANGE_MS: Record<TimeRange, number> = {
-  '1h': 60 * 60 * 1000,
-  '24h': 24 * 60 * 60 * 1000,
-  '7d': 7 * 24 * 60 * 60 * 1000,
-  '30d': 30 * 24 * 60 * 60 * 1000,
-};
 
 /** Minimal inline SVG sparkline — no chart lib needed for a single series. */
 function Sparkline({ values, width = 160, height = 32 }: { values: number[]; width?: number; height?: number }) {
@@ -123,19 +107,16 @@ function CountryCell({ row }: { row: FlowInternetCountry }) {
  * samples (5-minute / hourly rollups). Gated by `flows:read`.
  */
 export default function Flows() {
-  const [range, setRange] = useState<TimeRange>('24h');
+  const [range, setRange] = useState<TimeRangeValue>('24h');
   // Site filter — '' = all sites. Options come from /sites (gated on sites:read).
   const [siteId, setSiteId] = useState('');
   // Port drilldown — click a talker IP to scope the port tables to that host.
   const [drillIp, setDrillIp] = useState<string | null>(null);
 
-  // The `from` bound is computed at fetch time so "last hour" keeps sliding as
-  // the page refetches. Rollups land every 5 minutes — refresh on that cadence.
-  const windowParams = () => {
-    const to = new Date();
-    const from = new Date(Date.now() - RANGE_MS[range]);
-    return { from: from.toISOString(), to: to.toISOString() };
-  };
+  // The `from` bound is computed at fetch time so relative presets keep sliding
+  // as the page refetches; custom ranges are absolute. Rollups land every 5
+  // minutes — refresh on that cadence.
+  const windowParams = () => resolveTimeRangeIso(range);
   // Every flow query shares the site filter (null = no filter).
   const siteParam = () => (siteId || undefined);
 
@@ -467,17 +448,7 @@ export default function Flows() {
     <Layout title="Flows">
       {/* Filter bar — time-range preset + site filter. */}
       <div className="mb-3 flex shrink-0 items-center gap-2">
-        <select
-          className="w-full max-w-xs rounded-md border border-border px-2.5 py-1.5 text-sm"
-          value={range}
-          onChange={(e) => setRange(e.target.value as TimeRange)}
-        >
-          {TIME_RANGES.map((r) => (
-            <option key={r.value} value={r.value}>
-              {r.label}
-            </option>
-          ))}
-        </select>
+        <TimeRangeFilter value={range} onChange={setRange} />
         {can('sites:read') && (
           <select
             className="w-full max-w-xs rounded-md border border-border px-2.5 py-1.5 text-sm"

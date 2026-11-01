@@ -16,18 +16,20 @@ tags:
   - name: Authentication
   - name: Devices
   - name: Monitoring
-  - name: Configuration
   - name: Plugins
   - name: Secrets
   - name: Sites
   - name: Layers
   - name: Files
+  - name: Backups
+  - name: Replication
   - name: Inventory
   - name: Flows
   - name: Updates
   - name: Security
   - name: Logs
   - name: Notifications
+  - name: Automations
   - name: Users
   - name: Tokens
   - name: System
@@ -592,8 +594,7 @@ paths:
       description: >-
         Returns actionable item counts for the sidebar badges in a single call.
         Each key is present only when the caller holds that page's read
-        permission. Keys: `notifications` (open), `configJobs` (queued+running),
-        `plans` (executing/ready/draft).
+        permission. Keys: `notifications` (open), `plans` (executing/ready/draft).
       responses:
         '200':
           description: Count object (keys omitted for missing permissions)
@@ -1854,58 +1855,6 @@ paths:
           description: Missing required permission
         '404':
           description: Device not found
-
-  /devices/{id}/config-jobs:
-    post:
-      tags: [Configuration]
-      summary: Queue asynchronous configuration action
-      description: Requires 2FA-completed session and permission `configs:apply`.
-      x-2fa-required: true
-      parameters:
-        - in: path
-          name: id
-          required: true
-          schema: { type: string }
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/ConfigJobRequest'
-      responses:
-        '202':
-          description: Job accepted
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ConfigJob'
-        '401':
-          description: Authentication required
-        '403':
-          description: Missing required permission
-        '404':
-          description: Device not found
-
-  /config-jobs/{jobId}:
-    get:
-      tags: [Configuration]
-      summary: Get configuration job status
-      parameters:
-        - in: path
-          name: jobId
-          required: true
-          schema: { type: string }
-      responses:
-        '200':
-          description: Job status
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ConfigJob'
-        '401':
-          description: Authentication required
-        '404':
-          description: Job not found
 
   # --- Execution plans -------------------------------------------------------
   # A plan is the persisted output of a plugin's /plan endpoint (e.g. an
@@ -3529,6 +3478,478 @@ paths:
         '404':
           description: File not found
 
+  /backups/meta:
+    get:
+      tags: [Backups]
+      summary: Backup sections, presets and exclusion info
+      description: >-
+        Requires permission `instance:backup`. Returns the selectable backup
+        sections with their discovered tables (new schema tables are picked up
+        automatically — backups are exclusion-based), the preset bundles
+        (`config`, `planned`, `all`) and the list of tables that never enter a
+        backup. Feeds the Backups page's section picker.
+      responses:
+        '200':
+          description: Section/preset/exclusion metadata
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BackupMetaResponse'
+        '401':
+          description: Authentication required (requires instance:backup)
+
+  /backups:
+    get:
+      tags: [Backups]
+      summary: List stored backups
+      description: >-
+        Requires permission `instance:backup`. Stored backup metadata, newest
+        first. Repo-backed rows carry the bound file-repo instance's display
+        name (`providerName`); a deregistered/offline instance degrades to
+        "unknown provider <id>" so the row stays identifiable and deletable.
+        Local rows whose bytes were deleted out-of-band get `fileMissing: true`.
+      responses:
+        '200':
+          description: Stored backups (newest first)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  backups:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/BackupEntry'
+        '401':
+          description: Authentication required (requires instance:backup)
+    post:
+      tags: [Backups]
+      summary: Create a backup
+      description: >-
+        Requires permission `instance:backup`. Builds the selected sections
+        (or a preset bundle) into a gzip-compressed JSON archive and stores it
+        on the local backup volume (`destination: "local"`) or content-addressed
+        in a bound file-repo plugin instance (`destination: "repo"` +
+        `providerId`). The provider's computed SHA-256/size are recorded for
+        repo-backed backups. 409 when the target file-repo instance is not
+        registered or online.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BackupCreateRequest'
+      responses:
+        '201':
+          description: Backup created and stored
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  backup:
+                    $ref: '#/components/schemas/BackupEntry'
+        '400':
+          description: Unknown preset/section or missing providerId for repo destination
+        '401':
+          description: Authentication required (requires instance:backup)
+        '409':
+          description: Target file-repo instance not registered or online
+
+  /backups/{id}:
+    delete:
+      tags: [Backups]
+      summary: Delete a stored backup
+      description: >-
+        Requires permission `instance:backup`. Removes the metadata row and the
+        bytes — local unlink, or blob deletion on the BOUND file-repo instance
+        only (never a sibling). 409 when the bound instance is gone/offline.
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Deleted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  deleted: { type: boolean }
+        '401':
+          description: Authentication required (requires instance:backup)
+        '404':
+          description: Backup not found
+        '409':
+          description: Bound file-repo instance not registered or online
+
+  /backups/{id}/download:
+    get:
+      tags: [Backups]
+      summary: Download a stored backup (raw bytes, attachment)
+      description: >-
+        Requires permission `instance:backup`. Streams the gzip-compressed
+        archive with `Content-Disposition: attachment` from whichever destination
+        holds it. 410 when the metadata exists but the bytes are gone.
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: The archive's raw bytes
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        '401':
+          description: Authentication required (requires instance:backup)
+        '404':
+          description: Backup not found
+        '409':
+          description: Bound file-repo instance not registered or online
+        '410':
+          description: Metadata exists but the bytes are missing
+
+  /backups/restore/upload:
+    post:
+      tags: [Backups]
+      summary: Stage an uploaded backup for restore (preview)
+      description: >-
+        Requires permission `instance:backup`. The body is the RAW archive
+        (`application/octet-stream`); an optional display name travels in the
+        `x-backup-name` header. The archive is parsed and validated (format,
+        schema version, manifest) but NOT applied — it is staged under a pending
+        id so the client can show a preview first. 400 on corrupt/foreign or
+        newer-version archives.
+      parameters:
+        - name: x-backup-name
+          in: header
+          required: false
+          description: Optional display name for the uploaded archive
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/octet-stream:
+            schema:
+              type: string
+              format: binary
+      responses:
+        '201':
+          description: Archive staged — manifest returned for preview
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RestoreUploadResponse'
+        '400':
+          description: Corrupt, foreign or newer-version archive (or JSON body)
+        '401':
+          description: Authentication required (requires instance:backup)
+
+  /backups/restore/apply:
+    post:
+      tags: [Backups]
+      summary: Apply a backup with safe merge semantics
+      description: >-
+        Requires permission `instance:backup`. Merges the staged upload
+        (`pendingId`) or a stored backup (`backupId`) into this instance —
+        upsert by primary key per table, rows absent from the archive are never
+        deleted. Each section applies in its own transaction; settings merge
+        through the normal setting-update path (validation + onChange hooks).
+        Returns a per-section report with created/updated/skipped counts and
+        warnings.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RestoreApplyRequest'
+      responses:
+        '200':
+          description: Merge report per applied section
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  report:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/SectionMergeReport'
+        '400':
+          description: Unknown sections or invalid archive
+        '401':
+          description: Authentication required (requires instance:backup)
+        '404':
+          description: Stored backup not found
+        '409':
+          description: A section failed to apply (rolled back) or bound file-repo instance unreachable
+        '410':
+          description: Staged upload gone or bytes missing
+
+  /backups/restore/pending/{pendingId}:
+    delete:
+      tags: [Backups]
+      summary: Discard a staged restore upload without applying
+      parameters:
+        - in: path
+          name: pendingId
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Staged file discarded
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  deleted: { type: boolean }
+        '401':
+          description: Authentication required (requires instance:backup)
+
+  /replication/inbound:
+    post:
+      tags: [Replication]
+      summary: Receive a pushed backup from a peer instance
+      description: >-
+        Requires permission `instance:backup`. Peer-facing endpoint for push-mode
+        replication. The body is the portable archive `{ manifest, data }` (same
+        shape as GET /replication/export). Applies the same safe merge as restore;
+        only portable sections are accepted — liveInventory & co. are rejected with 400.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [manifest, data]
+              properties:
+                manifest: { $ref: '#/components/schemas/BackupManifest' }
+                data:
+                  type: object
+                  additionalProperties:
+                    type: object
+                    additionalProperties:
+                      type: array
+                      items: { type: object }
+      responses:
+        '200':
+          description: Merge report per applied section
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  report:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/SectionMergeReport'
+                  receivedAt: { type: string, format: date-time }
+        '400':
+          description: Malformed body or non-portable sections present
+        '401':
+          description: Authentication required (requires instance:backup)
+
+  /replication/export:
+    get:
+      tags: [Replication]
+      summary: Portable export for pull-mode peers
+      description: >-
+        Requires permission `instance:backup`. Returns the portable sections of
+        this instance as `{ manifest, data }` (liveInventory is never included).
+        Peers in pull mode fetch this and merge it locally.
+      parameters:
+        - name: sections
+          in: query
+          required: false
+          description: "Comma-separated subset of portable section keys (default: all)"
+          schema: { type: string }
+      responses:
+        '200':
+          description: Portable archive as JSON
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [manifest, data]
+                properties:
+                  manifest: { $ref: '#/components/schemas/BackupManifest' }
+                  data:
+                    type: object
+                    additionalProperties:
+                      type: object
+                      additionalProperties:
+                        type: array
+                        items: { type: object }
+        '401':
+          description: Authentication required (requires instance:backup)
+
+  /replication/targets:
+    get:
+      tags: [Replication]
+      summary: List replication targets
+      description: >-
+        Requires permission `instance:backup`. Lists configured peer targets.
+        Peer tokens are never returned in responses.
+      responses:
+        '200':
+          description: Configured targets
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  targets:
+                    type: array
+                    items: { $ref: '#/components/schemas/ReplicationTarget' }
+        '401':
+          description: Authentication required (requires instance:backup)
+    post:
+      tags: [Replication]
+      summary: Create a replication target
+      description: >-
+        Requires permission `instance:backup`. Registers a peer to push this
+        instance's portable config to, or pull it from. When `excludeKeys` is
+        omitted, the default exclusion list (identity-bound settings such as
+        instanceName and provider ids) applies.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ReplicationTargetCreateRequest' }
+      responses:
+        '201':
+          description: Target created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  target: { $ref: '#/components/schemas/ReplicationTarget' }
+        '400':
+          description: Invalid name, base URL, token or interval
+        '401':
+          description: Authentication required (requires instance:backup)
+
+  /replication/targets/{id}:
+    patch:
+      tags: [Replication]
+      summary: Update a replication target
+      description: >-
+        Requires permission `instance:backup`. Same body shape as create; name,
+        baseUrl and token are required.
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ReplicationTargetCreateRequest' }
+      responses:
+        '200':
+          description: Updated target
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  target: { $ref: '#/components/schemas/ReplicationTarget' }
+        '400':
+          description: Missing name, baseUrl or token / invalid values
+        '401':
+          description: Authentication required (requires instance:backup)
+        '404':
+          description: Target not found
+    delete:
+      tags: [Replication]
+      summary: Delete a replication target
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Deleted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  deleted: { type: boolean }
+        '401':
+          description: Authentication required (requires instance:backup)
+        '404':
+          description: Target not found
+
+  /replication/sync:
+    post:
+      tags: [Replication]
+      summary: Run a replication sync now (manual trigger)
+      description: >-
+        Requires permission `instance:backup`. Runs the same sync job as the
+        scheduler for one target. Returns 200 with the report even when the sync
+        itself failed — inspect `report.status` / `report.error`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [targetId]
+              properties:
+                targetId: { type: string }
+      responses:
+        '200':
+          description: Sync report (status ok or error)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  report: { $ref: '#/components/schemas/SyncReport' }
+        '400':
+          description: Missing targetId
+        '401':
+          description: Authentication required (requires instance:backup)
+        '404':
+          description: Target not found
+
+  /replication/due:
+    get:
+      tags: [Replication]
+      summary: Targets currently due for a scheduled sync
+      description: >-
+        Requires permission `instance:backup`. Debug/ops helper — lists enabled
+        targets whose interval has elapsed (or that never synced).
+      responses:
+        '200':
+          description: Due targets
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  targets:
+                    type: array
+                    items:
+                      type: object
+                      required: [id, name]
+                      properties:
+                        id: { type: string }
+                        name: { type: string }
+        '401':
+          description: Authentication required (requires instance:backup)
+
   /layers:
     get:
       tags: [Layers]
@@ -3851,6 +4272,47 @@ paths:
                         srcTopHost: { type: [string, 'null'], description: "Hosts-inventory hostname of srcTopIp (container/VM name, DHCP lease)" }
                         dstTopIp: { type: [string, 'null'], description: "Busiest destination IP of this pair" }
                         dstTopHost: { type: [string, 'null'], description: "Hosts-inventory hostname of dstTopIp" }
+        '401':
+          description: Authentication required
+
+  /flows/devices:
+    get:
+      tags: [Flows]
+      summary: Per-device total traffic over the window
+      description: >-
+        Estimated bytes per known internal device where it is source OR
+        destination (internal-classified endpoints only). Feeds node sizing on
+        the topology page — /flows/pairs alone would undercount a device's
+        internet egress.
+      parameters:
+        - in: query
+          name: from
+          required: false
+          schema: { type: string }
+        - in: query
+          name: to
+          required: false
+          schema: { type: string }
+        - in: query
+          name: siteId
+          required: false
+          schema: { type: string }
+          description: "Filter to devices where either endpoint belongs to a device at this site (400 for an unknown id)"
+      responses:
+        '200':
+          description: Per-device totals
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  fromMs: { type: integer }
+                  toMs: { type: integer }
+                  table: { type: string, enum: [flow_agg_5m, flow_agg_1h] }
+                  devices:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/FlowDeviceRow'
         '401':
           description: Authentication required
 
@@ -4211,6 +4673,87 @@ paths:
                   $ref: '#/components/schemas/HostRow'
         '400':
           description: Invalid source filter value
+        '401':
+          description: Authentication required
+
+  /dns:
+    get:
+      tags: [Inventory]
+      summary: List all static DNS entries across devices
+      description: >-
+        Cross-device view of the normalized `device_dns_entries` inventory
+        table, populated by the telemetry worker from each dns-capable plugin's
+        static host-record tables (OPNsense dnsmasq/unbound hosts, OpenWrt uci
+        dhcp @host/@map sections, RouterOS /ip/dns/static, LCOS Setup/DNS/
+        DNS-List). Rows are upserted per poll; entries not refreshed within the
+        stale window are swept away. Response rows are grouped by LOWERCASE
+        name — an entry present on several devices carries one chip per
+        device+plugin instance (with the addresses that device holds).
+      parameters:
+        - in: query
+          name: deviceId
+          required: false
+          schema: { type: string }
+          description: Filter to one device
+        - in: query
+          name: siteId
+          required: false
+          schema: { type: string }
+          description: Filter to devices belonging to a site
+      responses:
+        '200':
+          description: DNS entry rows (grouped by lowercase name, device + plugin identity included)
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/DnsRow'
+        '401':
+          description: Authentication required
+
+  /dhcp:
+    get:
+      tags: [Inventory]
+      summary: List configured DHCP networks + static reservations across devices
+      description: >-
+        Cross-device view of the normalized `device_dhcp_networks` and
+        `device_dhcp_reservations` inventory tables, populated by the telemetry
+        worker from each dhcp-capable plugin's server configuration (RouterOS
+        /ip/pool + /ip/dhcp-server/network, OPNsense Kea subnets or dnsmasq
+        ranges, OpenWrt uci dhcp .option=range). Rows are upserted per poll;
+        rows not refreshed within the stale window are swept away. Response is
+        `{ networks: [...], reservations: [...] }` — flat per-device rows (no
+        cross-device merge). Live leases are NOT here — they live in /hosts
+        (source 'dhcp').
+      parameters:
+        - in: query
+          name: deviceId
+          required: false
+          schema: { type: string }
+          description: Filter to one device
+        - in: query
+          name: siteId
+          required: false
+          schema: { type: string }
+          description: Filter to devices belonging to a site
+      responses:
+        '200':
+          description: DHCP network + reservation rows (device + plugin identity included)
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [networks, reservations]
+                properties:
+                  networks:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/DhcpNetworkRow'
+                  reservations:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/DhcpReservationRow'
         '401':
           description: Authentication required
 
@@ -4873,6 +5416,21 @@ paths:
           required: false
           schema: { type: boolean }
           description: "Add end-host nodes (ARP/MAC-table entries) to the logical segments; capped per segment"
+        - in: query
+          name: tags
+          required: false
+          schema: { type: string }
+          description: "Comma-separated device tags, AND semantics — only devices carrying ALL listed tags are included (case-insensitive); segments/cables recompute over the filtered subset"
+        - in: query
+          name: layer
+          required: false
+          schema: { type: string }
+          description: "Only keep devices whose RESOLVED network-layer band matches this id (override > plugin suggestion > heuristic), plus everything attached to them; unknown ids yield an empty graph"
+        - in: query
+          name: hostLimit
+          required: false
+          schema: { type: integer, default: 50, minimum: 1, maximum: 1000 }
+          description: "Max end-hosts rendered per segment (default 50 — ARP tables can hold hundreds of entries)"
       responses:
         '200':
           description: Topology graph (nodes + edges)
@@ -5117,8 +5675,8 @@ paths:
           required: false
           schema:
             type: string
-            enum: [firmware, os-package, docker-image, app]
-          description: Filter by update kind
+            enum: [firmware, os-package, docker-image, app, stack]
+          description: "Filter by update kind ('stack' = the synthetic UNM-itself row)"
       responses:
         '200':
           description: Update rows + stack self-update info (device + plugin identity included)
@@ -5181,6 +5739,101 @@ paths:
           description: Invalid kind or status filter value
         '401':
           description: Authentication required
+
+  /cve/vulnerabilities:
+    get:
+      tags: [Security]
+      summary: Per-device CVE matches (installed packages × known advisories)
+      description: >-
+        Rows from the `device_cves` table — one row per (device × vulnerable
+        package) match, recomputed wholesale by the cve worker on every beat.
+        The worker fetches advisories for every distinct package installed in
+        the fleet (OSV.dev today; commercial providers later via the CveProvider
+        interface) and matches them against each device's installed versions
+        with per-ecosystem comparators. Device-level access control applies —
+        scoped callers get an empty list for out-of-scope devices, never a leak.
+      parameters:
+        - in: query
+          name: deviceId
+          required: false
+          schema: { type: string }
+          description: Filter to one device
+        - in: query
+          name: siteId
+          required: false
+          schema: { type: string }
+          description: Filter to devices belonging to a site
+        - in: query
+          name: severityRank
+          required: false
+          schema:
+            type: string
+            enum: [critical, high, medium, low, unknown]
+          description: Filter by CVSS-derived severity bucket
+        - in: query
+          name: ecosystem
+          required: false
+          schema: { type: string }
+          description: Filter by package ecosystem tag (e.g. debian, alpine, npm)
+        - in: query
+          name: q
+          required: false
+          schema: { type: string }
+          description: Case-insensitive substring match on package name or CVE id
+      responses:
+        '200':
+          description: CVE match rows (device + plugin identity included)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CveVulnerabilitiesResponse'
+        '400':
+          description: Invalid severityRank filter value
+        '401':
+          description: Authentication required
+
+  /cve/summary:
+    get:
+      tags: [Security]
+      summary: CVE page header — counts by severity + last advisory fetch outcome
+      description: >-
+        Aggregate view for the Security page header: match counts per severity
+        bucket, the number of affected devices, and the cve worker's status rows
+        (lastAttemptAt / lastSuccessAt / lastError). Device-level access control
+        applies — scoped callers only count their own devices.
+      responses:
+        '200':
+          description: Summary counts + worker fetch state
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CveSummaryResponse'
+        '401':
+          description: Authentication required
+
+  /cve/refresh:
+    post:
+      tags: [Security]
+      summary: Run one CVE advisory fetch cycle now (bypasses the interval)
+      description: >-
+        Triggers a single advisory fetch for every distinct package installed in
+        the fleet (OSV.dev), upserts cve_advisories and prunes advisories for
+        packages no longer present. Match recomputation happens on the worker's
+        next beat automatically. Returns 502 when the fetch failed and no data
+        has ever been fetched successfully; 409 when CVE tracking is disabled.
+      responses:
+        '200':
+          description: Worker status rows after the cycle
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CveWorkerStatus'
+        '401':
+          description: Authentication required
+        '409':
+          description: CVE tracking is disabled (cveEnabled)
+        '502':
+          description: The fetch failed and no advisory data has ever been fetched
 
   /certificates:
     get:
@@ -6951,6 +7604,286 @@ paths:
         '502':
           description: CA unreachable — revocation NOT applied
 
+  # ── Actions & Schedules (automation engine) ────────────────────────────────
+  /automations:
+    get:
+      tags: [Automations]
+      summary: List automation rules with computed next-run previews
+      responses:
+        '200':
+          description: All rules, newest first
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AutomationListResponse' }
+        '401':
+          description: Authentication required
+        '403':
+          description: Missing automations:read permission
+    post:
+      tags: [Automations]
+      summary: Create an automation rule (ITTT triggers + actions)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AutomationDraft' }
+      responses:
+        '201':
+          description: The created rule
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AutomationResponse' }
+        '400':
+          description: Validation failed (details list the problems)
+        '401':
+          description: Authentication required
+        '403':
+          description: Missing automations:write permission
+
+  /automations/preview-schedule:
+    get:
+      tags: [Automations]
+      summary: Upcoming occurrences of a schedule spec (builder "next runs" hint)
+      parameters:
+        - in: query
+          name: kind
+          required: true
+          schema: { type: string, enum: [cron, interval, dailyAt] }
+        - in: query
+          name: expr
+          required: true
+          description: >-
+            cron expression | integer minutes (interval) | "HH:MM" (dailyAt).
+            Must be FULLY percent-encoded — the OpenAPI validator rejects any
+            unencoded reserved character, and `encodeURIComponent` alone leaves
+            `*` literal. Encode with e.g. encodeURIComponent(expr).replace(/\*/g, '%2A').
+          schema: { type: string }
+        - in: query
+          name: count
+          required: false
+          schema: { type: integer, default: 5, minimum: 1, maximum: 20 }
+      responses:
+        '200':
+          description: Upcoming ISO timestamps (newest first)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  runs: { type: array, items: { type: string, format: date-time } }
+        '400':
+          description: Invalid schedule spec
+        '401':
+          description: Authentication required
+        '403':
+          description: Missing automations:read permission
+
+  /automations/test-pattern:
+    post:
+      tags: [Automations]
+      summary: Dry-run a log trigger's pattern against recent logs (no firing, no state)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [source, pattern]
+              properties:
+                source: { type: string, enum: [plugin, firewall] }
+                pluginId: { type: string }
+                levels: { type: array, items: { type: string, enum: [debug, info, warn, error] } }
+                pattern: { type: string, description: JS regex source (search semantics) }
+      responses:
+        '200':
+          description: Matching rows from the most recent window (capped at 50)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  count: { type: integer }
+                  matches:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        deviceId: { type: string, nullable: true }
+                        message: { type: string }
+                        axisValue: { description: ISO timestamp (plugin) or epoch ms (firewall), oneOf }
+        '400':
+          description: Invalid source/pattern/regex
+        '401':
+          description: Authentication required
+        '403':
+          description: Missing automations:read permission
+        '500':
+          description: Pattern scan failed
+
+  /automations/templates:
+    get:
+      tags: [Automations]
+      summary: Template catalog — built-in + plugin-advertised rule drafts (pre-fill for the builder; picking one creates nothing)
+      responses:
+        '200':
+          description: All templates, built-ins first
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AutomationTemplatesResponse' }
+        '401':
+          description: Authentication required
+        '403':
+          description: Missing automations:read permission
+
+  /automations/{id}:
+    parameters:
+      - in: path
+        name: id
+        required: true
+        schema: { type: string }
+    patch:
+      tags: [Automations]
+      summary: Update an automation rule (partial — omitted fields keep current values)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AutomationDraftPatch' }
+      responses:
+        '200':
+          description: The updated rule
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AutomationResponse' }
+        '400':
+          description: Validation failed (details list the problems)
+        '401':
+          description: Authentication required
+        '403':
+          description: Missing automations:write permission
+        '404':
+          description: Rule not found
+    delete:
+      tags: [Automations]
+      summary: Delete an automation rule (run history is kept for audit)
+      responses:
+        '200':
+          description: Deletion confirmed
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  deleted: { type: boolean }
+        '401':
+          description: Authentication required
+        '403':
+          description: Missing automations:write permission
+        '404':
+          description: Rule not found
+
+  /automations/{id}/test:
+    post:
+      tags: [Automations]
+      summary: Manually trigger the rule now (wiring check, or apply currently-available updates)
+      description: >-
+        Optional body { "mode": "apply" } runs for real — updateAvailable triggers
+        resolve the CURRENTLY available device_updates rows and fire once per row
+        (defer schedules are bypassed). Omitted or { "mode": "test" } is the legacy
+        wiring check: the first trigger block fires once with a bare context.
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                mode:
+                  type: string
+                  enum: [test, apply]
+                  description: "apply = run for real against live update rows (default test)"
+      responses:
+        '200':
+          description: The run row just written
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AutomationRunResponse' }
+        '400':
+          description: Rule has no triggers or actions to test
+        '401':
+          description: Authentication required
+        '403':
+          description: Missing automations:write permission
+        '404':
+          description: Rule not found
+        '500':
+          description: Test run failed
+
+  /automations/{id}/dry-run:
+    post:
+      tags: [Automations]
+      summary: Simulate the rule without executing anything (dry run)
+      description: >-
+        Predicts what a manual apply would do, with zero side effects. updateAvailable
+        triggers resolve the CURRENTLY available device_updates rows and produce one
+        simulated firing per row; other trigger types produce one bare-context firing
+        each. Every action is SIMULATED — intent actions build a real plan via the same
+        createPlanCore path (the deterministic plugin /plan call) to report its exact
+        steps, then tear it down. No run rows are written, no deferral windows touched,
+        nothing enqueued or applied.
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: The simulated firings (what would happen if the rule fired now)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AutomationDryRunResponse' }
+        '400':
+          description: Rule has no triggers or actions to simulate
+        '401':
+          description: Authentication required
+        '403':
+          description: Missing automations:write permission
+        '404':
+          description: Rule not found
+        '500':
+          description: Dry run failed
+
+  /automations/{id}/runs:
+    get:
+      tags: [Automations]
+      summary: Run history for one rule (newest first, capped)
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+        - in: query
+          name: limit
+          required: false
+          schema: { type: integer, default: 50, minimum: 1, maximum: 200 }
+      responses:
+        '200':
+          description: Run rows for the rule
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AutomationRunsResponse' }
+        '401':
+          description: Authentication required
+        '403':
+          description: Missing automations:read permission
+        '404':
+          description: Rule not found
+
 components:
   securitySchemes:
     bearerAuth:
@@ -7226,6 +8159,21 @@ components:
           additionalProperties: { type: [string, 'null'] }
           description: "Replace bound slot secrets (validated per slot type); provided = full replacement of the slot map"
 
+    # One line of a device's status tooltip — which plugin is non-ok and why.
+    # Derived worst-wins from the last poll outcomes; plugins that report
+    # `healthReasons` on /monitoring contribute their own lines, everyone else
+    # gets a generic fallback ("Monitoring unreachable …", "Reports degraded health").
+    DeviceHealthReason:
+      type: object
+      required: [pluginId, severity, message]
+      properties:
+        pluginId: { type: string }
+        pluginName: { type: [string, 'null'], description: "Plugin display name (null when the plugin row is gone)" }
+        severity:
+          type: string
+          enum: [warning, critical]
+        message: { type: string, description: "Short human-readable reason, e.g. 'Pool tank is DEGRADED'" }
+
     Device:
       type: object
       required: [id, name, vendor, deviceTypes, tags, managementAddress, status]
@@ -7248,7 +8196,12 @@ components:
         siteName: { type: [string, 'null'], description: "Display name of the assigned site" }
         status:
           type: string
-          enum: [online, degraded, offline, unknown]
+          enum: [online, degraded, offline, critical, unknown]
+        healthReasons:
+          type: array
+          items:
+            $ref: '#/components/schemas/DeviceHealthReason'
+          description: "Human-readable reasons for a non-ok status (worst-wins rollup of the last poll outcomes); empty when online"
         model: { type: [string, 'null'], description: "Hardware model selected from a plugin's advertised catalog (null = unset)" }
         firmwareVersion: { type: [string, 'null'], description: "Firmware version for the selected model (null = unset)" }
         layerOverride: { type: [string, 'null'], description: "Manual topology-layer override (a network_layers id); null = auto-classify from plugin suggestion / heuristic" }
@@ -7441,7 +8394,6 @@ components:
       description: "Keys present only when the caller has the corresponding read permission"
       properties:
         notifications: { type: integer, minimum: 0, description: "Open notifications visible to the user" }
-        configJobs: { type: integer, minimum: 0, description: "Config jobs in queued or running state" }
         plans: { type: integer, minimum: 0, description: "Plans in executing/ready/draft state" }
 
     UserCreateRequest:
@@ -7861,6 +8813,22 @@ components:
         dstEstBytes: { type: integer, format: int64 }
         estBytes: { type: integer, format: int64 }
 
+    FlowDeviceRow:
+      type: object
+      description: >-
+        One known internal device with its total estimated bytes over the window
+        (srcEstBytes = traffic it sourced, dstEstBytes = traffic destined to it;
+        estBytes is their sum). Endpoints classified 'internet' are excluded —
+        this counts internal-to-anywhere and anywhere-to-internal traffic where
+        the endpoint device was resolved.
+      required: [deviceId, srcEstBytes, dstEstBytes, estBytes]
+      properties:
+        deviceId: { type: string }
+        deviceName: { type: [string, 'null'] }
+        srcEstBytes: { type: integer, format: int64 }
+        dstEstBytes: { type: integer, format: int64 }
+        estBytes: { type: integer, format: int64 }
+
     FlowInventoryIp:
       type: object
       description: >-
@@ -7975,6 +8943,98 @@ components:
                 type: array
                 items: { type: string }
                 description: "Interface(s) on the observing device where the host was seen (e.g. [lan], [wlan0])"
+
+    DnsRow:
+      type: object
+      required: [name, ips, devices]
+      properties:
+        name: { type: string, description: "Lowercase hostname (the grouping key)" }
+        # One row per static DNS name ACROSS all devices and plugins: rows with
+        # the same lowercase name are merged. A name that maps to different
+        # addresses on different devices keeps ALL of them — drift is visible.
+        ips:
+          type: array
+          minItems: 1
+          items: { type: string }
+          description: "All addresses of this name anywhere, IPv4 first. Record type per address is derived from its shape (v4 = A record, v6 = AAAA)."
+        domains:
+          type: array
+          items: { type: string }
+          description: "Distinct non-empty domain suffixes for the name across all devices (empty when no vendor splits hostname + domain — only OPNsense unbound does)"
+        descriptions:
+          type: array
+          items: { type: string }
+          description: "Distinct non-empty notes configured for the name across all devices (empty when no vendor stored one)"
+        devices:
+          type: array
+          minItems: 1
+          items:
+            type: object
+            required: [deviceId, pluginId, ips]
+            properties:
+              deviceId: { type: string }
+              deviceName: { type: [string, 'null'], description: "Display name of the device holding this entry" }
+              managementAddress: { type: [string, 'null'] }
+              siteName: { type: [string, 'null'] }
+              pluginId: { type: string, description: "Plugin instance id (multi-instance ids carry a :instance suffix)" }
+              pluginName: { type: [string, 'null'], description: "Display name of the plugin instance that reported this entry" }
+              ips:
+                type: array
+                minItems: 1
+                items: { type: string }
+                description: "The addresses THIS device holds for the name (drift is visible per chip)"
+              domains:
+                type: array
+                items: { type: string }
+                description: "Distinct non-empty domain suffixes configured on this device for the name (empty when the vendor has no separate field)"
+              descriptions:
+                type: array
+                items: { type: string }
+                description: "Distinct non-empty notes configured on this device for the name"
+
+    DhcpNetworkRow:
+      type: object
+      description: >-
+        One configured DHCP server network/pool range on one device, as reported
+        by a plugin's `dhcpNetworks` metric. A scope with several ranges yields
+        multiple rows (identity = name + rangeStart).
+      required: [deviceId, pluginId, name, rangeStart, rangeEnd]
+      properties:
+        deviceId: { type: string }
+        deviceName: { type: [string, 'null'], description: "Display name of the device" }
+        managementAddress: { type: [string, 'null'] }
+        siteName: { type: [string, 'null'] }
+        pluginId: { type: string, description: "Plugin instance id (multi-instance ids carry a :instance suffix)" }
+        pluginName: { type: [string, 'null'], description: "Display name of the plugin instance that reported this row" }
+        name: { type: string, description: "Network/scope name as configured, or the serving interface when the vendor has no name" }
+        iface: { type: [string, 'null'], description: "Serving interface (e.g. bridge1, lan). Null = not exposed by the vendor" }
+        rangeStart: { type: string, description: "First address of the lease range" }
+        rangeEnd: { type: string, description: "Last address of the lease range" }
+        cidr: { type: [string, 'null'], description: "Subnet CIDR covering the range (derived by the plugin when known)" }
+        leaseTimeSeconds: { type: [integer, 'null'], description: "Lease time in seconds as configured. Null = vendor default / not exposed" }
+        gateway: { type: [string, 'null'], description: "Gateway address handed out to clients" }
+        dnsServers: { type: [string, 'null'], description: "DNS servers handed out to clients (comma-joined)" }
+        refId: { type: [string, 'null'], description: "Vendor-side row identity used for deletion (dnsmasq range uuid, Kea subnet id…). Null = no stable handle" }
+
+    DhcpReservationRow:
+      type: object
+      description: >-
+        One static DHCP reservation (MAC → fixed IP) on one device, as reported
+        by a plugin's `dhcpReservations` metric. Identity = mac per device+plugin.
+      required: [deviceId, pluginId, mac]
+      properties:
+        deviceId: { type: string }
+        deviceName: { type: [string, 'null'], description: "Display name of the device" }
+        managementAddress: { type: [string, 'null'] }
+        siteName: { type: [string, 'null'] }
+        pluginId: { type: string, description: "Plugin instance id (multi-instance ids carry a :instance suffix)" }
+        pluginName: { type: [string, 'null'], description: "Display name of the plugin instance that reported this row" }
+        mac: { type: string, description: "Client MAC address, lowercase colon form" }
+        ip: { type: [string, 'null'], description: "Fixed IP the client always receives. Null = name-only mapping" }
+        hostname: { type: [string, 'null'], description: "Hostname bound to the reservation (when the vendor has one)" }
+        iface: { type: [string, 'null'], description: "Serving interface the mapping is scoped to (OPNsense staticmaps are per-interface). Null = not exposed" }
+        refId: { type: [string, 'null'], description: "Vendor-side row identity used for deletion (e.g. OPNsense uuid). Null = delete by MAC" }
+        status: { type: [string, 'null'], description: "Vendor lease status when exposed (e.g. RouterOS bound/free) — some vendors keep static bindings and active dynamic leases in one table; the page badges live rows" }
 
     DocumentedHostIp:
       type: object
@@ -8717,7 +9777,9 @@ components:
       description: >-
         One edge of the topology graph. `kind` discriminates: cable = inferred
         physical link (`via` records the evidence), tunnel = overlay link,
-        membership = device/host belongs to a logical segment.
+        membership = device/host belongs to a logical segment, wireless = WLAN
+        client association (source is the AP that reported the host in its
+        station table; `via` names the radio interface).
       required: [id, source, target, kind]
       properties:
         id: { type: string }
@@ -8725,11 +9787,10 @@ components:
         target: { type: string, description: "Target node id" }
         kind:
           type: string
-          enum: [cable, tunnel, membership]
+          enum: [cable, tunnel, membership, wireless]
         via:
           type: [string, 'null']
-          enum: [mac-table, lacp, null]
-          description: "Evidence the cable was inferred from (kind=cable)"
+          description: "kind=cable: evidence the cable was inferred from (mac-table | lacp). kind=wireless: radio interface on the AP (e.g. WLAN-1)"
         portA: { type: [string, 'null'], description: "Port on the source device (kind=cable)" }
         portB: { type: [string, 'null'], description: "Interface on the target device (kind=cable; null when unknown)" }
         vlans:
@@ -9413,8 +10474,11 @@ components:
         pluginName: { type: [string, 'null'], description: "Display name of the reporting plugin instance" }
         kind:
           type: string
-          enum: [firmware, os-package, docker-image, app]
-          description: "Update kind (plugins may emit custom kinds)"
+          enum: [firmware, os-package, docker-image, app, stack]
+          description: >-
+            Update kind (plugins may emit custom kinds). 'stack' marks the
+            synthetic "UNM itself" row appended by the API when a newer UNM
+            release is available (deviceId 'unm-stack', no apply path).
         name: { type: string, description: "Stable identity within (device, kind): 'os' for firmware, a package name, an app or image name" }
         currentVersion: { type: [string, 'null'] }
         latestVersion: { type: [string, 'null'] }
@@ -9453,6 +10517,29 @@ components:
           type: object
           additionalProperties: true
           description: "Plugin-specific details (JSON) — e.g. the package manager id for os-package rows"
+        fixesCves:
+          type: object
+          nullable: true
+          required: [total, critical, high, medium, low, unknown, topIds]
+          properties:
+            total: { type: integer }
+            critical: { type: integer }
+            high: { type: integer }
+            medium: { type: integer }
+            low: { type: integer }
+            unknown: { type: integer }
+            topIds:
+              type: array
+              items: { type: string }
+          description: >-
+            Which known CVEs this update RESOLVES — computed by the API from the
+            fleet's advisory data (device_cves × cve_advisories): an advisory is
+            counted when the CURRENT version falls inside its affected ranges and
+            the LATEST version does not. Only os-package rows with a known
+            current AND latest version carry this; null everywhere else (no fix
+            can be verified without both versions). Rendered as severity chips on
+            the Updates page ("Fixes CVEs" column); topIds lists the highest-
+            severity CVE ids first, capped at 8.
         collectedAt: { type: string, format: date-time, description: "When the reporting plugin last observed this update" }
 
     StackUpdateInfo:
@@ -9473,6 +10560,11 @@ components:
         latestApiVersion: { type: [string, 'null'], description: "Latest version from the configured release feed (null = no feed / fetch failed)" }
         available: { type: boolean, description: "True when the feed reports a newer version than the running one" }
         notesUrl: { type: [string, 'null'], description: "Release notes URL from the manifest, if present" }
+        releaseUrl:
+          type: [string, 'null']
+          description: >-
+            The release page itself (e.g. GitHub html_url) — where an admin
+            actually updates. Null when the feed carries no such link.
 
     UpdatesResponse:
       type: object
@@ -9528,6 +10620,60 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/SecurityCheckRow'
+
+    CveVulnerabilitiesResponse:
+      type: object
+      required: [rows]
+      properties:
+        rows:
+          type: array
+          items:
+            $ref: '#/components/schemas/CveMatchRow'
+
+    CveMatchRow:
+      type: object
+      description: One (device × vulnerable package) match from the device_cves table.
+      required: [deviceId, pluginId, ecosystem, packageName, cveId, severityRank, collectedAt]
+      properties:
+        deviceId: { type: string }
+        pluginId: { type: string }
+        ecosystem: { type: string, description: "Package ecosystem tag (debian, alpine, npm, …)" }
+        packageName: { type: string }
+        cveId: { type: string, description: "Advisory id — a CVE alias when the source provides one" }
+        installedVersion: { type: [string, 'null'], description: "The installed version that matched (null = unversioned package)" }
+        severityScore: { type: [number, 'null'], description: "CVSS v3 base score 0–10 (null = unscored advisory)" }
+        severityRank:
+          type: string
+          enum: [critical, high, medium, low, unknown]
+        summary: { type: [string, 'null'] }
+        url: { type: [string, 'null'], description: "Canonical advisory URL (OSV page)" }
+        extra: { type: object, additionalProperties: true }
+        collectedAt: { type: string, format: date-time }
+        deviceName: { type: [string, 'null'] }
+        managementAddress: { type: [string, 'null'] }
+        siteName: { type: [string, 'null'] }
+        pluginName: { type: [string, 'null'] }
+
+    CveSummaryResponse:
+      allOf:
+        - $ref: '#/components/schemas/CveWorkerStatus'
+        - type: object
+          required: [bySeverity, affectedDevices, totalMatches]
+          properties:
+            bySeverity:
+              type: object
+              description: "Match counts per severity bucket (all five keys always present)"
+              additionalProperties: { type: integer }
+            affectedDevices: { type: integer, description: "Distinct devices with at least one match" }
+            totalMatches: { type: integer }
+
+    CveWorkerStatus:
+      type: object
+      required: [lastAttemptAt, lastSuccessAt, lastError]
+      properties:
+        lastAttemptAt: { type: [string, 'null'], format: date-time }
+        lastSuccessAt: { type: [string, 'null'], format: date-time }
+        lastError: { type: string, description: "Empty when the last cycle succeeded" }
 
     ContainersOverview:
       type: object
@@ -9777,6 +10923,11 @@ components:
         health:
           type: string
           enum: [ok, warning, degraded, critical, unknown]
+        healthReasons:
+          type: array
+          items:
+            $ref: '#/components/schemas/HealthReason'
+          description: "Plugin-reported reasons for a non-ok health (empty when healthy or the plugin doesn't report them)"
         metrics:
           type: object
           additionalProperties: true
@@ -9794,10 +10945,26 @@ components:
         health:
           type: string
           enum: [ok, warning, degraded, critical, unknown]
+        healthReasons:
+          type: array
+          items:
+            $ref: '#/components/schemas/DeviceHealthReason'
+          description: "Worst-wins rollup of the last poll outcomes (same as devices.healthReasons)"
         snapshots:
           type: array
           items:
             $ref: '#/components/schemas/PluginTelemetrySnapshot'
+
+    # One plugin-reported reason for a non-ok monitoring health. Optional on
+    # POST /monitoring — the API persists it and surfaces it in tooltips.
+    HealthReason:
+      type: object
+      required: [severity, message]
+      properties:
+        severity:
+          type: string
+          enum: [warning, critical]
+        message: { type: string, description: "Short human-readable reason (one line, ideally ≤ 120 chars)" }
 
     # --- Device state (per-device Config page) ------------------------------
     # The dynamic device-state document a plugin serves from GET /state. The
@@ -9867,9 +11034,9 @@ components:
         description: { type: string, nullable: true }
         kind:
           type: string
-          enum: [table, switch]
+          enum: [table, switch, enclosure]
           default: table
-          description: "Rendering hint — 'switch' renders a virtual switch face with per-port selection for bulk actions"
+          description: "Rendering hint — 'switch' renders a virtual switch face with per-port selection for bulk actions; 'enclosure' renders a disk-tray face (one LED bay per item, grouped into bands by layout)"
         layout:
           $ref: '#/components/schemas/SwitchLayout'
         items:
@@ -10119,38 +11286,6 @@ components:
         portName: { type: string }
         # `null` clears the marker; otherwise one of uplink | trunk.
         role: { type: ['string', 'null'], enum: [uplink, trunk, null] }
-
-    ConfigJobRequest:
-      type: object
-      required: [pluginId, action, payload]
-      properties:
-        # Which assigned plugin applies the change (a device can have several).
-        pluginId: { type: string }
-        action:
-          type: string
-          enum: [applyConfig, rollbackConfig, syncState]
-        payload:
-          type: object
-          additionalProperties: true
-
-    ConfigJob:
-      type: object
-      required: [id, deviceId, action, status, createdAt]
-      properties:
-        id: { type: string }
-        deviceId: { type: string }
-        pluginId: { type: string, description: "The assignment that executes this job" }
-        action:
-          type: string
-          enum: [applyConfig, rollbackConfig, syncState]
-        status:
-          type: string
-          enum: [queued, running, succeeded, failed]
-        result:
-          type: object
-          additionalProperties: true
-        createdAt: { type: string, format: date-time }
-        finishedAt: { type: string, format: date-time }
 
     # --- Execution plans -----------------------------------------------------
 
@@ -10680,6 +11815,7 @@ components:
       properties:
         id: { type: string }
         name: { type: string }
+        description: { type: [string, 'null'], description: "Short human-readable description of what the plugin manages (advertised in /discover); rendered by the webapp's plugin catalog picker. Null when undeclared" }
         version: { type: string }
         vendors:
           type: array
@@ -10688,7 +11824,7 @@ components:
           type: array
           items:
             type: string
-            enum: [monitoring, configuration, inventory, identityProvider, secretsProvider, deviceState, ssh, filesystem, probe, sshConsole, updates, quickActions, logIngestion, inventorySync]
+            enum: [monitoring, inventory, configuration, planning, deviceState, ssh, filesystem, probe, sshConsole, updates, securityChecks, secretsProvider, fileRepo, identityProvider, logIngestion, quickActions, inventorySync, webFetch]
         endpoint: { type: string, format: uri }
         authType:
           type: string
@@ -10809,7 +11945,7 @@ components:
           type: array
           items:
             type: string
-            enum: [monitoring, configuration, inventory, identityProvider, secretsProvider, deviceState, ssh, filesystem, probe, sshConsole, updates, quickActions, logIngestion, inventorySync]
+            enum: [monitoring, inventory, configuration, planning, deviceState, ssh, filesystem, probe, sshConsole, updates, securityChecks, secretsProvider, fileRepo, identityProvider, logIngestion, quickActions, inventorySync, webFetch]
         endpoint: { type: string, format: uri }
         authType:
           type: string
@@ -10820,7 +11956,7 @@ components:
       type: object
       required: [name, leaderKey, isLeader, beatsCompleted]
       properties:
-        name: { type: string, description: "Worker role id (telemetry, planExecutor, retention, telemetryRetention, pluginMetrics, discovery, configJob)" }
+        name: { type: string, description: "Worker role id (telemetry, planExecutor, retention, telemetryRetention, pluginMetrics, discovery)" }
         leaderKey: { type: integer, description: "Advisory-lock key for this role (-1 = not leader-gated; every replica runs it)" }
         isLeader: { type: boolean, description: "True while THIS instance holds the leadership lock" }
         becameLeaderAt: { type: [string, 'null'], format: date-time, description: "When this instance acquired leadership (null = standby)" }
@@ -11034,6 +12170,172 @@ components:
         serial: { type: string, description: "Hex serial number of the leaf to revoke" }
         reason: { type: integer, nullable: true, description: "Optional CRL revocation reason code (0–10)" }
 
+    BackupMetaResponse:
+      type: object
+      properties:
+        sections:
+          type: array
+          items:
+            type: object
+            required: [key, tables]
+            properties:
+              key: { type: string }
+              tables:
+                type: array
+                items: { type: string }
+        presets:
+          type: object
+          additionalProperties:
+            type: array
+            items: { type: string }
+        excludedTables:
+          type: array
+          items: { type: string }
+    BackupCreateRequest:
+      type: object
+      required: [destination]
+      properties:
+        name: { type: string, description: Display name (default derived from scope + date) }
+        preset: { type: string, enum: [config, planned, all], description: Preset bundle; ignored when sections is given }
+        sections:
+          type: array
+          items: { type: string, enum: [identity, settings, devices, documented, plans, automations, secrets, liveInventory] }
+        destination: { type: string, enum: [local, repo] }
+        providerId: { type: string, description: File-repo plugin instance id (required for destination=repo) }
+        passphrase:
+          type: string
+          description: "Required when sections contains 'secrets' — encrypts the decrypted credentials into a portable envelope (scrypt + AES-256-GCM). Never stored; needed again to restore on another instance. The secrets section is in no preset and never crosses replication."
+    BackupEntry:
+      type: object
+      required: [id, name, scope, sections, sizeBytes, sha256, source, createdAt]
+      properties:
+        id: { type: string }
+        name: { type: string }
+        scope: { type: string, description: Preset name when the section set matches one, else "custom" }
+        sections:
+          type: array
+          items: { type: string }
+        sizeBytes: { type: integer, format: int64 }
+        sha256: { type: string }
+        source: { type: string, enum: [local, repo] }
+        providerId: { type: string, nullable: true, description: Bound file-repo instance (repo backups) }
+        providerName: { type: string, nullable: true, description: Display name of the bound instance; "unknown provider <id>" when deregistered }
+        fileMissing: { type: boolean, description: Local bytes deleted out-of-band (metadata row remains) }
+        createdAt: { type: string, format: date-time }
+    BackupManifest:
+      type: object
+      required: [format, schemaVersion, exportedAt, scope, sections]
+      properties:
+        format: { type: string, enum: [unm-backup] }
+        schemaVersion: { type: integer }
+        exportedAt: { type: string, format: date-time }
+        instanceName: { type: string }
+        buildTag: { type: string }
+        scope: { type: string }
+        secretsEncrypted: { type: boolean, description: "True when the archive carries a passphrase-encrypted device-credentials envelope (restore requires the passphrase)" }
+        sections:
+          type: object
+          additionalProperties:
+            type: object
+            required: [rowCount]
+            properties:
+              rowCount: { type: integer }
+              tables:
+                type: object
+                additionalProperties: { type: integer }
+    RestoreUploadResponse:
+      type: object
+      required: [pendingId, manifest]
+      properties:
+        pendingId: { type: string }
+        manifest:
+          $ref: '#/components/schemas/BackupManifest'
+    RestoreApplyRequest:
+      type: object
+      properties:
+        pendingId: { type: string, description: Staged upload id from POST /backups/restore/upload }
+        backupId: { type: string, description: Stored backup id (alternative to pendingId) }
+        sections:
+          type: array
+          items: { type: string }
+          description: "Subset of the archive's sections (default: all present)"
+        passphrase:
+          type: string
+          description: "Required when applying an archive that carries a 'secrets' envelope — unlocks it. Secrets are re-encrypted under this instance's provider key with their original ids preserved."
+    SectionMergeReport:
+      type: object
+      required: [section, tables]
+      properties:
+        section: { type: string }
+        tables:
+          type: array
+          items:
+            type: object
+            required: [table, created, updated]
+            properties:
+              table: { type: string }
+              created: { type: integer }
+              updated: { type: integer }
+              skipped: { type: integer, description: Rows skipped (e.g. unknown setting keys) }
+        warnings:
+          type: array
+          items: { type: string }
+    ReplicationTargetCreateRequest:
+      type: object
+      required: [name, baseUrl, token]
+      properties:
+        name: { type: string, description: Display name for the peer target }
+        baseUrl: { type: string, description: "Peer API base URL (http/https; a trailing /v1 is tolerated)" }
+        token: { type: string, description: Peer API token carrying instance:backup on that instance }
+        direction: { type: string, enum: [push, pull], default: push, description: push = send this instance's config to the peer; pull = fetch and merge the peer's config here }
+        enabled: { type: boolean, default: true }
+        intervalMinutes: { type: integer, minimum: 1, maximum: 1440, nullable: true, description: Scheduled sync cadence (null = manual only) }
+        excludeKeys:
+          type: array
+          items: { type: string }
+          description: "Setting keys stripped before sending/applying (default: identity-bound settings)"
+    ReplicationTarget:
+      type: object
+      required: [id, name, baseUrl, direction, enabled]
+      properties:
+        id: { type: string }
+        name: { type: string }
+        baseUrl: { type: string }
+        direction: { type: string, enum: [push, pull] }
+        enabled: { type: boolean }
+        intervalMinutes: { type: integer, nullable: true }
+        excludeKeys:
+          type: array
+          items: { type: string }
+        lastSyncAt: { type: string, format: date-time, nullable: true }
+        lastSyncStatus: { type: string, enum: [ok, error], nullable: true }
+        lastError: { type: string, nullable: true }
+        lastReport: { type: object, description: Last SyncReport as an object (empty until first sync) }
+        createdAt: { type: string, format: date-time }
+    SyncReport:
+      type: object
+      required: [status, at, direction]
+      properties:
+        status: { type: string, enum: [ok, error] }
+        at: { type: string, format: date-time }
+        direction: { type: string, enum: [push, pull] }
+        sections:
+          type: array
+          items: { type: string }
+        tables:
+          type: array
+          description: Per-table merge counts (SectionMergeReport.tables entries)
+          items:
+            type: object
+            properties:
+              table: { type: string }
+              created: { type: integer }
+              updated: { type: integer }
+              skipped: { type: integer }
+        warnings:
+          type: array
+          items: { type: string }
+        error: { type: string, description: Present when status is error }
     CaRevokeResponse:
       type: object
       required: [serial]
@@ -11041,3 +12343,411 @@ components:
         serial: { type: string }
         caStatus: { type: integer, description: "HTTP status returned by the CA's /1.0/revoke endpoint" }
         caResponse: { description: "Raw response body from the CA" }
+
+    # ── Actions & Schedules (automation engine) ──────────────────────────────
+    AutomationDeviceScope:
+      type: object
+      description: >-
+        Which devices a trigger/action applies to. "Any rule matches" semantics —
+        empty/absent = every device; otherwise the device qualifies when it
+        matches ANY provided list (site id, tag or explicit id).
+      properties:
+        siteIds: { type: array, items: { type: string } }
+        tags: { type: array, items: { type: string } }
+        deviceIds: { type: array, items: { type: string } }
+
+    AutomationScheduleSpec:
+      oneOf:
+        - type: object
+          required: [kind, expr]
+          properties:
+            kind: { type: string, enum: [cron] }
+            expr: { type: string, description: "5-field cron expression (server local time)" }
+        - type: object
+          required: [kind, everyMinutes]
+          properties:
+            kind: { type: string, enum: [interval] }
+            everyMinutes: { type: integer, minimum: 1 }
+        - type: object
+          required: [kind, time]
+          properties:
+            kind: { type: string, enum: [dailyAt] }
+            time: { type: string, pattern: "^([01]\\d|2[0-3]):[0-5]\\d$", description: '"HH:MM" 24h (server local time)' }
+
+    AutomationTriggerBlock:
+      oneOf:
+        - $ref: '#/components/schemas/AutomationScheduleTrigger'
+        - $ref: '#/components/schemas/AutomationMetricTrigger'
+        - $ref: '#/components/schemas/AutomationLogTrigger'
+        - $ref: '#/components/schemas/AutomationDeviceStatusTrigger'
+        - $ref: '#/components/schemas/AutomationFlowTrigger'
+        - $ref: '#/components/schemas/AutomationContainerLogTrigger'
+        - $ref: '#/components/schemas/AutomationUpdateTrigger'
+
+    AutomationScheduleTrigger:
+      type: object
+      required: [id, type, schedule]
+      properties:
+        id: { type: string }
+        type: { type: string, enum: [schedule] }
+        schedule: { $ref: '#/components/schemas/AutomationScheduleSpec' }
+
+    AutomationMetricTrigger:
+      type: object
+      required: [id, type, metricKey, mode]
+      properties:
+        id: { type: string }
+        type: { type: string, enum: [metric] }
+        scope: { $ref: '#/components/schemas/AutomationDeviceScope' }
+        pluginId: { type: string }
+        metricKey: { type: string, description: "Dot-notation key in the telemetry metrics blob" }
+        mode: { type: string, enum: [compare, regex] }
+        comparator: { type: string, enum: ['>', '>=', '<', '<=', '=', '!='] }
+        value: { oneOf: [{ type: number }, { type: string }] }
+        pattern: { type: string, description: "JS regex source (search semantics), required for mode=regex" }
+        durationSec: { type: integer, minimum: 0, description: "Condition must hold this long before firing (0 = immediate)" }
+
+    AutomationLogTrigger:
+      type: object
+      required: [id, type, source, pattern]
+      properties:
+        id: { type: string }
+        type: { type: string, enum: [log] }
+        source: { type: string, enum: [plugin, firewall] }
+        scope: { $ref: '#/components/schemas/AutomationDeviceScope' }
+        pluginId: { type: string }
+        levels: { type: array, items: { type: string, enum: [debug, info, warn, error] } }
+        pattern: { type: string, description: "JS regex source (search semantics) matched against the message" }
+
+    AutomationDeviceStatusTrigger:
+      type: object
+      required: [id, type, toStatuses]
+      properties:
+        id: { type: string }
+        type: { type: string, enum: [deviceStatus] }
+        scope: { $ref: '#/components/schemas/AutomationDeviceScope' }
+        toStatuses:
+          type: array
+          minItems: 1
+          items: { type: string, enum: [unknown, online, degraded, critical, offline] }
+
+    AutomationFlowTrigger:
+      type: object
+      required: [id, type, comparator, thresholdBytes]
+      description: >-
+        Fires when traffic observed by the flow collector crosses a threshold.
+        Evaluated over a sliding window (windowSec) of the aggregate tables;
+        durationSec>0 requires the condition to hold continuously that long.
+      properties:
+        id: { type: string }
+        type: { type: string, enum: [flow] }
+        scope: { $ref: '#/components/schemas/AutomationDeviceScope' }
+        direction: { type: string, enum: [any, src, dst], default: any, description: "Which endpoint to measure" }
+        endpointClass: { type: string, enum: [internal, internet, unknown], description: "Only endpoints classified as this (absent = all)" }
+        ip: { type: string, description: "Optional exact-IP filter on the measured endpoint" }
+        windowSec: { type: integer, minimum: 60, maximum: 3600000, default: 300, description: "Sliding window length in seconds" }
+        comparator: { type: string, enum: ['>', '>=', '<', '<=', '=', '!='] }
+        thresholdBytes: { type: number, minimum: 0 }
+        durationSec: { type: integer, minimum: 0, description: "Condition must hold this long before firing (0 = immediate)" }
+
+    AutomationContainerLogTrigger:
+      type: object
+      required: [id, type, pluginId, appName, pattern]
+      description: >-
+        Fires when NEW lines appear in a container's log output. The worker tails
+        the app through the plugin's containers.logs.read action and compares each
+        line against previously-seen lines (content-hash ring buffer). First run
+        seeds the seen-set without firing.
+      properties:
+        id: { type: string }
+        type: { type: string, enum: [containerLog] }
+        scope: { $ref: '#/components/schemas/AutomationDeviceScope' }
+        pluginId: { type: string, description: "Plugin providing containers.logs.read (ix-truenas or docker)" }
+        appName: { type: string, minLength: 1, description: "App / container name as shown on the Containers page" }
+        tail: { type: integer, minimum: 20, maximum: 5000, default: 300, description: "Trailing lines to read per evaluation" }
+        pattern: { type: string, description: "JS regex source (search semantics) matched against each new line" }
+
+    AutomationUpdateTrigger:
+      type: object
+      required: [id, type, condition]
+      description: >-
+        Fires on UPDATE transitions in device_updates (the Updates page's data):
+        a row appearing, its version advancing, or the row disappearing.
+        `condition` selects which transitions fire ('available' = appeared/
+        advanced, 'resolved' = disappeared). `defer` holds each firing until
+        the next occurrence of its schedule spec; `maxWaitHours` caps how long
+        an event waits before firing immediately. A `rebootRequired` filter
+        never matches rows whose flag is null (unknown ≠ safe to auto-apply).
+      properties:
+        id: { type: string }
+        type: { type: string, enum: [updateAvailable] }
+        scope: { $ref: '#/components/schemas/AutomationDeviceScope' }
+        pluginId: { type: string, description: "Only updates reported by this plugin (absent = all)" }
+        kinds: { type: array, items: { type: string }, description: "Only these device_updates.kind values (absent = all; plugins may emit custom kinds)" }
+        names: { type: array, items: { type: string }, description: "Exact row names to match (absent/empty = all)" }
+        namePattern: { type: string, description: "JS regex source matched against the row name (search semantics)" }
+        condition: { type: string, enum: [available, resolved] }
+        rebootRequired: { type: boolean, description: "Only rows whose rebootRequired flag EQUALS this value (null-flagged rows never match)" }
+        defer:
+          type: object
+          required: [schedule]
+          properties:
+            schedule: { $ref: '#/components/schemas/AutomationScheduleSpec' }
+            maxWaitHours: { type: number, exclusiveMinimum: 0, description: "Fire immediately once the event has waited this long (absent = wait for the slot unbounded)" }
+
+    AutomationActionBlock:
+      oneOf:
+        - $ref: '#/components/schemas/AutomationIntentAction'
+        - $ref: '#/components/schemas/AutomationWebhookAction'
+        - $ref: '#/components/schemas/AutomationNotificationAction'
+        - $ref: '#/components/schemas/AutomationInternalAction'
+
+    AutomationIntentAction:
+      type: object
+      required: [id, type]
+      description: >-
+        Creates + enqueues a plan (the same path the webapp's CreatePlan dialog
+        uses). `pluginId`/`actionId` are required unless `resolveFromTrigger`
+        is 'update', in which case they are filled at fire time from the firing
+        update row's apply path.
+      properties:
+        id: { type: string }
+        type: { type: string, enum: [intent] }
+        pluginId: { type: string, description: "Required unless resolveFromTrigger fills it" }
+        actionId: { type: string, description: "Catalog entry id (plugins.actionDescriptors). Required unless resolveFromTrigger fills it." }
+        devices:
+          type: object
+          properties:
+            scope: { $ref: '#/components/schemas/AutomationDeviceScope' }
+            deviceIds: { type: array, items: { type: string }, description: "Explicit ids narrow/override the scope" }
+        input: { type: object, additionalProperties: true, description: "Intent payload (validated against the catalog inputSchema in the UI). With resolveFromTrigger='update' it overrides the row's pre-filled applyInput." }
+        resolveFromTrigger: { type: string, enum: [update], description: "Fill pluginId/actionId/input from the firing update row's apply path (updateAvailable triggers only)" }
+        requireNoReboot: { type: boolean, default: false, description: "Skip execution when the firing update row requires a reboot" }
+
+    AutomationWebhookAction:
+      type: object
+      required: [id, type, url]
+      properties:
+        id: { type: string }
+        type: { type: string, enum: [webhook] }
+        url: { type: string, pattern: '^https?://', description: "http(s) endpoint (10 s timeout)" }
+        method: { type: string, enum: [GET, POST, PUT, PATCH], default: POST }
+        headers: { type: object, additionalProperties: { type: string } }
+        bodyTemplate: { type: string, description: "JSON or raw template with {{…}} tokens" }
+
+    AutomationNotificationAction:
+      type: object
+      required: [id, type, severity, titleTemplate, messageTemplate]
+      properties:
+        id: { type: string }
+        type: { type: string, enum: [notification] }
+        severity: { type: string, enum: [info, warning, critical] }
+        titleTemplate: { type: string, maxLength: 300 }
+        messageTemplate: { type: string, maxLength: 2000 }
+
+    AutomationInternalAction:
+      type: object
+      required: [id, type, kind]
+      properties:
+        id: { type: string }
+        type: { type: string, enum: [internal] }
+        kind: { type: string, enum: [backup, replicationSync] }
+        preset: { type: string, enum: [config, planned, all], description: "backup only (default config)" }
+        sections: { type: array, items: { type: string }, description: "backup only — explicit section list overrides preset" }
+        destination: { type: string, enum: [local, repo], default: local, description: "backup only (v1 stores local)" }
+        targetId: { type: string, description: "replicationSync only — replication_targets.id" }
+
+    AutomationDraft:
+      type: object
+      required: [name, triggers, actions]
+      properties:
+        name: { type: string, minLength: 1, maxLength: 200 }
+        description: { type: string, nullable: true }
+        enabled: { type: boolean, default: true }
+        triggers:
+          type: array
+          minItems: 1
+          items: { $ref: '#/components/schemas/AutomationTriggerBlock' }
+        actions:
+          type: array
+          minItems: 1
+          items: { $ref: '#/components/schemas/AutomationActionBlock' }
+        cooldownSec: { type: integer, minimum: 0, default: 0, description: "Minimum seconds between two firings (event-trigger throttle)" }
+
+    AutomationDraftPatch:
+      description: Partial automation update — every field is optional; omitted fields keep their current values.
+      type: object
+      properties:
+        name: { type: string, minLength: 1, maxLength: 200 }
+        description: { type: ['string', 'null'] }
+        enabled: { type: boolean }
+        triggers:
+          type: array
+          minItems: 1
+          items: { $ref: '#/components/schemas/AutomationTriggerBlock' }
+        actions:
+          type: array
+          minItems: 1
+          items: { $ref: '#/components/schemas/AutomationActionBlock' }
+        cooldownSec: { type: integer, minimum: 0 }
+
+    Automation:
+      allOf:
+        - $ref: '#/components/schemas/AutomationDraft'
+        - type: object
+          required: [id, createdAt, updatedAt]
+          properties:
+            id: { type: string }
+            lastFiredAt: { type: string, format: date-time, nullable: true }
+            createdBy: { type: string, nullable: true }
+            createdAt: { type: string, format: date-time }
+            updatedAt: { type: string, format: date-time }
+            nextUpdateRun:
+              description: >-
+                Earliest firing time across the rule's open deferral windows for
+                deferred updateAvailable triggers (the maintenance slot its pending
+                updates will fire at). Null when no window is open. Computed on list;
+                not part of create/patch payloads.
+              type: ['string', 'null']
+              format: date-time
+
+    AutomationResponse:
+      type: object
+      required: [automation]
+      properties:
+        automation:
+          allOf:
+            - $ref: '#/components/schemas/Automation'
+            - type: object
+              properties:
+                schedulePreviews:
+                  description: "triggerId → next occurrence (ISO) for each schedule trigger"
+                  type: object
+                  additionalProperties: { type: string, format: date-time, nullable: true }
+
+    AutomationTemplate:
+      type: object
+      required: [id, name, source, sourceName, draft]
+      properties:
+        id: { type: string }
+        name: { type: string }
+        description: { type: string }
+        source: { type: string, description: "'builtin' or the advertising plugin's id" }
+        sourceName: { type: string, description: "Display name of the source ('Built-in' for built-ins)" }
+        draft:
+          type: object
+          required: [name, triggers, actions]
+          properties:
+            name: { type: string }
+            description: { type: string, nullable: true }
+            enabled: { type: boolean }
+            triggers: { type: array, minItems: 1, items: { $ref: '#/components/schemas/AutomationTriggerBlock' } }
+            actions: { type: array, minItems: 1, items: { $ref: '#/components/schemas/AutomationActionBlock' } }
+            cooldownSec: { type: integer, minimum: 0 }
+
+    AutomationTemplatesResponse:
+      type: object
+      required: [templates]
+      properties:
+        templates: { type: array, items: { $ref: '#/components/schemas/AutomationTemplate' } }
+
+    AutomationListResponse:
+      type: object
+      required: [automations]
+      properties:
+        automations:
+          type: array
+          items:
+            allOf:
+              - $ref: '#/components/schemas/Automation'
+              - type: object
+                properties:
+                  schedulePreviews:
+                    type: object
+                    additionalProperties: { type: string, format: date-time, nullable: true }
+
+    AutomationRun:
+      type: object
+      required: [id, automationId, firedAt, triggerType, status]
+      properties:
+        id: { type: string }
+        automationId: { type: string }
+        firedAt: { type: string, format: date-time }
+        triggerType: { type: string, enum: [schedule, metric, log, deviceStatus, flow, containerLog, updateAvailable] }
+        context: { type: object, additionalProperties: true, description: "Trigger context at firing time" }
+        status: { type: string, enum: [succeeded, failed, partial, skipped] }
+        error: { type: string, nullable: true }
+        planIds: { type: array, items: { type: string }, description: "Plans created by intent actions" }
+
+    AutomationRunResponse:
+      type: object
+      required: [run]
+      properties:
+        run: { $ref: '#/components/schemas/AutomationRun' }
+        runs:
+          type: array
+          description: "All run rows written by this trigger (apply mode with an updateAvailable trigger writes one per live row)"
+          items: { $ref: '#/components/schemas/AutomationRun' }
+
+    AutomationRunsResponse:
+      type: object
+      required: [runs]
+      properties:
+        runs:
+          type: array
+          items: { $ref: '#/components/schemas/AutomationRun' }
+
+    SimulatedAction:
+      description: "Predicted outcome of one action block in a dry run (nothing was executed)."
+      type: object
+      required: [id, type, status, summary]
+      properties:
+        id: { type: string }
+        type: { type: string, enum: [intent, webhook, notification, internal] }
+        status:
+          type: string
+          enum: [would-run, skipped, error]
+          description: "would-run = would execute; skipped = deliberately skipped (e.g. requireNoReboot); error = would fail to resolve/build"
+        summary: { type: string, description: "One-line human description of what would happen." }
+        plan:
+          description: "For intent actions that resolve cleanly — the exact plan a real apply would build (built then torn down)."
+          type: object
+          required: [pluginId, actionId, deviceIds, steps]
+          properties:
+            pluginId: { type: string }
+            actionId: { type: string }
+            deviceIds:
+              type: array
+              items: { type: string }
+            steps:
+              type: array
+              items:
+                type: object
+                required: [stepIndex, deviceId, actionId]
+                properties:
+                  stepIndex: { type: integer }
+                  deviceId: { type: string }
+                  actionId: { type: string }
+        detail:
+          description: "Skip reason or error message (null when not applicable)."
+          type: ['string', 'null']
+
+    SimulatedFiring:
+      description: "One simulated firing of a trigger block in a dry run."
+      type: object
+      required: [trigger, label, actions]
+      properties:
+        trigger: { $ref: '#/components/schemas/AutomationTriggerBlock' }
+        label: { type: string, description: "Human label — e.g. 'update web09 (KIRGUSBANDE)' or 'schedule (dailyAt)'." }
+        actions:
+          type: array
+          items: { $ref: '#/components/schemas/SimulatedAction' }
+
+    AutomationDryRunResponse:
+      type: object
+      required: [firings]
+      properties:
+        firings:
+          description: "One entry per simulated firing (updateAvailable triggers produce one per currently-available row)."
+          type: array
+          items: { $ref: '#/components/schemas/SimulatedFiring' }

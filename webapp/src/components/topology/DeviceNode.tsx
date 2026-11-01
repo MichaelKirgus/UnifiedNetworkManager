@@ -3,6 +3,7 @@ import { Handle, Position } from '@xyflow/react';
 import clsx from 'clsx';
 import type { TopologyNode as TopoNode, TopologyPort } from '../../api/client';
 import { StatusBadge } from '../StatusBadge';
+import { TrafficBadge } from './TrafficBadge';
 
 /**
  * Device node for the topology graph. Shows icon placeholder + name + status;
@@ -78,7 +79,23 @@ export function SideHandles() {
   return <>{handles}</>;
 }
 
-export function DeviceNode({ data }: { data: TopoNode & { kind: 'device' } }) {
+/** All eight wall handles stacked at ONE point — the center of their parent.
+ * For nodes whose visual anchor is a sub-element (a host dot inside a
+ * dot+label row, a hub circle above its label), SideHandles would put edge
+ * endpoints at the CARD center and lines visibly miss the shape. Render this
+ * INSIDE the anchored element instead: every edge then ends exactly on it. */
+export function CenterHandles() {
+  const handles: React.ReactElement[] = [];
+  for (const { id } of WALLS) {
+    handles.push(
+      <Handle key={`${id}s`} id={`${id}s`} type="source" position={Position.Top} className="!absolute !left-1/2 !top-1/2 !h-1 !w-1 -translate-x-1/2 -translate-y-1/2 opacity-0" />,
+      <Handle key={`${id}t`} id={`${id}t`} type="target" position={Position.Top} className="!absolute !left-1/2 !top-1/2 !h-1 !w-1 -translate-x-1/2 -translate-y-1/2 opacity-0" />
+    );
+  }
+  return <>{handles}</>;
+}
+
+export function DeviceNode({ data }: { data: (TopoNode & { kind: 'device' }) & { trafficBytes?: number } }) {
   const layer = layerInfo(data.layer);
   return (
     <div className="flex flex-col items-center gap-1">
@@ -104,7 +121,15 @@ export function DeviceNode({ data }: { data: TopoNode & { kind: 'device' } }) {
             {layer.name}
           </span>
         )}
-        <span className="text-[10px] text-faint">{data.managementAddress}</span>
+        {/* Traffic overlay badge rides the address line — a separate row would
+            grow the card and break the fixed grid pitch (ROW_H) when port
+            chips wrap. */}
+        <div className="flex w-full items-center justify-between gap-1">
+          <span className="truncate text-[10px] text-faint">{data.managementAddress}</span>
+          {typeof data.trafficBytes === 'number' && data.trafficBytes > 0 && (
+            <TrafficBadge bytes={data.trafficBytes} />
+          )}
+        </div>
         {data.ports.length > 0 && (
           <div className="flex w-full flex-wrap gap-0.5">
             {/* Cap at 8 chips: keeps the node height bounded so the

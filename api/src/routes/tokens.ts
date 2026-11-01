@@ -103,7 +103,7 @@ router.delete('/tokens/:id', requireAuth, async (req: Request, res: Response) =>
     return;
   }
   try {
-    await revokeApiToken(req.params.id, req.user!.sub, { admin: canRevokeAny });
+    await revokeApiToken(String(req.params.id ?? ''), req.user!.sub, { admin: canRevokeAny });
     res.status(204).send();
   } catch (err) {
     const e = err as { status?: number; message?: string };

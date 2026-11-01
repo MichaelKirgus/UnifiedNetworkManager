@@ -6,7 +6,7 @@ import { db } from '../db';
 import * as schema from '../db/schema';
 import { requireAuth, requirePermission, require2FA } from '../auth/middleware';
 import { allowedDeviceIds } from '../deviceAccess';
-import { getSecret, generateSecret, regenerateSecret, deleteSecret } from '../secretsProvider';
+import { getSecret, regenerateSecret, deleteSecret } from '../secretsProvider';
 import { settingsHeaders } from '../pluginSettings';
 import { decryptCredentialSlots, withSlots } from '../utils/slotCredentials';
 import { parseExtraCredentials } from '../types/credentialSlots';
@@ -15,6 +15,7 @@ import { isCanonicalIntent, type CatalogEntry as SdkCatalogEntry } from '@unm/pl
 import { validateInput, type InputSchema } from '../utils/inputSchema';
 import { networkChecksForDevices, networkCheck, assertRolloutAllowed } from '../utils/networkCheck';
 import { suggestRolloutAddresses } from '../utils/ipAllocation';
+import { createPlanCore } from '../utils/createPlanCore';
 
 const router = Router();
 
@@ -577,31 +578,10 @@ router.post(
       return;
     }
 
-    const plugin = await db.query.plugins.findFirst({
-      where: (plugins, { eq }) => eq(plugins.id, pluginId),
-    });
-    if (!plugin) {
-      res.status(404).json({ error: 'Plugin not found' });
-      return;
-    }
-
-    const catalog = await loadCatalog(pluginId);
-    const intent = catalog.find((c) => c.id === intentActionId);
-    // Canonical fleet intents (network.create, …) FAN OUT — one step per device,
-    // any count. Older persisted catalogs may still carry a numeric deviceCount
-    // for them; the 'N' contract wins over the stale number.
-    if (intent && typeof intent.deviceCount === 'number' && !isCanonicalIntent(intentActionId)) {
-      // Multi-device intents name an exact device count (e.g. 2 for tunnels).
-      if (devicesRaw.length !== intent.deviceCount) {
-        res.status(400).json({
-          error: `Intent ${intentActionId} requires exactly ${intent.deviceCount} devices, got ${devicesRaw.length}`,
-        });
-        return;
-      }
-    }
-
-    // Resolve each device's assignment + credentials for THIS plugin.
-    const planDevices: Array<{ deviceId: string; managementAddress: string; credentials: Record<string, unknown> }> = [];
+    // Device-level access control — a plan may only be created for the
+    // caller's own devices (out-of-scope ids are indistinguishable from unknown).
+    const allowed = await allowedDeviceIds(req);
+    const deviceIds: string[] = [];
     for (const d of devicesRaw) {
       if (!d || typeof d.deviceId !== 'string') {
         res.status(400).json({ error: 'Each device entry must be { deviceId }' });
@@ -610,47 +590,11 @@ router.post(
       const device = await db.query.devices.findFirst({
         where: (devices, { eq }) => eq(devices.id, d.deviceId),
       });
-      if (!device) {
+      if (!device || (allowed !== null && !allowed.has(device.id))) {
         res.status(404).json({ error: `Device not found: ${d.deviceId}` });
         return;
       }
-      // Device-level access control — a plan may only be created for the
-      // caller's own devices (out-of-scope ids are indistinguishable from unknown).
-      const allowed = await allowedDeviceIds(req);
-      if (allowed !== null && !allowed.has(device.id)) {
-        res.status(404).json({ error: `Device not found: ${d.deviceId}` });
-        return;
-      }
-      const assignment = await resolveAssignment(device.id, pluginId);
-      if (!assignment) {
-        res.status(400).json({ error: `Plugin is not assigned to device "${device.name}"` });
-        return;
-      }
-      let credentials: Record<string, unknown> = {};
-      if (assignment.secretId) {
-        try {
-          const decrypted = await getSecret(assignment.secretId);
-          credentials = { ...decrypted.fields };
-        } catch (err) {
-          res.status(502).json({ error: `Could not load device credentials: ${(err as Error).message}` });
-          return;
-        }
-      } else if (intent && intent.deviceCount !== 1) {
-        // Multi-device intents always need appliance credentials. A bound PRIMARY
-        // secret OR any bound credential slot counts — the executor passes slots
-        // through under credentials.slots.<name>, so a slot-only assignment (e.g.
-        // TrueNAS with just an apiKey slot) is legitimately usable. Devices with
-        // NO credential at all are rejected here; plugin-level auth failures on
-        // insufficient-but-present credentials surface per-step at execution time.
-        const slots = parseExtraCredentials(assignment.extraCredentials);
-        if (Object.keys(slots).length === 0) {
-          res.status(400).json({
-            error: `Device "${device.name}" has no secret assigned for this plugin — multi-device intents require credentials`,
-          });
-          return;
-        }
-      }
-      planDevices.push({ deviceId: device.id, managementAddress: device.managementAddress, credentials });
+      deviceIds.push(device.id);
     }
 
     // Server-side rollout safety net: in "block" mode a network.create whose
@@ -661,9 +605,9 @@ router.post(
     // `rolloutOverlapMode` system setting.
     if (intentActionId === 'network.create') {
       try {
-        const perDevice = planDevices.map((d) => ({
-          deviceId: d.deviceId,
-          inputs: deviceInputs[d.deviceId] ? { ...inputs, ...deviceInputs[d.deviceId] } : { ...inputs },
+        const perDevice = deviceIds.map((deviceId) => ({
+          deviceId,
+          inputs: deviceInputs[deviceId] ? { ...inputs, ...deviceInputs[deviceId] } : { ...inputs },
         }));
         const blockError = await assertRolloutAllowed(intentActionId, perDevice);
         if (blockError) {
@@ -675,124 +619,34 @@ router.post(
       }
     }
 
-    // Ask the plugin to build the plan. Settings (transport/edition/backend)
-    // ride in x-unm-settings exactly like /config calls do.
-    const headers = await settingsHeaders(pluginId, planDevices[0].deviceId).catch(() => ({}));
-    let plan: {
-      id: string;
-      createdAt: string;
-      intentActionId: string;
-      provisionRequests: Array<{ ref: string; type: string; fields?: Record<string, unknown>; label?: string }>;
-      steps: Array<{
-        stepIndex: number;
-        deviceId: string;
-        actionId: string;
-        input: Record<string, unknown>;
-        dependsOn?: number[];
-        secretRefs?: string[];
-        bestEffort?: boolean;
-      }>;
-      /** Optional per-plan retry override the plugin wants (e.g. disable retries for a critical intent). */
-      retryPolicy?: { maxAttempts?: number; waitMs?: number } | null;
-    };
-    try {
-      const response = await pluginAxios(plugin.endpoint).post(
-        '/plan',
-        { intent: { actionId: intentActionId, inputs }, devices: planDevices, ...(Object.keys(deviceInputs).length > 0 ? { deviceInputs } : {}) },
-        { timeout: 20_000, headers }
-      );
-      plan = response.data?.plan;
-      if (!plan || !Array.isArray(plan.steps)) throw new Error('Plugin did not return a valid plan');
-    } catch (err) {
-      const e = err as { response?: { status?: number; data?: { error?: string } }; message?: string };
-      if (e.response?.status === 400) {
-        res.status(400).json({ error: e.response.data?.error ?? 'Planning failed' });
-        return;
-      }
-      res.status(502).json({ error: `Plugin planning failed: ${e.message ?? 'unreachable'}` });
-      return;
-    }
-
-    // Fulfil provisionRequests NOW (user decision: provisioning at creation).
-    const userId = req.user?.sub ?? '';
-    const provisionedSecrets: Record<string, string> = {};
-    try {
-      for (const pr of plan.provisionRequests ?? []) {
-        if (!pr || typeof pr.ref !== 'string' || typeof pr.type !== 'string') continue;
-        const created = await generateSecret({
-          type: pr.type,
-          fields: pr.fields,
-          label: pr.label ?? `Plan ${plan.id.slice(0, 8)} — ${pr.ref}`,
-          userId,
-        });
-        provisionedSecrets[pr.ref] = created.id;
-      }
-    } catch (err) {
-      // Roll back anything we already created for this plan.
-      for (const secretId of Object.values(provisionedSecrets)) {
-        await deleteSecret(secretId).catch(() => undefined);
-      }
-      res.status(502).json({ error: `Provisioning failed: ${(err as Error).message}` });
-      return;
-    }
-
-    // Per-plan retry policy: the user's explicit choice wins; otherwise a plugin
-    // may set one on the plan it returns from /plan (e.g. { maxAttempts: 0 } to
-    // disable retries for a critical intent); otherwise null = global defaults.
+    // Per-plan retry policy: the user's explicit choice wins (the plugin's own
+    // suggestion and global defaults are resolved inside createPlanCore).
     const bodyRetryPolicy = isPlainObject(body.retryPolicy) ? (body.retryPolicy as Record<string, unknown>) : undefined;
-    let retryPolicyJson: string | null = null;
+    let retryPolicy: { maxAttempts?: number; waitMs?: number } | null | undefined;
     if (bodyRetryPolicy !== undefined) {
-      retryPolicyJson = JSON.stringify({
+      retryPolicy = {
         ...(typeof bodyRetryPolicy['maxAttempts'] === 'number' ? { maxAttempts: Math.trunc(bodyRetryPolicy['maxAttempts']) } : {}),
         ...(typeof bodyRetryPolicy['waitMs'] === 'number' ? { waitMs: Math.round(bodyRetryPolicy['waitMs']) } : {}),
-      });
-    } else if (plan.retryPolicy && typeof plan.retryPolicy === 'object') {
-      retryPolicyJson = JSON.stringify({
-        ...(typeof plan.retryPolicy.maxAttempts === 'number' ? { maxAttempts: Math.trunc(plan.retryPolicy.maxAttempts) } : {}),
-        ...(typeof plan.retryPolicy.waitMs === 'number' ? { waitMs: Math.round(plan.retryPolicy.waitMs) } : {}),
-      });
+      };
     }
 
-    const now = new Date().toISOString();
-    const planRowId = uuidv4();
-    await db.insert(schema.plans).values({
-      id: planRowId,
-      pluginId,
-      intentActionId,
-      // Persist the raw intent inputs so every execution of this plan (and any
-      // retry that duplicates it) is fully transparent about what was applied.
-      intentInputs: JSON.stringify(inputs),
-      status: 'ready',
-      provisionedSecrets: JSON.stringify(provisionedSecrets),
-      error: null,
-      createdBy: userId,
-      executedBy: null,
-      cancelledAt: null,
-      createdAt: now,
-      updatedAt: now,
-      startedAt: null,
-      finishedAt: null,
-      retryPolicy: retryPolicyJson,
-    });
-    for (const step of plan.steps) {
-      await db.insert(schema.planSteps).values({
-        id: uuidv4(),
-        planId: planRowId,
-        stepIndex: step.stepIndex,
-        deviceId: step.deviceId,
-        actionId: step.actionId,
-        input: JSON.stringify(step.input ?? {}),
-        dependsOn: JSON.stringify(step.dependsOn ?? []),
-        secretRefs: JSON.stringify(step.secretRefs ?? []),
-        bestEffort: !!step.bestEffort,
-        status: 'pending',
-        result: null,
-        startedAt: null,
-        finishedAt: null,
+    // The shared core (utils/createPlanCore.ts) resolves assignments + credentials,
+    // asks the plugin to build the plan, fulfils provisionRequests and persists.
+    try {
+      const { planId } = await createPlanCore({
+        pluginId,
+        intentActionId,
+        inputs,
+        deviceIds,
+        deviceInputs,
+        createdBy: req.user?.sub ?? '',
+        retryPolicy,
       });
+      res.status(201).json(await serializePlan(planId, true));
+    } catch (err) {
+      const e = err as { status?: number; message?: string };
+      res.status(e.status ?? 500).json({ error: e.message ?? 'Failed to create plan' });
     }
-
-    res.status(201).json(await serializePlan(planRowId, true));
   }
 );
 
@@ -832,7 +686,7 @@ router.get('/plans/activity', requireAuth, requirePermission('plans:read'), asyn
   for (const row of planRows) {
     const steps = await loadSteps(row.id);
     const done = steps.filter((s) => s.status === 'succeeded').length;
-    out.push({ ...serializePlanRow(row, usernames), provisionedSecrets: secretsMeta.get(row.id) ?? [], stepCount: steps.length, stepsDone: done });
+    out.push({ ...serializePlanRow(row, usernames), provisionedSecrets: secretsMeta.get(row.id) ?? [], stepCount: steps.length, stepsDone: done, deviceIds: [...new Set(steps.map((s) => s.deviceId))] });
   }
   res.status(200).json(out);
 });
@@ -858,15 +712,15 @@ router.get('/plans', requireAuth, requirePermission('plans:read'), async (_req, 
   for (const row of planRows) {
     const steps = await loadSteps(row.id);
     const done = steps.filter((s) => s.status === 'succeeded').length;
-    out.push({ ...serializePlanRow(row, usernames), provisionedSecrets: secretsMeta.get(row.id) ?? [], stepCount: steps.length, stepsDone: done });
+    out.push({ ...serializePlanRow(row, usernames), provisionedSecrets: secretsMeta.get(row.id) ?? [], stepCount: steps.length, stepsDone: done, deviceIds: [...new Set(steps.map((s) => s.deviceId))] });
   }
   res.status(200).json(out);
 });
 
 // GET /plans/:id — full plan with ordered steps + provisioned secret metadata.
 router.get('/plans/:id', requireAuth, requirePermission('plans:read'), async (req, res) => {
-  if (!(await assertPlanAccess(req, res, req.params.id))) return;
-  const out = await serializePlan(req.params.id, true);
+  if (!(await assertPlanAccess(req, res, String(req.params.id ?? '')))) return;
+  const out = await serializePlan(String(req.params.id ?? ''), true);
   if (!out) {
     res.status(404).json({ error: 'Plan not found' });
     return;
@@ -882,8 +736,8 @@ router.patch(
   requireAuth,
   requirePermission('configs:apply'),
   async (req, res) => {
-    if (!(await assertPlanAccess(req, res, req.params.id))) return;
-    const plan = await loadPlan(req.params.id);
+    if (!(await assertPlanAccess(req, res, String(req.params.id ?? '')))) return;
+    const plan = await loadPlan(String(req.params.id ?? ''));
     if (!plan) {
       res.status(404).json({ error: 'Plan not found' });
       return;
@@ -933,8 +787,8 @@ router.patch(
   requireAuth,
   requirePermission('configs:apply'),
   async (req, res) => {
-    if (!(await assertPlanAccess(req, res, req.params.id))) return;
-    const plan = await loadPlan(req.params.id);
+    if (!(await assertPlanAccess(req, res, String(req.params.id ?? '')))) return;
+    const plan = await loadPlan(String(req.params.id ?? ''));
     if (!plan) {
       res.status(404).json({ error: 'Plan not found' });
       return;
@@ -944,7 +798,7 @@ router.patch(
       return;
     }
     const steps = await loadSteps(plan.id);
-    const step = steps.find((s) => s.id === req.params.stepId);
+    const step = steps.find((s) => s.id === String(req.params.stepId ?? ''));
     if (!step) {
       res.status(404).json({ error: 'Step not found' });
       return;
@@ -1035,7 +889,7 @@ router.post(
   requireAuth,
   requirePermission('configs:apply'),
   async (req, res) => {
-    const plan = await loadPlan(req.params.id);
+    const plan = await loadPlan(String(req.params.id ?? ''));
     if (!plan) {
       res.status(404).json({ error: 'Plan not found' });
       return;
@@ -1136,7 +990,7 @@ router.post(
   requireAuth,
   requirePermission('configs:apply'),
   async (req, res) => {
-    const plan = await loadPlan(req.params.id);
+    const plan = await loadPlan(String(req.params.id ?? ''));
     if (!plan) {
       res.status(404).json({ error: 'Plan not found' });
       return;
@@ -1243,7 +1097,7 @@ router.delete(
   requireAuth,
   requirePermission('configs:apply'),
   async (req, res) => {
-    const plan = await loadPlan(req.params.id);
+    const plan = await loadPlan(String(req.params.id ?? ''));
     if (!plan) {
       res.status(404).json({ error: 'Plan not found' });
       return;
@@ -1253,7 +1107,7 @@ router.delete(
       return;
     }
     const steps = await loadSteps(plan.id);
-    const step = steps.find((s) => s.id === req.params.stepId);
+    const step = steps.find((s) => s.id === String(req.params.stepId ?? ''));
     if (!step) {
       res.status(404).json({ error: 'Step not found' });
       return;
@@ -1284,7 +1138,7 @@ router.patch(
   requireAuth,
   requirePermission('configs:apply'),
   async (req, res) => {
-    const plan = await loadPlan(req.params.id);
+    const plan = await loadPlan(String(req.params.id ?? ''));
     if (!plan) {
       res.status(404).json({ error: 'Plan not found' });
       return;
@@ -1294,7 +1148,7 @@ router.patch(
       return;
     }
     // Device-level access control (reorder touches every step's device).
-    if (!(await assertPlanAccess(req, res, req.params.id))) return;
+    if (!(await assertPlanAccess(req, res, String(req.params.id ?? '')))) return;
 
     const body = req.body ?? {};
     const from = typeof body.from === 'number' ? body.from : -1;
@@ -1326,7 +1180,7 @@ router.post(
   require2FA,
   requirePermission('configs:apply'),
   async (req, res) => {
-    const plan = await loadPlan(req.params.id);
+    const plan = await loadPlan(String(req.params.id ?? ''));
     if (!plan) {
       res.status(404).json({ error: 'Plan not found' });
       return;
@@ -1336,7 +1190,7 @@ router.post(
       return;
     }
     // Device-level access control — executing applies changes to every step's device.
-    if (!(await assertPlanAccess(req, res, req.params.id))) return;
+    if (!(await assertPlanAccess(req, res, String(req.params.id ?? '')))) return;
 
     await enqueuePlanExecution(plan.id, req.user?.sub ?? null);
     res.status(202).json((await serializePlan(plan.id, true))!);
@@ -1353,7 +1207,7 @@ router.post(
   require2FA,
   requirePermission('configs:apply'),
   async (req, res) => {
-    const plan = await loadPlan(req.params.id);
+    const plan = await loadPlan(String(req.params.id ?? ''));
     if (!plan) {
       res.status(404).json({ error: 'Plan not found' });
       return;
@@ -1363,7 +1217,7 @@ router.post(
       return;
     }
     // Device-level access control — a retry re-applies every step's device.
-    if (!(await assertPlanAccess(req, res, req.params.id))) return;
+    if (!(await assertPlanAccess(req, res, String(req.params.id ?? '')))) return;
 
     const steps = await loadSteps(plan.id);
     if (steps.length === 0) {
@@ -1421,12 +1275,12 @@ router.post(
 
 // POST /plans/:id/cancel — cooperative cancel; the executor checks between steps.
 router.post('/plans/:id/cancel', requireAuth, requirePermission('configs:apply'), async (req, res) => {
-  const plan = await loadPlan(req.params.id);
+  const plan = await loadPlan(String(req.params.id ?? ''));
   if (!plan) {
     res.status(404).json({ error: 'Plan not found' });
     return;
   }
-  if (!(await assertPlanAccess(req, res, req.params.id))) return;
+  if (!(await assertPlanAccess(req, res, String(req.params.id ?? '')))) return;
   if (plan.status !== 'executing') {
     res.status(409).json({ error: `Plan is ${plan.status} — only executing plans can be cancelled` });
     return;
@@ -1444,16 +1298,16 @@ router.post(
   requireAuth,
   requirePermission('secrets:write'),
   async (req, res) => {
-    if (!(await assertPlanAccess(req, res, req.params.id))) return;
-    const plan = await loadPlan(req.params.id);
+    if (!(await assertPlanAccess(req, res, String(req.params.id ?? '')))) return;
+    const plan = await loadPlan(String(req.params.id ?? ''));
     if (!plan) {
       res.status(404).json({ error: 'Plan not found' });
       return;
     }
     const provisioned = parseJson<Record<string, string>>(plan.provisionedSecrets, {});
-    const secretId = provisioned[req.params.ref];
+    const secretId = provisioned[String(req.params.ref ?? '')];
     if (!secretId) {
-      res.status(404).json({ error: `No provisioned secret with ref "${req.params.ref}"` });
+      res.status(404).json({ error: `No provisioned secret with ref "${String(req.params.ref ?? '')}"` });
       return;
     }
     try {
@@ -1510,8 +1364,8 @@ router.post(
   requireAuth,
   requirePermission('configs:apply'),
   async (req, res) => {
-    if (!(await assertPlanAccess(req, res, req.params.id))) return;
-    const plan = await loadPlan(req.params.id);
+    if (!(await assertPlanAccess(req, res, String(req.params.id ?? '')))) return;
+    const plan = await loadPlan(String(req.params.id ?? ''));
     if (!plan) {
       res.status(404).json({ error: 'Plan not found' });
       return;
@@ -1563,8 +1417,8 @@ router.delete(
   requireAuth,
   requirePermission('configs:apply'),
   async (req, res) => {
-    if (!(await assertPlanAccess(req, res, req.params.id))) return;
-    const plan = await loadPlan(req.params.id);
+    if (!(await assertPlanAccess(req, res, String(req.params.id ?? '')))) return;
+    const plan = await loadPlan(String(req.params.id ?? ''));
     if (!plan) {
       res.status(404).json({ error: 'Plan not found' });
       return;
@@ -1593,12 +1447,12 @@ router.delete(
 
 // DELETE /plans/:id — delete a non-executing plan + its steps + provisioned secrets.
 router.delete('/plans/:id', requireAuth, requirePermission('configs:apply'), async (req, res) => {
-  const plan = await loadPlan(req.params.id);
+  const plan = await loadPlan(String(req.params.id ?? ''));
   if (!plan) {
     res.status(404).json({ error: 'Plan not found' });
     return;
   }
-  if (!(await assertPlanAccess(req, res, req.params.id))) return;
+  if (!(await assertPlanAccess(req, res, String(req.params.id ?? '')))) return;
   if (plan.status === 'executing') {
     res.status(409).json({ error: 'Cancel the plan before deleting it' });
     return;

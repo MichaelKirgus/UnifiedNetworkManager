@@ -1,6 +1,7 @@
 import { ActionDescriptor } from './types';
 import { l2TopologyAction } from './l2Topology';
 import { networkIntentActions } from './networkIntents';
+import { dnsIntentActions } from './dnsIntents';
 import { clockSyncAction } from './clock';
 import { systemActions } from './system';
 import { networkActions } from './network';
@@ -20,6 +21,8 @@ import { firmwareActions } from './firmware';
 const ALL_ACTIONS: ActionDescriptor[] = [
   l2TopologyAction,
   ...networkIntentActions,
+  // Canonical DNS intents (dns.set / dns.delete) — fan-out via plan workflow.
+  ...dnsIntentActions,
   clockSyncAction,
   // 0.4.0 — full feature surface (System / Network / Firewall / VPN / Backup / Updates).
   ...systemActions,

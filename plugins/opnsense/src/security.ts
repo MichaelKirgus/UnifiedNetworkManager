@@ -66,21 +66,32 @@ interface FileBaseline {
 // Entry point
 // ---------------------------------------------------------------------------
 
-/** Runs every check in ONE SSH round-trip (best-effort, never throws). */
+/**
+ * Runs every check in ONE SSH round-trip (best-effort, never throws).
+ *
+ * Return contract — the caller MUST distinguish "no fresh data" from "clean":
+ *   - `null`  = checks did NOT run this cycle (disabled, no ssh slot bound, or
+ *     the SSH exec failed). The caller omits the metric key entirely so stored
+ *     rows survive a transient failure AND notification mirroring leaves live
+ *     security alerts untouched.
+ *   - `[]`    = checks ran and found nothing actionable — an AUTHORITATIVE wipe
+ *     (the API clears this device's findings) and a signal to resolve any
+ *     lingering notification-center entries for this host.
+ */
 export async function collectSecurityChecks(
   managementAddress: string,
   credentials: Record<string, unknown> | undefined,
   sshPort: number | undefined,
   deviceId: string | null,
   settings: SecuritySettings,
-): Promise<SecurityCheckRow[]> {
-  if (!settings.enabled) return [];
+): Promise<SecurityCheckRow[] | null> {
+  if (!settings.enabled) return null;
 
   // Bare host for stable baseline keys (a management address may carry scheme/port).
   const host = hostFromAddress(managementAddress) ?? managementAddress;
 
   // No ssh slot bound → API-only mode: skip all checks silently.
-  if (!resolveSshCredentials(credentials, { slotOnly: true })) return [];
+  if (!resolveSshCredentials(credentials, { slotOnly: true })) return null;
 
   const list = settings.watchedFiles.map((p) => `'${p.replace(/'/g, "'\\''")}'`).join(' ');
   const command = [
@@ -105,7 +116,7 @@ export async function collectSecurityChecks(
   ].join('\n');
 
   const r = await execViaSshSlot(host, credentials, command, { port: sshPort, timeoutMs: 25_000 }).catch(() => null);
-  if (!r) return []; // no usable SSH path / exec failed — checks not applicable
+  if (!r) return null; // no usable SSH path / exec failed — checks not applicable (keep previous data + alerts)
 
   const out = r.stdout ?? '';
   const section = (start: string, end?: string): string[] => {

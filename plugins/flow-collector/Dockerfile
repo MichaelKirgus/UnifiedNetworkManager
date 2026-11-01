@@ -21,10 +21,14 @@ RUN cd packages/plugin-sdk && npm install --legacy-peer-deps && npm run build
 COPY plugins/flow-collector/package*.json plugins/flow-collector/tsconfig.json plugins/flow-collector/
 RUN cd plugins/flow-collector && npm install --legacy-peer-deps
 
+
 COPY plugins/flow-collector/src/ plugins/flow-collector/src/
 COPY plugins/flow-collector/icons/ plugins/flow-collector/icons/
 RUN cd plugins/flow-collector && npm run build \
-    && node -e "require('/app/plugins/flow-collector/node_modules/@unm/plugin-sdk')"
+    && node -e "require('/app/plugins/flow-collector/node_modules/@unm/plugin-sdk')" && npm prune --omit=dev --legacy-peer-deps
+# Prune devDependencies (typescript, ts-node-dev, jest, @types/*): the build above
+# already ran and nothing at runtime requires them — keeps images lean and free of
+# dev-only vulnerable packages.
 
 # Run from the plugin dir so `main` (dist/src/index.js) and the file: link in
 # node_modules resolve exactly like in local development.
@@ -38,5 +42,19 @@ WORKDIR /app/plugins/flow-collector
 
 EXPOSE 4080
 EXPOSE 6343/udp
+
+# Unprivileged runtime user (uid/gid 1001) — the entrypoint wrapper drops to it.
+RUN addgroup -g 1001 unm && adduser -u 1001 -G unm -D app \
+    && mkdir -p /data/tls && chown -R 1001:1001 /data/tls
+
+# Privilege-drop helper — joins UNM_DOCKER_GID, drops to `app`, re-execs the app.
+COPY scripts/unm-privdrop.js /usr/local/lib/unm-privdrop.js
+
+# UNM entrypoint wrapper — macvlan gateway (UNM_DEFAULT_GATEWAY), data-dir chown
+# (UNM_CHOWN_PATHS, skip via UNM_SKIP_CHOWN=1) and privilege drop to `app`
+# (opt out with UNM_RUN_AS_ROOT=1). See scripts/docker-entrypoint.sh.
+COPY scripts/docker-entrypoint.sh /usr/local/bin/unm-entrypoint.sh
+RUN chmod +x /usr/local/bin/unm-entrypoint.sh
+ENTRYPOINT ["/usr/local/bin/unm-entrypoint.sh"]
 
 CMD ["npm", "start"]

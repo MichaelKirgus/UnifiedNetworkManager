@@ -25,6 +25,8 @@ import {
   StateSection,
   clampInt,
   isTransientTransportError,
+  collectGpuRows,
+  createNotifier,
   createPluginLogger,
   createPluginServer,
   errorDescriptor,
@@ -32,6 +34,7 @@ import {
   probeHandler,
   readSettings,
   resolvePluginIdentity,
+  resolveSshCredentials,
   stateHandler,
   textMetric,
   validateInput,
@@ -40,10 +43,11 @@ import { DOCKER_DEVICE_SUPPORT } from './deviceSupport';
 import path from 'node:path';
 
 import { DockerClientOptions, DockerTlsMaterial, engineVersion, listContainers, listImages } from './client';
-import { buildContainerRows, buildImageRows, ContainerRow as UnmContainerRow, DockerContainerRaw, DockerImageRaw, ImageRow } from './inventory';
-import { registry as actionRegistry, DockerActionContext } from './actions';
+import { buildContainerRows, buildImageRows, ComposeProjectSummary, ContainerRow as UnmContainerRow, DockerContainerRaw, DockerImageRaw, ImageRow, summarizeComposeProjects } from './inventory';
+import { registry as actionRegistry, sshPool, DockerActionContext } from './actions';
 import { buildPlan, PlanningError } from './plan';
 import { collectProbeStats, collectProbeStates, ProbeContainerStat, ProbeContainerState } from './probe';
+import { mirrorDockerContainers, ContainerCondition } from './notifications';
 
 // --- Identity -----------------------------------------------------------------
 export const PLUGIN_UUID = '00000000-0000-4000-8000-00000000000b';
@@ -57,6 +61,8 @@ export const PLUGIN_NAME = 'Docker Plugin';
 const identity = resolvePluginIdentity({
   uuid: PLUGIN_UUID,
   name: PLUGIN_NAME,
+  description:
+    'Monitors any Docker host through the Engine API — containers, images and compose projects on the Containers page (TCP/TLS/socket transports).',
   // 0.4.0 — containers.deploy-compose deploys a NEW compose stack on the host
   // (docker compose up -d via an optional ssh slot; the Engine API has no
   // classic compose endpoint), powering the Containers page's Create-app dialog.
@@ -76,7 +82,37 @@ const identity = resolvePluginIdentity({
   // optionally restart every running container using one of those refs) and
   // images.prune {all?} (POST /images/prune). Same generic contract as the
   // Generic SSH plugin — the webapp's image buttons are catalog-gated.
-  version: '0.6.0',
+  // 0.7.0 — notification-center mirroring: non-running containers (exited /
+  // dead / paused / created) push a stable per-container bell entry that clears
+  // automatically when the container recovers or disappears, gated by the new
+  // `notifyAlerts` option. The self-healing 'restarting' state is NOT mirrored
+  // so deploys don't flap the center; metrics-only polls pass null (anti-flap).
+  // 0.7.1 — docker.containers.running/stopped now count REAL containers and are
+  // emitted on EVERY poll: a cheap /containers/json?all=true runs each cycle
+  // (the probe already does this every few seconds), so the device page's gauge
+  // cards no longer read 0/0 between inventory polls. Previously they counted
+  // APP ROWS (compose projects) and were absent on metrics-only polls — a host
+  // with one big stack showed "1 running" at best, "0" most of the time. Row +
+  // image building stays deferred to inventory-due polls only.
+  // 0.8.0 — compose project gauges: docker.compose.projects / .running count
+  // distinct com.docker.compose.project labels and docker.compose.projects.list
+  // renders a per-project status line ("name running (27/29)"). Pure in-memory
+  // grouping over the container list already fetched every poll — no extra
+  // Engine API calls, so it is as cheap as the v0.7.1 container gauges.
+  // 0.9.0 — GPU inventory + live metrics: emits the generic `gpus[]` metric at
+  // the inventory cadence via a shared SDK probe script (PCI enumeration catches
+  // NVIDIA/AMD/Intel incl. enabled iGPUs; nvidia-smi / rocm-smi add util, VRAM,
+  // temp, power and core clocks) run over an OPTIONAL bound ssh slot — the Engine
+  // API exposes no host-GPU endpoint. Gated by the new `collectGpus` option,
+  // DEFAULT OFF: most Docker hosts are GPU-less servers/VMs, so off = zero SSH
+  // traffic and the key is omitted entirely (no wipe).
+  // 0.10.0 — canonical intent containers.image.set: change a container's image
+  // tag or switch it to another image entirely. Each matched container is
+  // RECREATED via the Engine API with its full configuration preserved (env,
+  // labels incl. compose project/service, ports, binds/volumes, restart policy,
+  // static IPs + aliases); named volumes are never touched and stopped
+  // containers stay stopped. Compose members are recreated in depends_on order.
+  version: '0.10.0',
   vendors: ['generic'],
   capabilities: ['monitoring', 'configuration', 'planning', 'deviceState', 'probe'],
 });
@@ -116,12 +152,31 @@ const PLUGIN_OPTIONS: PluginOptionDescriptor[] = [
     description:
       'Ship structured log entries (poll failures) to the UNM API for the device Logs view. Disable to keep logging container-local only.',
   },
+  {
+    key: 'notifyAlerts',
+    label: 'Mirror stopped containers to notification center',
+    type: 'boolean' as const,
+    default: true,
+    description:
+      "Push non-running containers (exited / dead / paused / created) into UNM's notification center. Entries clear automatically when the container recovers or disappears. The transient 'restarting' state is never mirrored.",
+  },
+  {
+    key: 'collectGpus',
+    label: 'Collect GPU data (requires SSH slot)',
+    type: 'boolean' as const,
+    default: false,
+    description:
+      "Enumerate the host's GPUs (NVIDIA / AMD / Intel, incl. enabled iGPUs) and read live counters via nvidia-smi / rocm-smi during inventory polls — over an OPTIONAL bound ssh slot, since the Engine API has no host-GPU endpoint. OFF by default: most Docker hosts are GPU-less servers/VMs; off = zero SSH traffic.",
+  },
 ];
 
 // --- Metric descriptors -----------------------------------------------------------
 const METRIC_DESCRIPTORS: MetricDescriptor[] = [
   gaugeMetric('docker.containers.running', 'Containers running', { group: 'Docker', min: 0, summary: true }),
   gaugeMetric('docker.containers.stopped', 'Containers stopped', { group: 'Docker', min: 0 }),
+  gaugeMetric('docker.compose.projects', 'Compose projects', { group: 'Docker', min: 0 }),
+  gaugeMetric('docker.compose.projects.running', 'Projects running', { group: 'Docker', min: 0 }),
+  textMetric('docker.compose.projects.list', 'Compose project status', { group: 'Docker' }),
   textMetric('docker.version', 'Engine version', { group: 'Docker' }),
 ];
 
@@ -164,6 +219,10 @@ const app = server.app;
 // --- Structured logging ---------------------------------------------------------------
 const logger = createPluginLogger(identity);
 
+// Notification-center mirroring (SDK fire-and-forget notifier) — enabled/disabled
+// per poll from the `notifyAlerts` option, same pattern as logToApi.
+const notifier = createNotifier(identity);
+
 // --- /monitoring helpers ----------------------------------------------------------------
 
 /** Reads the optional `dockerTls` slot from the decrypted credentials body. */
@@ -205,11 +264,16 @@ function clientOptsFrom(
   };
 }
 
-/** One full collection: version + container list + image inventory → UNM rows. */
+/** One full collection: version + container list (+ image inventory on full polls) → UNM rows. */
 /**
- * Window-based scheduling: `full=false` on metrics-only polls — only the cheap
- * engine liveness/version call runs; container + image listing (the slow part)
-  * is skipped and their metric keys are omitted until the next inventory-due poll.
+ * Window-based scheduling: `full=false` on metrics-only polls — the cheap
+ * engine liveness/version call AND one /containers/json?all=true run (so the
+ * running/stopped gauges stay fresh every cycle and the notification mirror has
+ * an authoritative snapshot); row building + image listing (the slow part) are
+ * skipped until the next inventory-due poll. The container list is deliberately
+ * NOT deferred: it is one cheap call the probe already makes every few seconds,
+ * while deferring it made the device page's gauge cards read 0/0 for ~15 min at
+ * a time and (previously) miscounted APP ROWS instead of containers.
  */
 async function collect(opts: DockerClientOptions, full = true): Promise<{
   health: Health;
@@ -219,37 +283,73 @@ async function collect(opts: DockerClientOptions, full = true): Promise<{
   images: ImageRow[] | null;
   running: number;
   stopped: number;
+  compose: ComposeProjectSummary;
   engineVersionText: string | null;
+  /** Non-running containers for notification mirroring. `null` when this poll
+   * did NOT take an authoritative container snapshot (a failed /containers/json
+   * read) — the mirror must leave its known-set alone. */
+  conditions: ContainerCondition[] | null;
 }> {
   const version = await engineVersion(opts);
   if (!version.ok) {
-    return { health: 'critical', error: `Docker Engine unreachable via ${version.transportUsed ?? opts.transport}: ${version.error || `HTTP ${version.status}`}`, rows: [], images: null, running: 0, stopped: 0, engineVersionText: null };
+    return { health: 'critical', error: `Docker Engine unreachable via ${version.transportUsed ?? opts.transport}: ${version.error || `HTTP ${version.status}`}`, rows: [], images: null, running: 0, stopped: 0, compose: { total: 0, running: 0, entries: [] }, engineVersionText: null, conditions: null };
   }
 
-  if (!full) {
-    // Liveness-only poll — the daemon answered /_ping + version; that IS the
-    // health signal. No container/image traffic to the engine.
-    return { health: 'ok', rows: [], images: null, running: 0, stopped: 0, engineVersionText: version.data?.Version ? `Docker ${version.data.Version}` : null };
-  }
+  // Version + container list in parallel (both cheap). On a full poll the image
+  // inventory joins them — it is a best-effort extra whose failure must not fail
+  // the poll or wipe previously seen rows.
+  const [list, imagesRes] = await Promise.all([
+    listContainers(opts),
+    full ? listImages(opts) : Promise.resolve(null),
+  ]);
 
-  // Containers are the core of this plugin; the image inventory is a best-
-  // effort extra (a failure must not fail the poll or wipe previously seen rows).
-  const [list, imagesRes] = await Promise.all([listContainers(opts), listImages(opts)]);
   if (!list.ok) {
-    return { health: 'critical', error: `/containers/json failed (HTTP ${list.status}): ${JSON.stringify(list.data ?? '').slice(0, 200)}`, rows: [], images: null, running: 0, stopped: 0, engineVersionText: version.data?.Version ?? null };
+    // A failed container read is authoritative for NOTHING: gauges are emitted
+    // as 0/0 (the daemon answered /_ping, so the host is up — we just couldn't
+    // list containers this cycle) and `conditions` stays null so the mirror's
+    // known-set is untouched. On a full poll it additionally fails the inventory
+    // (rows are not emitted → no wipe of stored rows).
+    const engineVersionText = version.data?.Version ? `Docker ${version.data.Version}` : null;
+    if (!full) {
+      return { health: 'ok', rows: [], images: null, running: 0, stopped: 0, compose: { total: 0, running: 0, entries: [] }, engineVersionText, conditions: null };
+    }
+    return { health: 'critical', error: `/containers/json failed (HTTP ${list.status}): ${JSON.stringify(list.data ?? '').slice(0, 200)}`, rows: [], images: null, running: 0, stopped: 0, compose: { total: 0, running: 0, entries: [] }, engineVersionText, conditions: null };
   }
 
   const raw = Array.isArray(list.data) ? (list.data as DockerContainerRaw[]) : [];
-  const rows = buildContainerRows(raw);
+
+  // REAL container counts for the gauge cards — every poll, not app rows.
   let running = 0;
   let stopped = 0;
-  for (const r of rows) {
-    if (r.state === 'RUNNING') running++;
+  for (const c of raw) {
+    const state = typeof c?.State === 'string' ? c.State.toLowerCase() : '';
+    if (state === 'running') running++;
     else stopped++;
   }
 
+  // Non-running containers worth a bell entry — straight from the raw list so we
+  // keep the exit code (the UNM row shape doesn't carry it). 'running' and the
+  // self-healing 'restarting' transition are excluded by the mirror itself.
+  const conditions: ContainerCondition[] = [];
+  for (const c of raw) {
+    if (!c || typeof c !== 'object') continue;
+    const state = typeof c.State === 'string' ? c.State.toLowerCase() : '';
+    if (!state || state === 'running' || state === 'restarting') continue;
+    const name = Array.isArray(c.Names) && c.Names.length > 0 ? String(c.Names[0]).replace(/^\/+/, '') : '';
+    if (!name) continue;
+    conditions.push({ name, state, exitCode: typeof c.ExitCode === 'number' ? c.ExitCode : null });
+  }
+
+  // Compose project summary for the device-page gauges — every poll, pure
+  // in-memory grouping over the raw list (no extra Engine API calls).
+  const compose = summarizeComposeProjects(raw);
+
+  // UNM rows (App → Container tree) only on inventory-due polls — they are the
+  // slow part and feed the cross-device `containers` table.
+  const rows = full ? buildContainerRows(raw) : [];
+
   let images: ImageRow[] | null = null;
-  if (imagesRes.ok && Array.isArray(imagesRes.data)) {
+  if (full && imagesRes?.ok && Array.isArray(imagesRes.data)) {
     images = buildImageRows(imagesRes.data as DockerImageRaw[]);
   }
 
@@ -259,7 +359,9 @@ async function collect(opts: DockerClientOptions, full = true): Promise<{
     images,
     running,
     stopped,
+    compose,
     engineVersionText: version.data?.Version ? `Docker ${version.data.Version}` : null,
+    conditions,
   };
 }
 
@@ -277,6 +379,7 @@ app.post('/monitoring', async (req, res) => {
   // Effective settings: declared defaults ⊕ user overrides from the header.
   const settings = readSettings(req, PLUGIN_OPTIONS);
   logger.setEnabled(settings.logToApi === true);
+  notifier.setEnabled(settings.notifyAlerts !== false);
   const transport = String(settings.transport ?? 'auto');
   const port = clampInt(Number(settings.port ?? 2375), 1, 65535, 2375);
   const localSocketPath = String(settings.localSocketPath || '/var/run/docker.sock');
@@ -316,13 +419,50 @@ app.post('/monitoring', async (req, res) => {
     }
 
     const metrics: Record<string, unknown> = {};
+    // Real container counts on EVERY poll — the device page renders its gauge
+    // cards from the latest telemetry row, so deferring these to inventory polls
+    // made them read 0/0 for ~15 min at a time.
+    metrics['docker.containers.running'] = result.running;
+    metrics['docker.containers.stopped'] = result.stopped;
+    // Compose project gauges — same every-poll contract as the container
+    // counts above. The list line is "name running (27/29)" per project, so a
+    // partially-down stack stays visible at a glance.
+    metrics['docker.compose.projects'] = result.compose.total;
+    metrics['docker.compose.projects.running'] = result.compose.running;
+    metrics['docker.compose.projects.list'] = result.compose.entries.length > 0
+      ? result.compose.entries.map((e) => `${e.name} ${e.state.toLowerCase()} (${e.runningContainers}/${e.containers})`).join(', ')
+      : '';
     if (full) {
       // The generic containers[] key — ingested by the API's telemetry worker
       // into the cross-device `containers` table. Emitted even when empty so a
-      // host that loses all containers clears its rows (authoritative wipe).
+      // host that loses all containers clears its rows (authoritative wipe);
+      // omitted on metrics-only polls (absent = keep stored rows).
       metrics['containers'] = result.rows;
-      metrics['docker.containers.running'] = result.running;
-      metrics['docker.containers.stopped'] = result.stopped;
+    }
+    // GPUs — the Engine API has NO host-GPU endpoint, so this runs over an
+    // OPTIONAL bound ssh slot using the shared SDK probe script (PCI + vendor
+    // tools in one round-trip). Gated by `collectGpus` (DEFAULT OFF) and on
+    // inventory-due polls only. null = exec failed → omit the key (no wipe);
+    // an empty array is authoritative (host genuinely has no GPUs).
+    if (full && settings.collectGpus === true) {
+      const gpuCreds = resolveSshCredentials(body.credentials as Record<string, unknown> | undefined, { slotOnly: true });
+      if (gpuCreds) {
+        try {
+          const sshHost = managementAddress.trim().replace(/^https?:\/\//i, '').split('/')[0].split(':')[0];
+          const c = await sshPool.get(sshHost, 22, gpuCreds);
+          // Hard cap well under the API's 30 s /monitoring budget — a slow host
+          // simply yields no GPU rows this cycle (the pooled session stays open).
+          const gpus = await Promise.race([
+            collectGpuRows({ exec: (cmd, t) => c.exec(cmd, gpuCreds, t) }),
+            new Promise<null>((resolve) => setTimeout(() => resolve(null), 8_000).unref()),
+          ]);
+          // null = probe failed/timed out → omit (no wipe); an EMPTY array is
+          // authoritative — the host genuinely has no GPUs and stale rows clear.
+          if (gpus !== null) metrics['gpus'] = gpus;
+        } catch {
+          /* best-effort — a failed GPU probe must never sink the poll */
+        }
+      }
     }
     if (result.engineVersionText) metrics['docker.version'] = result.engineVersionText;
     // The generic images[] key — ingested into the cross-device `docker_images`
@@ -331,12 +471,36 @@ app.post('/monitoring', async (req, res) => {
     // when the /images/json call itself failed (no wipe on transport errors).
     if (result.images !== null) metrics['images'] = result.images;
 
+    // Notification-center mirroring (gated by `notifyAlerts`): non-running
+    // containers get a stable per-container bell entry that clears when the
+    // container recovers or disappears. `result.conditions` is null on every
+    // non-authoritative path (metrics-only poll, failed read) → the mirror's
+    // known-set is left untouched (anti-flap contract).
+    if (notifier.enabled && result.conditions !== null) {
+      mirrorDockerContainers(notifier, managementAddress || 'local', deviceId, result.conditions);
+    }
+
+    // The gpus table descriptor is only advertised when rows exist — the
+    // static catalog covers everything else.
+    const descriptors = Array.isArray(metrics['gpus']) && (metrics['gpus'] as unknown[]).length > 0
+      ? [...METRIC_DESCRIPTORS, { key: 'gpus', label: 'GPUs', type: 'string' as const, visualization: 'table' as const, columns: ['name', 'vendor', 'slot', 'driver', 'driverVersion', 'vramBytes', 'utilPercent', 'tempCelsius'], group: 'GPU' }]
+      : METRIC_DESCRIPTORS;
+
     res.status(200).json({
       deviceId,
       collectedAt: new Date().toISOString(),
       health: result.health,
       metrics,
-      metricDescriptors: METRIC_DESCRIPTORS,
+      metricDescriptors: descriptors,
+      // Echo back the effective settings we received — proof that the
+      // API→plugin settings injection loop works end to end.
+      activeSettings: {
+        transport,
+        port,
+        localSocketPath,
+        logToApi: settings.logToApi === true,
+        notifyAlerts: settings.notifyAlerts !== false,
+      },
     });
   } catch (err) {
     logger.error(`Monitoring poll for ${managementAddress} failed: ${(err as Error).message}`, { deviceId, context: { host: managementAddress } });

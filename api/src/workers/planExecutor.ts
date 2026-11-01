@@ -11,6 +11,8 @@ import { emitNotification } from '../notifications';
 import { parseExtraCredentials } from '../types/credentialSlots';
 import { decryptCredentialSlots, withSlots } from '../utils/slotCredentials';
 import { getEffectiveSettingValue } from '../systemSettings';
+import { isSystemStepAction, SYSTEM_STEP_WAIT, SYSTEM_STEP_INVENTORY_REFRESH } from '@unm/plugin-sdk';
+import { forceRefreshDevices } from './telemetry';
 
 const PROCESS_INTERVAL_MS = 5_000;
 
@@ -263,6 +265,40 @@ async function processPlan(planId: string): Promise<void> {
       return;
     }
 
+    // --- Reserved system steps (unm.wait / unm.inventory.refresh) -------------
+    // Appended by plugins to settle + refresh cached inventory after an update.
+    // The executor runs them LOCALLY — they are never dispatched to a plugin's
+    // /config endpoint, so no device row / assignment / credentials are needed.
+    if (isSystemStepAction(step.actionId)) {
+      const sysInput = parseJson<Record<string, unknown>>(step.input, {});
+      await markStep(step.id, 'running');
+      try {
+        let details: Record<string, unknown>;
+        if (step.actionId === SYSTEM_STEP_WAIT) {
+          // Cap at the same ceiling as retry waits; a plugin's settle estimate
+          // must never wedge the executor indefinitely.
+          const ms = Math.min(Math.max(0, Number(sysInput['ms']) || 0), 3_600_000);
+          const cancelled = await sleepCancellable(planId, ms);
+          if (cancelled) {
+            await markStep(step.id, 'skipped');
+            await skipRemainingSteps(planId);
+            await finishPlan(planId, 'cancelled', 'Cancelled by user before completion');
+            return;
+          }
+          details = { waitedMs: ms };
+        } else {
+          const refreshed = await forceRefreshDevices([step.deviceId]);
+          details = { refreshed: refreshed.map((r) => ({ deviceId: r.deviceId, ok: r.ok, assignmentsPolled: r.assignmentsPolled })) };
+        }
+        await markStep(step.id, 'succeeded', { success: true, result: { verified: true, ...details } });
+        results.set(step.stepIndex, { success: true, result: { verified: true, ...details } });
+      } catch (err) {
+        // bestEffort by contract — a failed settle/refresh never fails the plan.
+        await markStep(step.id, 'failed', { success: false, result: { error: (err as Error).message } });
+      }
+      continue;
+    }
+
     const device = await db.query.devices.findFirst({
       where: (devices, { eq }) => eq(devices.id, step.deviceId),
     });
@@ -355,8 +391,9 @@ async function processPlan(planId: string): Promise<void> {
     let waitHintMs: number | null = null;
     let attempts = 0;
     for (;;) {
-      // Traceability: mirror each dispatched attempt as a config job row (terminal
-      // status set here — the legacy configJob worker only picks up 'queued' rows).
+      // Traceability: mirror each dispatched attempt as a config_jobs row for
+      // full audit history of every dispatch — status is set to its terminal
+      // value below, so no worker ever picks these rows up.
       const jobId = crypto.randomUUID();
       const nowStart = new Date().toISOString();
       await db.insert(schema.configJobs).values({

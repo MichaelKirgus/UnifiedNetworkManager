@@ -129,7 +129,7 @@ router.patch('/roles/:name', requireAuth, requirePermission('users:write'), asyn
     return;
   }
 
-  const existing = await db.query.roles.findFirst({ where: eq(schema.roles.name, req.params.name) });
+  const existing = await db.query.roles.findFirst({ where: eq(schema.roles.name, String(req.params.name ?? '')) });
   if (!existing) {
     res.status(404).json({ error: 'Role not found' });
     return;
@@ -143,13 +143,13 @@ router.patch('/roles/:name', requireAuth, requirePermission('users:write'), asyn
     ...(check.values.deviceScope !== undefined
       ? { deviceScope: JSON.stringify(check.values.deviceScope) }
       : {}),
-  }).where(eq(schema.roles.name, req.params.name));
+  }).where(eq(schema.roles.name, String(req.params.name ?? '')));
 
   // Scope rules changed — drop the per-user allowed-id caches so members of
   // this role see the new scope immediately (not after the 5 s TTL).
   invalidateDeviceAccessCache();
 
-  const updated = await db.query.roles.findFirst({ where: eq(schema.roles.name, req.params.name) });
+  const updated = await db.query.roles.findFirst({ where: eq(schema.roles.name, String(req.params.name ?? '')) });
   res.status(200).json(serializeRole(updated!));
 });
 
@@ -157,8 +157,7 @@ router.patch('/roles/:name', requireAuth, requirePermission('users:write'), asyn
 // `admin` role can never be deleted; other roles are refused while any user
 // still carries them.
 router.delete('/roles/:name', requireAuth, requirePermission('users:write'), async (req: Request, res: Response) => {
-  const name = req.params.name;
-
+  const name = String(req.params.name ?? '');
   if (name === 'admin') {
     res.status(409).json({ error: 'The built-in admin role cannot be deleted.' });
     return;

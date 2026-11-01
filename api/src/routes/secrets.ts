@@ -240,7 +240,7 @@ router.post('/generate', requireAuth, requirePermission('secrets:write'), async 
 // POST /secrets/:id/regenerate - Re-roll a generatable secret's key material in
 // place (same id preserved) so references keep working.
 router.post('/:id/regenerate', requireAuth, requirePermission('secrets:write'), async (req, res) => {
-  const { id } = req.params;
+  const id = String(req.params.id ?? '');
   try {
     const result = await regenerateSecret(id);
     invalidateSecretCache(id); // rotated key material must not be served from cache
@@ -261,7 +261,7 @@ router.get('/:id', requireAuth, async (req, res) => {
     return;
   }
 
-  const { id } = req.params;
+  const id = String(req.params.id ?? '');
   try {
     if (!perms.has('secrets:read')) {
       const row = await db.query.secrets.findFirst({ where: eq(schema.secrets.id, id) });
@@ -289,7 +289,7 @@ router.patch('/:id', requireAuth, async (req, res) => {
     return;
   }
 
-  const { id } = req.params;
+  const id = String(req.params.id ?? '');
   const { fields, label, expiresAt, interactiveLoginAllowed, fileAccessAllowed } = req.body ?? {};
 
   if (!fields || typeof fields !== 'object' || Array.isArray(fields)) {
@@ -329,7 +329,7 @@ router.delete('/:id', requireAuth, async (req, res) => {
     return;
   }
 
-  const { id } = req.params;
+  const id = String(req.params.id ?? '');
   try {
     if (!perms.has('secrets:delete')) {
       const row = await db.query.secrets.findFirst({ where: eq(schema.secrets.id, id) });

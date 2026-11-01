@@ -194,15 +194,15 @@ router.patch('/sites/:id', requireAuth, requirePermission('sites:write'), async 
     return;
   }
 
-  const existing = await db.query.sites.findFirst({ where: eq(schema.sites.id, req.params.id) });
+  const existing = await db.query.sites.findFirst({ where: eq(schema.sites.id, String(req.params.id ?? '')) });
   if (!existing) {
     res.status(404).json({ error: 'Site not found' });
     return;
   }
 
-  await db.update(schema.sites).set(check.values).where(eq(schema.sites.id, req.params.id));
+  await db.update(schema.sites).set(check.values).where(eq(schema.sites.id, String(req.params.id ?? '')));
 
-  const updated = await db.query.sites.findFirst({ where: eq(schema.sites.id, req.params.id) });
+  const updated = await db.query.sites.findFirst({ where: eq(schema.sites.id, String(req.params.id ?? '')) });
   if (!updated) {
     res.status(500).json({ error: 'Failed to retrieve updated site' });
     return;
@@ -213,7 +213,7 @@ router.patch('/sites/:id', requireAuth, requirePermission('sites:write'), async 
 // DELETE /sites/:id — remove a site (requires sites:write). Refused with 409
 // while any device still references it, so no assignment is ever orphaned.
 router.delete('/sites/:id', requireAuth, requirePermission('sites:write'), async (req: Request, res: Response) => {
-  const existing = await db.query.sites.findFirst({ where: eq(schema.sites.id, req.params.id) });
+  const existing = await db.query.sites.findFirst({ where: eq(schema.sites.id, String(req.params.id ?? '')) });
   if (!existing) {
     res.status(404).json({ error: 'Site not found' });
     return;

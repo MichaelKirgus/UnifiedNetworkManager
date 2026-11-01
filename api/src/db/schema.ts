@@ -1,4 +1,4 @@
-import { pgTable, text, boolean, integer, bigint, doublePrecision, index, uniqueIndex, primaryKey } from 'drizzle-orm/pg-core';
+import { pgTable, text, boolean, integer, bigint, doublePrecision, jsonb, index, uniqueIndex, primaryKey } from 'drizzle-orm/pg-core';
 import { sql } from 'drizzle-orm';
 
 export const users = pgTable('users', {
@@ -108,6 +108,11 @@ export const devices = pgTable('devices', {
   // Reference to the site this device lives at (NULL = unassigned).
   siteId: text('siteId'),
   status: text('status').notNull().default('unknown'),
+  // Human-readable reasons for a non-ok status (JSON array of
+  // {pluginId, pluginName, severity, message}), derived worst-wins from the
+  // last poll outcomes — persisted so the webapp can show them in a badge
+  // tooltip without re-deriving. NULL when online/unknown or no reasons yet.
+  healthReasons: text('healthReasons'),
   // User-selected hardware model, chosen from a plugin's advertised catalog
   // (/discover `deviceModels`). NULL when no catalog applies or the user skipped it.
   // Forwarded to every /monitoring call so vendor plugins can adapt their data gathering.
@@ -248,6 +253,10 @@ export const deviceSessionCredentials = pgTable(
 export const plugins = pgTable('plugins', {
   id: text('id').primaryKey(),
   name: text('name').notNull(),
+  // Short human-readable description of what the plugin manages, advertised in
+  // /discover. Drives the webapp's plugin catalog picker (card subtitle). NULL
+  // = not declared — the card simply shows no description line.
+  description: text('description'),
   version: text('version').notNull(),
   vendors: text('vendors').notNull().default('[]'),
   capabilities: text('capabilities').notNull().default('[]'),
@@ -298,6 +307,11 @@ export const plugins = pgTable('plugins', {
   // effective-capability evaluation (see types/deviceSupport.ts). NULL = no
   // support matrix advertised.
   deviceSupport: text('deviceSupport'),
+  // Ready-made automation rule drafts declared by the plugin in /discover (JSON
+  // array of { id, name, description?, draft }). Served by GET /automations/
+  // templates alongside the API's built-in templates; the webapp opens the rule
+  // builder pre-filled from one. NULL = none advertised.
+  automationTemplates: text('automationTemplates'),
   // mTLS state (Stage 1): true when discovery last confirmed this plugin is
   // serving TLS with a CA-signed leaf on its conventional port. The API's
   // pluginHttp factory uses https+client-cert for these, plain http otherwise.
@@ -397,6 +411,9 @@ export const telemetry = pgTable('telemetry', {
   pluginId: text('pluginId'),
   collectedAt: text('collectedAt').notNull(),
   health: text('health').notNull().default('unknown'),
+  // Optional plugin-reported reasons for a non-ok health (JSON array of
+  // {severity, message}) — surfaced in the webapp's status-badge tooltip.
+  healthReasons: text('healthReasons'),
   metrics: text('metrics').notNull().default('{}'),
   metricDescriptors: text('metricDescriptors'),
 }, (table) => {
@@ -812,6 +829,128 @@ export const routes = pgTable(
         columns: [table.deviceId, table.pluginId, table.destination, table.protocol],
       }),
       idxRoutesDevice: index('idx_routes_device').on(table.deviceId),
+    };
+  }
+);
+
+// One row per static DNS host entry (hostname → address) on one device, as
+// reported by a plugin's `dnsEntries` metric. Powers the cross-device DNS page
+// with the same upsert-per-poll + delete-on-absent + 24h-sweep lifecycle as
+// tunnels/routes. Vendors normalize to {name, ip} at collection time (OPNsense
+// dnsmasq/unbound host records; OpenWrt uci dhcp @host/@map; RouterOS
+// /ip/dns/static; LCOS Setup/DNS/DNS-List). `name` is lowercased at ingest so
+// the page groups case-insensitively; one row per (device, name, ip) — a name
+// with several addresses yields multiple rows.
+export const deviceDnsEntries = pgTable(
+  'device_dns_entries',
+  {
+    deviceId: text('deviceId').notNull(),
+    pluginId: text('pluginId').notNull(),
+    // Hostname as configured on the device, lowercased at ingest (grouping key).
+    name: text('name').notNull(),
+    // IPv4 or IPv6 address the hostname resolves to. Record type (A/AAAA) is
+    // derived from the address shape — no separate column needed.
+    ip: text('ip').notNull(),
+    // Optional domain suffix as configured on the device. Only vendors that
+    // split a record into bare-hostname + domain emit it (OPNsense unbound
+    // host overrides); for them `name` is the bare hostname and the full name
+    // is `name`.`domain`. NULL = vendor has no separate domain field (the name
+    // already IS the full name — LCOS, RouterOS, OpenWrt).
+    domain: text('domain'),
+    // Optional free-text note as configured on the device (e.g. RouterOS
+    // /ip/dns/static `comment`). NULL = vendor has no native field for it.
+    description: text('description'),
+    collectedAt: text('collectedAt').notNull(),
+  },
+  (table) => {
+    return {
+      pkDnsEntries: primaryKey({
+        name: 'device_dns_entries_pkey',
+        columns: [table.deviceId, table.pluginId, table.name, table.ip],
+      }),
+      idxDnsEntriesDevice: index('idx_device_dns_entries_device').on(table.deviceId),
+    };
+  }
+);
+
+// One row per configured DHCP server network/pool on one device, as reported by a
+// plugin's `dhcpNetworks` metric. Powers the cross-device DHCP page with the same
+// upsert-per-poll + delete-on-absent + 24h-sweep lifecycle as tunnels/routes/dns.
+// Vendors normalize to {name, rangeStart, rangeEnd, …} at collection time (RouterOS
+// /ip/pool + /ip/dhcp-server/network; OPNsense Kea subnets or dnsmasq ranges; OpenWrt
+// uci dhcp .option=range). One row per (device, plugin, name, rangeStart) — a named
+// scope with several ranges yields multiple rows.
+export const deviceDhcpNetworks = pgTable(
+  'device_dhcp_networks',
+  {
+    deviceId: text('deviceId').notNull(),
+    pluginId: text('pluginId').notNull(),
+    // Network/scope name as configured, or the serving interface when the vendor has no name.
+    name: text('name').notNull(),
+    // Serving interface (e.g. `bridge1`, `lan`). NULL = vendor doesn't expose it.
+    iface: text('iface'),
+    // First address of the lease range. Part of the PK — a scope with several ranges yields rows.
+    rangeStart: text('rangeStart').notNull(),
+    // Last address of the lease range.
+    rangeEnd: text('rangeEnd').notNull(),
+    // Subnet CIDR covering the range (derived by the plugin when known). NULL = unknown.
+    cidr: text('cidr'),
+    // Lease time in seconds as configured on the device. NULL = vendor default / not exposed.
+    leaseTimeSeconds: integer('leaseTimeSeconds'),
+    // Gateway address handed out to clients. NULL = not exposed.
+    gateway: text('gateway'),
+    // DNS servers handed out to clients (comma-joined). NULL = not exposed.
+    dnsServers: text('dnsServers'),
+    // Vendor-side row identity used for deletion (dnsmasq range uuid, Kea subnet id…). NULL = no stable handle.
+    refId: text('refId'),
+    collectedAt: text('collectedAt').notNull(),
+  },
+  (table) => {
+    return {
+      pkDhcpNetworks: primaryKey({
+        name: 'device_dhcp_networks_pkey',
+        columns: [table.deviceId, table.pluginId, table.name, table.rangeStart],
+      }),
+      idxDhcpNetworksDevice: index('idx_device_dhcp_networks_device').on(table.deviceId),
+    };
+  }
+);
+
+// One row per static DHCP reservation (MAC → fixed IP) on one device, as reported by a
+// plugin's `dhcpReservations` metric. Same lifecycle as the other inventory tables.
+// Vendors normalize to {mac, ip?, hostname?} at collection time (RouterOS
+// /ip/dhcp-server/lease static; OPNsense Kea reservations or dnsmasq staticmaps; OpenWrt
+// uci dhcp @host/@map). `refId` is the vendor-side row identity used for deletion
+// (OPNsense uuid, …); NULL = delete by MAC. One row per (device, plugin, mac) — a MAC
+// with several fixed IPs on one device collapses to the last-seen IP (rare; vendors
+// key reservations by MAC).
+export const deviceDhcpReservations = pgTable(
+  'device_dhcp_reservations',
+  {
+    deviceId: text('deviceId').notNull(),
+    pluginId: text('pluginId').notNull(),
+    // Client MAC address, lowercase colon form. Part of the PK.
+    mac: text('mac').notNull(),
+    // Fixed IP the client always receives. NULL = name-only mapping (no fixed IP).
+    ip: text('ip'),
+    // Hostname bound to the reservation (when the vendor has one).
+    hostname: text('hostname'),
+    // Serving interface the mapping is scoped to (OPNsense staticmaps are per-interface). NULL = not exposed.
+    iface: text('iface'),
+    // Vendor-specific row identifier used for deletion (OPNsense uuid, …). NULL = delete by MAC.
+    refId: text('refId'),
+    // Vendor lease status when exposed (e.g. RouterOS 'bound'/'free') — some vendors keep
+    // static bindings and active dynamic leases in one table; the page badges live rows.
+    status: text('status'),
+    collectedAt: text('collectedAt').notNull(),
+  },
+  (table) => {
+    return {
+      pkDhcpReservations: primaryKey({
+        name: 'device_dhcp_reservations_pkey',
+        columns: [table.deviceId, table.pluginId, table.mac],
+      }),
+      idxDhcpReservationsDevice: index('idx_device_dhcp_reservations_device').on(table.deviceId),
     };
   }
 );
@@ -1570,6 +1709,60 @@ export const dockerImages = pgTable(
   }
 );
 
+// One row per GPU as reported by a plugin's `gpus` metric. Powers the
+// per-device GPU cards on DeviceDetail (rendered via the generic table
+// MetricView — no dedicated page yet). Same upsert-per-poll + delete-on-absent
+// lifecycle as containers/vms: a removed card must vanish, not linger until the
+// 24h sweep. `slot` is part of the PK — one row per (device, plugin, PCI slot);
+// a device without GPU data contributes no rows.
+export const gpus = pgTable(
+  'gpus',
+  {
+    deviceId: text('deviceId').notNull(),
+    pluginId: text('pluginId').notNull(),
+    // Human-readable card name (e.g. "NVIDIA GeForce RTX 3080", "AMD Radeon RX 6800",
+    // "Intel UHD Graphics 770"). Falls back to the PCI slot when unknown.
+    name: text('name').notNull(),
+    // NVIDIA | AMD | INTEL | UNKNOWN — vendor family (case-insensitive at emit).
+    vendor: text('vendor').notNull().default('UNKNOWN'),
+    // PCI address, e.g. "0000:41:00.0" — the stable identity of a card.
+    slot: text('slot').notNull(),
+    // Kernel driver bound to the device (nvidia, amdgpu, i915, xe, ...).
+    driver: text('driver'),
+    // Driver version string when the vendor tool reports one (e.g. nvidia-smi's
+    // "Driver Version: 550.90.07"); null for sysfs-only detection.
+    driverVersion: text('driverVersion'),
+    // Total VRAM in bytes (null = unknown / no dedicated memory).
+    vramBytes: doublePrecision('vramBytes'),
+    // Live utilization % (GPU core) — null when the vendor tool is unavailable
+    // or the card has no such counter.
+    utilPercent: integer('utilPercent'),
+    // VRAM utilization % (NVIDIA only; AMD/Intel expose no equivalent).
+    memUtilPercent: integer('memUtilPercent'),
+    // Temperature in °C.
+    tempCelsius: integer('tempCelsius'),
+    // Power draw in watts.
+    powerWatts: doublePrecision('powerWatts'),
+    // Current core clock in MHz (null = not reported / iGPU).
+    coreClockMhz: integer('coreClockMhz'),
+    // Max supported core clock in MHz.
+    maxCoreClockMhz: integer('maxCoreClockMhz'),
+    // Plugin-specific details (JSON object) stored verbatim — e.g. TrueNAS's
+    // available_to_host / uses_system_critical_devices, per-container device requests.
+    extra: text('extra').notNull().default('{}'),
+    collectedAt: text('collectedAt').notNull(),
+  },
+  (table) => {
+    return {
+      pkGpus: primaryKey({
+        name: 'gpus_pkey',
+        columns: [table.deviceId, table.pluginId, table.slot],
+      }),
+      idxGpusDevice: index('idx_gpus_device').on(table.deviceId),
+    };
+  }
+);
+
 // One row per virtual machine as reported by a plugin's `vms` metric. Powers
 // the cross-device VMs page (TrueNAS SCALE VMs today; any plugin may emit the
 // generic key — e.g. a future Proxmox plugin). Same upsert-per-poll +
@@ -2186,6 +2379,290 @@ export const repoFileUses = pgTable(
   }
 );
 
+// Stored UNM backups (see src/backup.ts + routes/backups.ts). A backup is a
+// section-based JSON archive (gzipped, `.unmbak.gz`) of this instance's own
+// database — NOT device config files. The BYTES live either on the api-local
+// volume (`source='local'`, `providerId` NULL → `${BACKUP_PATH}/<id>.unmbak.gz`)
+// or in a file-repo plugin (`source='repo'`, content-addressed by sha256).
+// Multi-instance note: several file-repo INSTANCES can be registered at once
+// (plugin id `<base-uuid>:<instanceId>`); `providerId` binds the backup to
+// EXACTLY ONE of them and is resolved strictly — never with fallback to a
+// sibling instance.
+export const backups = pgTable(
+  'backups',
+  {
+    id: text('id').primaryKey(),
+    // Human label (e.g. "prod before cutover"). Defaults to the scope + date.
+    name: text('name').notNull(),
+    // Preset that produced this backup ('config' | 'planned' | 'all') — display
+    // only; `sections` is authoritative for what the archive actually holds.
+    scope: text('scope').notNull().default('all'),
+    // JSON string array of section keys present in the archive (see backup.ts
+    // BACKUP_SECTIONS). Drives restore preview + per-section apply selection.
+    sections: text('sections').notNull().default('[]'),
+    sizeBytes: bigint('sizeBytes', { mode: 'number' }).notNull().default(0),
+    // SHA-256 hex of the archive bytes — integrity check on download AND the
+    // content-addressed blob key inside a file-repo provider.
+    sha256: text('sha256').notNull(),
+    // Where the bytes live: 'local' = api volume (BACKUP_PATH), 'repo' = plugin.
+    source: text('source').notNull().default('local'),
+    // File-repo PLUGIN id holding the bytes (capability `fileRepo`). NULL for
+    // local-volume backups. Full instance id when multiple instances exist.
+    providerId: text('providerId'),
+    createdAt: text('createdAt').notNull(),
+  },
+  (table) => {
+    return {
+      idxBackupsSource: index('idx_backups_source').on(table.source, table.providerId),
+    };
+  }
+);
+
+// Replication targets — one-way sync peers of this UNM instance (see
+// routes/backups.ts /replication/* + workers/replication.ts). A target is
+// another UNM API reachable over HTTP; the peer authenticates with a long-lived
+// bearer token that carries `instance:backup`. Direction 'push' = THIS instance
+// exports and sends to the peer's POST /replication/inbound; 'pull' = this
+// instance fetches the peer's GET /replication/export and applies it locally.
+export const replicationTargets = pgTable(
+  'replication_targets',
+  {
+    id: text('id').primaryKey(),
+    // Human label (e.g. "prod").
+    name: text('name').notNull(),
+    // Peer API base URL, e.g. https://unm.example.com/v1 — must already include
+    // the /v1 prefix; the sync job appends /replication/inbound or
+    // /replication/export to it.
+    baseUrl: text('baseUrl').notNull(),
+    // Bearer token presented to the peer (plaintext — DB access already implies
+    // admin trust; revisit with envelope encryption later).
+    token: text('token').notNull(),
+    direction: text('direction').notNull().default('push'),
+    enabled: boolean('enabled').notNull().default(true),
+    // Scheduled sync cadence in minutes. NULL = manual-only (Sync now button).
+    intervalMinutes: integer('intervalMinutes'),
+    // JSON string array of system_settings keys to EXCLUDE from the settings
+    // section during sync — stack-dependent values that must stay per-instance
+    // (instanceName, updateFeedUrl, …). Defaults are applied at creation time.
+    excludeKeys: text('excludeKeys').notNull().default('[]'),
+    lastSyncAt: text('lastSyncAt'),
+    // 'ok' | 'error' — plus the human-readable failure in `lastError`.
+    lastSyncStatus: text('lastSyncStatus'),
+    lastError: text('lastError'),
+    // JSON report of the last sync (per-section created/updated counts, or the
+    // peer's error envelope) — rendered on the Backups page.
+    lastReport: text('lastReport').notNull().default('{}'),
+    createdAt: text('createdAt').notNull(),
+  },
+  (table) => {
+    return {
+      idxReplicationTargetsEnabled: index('idx_replication_targets_enabled').on(table.enabled),
+    };
+  }
+);
+
 // Add index for config_jobs
 // Note: Drizzle's index definition inside the table definition is 
 // usually the best way to handle this. I'll add it to configJobs.
+
+// ── CVE vulnerability tracking (Security page) ───────────────────────────────
+// One row per installed package as reported by a plugin's `installedPackages`
+// metric — the fleet-wide inventory the CVE worker matches advisories against.
+// Same upsert-per-poll + delete-on-absent lifecycle as containers: an uninstalled
+// package must vanish on the next poll, not linger until the 24h sweep. PK is
+// (device, plugin, name) so two plugins watching one device keep separate rows;
+// a device without package data contributes no rows. Swept like other inventory.
+export const devicePackages = pgTable(
+  'device_packages',
+  {
+    deviceId: text('deviceId').notNull(),
+    pluginId: text('pluginId').notNull(),
+    // Package name as reported (e.g. "openssl", "nginx", "node").
+    name: text('name').notNull(),
+    // Installed version string, verbatim ("1.1.1n-0ubuntu3.9", "2.4.5-r0", …).
+    // NULL = unversioned (e.g. a binary with no readable version) — the CVE
+    // worker treats it as "any version" for matching purposes.
+    version: text('version'),
+    // Ecosystem tag used to pick the advisory source + version comparator:
+    // 'debian' | 'alpine' | 'npm' | … (plugins emit what their OS/package
+    // manager is; the worker maps it onto provider ecosystems).
+    ecosystem: text('ecosystem').notNull().default('unknown'),
+    // Plugin-specific details (JSON object) stored verbatim.
+    extra: text('extra').notNull().default('{}'),
+    collectedAt: text('collectedAt').notNull(),
+  },
+  (table) => {
+    return {
+      pkDevicePackages: primaryKey({
+        name: 'device_packages_pkey',
+        columns: [table.deviceId, table.pluginId, table.name],
+      }),
+      idxDevicePackagesDevice: index('idx_device_packages_device').on(table.deviceId),
+    };
+  }
+);
+
+// One row per known advisory for a (ecosystem, package) pair — the fleet-wide
+// vulnerability knowledge base. Worker-managed ONLY (never written by plugins):
+// fetched from an OSINT provider (OSV.dev today; commercial providers later via
+// the CveProvider interface), upserted on every fetch cycle and pruned for
+// packages no longer installed anywhere in the fleet. NOT swept — advisories
+// are global knowledge, not per-device inventory. `affectedRanges` is a JSONB
+// array of { type: 'lt'|'gt', version } bounds (OSV "events" normalized): a
+// package version matches when it falls inside any [introduced, fixed) range.
+export const cveAdvisories = pgTable(
+  'cve_advisories',
+  {
+    // Provider ecosystem tag ('DEBIAN', 'ALPINE_LINUX', 'npm', …). Part of the
+    // PK — the same package name can carry different advisories per ecosystem.
+    ecosystem: text('ecosystem').notNull(),
+    packageName: text('packageName').notNull(),
+    // Advisory id (e.g. "CVE-2024-1234", "GHSA-xxxx"). One row per advisory —
+    // a package with several CVEs gets one row each, all sharing the ranges.
+    id: text('id').notNull(),
+    // CVSS base score 0–10 (null = unscored / provider gave none).
+    severityScore: doublePrecision('severityScore'),
+    // Derived bucket for cheap filtering/sorting: 'critical' | 'high' |
+    // 'medium' | 'low' | 'unknown' — computed from the score at ingest.
+    severityRank: text('severityRank').notNull().default('unknown'),
+    // Affected version ranges (JSONB): [{ type: 'lt'|'gt', version }] — OSV
+    // "events" normalized to bounds. Matching is done in TS (cve/match.ts),
+    // not SQL, so the shape stays provider-flexible.
+    affectedRanges: jsonb('affectedRanges').notNull().default([] as unknown[]),
+    // Human summary of the vulnerability (first paragraph / description).
+    summary: text('summary'),
+    // Canonical advisory URL (NVD/GHSA/OSV page) for the UI's "details" link.
+    url: text('url'),
+    publishedAt: text('publishedAt'),
+    // Provider id that last wrote this row ('osv' today).
+    provider: text('provider').notNull().default('osv'),
+    collectedAt: text('collectedAt').notNull(),
+  },
+  (table) => {
+    return {
+      pkCveAdvisories: primaryKey({
+        name: 'cve_advisories_pkey',
+        columns: [table.ecosystem, table.packageName, table.id],
+      }),
+      idxCveAdvisoriesPkg: index('idx_cve_advisories_pkg').on(table.ecosystem, table.packageName),
+    };
+  }
+);
+
+// One row per (device × vulnerable package) match — the join of device_packages
+// with cve_advisories computed by the CVE worker on every fetch cycle. This is
+// what the Security page renders: which devices are exposed to which CVEs, at
+// what severity. Recomputed WHOLESALE each beat (delete-all + re-insert per
+// device set) — the table is a pure derived view and must never drift from its
+// inputs. Swept like other inventory so offline devices drop out of the views.
+export const deviceCves = pgTable(
+  'device_cves',
+  {
+    deviceId: text('deviceId').notNull(),
+    pluginId: text('pluginId').notNull(),
+    ecosystem: text('ecosystem').notNull(),
+    packageName: text('packageName').notNull(),
+    cveId: text('cveId').notNull(),
+    // The installed version that matched (denormalized for display).
+    installedVersion: text('installedVersion'),
+    severityScore: doublePrecision('severityScore'),
+    severityRank: text('severityRank').notNull().default('unknown'),
+    summary: text('summary'),
+    url: text('url'),
+    // Provider-specific details (JSON object) stored verbatim.
+    extra: text('extra').notNull().default('{}'),
+    collectedAt: text('collectedAt').notNull(),
+  },
+  (table) => {
+    return {
+      pkDeviceCves: primaryKey({
+        name: 'device_cves_pkey',
+        columns: [table.deviceId, table.pluginId, table.ecosystem, table.packageName, table.cveId],
+      }),
+      idxDeviceCvesDevice: index('idx_device_cves_device').on(table.deviceId),
+    };
+  }
+);
+
+// ── Actions & Schedules (automation engine) ──────────────────────────────────
+// ITTT-style rules: "IF <trigger> THEN <action…>". A rule is a list of trigger
+// blocks AND a list of action blocks; the leader-gated automation worker
+// (workers/automations.ts) evaluates triggers on every tick and runs the
+// actions sequentially when one fires. Trigger/action shapes are validated in
+// automations/types.ts — the DB stores them as opaque JSON TEXT so new block
+// types can be added without a migration. See routes/automations.ts for the API.
+
+export const automations = pgTable(
+  'automations',
+  {
+    id: text('id').primaryKey(),
+    name: text('name').notNull(),
+    description: text('description'),
+    enabled: boolean('enabled').notNull().default(true),
+    // JSON array of trigger blocks (≥1): schedule | metric | log | deviceStatus | flow | containerLog.
+    triggers: text('triggers').notNull().default('[]'),
+    // JSON array of action blocks (≥1): intent | webhook | notification | internal.
+    actions: text('actions').notNull().default('[]'),
+    // Minimum seconds between two firings of this rule (event-trigger throttle).
+    cooldownSec: integer('cooldownSec').notNull().default(0),
+    // ISO timestamp of the most recent firing (any trigger) — drives cooldown.
+    lastFiredAt: text('lastFiredAt'),
+    createdBy: text('createdBy'),
+    createdAt: text('createdAt').notNull(),
+    updatedAt: text('updatedAt').notNull(),
+  },
+  (table) => {
+    return {
+      idxAutomationsEnabled: index('idx_automations_enabled').on(table.enabled),
+    };
+  }
+);
+
+// One row per rule firing — the audit trail behind the "Runs" view. `status`
+// is 'succeeded' when every action succeeded, 'failed' when none did and
+// 'partial' for mixed outcomes; `planIds` links intent actions to their plans.
+export const automationRuns = pgTable(
+  'automation_runs',
+  {
+    id: text('id').primaryKey(),
+    automationId: text('automationId').notNull(),
+    // ISO timestamp of the firing instant (denormalized for cheap retention sweeps).
+    firedAt: text('firedAt').notNull(),
+    // Which trigger block fired (free TEXT — any TriggerBlock type).
+    triggerType: text('triggerType').notNull(),
+    // Trigger context at firing time (JSON): device/metric/log details for display.
+    context: text('context').notNull().default('{}'),
+    status: text('status').notNull().default('succeeded'),
+    error: text('error'),
+    // JSON array of plan ids created by intent actions ([] when none).
+    planIds: text('planIds').notNull().default('[]'),
+  },
+  (table) => {
+    return {
+      idxAutomationRunsAutomationId: index('idx_automation_runs_automation_id').on(table.automationId),
+      idxAutomationRunsFiredAt: index('idx_automation_runs_fired_at').on(table.firedAt),
+    };
+  }
+);
+
+// Per-trigger evaluation state (JSON) — e.g. log-trigger watermarks and the
+// sustained-condition window of metric triggers. Keyed by (rule, trigger block,
+// state key) so each trigger keeps its own bookkeeping independently.
+export const automationState = pgTable(
+  'automation_state',
+  {
+    automationId: text('automationId').notNull(),
+    triggerId: text('triggerId').notNull(),
+    stateKey: text('stateKey').notNull(),
+    value: text('value').notNull().default('{}'),
+    updatedAt: text('updatedAt').notNull(),
+  },
+  (table) => {
+    return {
+      pkAutomationState: primaryKey({
+        name: 'automation_state_pkey',
+        columns: [table.automationId, table.triggerId, table.stateKey],
+      }),
+    };
+  }
+);

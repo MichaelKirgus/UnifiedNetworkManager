@@ -40,9 +40,13 @@ RUN cd packages/lancom-shared && npm install --legacy-peer-deps && npm run build
 COPY plugins/lancom-lcos/package*.json plugins/lancom-lcos/tsconfig.json plugins/lancom-lcos/
 RUN cd plugins/lancom-lcos && npm install --legacy-peer-deps
 
+
 COPY plugins/lancom-lcos/src/ plugins/lancom-lcos/src/
 RUN cd plugins/lancom-lcos && npm run build \
-    && node -e "require('/app/plugins/lancom-lcos/node_modules/@unm/snmp-client')"
+    && node -e "require('/app/plugins/lancom-lcos/node_modules/@unm/snmp-client')" && npm prune --omit=dev --legacy-peer-deps
+# Prune devDependencies (typescript, ts-node-dev, jest, @types/*): the build above
+# already ran and nothing at runtime requires them — keeps images lean and free of
+# dev-only vulnerable packages.
 
 # Static icon assets served at /icons (proxied by the API's GET /plugins/:id/icon).
 COPY plugins/lancom-lcos/icons/ plugins/lancom-lcos/icons/
@@ -58,5 +62,19 @@ COPY plugins/lancom-lcos/docs/ plugins/lancom-lcos/docs/
 WORKDIR /app/plugins/lancom-lcos
 
 EXPOSE 4080
+
+# Unprivileged runtime user (uid/gid 1001) — the entrypoint wrapper drops to it.
+RUN addgroup -g 1001 unm && adduser -u 1001 -G unm -D app \
+    && mkdir -p /data/tls && chown -R 1001:1001 /data/tls
+
+# Privilege-drop helper — joins UNM_DOCKER_GID, drops to `app`, re-execs the app.
+COPY scripts/unm-privdrop.js /usr/local/lib/unm-privdrop.js
+
+# UNM entrypoint wrapper — macvlan gateway (UNM_DEFAULT_GATEWAY), data-dir chown
+# (UNM_CHOWN_PATHS, skip via UNM_SKIP_CHOWN=1) and privilege drop to `app`
+# (opt out with UNM_RUN_AS_ROOT=1). See scripts/docker-entrypoint.sh.
+COPY scripts/docker-entrypoint.sh /usr/local/bin/unm-entrypoint.sh
+RUN chmod +x /usr/local/bin/unm-entrypoint.sh
+ENTRYPOINT ["/usr/local/bin/unm-entrypoint.sh"]
 
 CMD ["npm", "start"]

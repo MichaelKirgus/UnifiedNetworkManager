@@ -5,13 +5,14 @@ import { ChevronDown, Copy, Eye, Pencil, Plus, Power, RefreshCw, Save, Settings2
 import { Layout } from '../components/Layout';
 import { DataTable, DataTableColumn } from '../components/DataTable';
 import { ChipInput } from '../components/ChipInput';
-import { StatusBadge } from '../components/StatusBadge';
+import { StatusBadge, statusReasonsTitle } from '../components/StatusBadge';
 import { MetricCell } from '../components/MetricCell';
 import { DeviceIcon } from '../components/DeviceIcon';
 import { DeviceActionsCell } from '../components/DeviceActionsCell';
 import { PluginAssignmentBuilder } from '../components/PluginAssignmentBuilder';
 import { api, Device, DeviceCreateRequest, DeviceModelEntry, DevicePluginAssignmentInput, DevicePluginAssignment, DeviceRefreshResult, Plugin } from '../api/client';
 import { OptionForm } from '../components/OptionForm';
+import { useNavLock } from '../components/NavLock';
 import { can } from '../auth/permissions';
 import { isValidAddress, addressError } from '../utils/address';
 
@@ -129,6 +130,17 @@ export default function Devices() {
     setSearchParams({}, { replace: true });
   }, [searchParams, canWriteDevices, editingId]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // While the create/edit form is open, hold the nav lock (the same mechanism
+  // wizards use) so a stray sidebar click can't change the route and unmount
+  // the page — which would silently abandon in-progress edits. The form closes
+  // via resetForm() on Save/Cancel, releasing the lock.
+  const { lock, unlock } = useNavLock();
+  useEffect(() => {
+    if (!showForm) return;
+    lock('Finish editing this device first');
+    return () => unlock();
+  }, [showForm, lock, unlock]);
+
   // Model catalog for the selected vendor, merged across ALL plugins currently
   // assigned in the form (a device can have several — e.g. LANCOM + SNMP).
   // Empty when no assigned plugin advertises models for this vendor (e.g. ICMP),
@@ -177,8 +189,6 @@ export default function Devices() {
     mutationFn: (id: string) => api.deleteDevice(id),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['devices'] });
-      // The device's config-job history is deleted server-side too.
-      queryClient.invalidateQueries({ queryKey: ['configJobs'] });
     },
     onError: (err: Error) => setFormError(err.message),
   });
@@ -223,8 +233,6 @@ export default function Devices() {
     },
     onSuccess: ({ total, blockedByPlans, otherErrors }) => {
       queryClient.invalidateQueries({ queryKey: ['devices'] });
-      // Deleted devices' config-job history is removed server-side too.
-      queryClient.invalidateQueries({ queryKey: ['configJobs'] });
       if (blockedByPlans.length > 0 || otherErrors.length > 0) {
         const parts = [
           `Deleted ${total - blockedByPlans.length - otherErrors.length} of ${total} device(s).`,
@@ -559,7 +567,8 @@ export default function Devices() {
       key: 'status',
       render: (row) => (
         <span className="inline-flex items-center gap-1.5">
-          <StatusBadge status={row.status} />
+          {/* Tooltip lists which plugin is non-ok and why (worst-wins rollup). */}
+          <StatusBadge status={row.status} title={statusReasonsTitle(row.status, row.healthReasons)} />
           {row.enabled === false && (
             <span
               title="Telemetry polling disabled — historical data and last metrics are preserved"

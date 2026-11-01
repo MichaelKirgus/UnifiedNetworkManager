@@ -16,6 +16,9 @@ import {
   statusToSeverity,
 } from '../notifications';
 import { LEADER_KEYS } from './leader';
+import { onDeviceStatusTransition, onUpdateTransitions } from './automations';
+import { diffUpdateTransitions } from '../automations/engine';
+import type { DeviceStatus } from '../automations/types';
 import {
   initWorker,
   recordSkippedTelemetryBeat,
@@ -50,9 +53,9 @@ const INVENTORY_SWEEP_INTERVAL_MS = 10 * 60 * 1000;
 /** Metric keys that carry cross-device inventory (ingested into their own tables). */
 const INVENTORY_METRIC_KEYS = [
   'networks', 'arp', 'ndp', 'hosts', 'dhcpLeases', 'wlanClients', 'macTable', 'dockerHosts', 'vmHosts',
-  'tunnels', 'routes', 'firewallRules', 'certificates', 'services',
+  'tunnels', 'routes', 'dnsEntries', 'dhcpNetworks', 'dhcpReservations', 'firewallRules', 'certificates', 'services',
   'wifiNetworks', 'wifiAirtime', 'wifiRadios', 'wifiNeighbors',
-  'ports', 'filesystems', 'disks', 'containers', 'images', 'vms', 'updates',
+  'ports', 'filesystems', 'disks', 'containers', 'images', 'vms', 'gpus', 'updates',
   'mailDomains', 'mailMailboxes', 'mailAliases',
 ] as const;
 
@@ -87,11 +90,42 @@ function clampInt(v: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, Math.round(v)));
 }
 
+/** Normalizes a MAC to lowercase colon form ("aa:bb:cc:dd:ee:ff"); '' when not exactly 12 hex digits. */
+function normalizeMacColon(raw: string): string {
+  const hex = raw.toLowerCase().replace(/[^0-9a-f]/g, '');
+  if (hex.length !== 12) return '';
+  return hex.replace(/([0-9a-f]{2})(?=[0-9a-f])/g, '$1:');
+}
+
+/** One plugin-reported reason for a non-ok health (SDK `HealthReason`). */
+interface PluginHealthReason {
+  severity: 'warning' | 'critical';
+  message: string;
+}
+
 interface MonitoringResponse {
   /** Plugin monitoring health — the SDK's canonical vocabulary (ok/warning/critical/unknown). */
   health?: Health;
+  /** Optional human-readable reasons for a non-ok health (newer plugins only). */
+  healthReasons?: unknown;
   metrics?: Record<string, unknown>;
   metricDescriptors?: unknown[];
+}
+
+/** Normalizes the plugin's `healthReasons` field — tolerant of anything. */
+function parseHealthReasons(raw: unknown): PluginHealthReason[] {
+  if (!Array.isArray(raw)) return [];
+  const out: PluginHealthReason[] = [];
+  for (const r of raw) {
+    if (!r || typeof r !== 'object') continue;
+    const o = r as Record<string, unknown>;
+    const severity = o['severity'] === 'critical' ? 'critical' : o['severity'] === 'warning' ? 'warning' : null;
+    const message = typeof o['message'] === 'string' ? o['message'].trim() : '';
+    if (!severity || !message) continue;
+    out.push({ severity, message: message.slice(0, 300) });
+    if (out.length >= 10) break; // tooltip budget — keep it short by contract
+  }
+  return out;
 }
 
 // DeviceAddressView comes from types/deviceAddressView (shared).
@@ -122,6 +156,9 @@ interface AssignmentTarget {
  * inventory arrays — used to decide if the inventory deadline may advance.
  * `error` carries the transport/credential error message for diagnostics
  * (forced refresh reports it back to the caller; the scheduler ignores it).
+ * `healthReasons` are plugin-reported human-readable reasons for a non-ok
+ * health — persisted on the telemetry snapshot and rolled up into the
+ * device's status tooltip.
  */
 interface PollOutcome {
   /** The plugin's reported monitoring health (SDK Health vocabulary). */
@@ -130,6 +167,8 @@ interface PollOutcome {
   inventoryEmitted: boolean;
   /** Transport-level failure reason (set when `reachable` is false). */
   error?: string;
+  /** Plugin-reported reasons for a non-ok health (empty when healthy/absent). */
+  healthReasons: PluginHealthReason[];
 }
 
 interface PollOptions {
@@ -140,6 +179,13 @@ interface PollOptions {
    * and always answer with a full snapshot — harmless.
    */
   collectInventory: boolean;
+  /**
+   * Ask the plugin to trigger an immediate device-side update search (OPNsense:
+   * POST /api/core/firmware/status, ~30–90 s). Set by forced refreshes ("Check
+   * now" on the Updates page) so a stale appliance cache can't keep hiding
+   * updates. Old plugin images ignore the field — harmless.
+   */
+  forceUpdateCheck?: boolean;
 }
 
 async function pollAssignment(target: AssignmentTarget, opts: PollOptions): Promise<PollOutcome> {
@@ -172,6 +218,7 @@ async function pollAssignment(target: AssignmentTarget, opts: PollOptions): Prom
         // Window-based scheduling hint (see header comment): true only on
         // inventory-due polls so plugins can skip slow collection in between.
         collectInventory: opts.collectInventory,
+        ...(opts.forceUpdateCheck ? { forceUpdateCheck: true } : {}),
         ...(decrypted?.type === 'apiKey'
           ? { apiKey: credentials.apiKey, apiSecret: credentials.apiSecret }
           : {})
@@ -184,6 +231,9 @@ async function pollAssignment(target: AssignmentTarget, opts: PollOptions): Prom
     );
 
     const health = response.data?.health ?? 'unknown';
+    // Reasons only make sense for a non-ok poll — drop them when healthy so
+    // the column stays NULL in the common case.
+    const healthReasons = parseHealthReasons(response.data?.healthReasons);
     const metrics = response.data?.metrics ?? {};
     const metricDescriptors = response.data?.metricDescriptors;
     const collectedAt = new Date().toISOString();
@@ -194,6 +244,7 @@ async function pollAssignment(target: AssignmentTarget, opts: PollOptions): Prom
       pluginId: target.pluginId,
       collectedAt,
       health,
+      healthReasons: health !== 'ok' && healthReasons.length > 0 ? JSON.stringify(healthReasons) : null,
       metrics: JSON.stringify(metrics),
       metricDescriptors: metricDescriptors ? JSON.stringify(metricDescriptors) : null,
     });
@@ -202,6 +253,25 @@ async function pollAssignment(target: AssignmentTarget, opts: PollOptions): Prom
     // table — runs on EVERY poll (not inventory-gated) so drift stays fresh.
     // Best-effort; a parse failure must never break the telemetry cycle.
     ingestDeviceTime(target.deviceId, target.pluginId, metrics, collectedAt);
+
+    // Device updates (Updates page) — also per-poll: plugins that emit `updates`
+    // do so on every beat (OPNsense reads its cached check result each poll),
+    // and a forced refresh ("Check now") must surface fresh rows IMMEDIATELY
+    // instead of waiting up to the next 15-min inventory window. Absent key =
+    // no-op, present-but-empty = authoritative wipe — same contract as before.
+    ingestUpdates(target.deviceId, target.pluginId, metrics, collectedAt).catch((err) => {
+      // eslint-disable-next-line no-console
+      console.error('[telemetry] updates ingestion failed:', err);
+    });
+
+    // Installed packages (CVE tracking) — also per-poll: a package upgrade must
+    // refresh the row's version + collectedAt so the cve worker's input-change
+    // gate re-matches within one beat. Absent key = no-op, present-but-empty =
+    // authoritative wipe — same contract as containers/updates.
+    ingestInstalledPackages(target.deviceId, target.pluginId, metrics, collectedAt).catch((err) => {
+      // eslint-disable-next-line no-console
+      console.error('[telemetry] installed-packages ingestion failed:', err);
+    });
 
     // Normalize the inventory parts of this snapshot into the cross-device
     // tables (Networks + Hosts pages) — ONLY on inventory-due polls. Metrics-
@@ -212,14 +282,14 @@ async function pollAssignment(target: AssignmentTarget, opts: PollOptions): Prom
       ingestInventory(target.deviceId, target.pluginId, metrics, collectedAt);
     }
 
-    return { health, reachable: true, inventoryEmitted: hasInventoryKeys(metrics) };
+    return { health, reachable: true, inventoryEmitted: hasInventoryKeys(metrics), healthReasons };
   } catch (err) {
     // eslint-disable-next-line no-console
     console.error(
       `[telemetry] failed to poll device ${target.deviceId} via plugin ${target.pluginId}:`,
       (err as Error).message
     );
-    return { health: 'unknown', reachable: false, inventoryEmitted: false, error: (err as Error).message };
+    return { health: 'unknown', reachable: false, inventoryEmitted: false, error: (err as Error).message, healthReasons: [] };
   }
 }
 
@@ -333,6 +403,232 @@ async function ingestDeviceTime(
  * independently of the API. Never throws: an inventory parse failure must not
  * break the telemetry cycle.
  */
+/**
+ * Ingests the `updates` metric into device_updates (Updates page). Runs on
+ * EVERY poll — not inventory-gated — because plugins that emit it do so on
+ * every beat and a forced refresh must surface fresh rows immediately.
+ *
+ * Generic key — any plugin advertising capability 'updates' may emit it:
+ *   updates[] { name, kind, currentVersion?, latestVersion?, available,
+ *               rebootRequired?, sizeBytes?, applyActionId?, applyInput?, extra? }
+ * Same CONFIG-object lifecycle as containers: upsert-per-poll + delete-on-
+ * absent (an applied update must vanish on the next poll), present-but-nothing
+ * available = authoritative wipe. Only rows with available=true persist — a
+ * plugin that reports "checked, nothing new" emits an empty array and its
+ * stale rows are wiped.
+ */
+async function ingestUpdates(
+  deviceId: string,
+  pluginId: string,
+  metrics: Record<string, unknown>,
+  collectedAt: string
+): Promise<void> {
+  const rawUpdates = Array.isArray(metrics['updates']) ? (metrics['updates'] as unknown[]) : null;
+  if (rawUpdates === null) return; // absent key — keep previous rows
+
+  // Local helpers (same semantics as ingestInventory's closures).
+  const numOrNull = (v: unknown): number | null =>
+    typeof v === 'number' && Number.isFinite(v) ? v : null;
+  const extraOf = (r: Record<string, unknown>): string => {
+    const e = r['extra'];
+    if (!e || typeof e !== 'object' || Array.isArray(e)) return '{}';
+    try {
+      return JSON.stringify(e);
+    } catch {
+      return '{}';
+    }
+  };
+
+  const values: {
+    deviceId: string; pluginId: string; kind: string; name: string;
+    currentVersion: string | null; latestVersion: string | null;
+    rebootRequired: boolean | null; sizeBytes: number | null;
+    releaseNotesUrl: string | null; releaseNotes: string | null;
+    branch: string | null;
+    applyActionId: string | null; applyInput: string; extra: string; collectedAt: string;
+  }[] = [];
+  for (const raw of rawUpdates) {
+    if (!raw || typeof raw !== 'object') continue;
+    const r = raw as Record<string, unknown>;
+    // Only genuinely-available updates persist.
+    if (r['available'] !== true) continue;
+    const name = typeof r['name'] === 'string' ? (r['name'] as string).trim() : '';
+    if (!name) continue; // name is part of the conflict key
+    const kind = typeof r['kind'] === 'string' && (r['kind'] as string).trim() !== '' ? (r['kind'] as string).trim() : 'firmware';
+    values.push({
+      deviceId,
+      pluginId,
+      kind,
+      name,
+      currentVersion: typeof r['currentVersion'] === 'string' && (r['currentVersion'] as string) !== '' ? (r['currentVersion'] as string) : null,
+      latestVersion: typeof r['latestVersion'] === 'string' && (r['latestVersion'] as string) !== '' ? (r['latestVersion'] as string) : null,
+      rebootRequired: typeof r['rebootRequired'] === 'boolean' ? (r['rebootRequired'] as boolean) : null,
+      sizeBytes: numOrNull(r['sizeBytes']),
+      releaseNotesUrl: typeof r['releaseNotesUrl'] === 'string' && (r['releaseNotesUrl'] as string).trim() !== '' ? (r['releaseNotesUrl'] as string).trim() : null,
+      // Cap notes text at 16 KB — a runaway feed must not bloat the table.
+      releaseNotes: typeof r['releaseNotes'] === 'string' && (r['releaseNotes'] as string).trim() !== '' ? (r['releaseNotes'] as string).slice(0, 16_384) : null,
+      branch: typeof r['branch'] === 'string' && (r['branch'] as string).trim() !== '' ? (r['branch'] as string).trim().slice(0, 128) : null,
+      applyActionId: typeof r['applyActionId'] === 'string' && (r['applyActionId'] as string).trim() !== '' ? (r['applyActionId'] as string) : null,
+      applyInput: (() => {
+        const ai = r['applyInput'];
+        if (!ai || typeof ai !== 'object' || Array.isArray(ai)) return '{}';
+        try { return JSON.stringify(ai); } catch { return '{}'; }
+      })(),
+      extra: extraOf(r),
+      collectedAt,
+    });
+  }
+  // Capture the pre-poll row set BEFORE mutating — the automation worker's
+  // updateAvailable triggers fire on TRANSITIONS (appeared / advanced /
+  // disappeared), so we diff old vs new after the commit below.
+  const prevRows = await db.query.deviceUpdates.findMany({
+    where: and(eq(schema.deviceUpdates.deviceId, deviceId), eq(schema.deviceUpdates.pluginId, pluginId)),
+  });
+
+  // Dedupe within the poll (same kind|name reported twice = one row, last wins) —
+  // used for BOTH the insert and the transition diff below.
+  const byKey = new Map<string, typeof values[number]>();
+  for (const v of values) byKey.set(`${v.kind}|${v.name}`, v);
+  const deduped = Array.from(byKey.values());
+
+  if (deduped.length > 0) {
+    await db.insert(schema.deviceUpdates).values(deduped).onConflictDoUpdate({
+      target: [schema.deviceUpdates.deviceId, schema.deviceUpdates.pluginId, schema.deviceUpdates.kind, schema.deviceUpdates.name],
+      set: {
+        currentVersion: sql`excluded."currentVersion"`,
+        latestVersion: sql`excluded."latestVersion"`,
+        rebootRequired: sql`excluded."rebootRequired"`,
+        sizeBytes: sql`excluded."sizeBytes"`,
+        releaseNotesUrl: sql`excluded."releaseNotesUrl"`,
+        releaseNotes: sql`excluded."releaseNotes"`,
+        branch: sql`excluded."branch"`,
+        applyActionId: sql`excluded."applyActionId"`,
+        applyInput: sql`excluded."applyInput"`,
+        extra: sql`excluded.extra`,
+        collectedAt: sql`excluded."collectedAt"`,
+      },
+    });
+    const seenKeys = new Set(deduped.map((v) => `${v.kind}|${v.name}`));
+    await db.delete(schema.deviceUpdates)
+      .where(and(
+        eq(schema.deviceUpdates.deviceId, deviceId),
+        eq(schema.deviceUpdates.pluginId, pluginId),
+        notInArray(sql`"kind" || '|' || name`, Array.from(seenKeys))
+      ));
+  } else {
+    // Present-but-nothing-available is the authoritative wipe — same contract as containers.
+    await db.delete(schema.deviceUpdates)
+      .where(and(
+        eq(schema.deviceUpdates.deviceId, deviceId),
+        eq(schema.deviceUpdates.pluginId, pluginId)
+      ));
+  }
+
+  // Actions & Schedules — updateAvailable triggers fire on TRANSITIONS between
+  // this poll's row set and the previous one (appeared / advanced / disappeared).
+  // Fire-and-forget: automation failures must never disturb telemetry bookkeeping.
+  const parseApplyInput = (raw: string): Record<string, unknown> | undefined => {
+    try {
+      const parsed = JSON.parse(raw);
+      return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : undefined;
+    } catch {
+      return undefined;
+    }
+  };
+  const transitions = diffUpdateTransitions(
+    prevRows.map((r) => ({ kind: r.kind, name: r.name, currentVersion: r.currentVersion, latestVersion: r.latestVersion, rebootRequired: r.rebootRequired, applyActionId: r.applyActionId, applyInput: parseApplyInput(r.applyInput) })),
+    deduped.map((v) => ({ kind: v.kind, name: v.name, currentVersion: v.currentVersion, latestVersion: v.latestVersion, rebootRequired: v.rebootRequired, applyActionId: v.applyActionId, applyInput: parseApplyInput(v.applyInput) }))
+  );
+  if (transitions.length > 0) {
+    void onUpdateTransitions(deviceId, pluginId, transitions).catch((err) => {
+      // eslint-disable-next-line no-console
+      console.error('[telemetry] automation update-transition hook failed:', err);
+    });
+  }
+}
+
+/**
+ * Ingests the `installedPackages` metric into device_packages (CVE tracking).
+ * Runs on EVERY poll — not inventory-gated — so a package upgrade refreshes the
+ * row's version + collectedAt immediately and the cve worker re-matches within
+ * one beat.
+ *
+ * Generic key — any plugin may emit it:
+ *   installedPackages[] { name, version?, ecosystem?, extra? }
+ * `ecosystem` is a free-form tag ('debian', 'alpine', 'npm', …) the cve worker
+ * maps onto its provider's source names; missing = 'unknown' (skipped by the
+ * fetch, but still stored so the UI can show untracked packages). Same
+ * CONFIG-object lifecycle as containers: upsert-per-poll + delete-on-absent,
+ * present-but-empty = authoritative wipe. Never throws.
+ */
+async function ingestInstalledPackages(
+  deviceId: string,
+  pluginId: string,
+  metrics: Record<string, unknown>,
+  collectedAt: string
+): Promise<void> {
+  const rawPkgs = Array.isArray(metrics['installedPackages']) ? (metrics['installedPackages'] as unknown[]) : null;
+  if (rawPkgs === null) return; // absent key — keep previous rows
+
+  const extraOf = (r: Record<string, unknown>): string => {
+    const e = r['extra'];
+    if (!e || typeof e !== 'object' || Array.isArray(e)) return '{}';
+    try {
+      return JSON.stringify(e);
+    } catch {
+      return '{}';
+    }
+  };
+
+  const values: {
+    deviceId: string; pluginId: string; name: string; version: string | null;
+    ecosystem: string; extra: string; collectedAt: string;
+  }[] = [];
+  for (const raw of rawPkgs) {
+    if (!raw || typeof raw !== 'object') continue;
+    const r = raw as Record<string, unknown>;
+    const name = typeof r['name'] === 'string' ? (r['name'] as string).trim() : '';
+    if (!name) continue; // name is part of the conflict key
+    values.push({
+      deviceId,
+      pluginId,
+      name,
+      version: typeof r['version'] === 'string' && (r['version'] as string).trim() !== '' ? (r['version'] as string).trim() : null,
+      ecosystem: typeof r['ecosystem'] === 'string' && (r['ecosystem'] as string).trim() !== '' ? (r['ecosystem'] as string).trim().toLowerCase() : 'unknown',
+      extra: extraOf(r),
+      collectedAt,
+    });
+  }
+
+  if (values.length > 0) {
+    const byKey = new Map<string, typeof values[number]>();
+    for (const v of values) byKey.set(v.name, v); // one row per package name (PK is case-sensitive; the cve worker matches case-insensitively)
+    await db.insert(schema.devicePackages).values(Array.from(byKey.values())).onConflictDoUpdate({
+      target: [schema.devicePackages.deviceId, schema.devicePackages.pluginId, schema.devicePackages.name],
+      set: {
+        version: sql`excluded.version`,
+        ecosystem: sql`excluded.ecosystem`,
+        extra: sql`excluded.extra`,
+        collectedAt: sql`excluded."collectedAt"`,
+      },
+    });
+    const seenNames = new Set(values.map((v) => v.name));
+    await db.delete(schema.devicePackages)
+      .where(and(
+        eq(schema.devicePackages.deviceId, deviceId),
+        eq(schema.devicePackages.pluginId, pluginId),
+        notInArray(schema.devicePackages.name, Array.from(seenNames))
+      ));
+  } else {
+    // Present-but-EMPTY is the authoritative wipe — same contract as containers.
+    await db.delete(schema.devicePackages)
+      .where(and(
+        eq(schema.devicePackages.deviceId, deviceId),
+        eq(schema.devicePackages.pluginId, pluginId)
+      ));
+  }
+}
+
 async function ingestInventory(
   deviceId: string,
   pluginId: string,
@@ -622,6 +918,173 @@ async function ingestInventory(
             eq(schema.routes.deviceId, deviceId),
             eq(schema.routes.pluginId, pluginId),
             or(...staleRoutes.map((k) => and(eq(schema.routes.destination, k.destination), eq(schema.routes.protocol, k.protocol))))
+          )
+        );
+      }
+    }
+
+    // --- dnsEntries (static DNS host entries) ---------------------------------
+    // Same present-vs-absent contract as routes: a PRESENT-but-empty array is
+    // authoritative ("this device has no static DNS entries right now") so stale
+    // rows are wiped; an ABSENT key means "plugin doesn't report DNS entries"
+    // and must not touch the table (24h sweep still applies). `name` is lowercased
+    // at ingest — the DNS page groups case-insensitively. Identity is name|ip so a
+    // name with several addresses yields multiple rows.
+    const rawDnsEntries = Array.isArray(metrics['dnsEntries']) ? (metrics['dnsEntries'] as unknown[]) : null;
+    if (rawDnsEntries !== null) {
+      const values: { deviceId: string; pluginId: string; name: string; ip: string; domain: string | null; description: string | null; collectedAt: string }[] = [];
+      for (const raw of rawDnsEntries) {
+        if (!raw || typeof raw !== 'object') continue;
+        const r = raw as Record<string, unknown>;
+        const name = typeof r['name'] === 'string' ? (r['name'] as string).trim().toLowerCase() : '';
+        const ip = typeof r['ip'] === 'string' ? (r['ip'] as string).trim() : '';
+        if (!name || !ip) continue; // both are part of the conflict key
+        // Optional domain suffix (OPNsense unbound: bare hostname + separate
+        // domain field). Lowercased, trailing dot stripped — ''/absent → NULL.
+        const rawDomain = typeof r['domain'] === 'string' ? (r['domain'] as string).trim().toLowerCase() : '';
+        const domain = rawDomain !== '' ? rawDomain.replace(/\.$/, '') || null : null;
+        // Optional vendor note (e.g. RouterOS `comment`) — ''/absent → NULL.
+        const description = typeof r['description'] === 'string' && (r['description'] as string).trim() !== '' ? (r['description'] as string).trim() : null;
+        values.push({ deviceId, pluginId, name, ip, domain, description, collectedAt });
+      }
+      const dnsByKey = new Map<string, typeof values[number]>();
+      for (const v of values) {
+        dnsByKey.set(`${v.deviceId}|${v.pluginId}|${v.name}|${v.ip}`, v);
+      }
+      if (dnsByKey.size > 0) {
+        await db.insert(schema.deviceDnsEntries).values(Array.from(dnsByKey.values())).onConflictDoUpdate({
+          target: [schema.deviceDnsEntries.deviceId, schema.deviceDnsEntries.pluginId, schema.deviceDnsEntries.name, schema.deviceDnsEntries.ip],
+          // description + domain are refreshed too — a note or domain edited on
+          // the device (or its removal) must track the live table.
+          set: { collectedAt: sql`excluded."collectedAt"`, description: sql`excluded."description"`, domain: sql`excluded."domain"` },
+        });
+      }
+      // A DNS entry removed on the device must vanish from the page. Drop rows
+      // this snapshot no longer reports (only when the key is present at all).
+      const existingDnsKeys = await db
+        .select({ name: schema.deviceDnsEntries.name, ip: schema.deviceDnsEntries.ip })
+        .from(schema.deviceDnsEntries)
+        .where(and(eq(schema.deviceDnsEntries.deviceId, deviceId), eq(schema.deviceDnsEntries.pluginId, pluginId)));
+      const seenDnsKeys = new Set(values.map((v) => `${v.name}|${v.ip}`));
+      const staleDns = existingDnsKeys.filter((k) => !seenDnsKeys.has(`${k.name}|${k.ip}`));
+      if (staleDns.length > 0) {
+        await db.delete(schema.deviceDnsEntries).where(
+          and(
+            eq(schema.deviceDnsEntries.deviceId, deviceId),
+            eq(schema.deviceDnsEntries.pluginId, pluginId),
+            or(...staleDns.map((k) => and(eq(schema.deviceDnsEntries.name, k.name), eq(schema.deviceDnsEntries.ip, k.ip))))
+          )
+        );
+      }
+    }
+
+    // --- dhcpNetworks (configured DHCP server networks/pools) -----------------
+    // Same present-vs-absent contract as dnsEntries: a PRESENT-but-empty array is
+    // authoritative ("this device has no DHCP networks right now") so stale rows
+    // are wiped; an ABSENT key means "plugin doesn't report DHCP networks" and must
+    // not touch the table (24h sweep still applies). Identity is name|rangeStart so
+    // a scope with several ranges yields multiple rows.
+    const rawDhcpNetworks = Array.isArray(metrics['dhcpNetworks']) ? (metrics['dhcpNetworks'] as unknown[]) : null;
+    if (rawDhcpNetworks !== null) {
+      const values: {
+        deviceId: string; pluginId: string; name: string; iface: string | null; rangeStart: string; rangeEnd: string;
+        cidr: string | null; leaseTimeSeconds: number | null; gateway: string | null; dnsServers: string | null; refId: string | null; collectedAt: string;
+      }[] = [];
+      for (const raw of rawDhcpNetworks) {
+        if (!raw || typeof raw !== 'object') continue;
+        const r = raw as Record<string, unknown>;
+        const name = typeof r['name'] === 'string' ? (r['name'] as string).trim() : '';
+        const rangeStart = typeof r['rangeStart'] === 'string' ? (r['rangeStart'] as string).trim() : '';
+        const rangeEnd = typeof r['rangeEnd'] === 'string' ? (r['rangeEnd'] as string).trim() : '';
+        if (!name || !rangeStart) continue; // both are part of the conflict key
+        const iface = typeof r['interface'] === 'string' && (r['interface'] as string).trim() !== '' ? (r['interface'] as string).trim() : null;
+        const cidr = typeof r['cidr'] === 'string' && (r['cidr'] as string).trim() !== '' ? (r['cidr'] as string).trim() : null;
+        const leaseTimeSeconds = typeof r['leaseTimeSeconds'] === 'number' && Number.isFinite(r['leaseTimeSeconds']) ? Math.round(r['leaseTimeSeconds'] as number) : null;
+        const gateway = typeof r['gateway'] === 'string' && (r['gateway'] as string).trim() !== '' ? (r['gateway'] as string).trim() : null;
+        const dnsServers = typeof r['dnsServers'] === 'string' && (r['dnsServers'] as string).trim() !== '' ? (r['dnsServers'] as string).trim() : null;
+        const refId = typeof r['refId'] === 'string' && (r['refId'] as string).trim() !== '' ? (r['refId'] as string).trim() : null;
+        values.push({ deviceId, pluginId, name, iface, rangeStart, rangeEnd: rangeEnd || rangeStart, cidr, leaseTimeSeconds, gateway, dnsServers, refId, collectedAt });
+      }
+      const dhcpNetByKey = new Map<string, typeof values[number]>();
+      for (const v of values) {
+        dhcpNetByKey.set(`${v.deviceId}|${v.pluginId}|${v.name}|${v.rangeStart}`, v);
+      }
+      if (dhcpNetByKey.size > 0) {
+        await db.insert(schema.deviceDhcpNetworks).values(Array.from(dhcpNetByKey.values())).onConflictDoUpdate({
+          target: [schema.deviceDhcpNetworks.deviceId, schema.deviceDhcpNetworks.pluginId, schema.deviceDhcpNetworks.name, schema.deviceDhcpNetworks.rangeStart],
+          // All display columns are refreshed — a range/lease-time edited on the device must track the live table.
+          set: {
+            collectedAt: sql`excluded."collectedAt"`, iface: sql`excluded.iface`, rangeEnd: sql`excluded."rangeEnd"`,
+            cidr: sql`excluded.cidr`, leaseTimeSeconds: sql`excluded."leaseTimeSeconds"`, gateway: sql`excluded.gateway`, dnsServers: sql`excluded."dnsServers"`, refId: sql`excluded."refId"`,
+          },
+        });
+      }
+      // A DHCP network removed on the device must vanish from the page. Drop rows
+      // this snapshot no longer reports (only when the key is present at all).
+      const existingDhcpNetKeys = await db
+        .select({ name: schema.deviceDhcpNetworks.name, rangeStart: schema.deviceDhcpNetworks.rangeStart })
+        .from(schema.deviceDhcpNetworks)
+        .where(and(eq(schema.deviceDhcpNetworks.deviceId, deviceId), eq(schema.deviceDhcpNetworks.pluginId, pluginId)));
+      const seenDhcpNetKeys = new Set(values.map((v) => `${v.name}|${v.rangeStart}`));
+      const staleDhcpNets = existingDhcpNetKeys.filter((k) => !seenDhcpNetKeys.has(`${k.name}|${k.rangeStart}`));
+      if (staleDhcpNets.length > 0) {
+        await db.delete(schema.deviceDhcpNetworks).where(
+          and(
+            eq(schema.deviceDhcpNetworks.deviceId, deviceId),
+            eq(schema.deviceDhcpNetworks.pluginId, pluginId),
+            or(...staleDhcpNets.map((k) => and(eq(schema.deviceDhcpNetworks.name, k.name), eq(schema.deviceDhcpNetworks.rangeStart, k.rangeStart))))
+          )
+        );
+      }
+    }
+
+    // --- dhcpReservations (static MAC→IP mappings) ----------------------------
+    // Same present-vs-absent contract as dnsEntries. Identity is mac — a MAC with
+    // several fixed IPs on one device collapses to the last-seen IP (vendors key
+    // reservations by MAC). `refId`/`ip`/`hostname` are refreshed on conflict so an
+    // edited reservation tracks the live table; NULLs in the snapshot overwrite.
+    const rawDhcpReservations = Array.isArray(metrics['dhcpReservations']) ? (metrics['dhcpReservations'] as unknown[]) : null;
+    if (rawDhcpReservations !== null) {
+      const values: { deviceId: string; pluginId: string; mac: string; ip: string | null; hostname: string | null; iface: string | null; refId: string | null; status: string | null; collectedAt: string }[] = [];
+      for (const raw of rawDhcpReservations) {
+        if (!raw || typeof raw !== 'object') continue;
+        const r = raw as Record<string, unknown>;
+        // Canonical form is lowercase colon ("aa:bb:cc:dd:ee:ff") — vendors emit
+        // bare hex (LCOS), colons, or dashes; normalize so rows from different
+        // devices are comparable and the webapp's MAC_PATTERN validates them.
+        const mac = typeof r['mac'] === 'string' ? normalizeMacColon(r['mac'] as string) : '';
+        if (!mac) continue; // mac is part of the conflict key
+        const ip = typeof r['ip'] === 'string' && (r['ip'] as string).trim() !== '' ? (r['ip'] as string).trim() : null;
+        const hostname = typeof r['hostname'] === 'string' && (r['hostname'] as string).trim() !== '' ? (r['hostname'] as string).trim() : null;
+        const iface = typeof r['interface'] === 'string' && (r['interface'] as string).trim() !== '' ? (r['interface'] as string).trim() : null;
+        const refId = typeof r['refId'] === 'string' && (r['refId'] as string).trim() !== '' ? (r['refId'] as string).trim() : null;
+        const status = typeof r['status'] === 'string' && (r['status'] as string).trim() !== '' ? (r['status'] as string).trim().toLowerCase() : null;
+        values.push({ deviceId, pluginId, mac, ip, hostname, iface, refId, status, collectedAt });
+      }
+      const dhcpResByMac = new Map<string, typeof values[number]>();
+      for (const v of values) {
+        dhcpResByMac.set(`${v.deviceId}|${v.pluginId}|${v.mac}`, v);
+      }
+      if (dhcpResByMac.size > 0) {
+        await db.insert(schema.deviceDhcpReservations).values(Array.from(dhcpResByMac.values())).onConflictDoUpdate({
+          target: [schema.deviceDhcpReservations.deviceId, schema.deviceDhcpReservations.pluginId, schema.deviceDhcpReservations.mac],
+          set: { collectedAt: sql`excluded."collectedAt"`, ip: sql`excluded.ip`, hostname: sql`excluded.hostname`, iface: sql`excluded.iface`, refId: sql`excluded."refId"`, status: sql`excluded.status` },
+        });
+      }
+      // A reservation removed on the device must vanish from the page. Drop rows
+      // this snapshot no longer reports (only when the key is present at all).
+      const existingDhcpResMacs = await db
+        .select({ mac: schema.deviceDhcpReservations.mac })
+        .from(schema.deviceDhcpReservations)
+        .where(and(eq(schema.deviceDhcpReservations.deviceId, deviceId), eq(schema.deviceDhcpReservations.pluginId, pluginId)));
+      const seenDhcpResMacs = new Set(values.map((v) => v.mac));
+      const staleDhcpRes = existingDhcpResMacs.filter((k) => !seenDhcpResMacs.has(k.mac));
+      if (staleDhcpRes.length > 0) {
+        await db.delete(schema.deviceDhcpReservations).where(
+          and(
+            eq(schema.deviceDhcpReservations.deviceId, deviceId),
+            eq(schema.deviceDhcpReservations.pluginId, pluginId),
+            or(...staleDhcpRes.map((k) => eq(schema.deviceDhcpReservations.mac, k.mac)))
           )
         );
       }
@@ -2052,91 +2515,97 @@ async function ingestInventory(
       }
     }
 
-    // --- Device updates (Updates page) --------------------------------------
-    // Generic key — any plugin advertising capability 'updates' may emit it:
-    //   updates[] { name, kind, currentVersion?, latestVersion?, available,
-    //               rebootRequired?, sizeBytes?, applyActionId?, applyInput?, extra? }
-    // Same CONFIG-object lifecycle as containers: upsert-per-poll + delete-on-
-    // absent (an applied update must vanish on the next poll), present-but-nothing
-    // available = authoritative wipe. Only rows with available=true persist — a
-    // plugin that reports "checked, nothing new" emits an empty array and its
-    // stale rows are wiped.
-    const rawUpdates = Array.isArray(metrics['updates']) ? (metrics['updates'] as unknown[]) : null;
-    if (rawUpdates !== null) {
+    // --- GPUs (DeviceDetail GPU cards) --------------------------------------
+    // Generic key — any plugin may emit it:
+    //   gpus[] { name, vendor?, slot, driver?, driverVersion?, vramBytes?,
+    //            utilPercent?, memUtilPercent?, tempCelsius?, powerWatts?,
+    //            coreClockMhz?, maxCoreClockMhz?, extra? }
+    // Same CONFIG-object lifecycle as containers/vms: upsert-per-poll +
+    // delete-on-absent (a removed card must vanish), present-but-empty =
+    // authoritative wipe. `slot` (PCI address) is the stable identity and part
+    // of the PK; live counters are refreshed in place on every inventory poll.
+    const rawGpus = Array.isArray(metrics['gpus']) ? (metrics['gpus'] as unknown[]) : null;
+    if (rawGpus !== null) {
+      const gpuNumOrNull = (v: unknown): number | null =>
+        typeof v === 'number' && Number.isFinite(v) ? v : null;
+      const gpuIntOrNull = (v: unknown): number | null =>
+        typeof v === 'number' && Number.isFinite(v) ? Math.trunc(v) : null;
       const values: {
-        deviceId: string; pluginId: string; kind: string; name: string;
-        currentVersion: string | null; latestVersion: string | null;
-        rebootRequired: boolean | null; sizeBytes: number | null;
-        releaseNotesUrl: string | null; releaseNotes: string | null;
-        branch: string | null;
-        applyActionId: string | null; applyInput: string; extra: string; collectedAt: string;
+        deviceId: string; pluginId: string; name: string; vendor: string; slot: string;
+        driver: string | null; driverVersion: string | null; vramBytes: number | null;
+        utilPercent: number | null; memUtilPercent: number | null; tempCelsius: number | null;
+        powerWatts: number | null; coreClockMhz: number | null; maxCoreClockMhz: number | null;
+        extra: string; collectedAt: string;
       }[] = [];
-      for (const raw of rawUpdates) {
+      for (const raw of rawGpus) {
         if (!raw || typeof raw !== 'object') continue;
         const r = raw as Record<string, unknown>;
-        // Only genuinely-available updates persist.
-        if (r['available'] !== true) continue;
-        const name = typeof r['name'] === 'string' ? (r['name'] as string).trim() : '';
-        if (!name) continue; // name is part of the conflict key
-        const kind = typeof r['kind'] === 'string' && (r['kind'] as string).trim() !== '' ? (r['kind'] as string).trim() : 'firmware';
+        // slot is the stable identity + part of the conflict key — a row without
+        // one cannot be upserted or matched, so skip it (defensive: a plugin bug
+        // must not wipe this device's GPU rows).
+        const slot = typeof r['slot'] === 'string' ? (r['slot'] as string).trim() : '';
+        if (!slot) continue;
         values.push({
           deviceId,
           pluginId,
-          kind,
-          name,
-          currentVersion: typeof r['currentVersion'] === 'string' && (r['currentVersion'] as string) !== '' ? (r['currentVersion'] as string) : null,
-          latestVersion: typeof r['latestVersion'] === 'string' && (r['latestVersion'] as string) !== '' ? (r['latestVersion'] as string) : null,
-          rebootRequired: typeof r['rebootRequired'] === 'boolean' ? (r['rebootRequired'] as boolean) : null,
-          sizeBytes: numOrNull(r['sizeBytes']),
-          releaseNotesUrl: typeof r['releaseNotesUrl'] === 'string' && (r['releaseNotesUrl'] as string).trim() !== '' ? (r['releaseNotesUrl'] as string).trim() : null,
-          // Cap notes text at 16 KB — a runaway feed must not bloat the table.
-          releaseNotes: typeof r['releaseNotes'] === 'string' && (r['releaseNotes'] as string).trim() !== '' ? (r['releaseNotes'] as string).slice(0, 16_384) : null,
-          branch: typeof r['branch'] === 'string' && (r['branch'] as string).trim() !== '' ? (r['branch'] as string).trim().slice(0, 128) : null,
-          applyActionId: typeof r['applyActionId'] === 'string' && (r['applyActionId'] as string).trim() !== '' ? (r['applyActionId'] as string).trim() : null,
-          applyInput: (() => {
-            const ai = r['applyInput'];
-            if (!ai || typeof ai !== 'object' || Array.isArray(ai)) return '{}';
-            try { return JSON.stringify(ai); } catch { return '{}'; }
-          })(),
+          name: typeof r['name'] === 'string' && (r['name'] as string).trim() !== '' ? (r['name'] as string).trim() : slot,
+          vendor: typeof r['vendor'] === 'string' && (r['vendor'] as string).trim() !== '' ? (r['vendor'] as string).trim().toUpperCase() : 'UNKNOWN',
+          slot,
+          driver: typeof r['driver'] === 'string' && (r['driver'] as string).trim() !== '' ? (r['driver'] as string).trim() : null,
+          driverVersion: typeof r['driverVersion'] === 'string' && (r['driverVersion'] as string).trim() !== '' ? (r['driverVersion'] as string).trim() : null,
+          vramBytes: gpuNumOrNull(r['vramBytes']),
+          utilPercent: gpuIntOrNull(r['utilPercent']),
+          memUtilPercent: gpuIntOrNull(r['memUtilPercent']),
+          tempCelsius: gpuIntOrNull(r['tempCelsius']),
+          powerWatts: gpuNumOrNull(r['powerWatts']),
+          coreClockMhz: gpuIntOrNull(r['coreClockMhz']),
+          maxCoreClockMhz: gpuIntOrNull(r['maxCoreClockMhz']),
           extra: extraOf(r),
           collectedAt,
         });
       }
-      if (values.length > 0) {
-        const byKey = new Map<string, typeof values[number]>();
-        for (const v of values) byKey.set(`${v.kind}|${v.name}`, v);
-        await db.insert(schema.deviceUpdates).values(Array.from(byKey.values())).onConflictDoUpdate({
-          target: [schema.deviceUpdates.deviceId, schema.deviceUpdates.pluginId, schema.deviceUpdates.kind, schema.deviceUpdates.name],
+      const gpuByKey = new Map<string, typeof values[number]>();
+      for (const v of values) {
+        gpuByKey.set(`${v.deviceId}|${v.pluginId}|${v.slot}`, v);
+      }
+      if (gpuByKey.size > 0) {
+        await db.insert(schema.gpus).values(Array.from(gpuByKey.values())).onConflictDoUpdate({
+          target: [schema.gpus.deviceId, schema.gpus.pluginId, schema.gpus.slot],
           set: {
-            currentVersion: sql`excluded."currentVersion"`,
-            latestVersion: sql`excluded."latestVersion"`,
-            rebootRequired: sql`excluded."rebootRequired"`,
-            sizeBytes: sql`excluded."sizeBytes"`,
-            releaseNotesUrl: sql`excluded."releaseNotesUrl"`,
-            releaseNotes: sql`excluded."releaseNotes"`,
-            branch: sql`excluded."branch"`,
-            applyActionId: sql`excluded."applyActionId"`,
-            applyInput: sql`excluded."applyInput"`,
+            name: sql`excluded.name`,
+            vendor: sql`excluded.vendor`,
+            driver: sql`excluded.driver`,
+            "driverVersion": sql`excluded."driverVersion"`,
+            "vramBytes": sql`excluded."vramBytes"`,
+            "utilPercent": sql`excluded."utilPercent"`,
+            "memUtilPercent": sql`excluded."memUtilPercent"`,
+            "tempCelsius": sql`excluded."tempCelsius"`,
+            "powerWatts": sql`excluded."powerWatts"`,
+            "coreClockMhz": sql`excluded."coreClockMhz"`,
+            "maxCoreClockMhz": sql`excluded."maxCoreClockMhz"`,
             extra: sql`excluded.extra`,
             collectedAt: sql`excluded."collectedAt"`,
           },
         });
-        const seenKeys = new Set(values.map((v) => `${v.kind}|${v.name}`));
-        await db.delete(schema.deviceUpdates)
+      }
+      const seenGpuSlots = new Set(values.map((v) => v.slot));
+      if (seenGpuSlots.size > 0) {
+        await db.delete(schema.gpus)
           .where(and(
-            eq(schema.deviceUpdates.deviceId, deviceId),
-            eq(schema.deviceUpdates.pluginId, pluginId),
-            notInArray(sql`"kind" || '|' || name`, Array.from(seenKeys))
+            eq(schema.gpus.deviceId, deviceId),
+            eq(schema.gpus.pluginId, pluginId),
+            notInArray(schema.gpus.slot, Array.from(seenGpuSlots))
           ));
-      } else {
-        // Present-but-nothing-available is the authoritative wipe — same contract as containers.
-        await db.delete(schema.deviceUpdates)
+      } else if (rawGpus.length === 0) {
+        // Present-but-EMPTY is the authoritative wipe — same contract as containers.
+        await db.delete(schema.gpus)
           .where(and(
-            eq(schema.deviceUpdates.deviceId, deviceId),
-            eq(schema.deviceUpdates.pluginId, pluginId)
+            eq(schema.gpus.deviceId, deviceId),
+            eq(schema.gpus.pluginId, pluginId)
           ));
       }
     }
+
 
     // --- Security checks (Security page) --------------------------------------
     // Generic key — any plugin advertising capability 'securityChecks' may emit it:
@@ -2244,10 +2713,16 @@ async function sweepStaleInventory(inventoryWindowMs: number): Promise<void> {
     await db.delete(schema.hosts).where(and(lt(schema.hosts.lastSeenAt, cutoff), notInArray(schema.hosts.deviceId, disabledIds)));
     await db.delete(schema.networks).where(and(lt(schema.networks.collectedAt, cutoff), notInArray(schema.networks.deviceId, disabledIds)));
     await db.delete(schema.devicePorts).where(and(lt(schema.devicePorts.collectedAt, cutoff), notInArray(schema.devicePorts.deviceId, disabledIds)));
+    await db.delete(schema.deviceDnsEntries).where(and(lt(schema.deviceDnsEntries.collectedAt, cutoff), notInArray(schema.deviceDnsEntries.deviceId, disabledIds)));
+    await db.delete(schema.deviceDhcpNetworks).where(and(lt(schema.deviceDhcpNetworks.collectedAt, cutoff), notInArray(schema.deviceDhcpNetworks.deviceId, disabledIds)));
+    await db.delete(schema.deviceDhcpReservations).where(and(lt(schema.deviceDhcpReservations.collectedAt, cutoff), notInArray(schema.deviceDhcpReservations.deviceId, disabledIds)));
   } else {
     await db.delete(schema.hosts).where(lt(schema.hosts.lastSeenAt, cutoff));
     await db.delete(schema.networks).where(lt(schema.networks.collectedAt, cutoff));
     await db.delete(schema.devicePorts).where(lt(schema.devicePorts.collectedAt, cutoff));
+    await db.delete(schema.deviceDnsEntries).where(lt(schema.deviceDnsEntries.collectedAt, cutoff));
+    await db.delete(schema.deviceDhcpNetworks).where(lt(schema.deviceDhcpNetworks.collectedAt, cutoff));
+    await db.delete(schema.deviceDhcpReservations).where(lt(schema.deviceDhcpReservations.collectedAt, cutoff));
   }
   // Tunnels/routes/Wi-Fi rows carry no deviceId — they are only ever refreshed
   // by polling enabled devices, so the plain stale sweep applies to them.
@@ -2268,8 +2743,14 @@ async function sweepStaleInventory(inventoryWindowMs: number): Promise<void> {
   // drops its (stale) session rows after the sweep window.
   await db.delete(schema.shareSessions).where(lt(schema.shareSessions.collectedAt, cutoff));
   await db.delete(schema.containers).where(lt(schema.containers.collectedAt, cutoff));
+  // Installed-package inventory (CVE tracking) ages out the same way as containers.
+  await db.delete(schema.devicePackages).where(lt(schema.devicePackages.collectedAt, cutoff));
+  // Derived CVE matches: swept too so an offline device drops out of the Security
+  // page between worker beats (the worker also recomputes them wholesale each cycle).
+  await db.delete(schema.deviceCves).where(lt(schema.deviceCves.collectedAt, cutoff));
   await db.delete(schema.dockerImages).where(lt(schema.dockerImages.collectedAt, cutoff));
   await db.delete(schema.vms).where(lt(schema.vms.collectedAt, cutoff));
+  await db.delete(schema.gpus).where(lt(schema.gpus.collectedAt, cutoff));
   await db.delete(schema.deviceUpdates).where(lt(schema.deviceUpdates.collectedAt, cutoff));
   await db.delete(schema.deviceSecurityChecks).where(lt(schema.deviceSecurityChecks.collectedAt, cutoff));
   await db.delete(schema.mailDomains).where(lt(schema.mailDomains.collectedAt, cutoff));
@@ -2290,6 +2771,59 @@ function deriveDeviceStatus(outcomes: PollOutcome[]): string {
   if (outcomes.some((o) => o.health === 'critical')) return 'critical';
   if (outcomes.every((o) => o.health === 'ok')) return 'online';
   return 'degraded';
+}
+
+/** One line of the device's status tooltip — which plugin, why. */
+interface DeviceHealthReason {
+  pluginId: string;
+  /** Plugin display name (resolved at derivation time; null when unknown). */
+  pluginName: string | null;
+  severity: 'warning' | 'critical';
+  message: string;
+}
+
+/**
+ * Rolls the per-assignment outcomes up into human-readable status reasons —
+ * one entry per non-ok assignment, worst first (unreachable → critical →
+ * warning). Plugins that report `healthReasons` contribute their own lines;
+ * everyone else gets a generic fallback so the tooltip is never empty for a
+ * degraded/critical/offline device. Online/unknown devices get no reasons.
+ * The map keys are `${deviceId}|${pluginId}` — the plugin id comes from there.
+ */
+function deriveDeviceHealthReasons(
+  byAssignment: Map<string, PollOutcome>,
+  pluginNameByPluginId: Map<string, string>
+): DeviceHealthReason[] {
+  const outcomes = Array.from(byAssignment.values());
+  const status = deriveDeviceStatus(outcomes);
+  if (status === 'online' || status === 'unknown') return [];
+
+  const rank = (o: PollOutcome): number =>
+    !o.reachable ? 0 : o.health === 'critical' ? 1 : o.health === 'warning' ? 2 : 3;
+
+  const reasons: DeviceHealthReason[] = [];
+  for (const [key, o] of [...byAssignment.entries()].sort((a, b) => rank(a[1]) - rank(b[1]))) {
+    if (o.reachable && o.health === 'ok') continue;
+    const pluginId = key.split('|')[1] ?? '';
+    const pluginName = pluginNameByPluginId.get(pluginId) ?? null;
+    if (!o.reachable) {
+      reasons.push({
+        pluginId,
+        pluginName,
+        severity: 'critical',
+        message: `Monitoring unreachable${o.error ? ` — ${o.error.slice(0, 200)}` : ''}`,
+      });
+    } else if (o.healthReasons.length > 0) {
+      for (const r of o.healthReasons) {
+        reasons.push({ pluginId, pluginName, severity: r.severity, message: r.message });
+      }
+    } else {
+      const generic =
+        o.health === 'critical' ? 'Reports a critical problem' : 'Reports degraded health';
+      reasons.push({ pluginId, pluginName, severity: o.health === 'critical' ? 'critical' : 'warning', message: generic });
+    }
+  }
+  return reasons.slice(0, 12); // tooltip budget — keep it scannable
 }
 
 /**
@@ -2367,6 +2901,23 @@ const inFlightKeys = new Set<string>();
 const lastOutcomesByDevice = new Map<string, Map<string, PollOutcome>>();
 /** In-memory mirror of devices.status (avoids a DB read per poll). */
 const lastKnownStatus = new Map<string, string>();
+/** In-memory mirror of devices.healthReasons (JSON or null) — lets us skip the
+ * DB write when neither status nor reasons changed. */
+const lastHealthReasonsJson = new Map<string, string | null>();
+
+// --- Status-transition hysteresis -------------------------------------------
+// A single bad poll must not flip a device's status (and thereby emit a
+// notification): e.g. one lost ping out of four is 'warning' for 30 s and back
+// to ok — without grace that churns "degraded" + "back online" rows every few
+// minutes on flaky links. A NEWLY DERIVED status only commits once it has been
+// observed continuously for STATUS_TRANSITION_GRACE_MS; the DB keeps showing
+// the previous (stable) state until then. Recovery to 'online' gets the same
+// grace, so a brief blip never produces a "back online" note at all.
+const STATUS_TRANSITION_GRACE_MS = 60_000;
+/** deviceId → epoch ms when the current derived status first differed from the committed one (null = matches). */
+const pendingStatusSince = new Map<string, number | null>();
+/** Plugin display names for status-reason tooltips (refreshed with the roster). */
+const pluginNames = new Map<string, string>();
 /** Assignment count per device — status is only derived once all are known. */
 const assignmentsPerDevice = new Map<string, number>();
 let lastRosterRefreshAt = 0;
@@ -2419,6 +2970,9 @@ async function refreshRoster(settings: SystemSettings): Promise<void> {
     targetStates.clear();
     lastOutcomesByDevice.clear();
     assignmentsPerDevice.clear();
+    pluginNames.clear();
+    lastHealthReasonsJson.clear();
+    pendingStatusSince.clear();
     recordTelemetryCycle(0, 0, Date.now() - startedAt);
     return;
   }
@@ -2426,6 +2980,10 @@ async function refreshRoster(settings: SystemSettings): Promise<void> {
   // Load every assignment with its plugin endpoint in one pass.
   const assignments = await db.query.devicePlugins.findMany({});
   const pluginsById = new Map((await db.query.plugins.findMany()).map((p) => [p.id, p] as const));
+
+  // Plugin display names — used to attribute status-reason tooltip lines.
+  pluginNames.clear();
+  for (const p of pluginsById.values()) pluginNames.set(p.id, p.name);
 
   // Secondary IPs per device (primary is always managementAddress). Batched.
   const deviceIds = devices.map((d) => d.id);
@@ -2497,6 +3055,12 @@ async function refreshRoster(settings: SystemSettings): Promise<void> {
   for (const deviceId of Array.from(lastOutcomesByDevice.keys())) {
     if (!liveDeviceIds.has(deviceId)) lastOutcomesByDevice.delete(deviceId);
   }
+  for (const deviceId of Array.from(lastHealthReasonsJson.keys())) {
+    if (!liveDeviceIds.has(deviceId)) lastHealthReasonsJson.delete(deviceId);
+  }
+  for (const deviceId of Array.from(pendingStatusSince.keys())) {
+    if (!liveDeviceIds.has(deviceId)) pendingStatusSince.delete(deviceId);
+  }
 
   // Per-device assignment counts + status mirror for transition detection.
   assignmentsPerDevice.clear();
@@ -2506,7 +3070,13 @@ async function refreshRoster(settings: SystemSettings): Promise<void> {
       (assignmentsPerDevice.get(state.target.deviceId) ?? 0) + 1
     );
   }
-  for (const d of devices) lastKnownStatus.set(d.id, d.status);
+  // Seed both mirrors from the DB — a device already non-ok before an API
+  // restart must get its reasons persisted on the first poll without a status
+  // transition to trigger it.
+  for (const d of devices) {
+    lastKnownStatus.set(d.id, d.status);
+    lastHealthReasonsJson.set(d.id, d.healthReasons ?? null);
+  }
 
   recordTelemetryCycle(devices.length, targetStates.size, Date.now() - startedAt);
 }
@@ -2573,15 +3143,55 @@ async function updateDeviceStatus(
   const expected = assignmentsPerDevice.get(deviceId) ?? 1;
   if (byAssignment.size < expected) return; // wait for the full picture
 
-  const status = deriveDeviceStatus(Array.from(byAssignment.values()));
-  const prev = lastKnownStatus.get(deviceId) ?? 'unknown';
-  if (status === prev) return;
-  lastKnownStatus.set(deviceId, status);
-  // Mirror the transition into the notification center. Degrading states carry
-  // a stable dedupe key so they upsert while ongoing and are auto-resolved by
-  // the notifications worker when the device recovers; recovery emits one-shot.
-  void emitDeviceStatusNotification(deviceId, prev, status);
-  await db.update(schema.devices).set({ status }).where(eq(schema.devices.id, deviceId));
+  const derived = deriveDeviceStatus(Array.from(byAssignment.values()));
+  const committed = lastKnownStatus.get(deviceId) ?? 'unknown';
+
+  // Hysteresis (see STATUS_TRANSITION_GRACE_MS): a transition only commits once
+  // it has been SUSTAINED for the grace window. Until then the device keeps its
+  // previous stable status AND reasons — no partial updates, no notification
+  // churn from single bad polls (one lost ping out of four must not flip a
+  // healthy device to degraded and back within a minute).
+  let status = committed;
+  if (derived !== committed) {
+    const since = pendingStatusSince.get(deviceId);
+    if (since === undefined || since === null) {
+      pendingStatusSince.set(deviceId, Date.now()); // first observation — start the window
+      return; // keep showing the previous stable state for now
+    }
+    if (Date.now() - since < STATUS_TRANSITION_GRACE_MS) return; // still inside the window
+    status = derived; // sustained long enough — commit it
+  } else {
+    pendingStatusSince.set(deviceId, null); // back to committed state — re-arm for next time
+  }
+
+  // Human-readable reasons for the current outcome set (NULL when healthy).
+  const healthReasons = deriveDeviceHealthReasons(byAssignment, pluginNames);
+  const reasonsJson = healthReasons.length > 0 ? JSON.stringify(healthReasons) : null;
+
+  if (status === committed && (lastHealthReasonsJson.get(deviceId) ?? null) === reasonsJson) return;
+
+  // Mirror the STATUS transition into the notification center. Degrading states
+  // carry a stable dedupe key so they upsert while ongoing and are auto-resolved
+  // by the notifications worker when the device recovers; recovery emits one-shot.
+  if (status !== committed) {
+    lastKnownStatus.set(deviceId, status);
+    pendingStatusSince.set(deviceId, null); // re-arm for the next transition
+    void emitDeviceStatusNotification(deviceId, committed, status);
+    // Actions & Schedules — deviceStatus triggers fire on the SETTLED transition
+    // (post-hysteresis), never disturbing telemetry bookkeeping.
+    void onDeviceStatusTransition(deviceId, committed as DeviceStatus, status as DeviceStatus).catch((err) => {
+      // eslint-disable-next-line no-console
+      console.error('[telemetry] automation device-status hook failed:', err);
+    });
+  }
+  // Persist status + reasons whenever EITHER changed — a device that was already
+  // non-ok before an API restart has no transition to trigger the write, so its
+  // tooltip would stay empty until this catches up.
+  lastHealthReasonsJson.set(deviceId, reasonsJson);
+  await db.update(schema.devices).set({
+    status,
+    healthReasons: reasonsJson,
+  }).where(eq(schema.devices.id, deviceId));
 }
 
 /** One dispatcher tick: roster/sweeps on their cadences + dispatch due targets. */
@@ -2784,8 +3394,11 @@ export async function forceRefreshDevices(
       continue;
     }
 
+    // forceUpdateCheck: an explicit "Check now" must not be held back by the
+    // plugin's automatic-search cadence (or a zero interval) — it asks for FRESH
+    // data right now. The probe itself runs in the background inside the plugin.
     const outcomes = await Promise.all(
-      targets.map((target) => pollAssignment(target, { collectInventory: true }))
+      targets.map((target) => pollAssignment(target, { collectInventory: true, forceUpdateCheck: true }))
     );
     results.push({
       deviceId: id,

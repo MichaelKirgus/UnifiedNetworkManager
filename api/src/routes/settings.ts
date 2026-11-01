@@ -43,7 +43,7 @@ router.put(
   async (req, res: Response) => {
     try {
       const body = (req.body ?? {}) as Record<string, unknown>;
-      const view = await updateSetting(req.params.key, body.value);
+      const view = await updateSetting(String(req.params.key ?? ''), body.value);
       res.status(200).json({ setting: view });
     } catch (err) {
       const e = err as { status?: number; message?: string };
@@ -60,7 +60,7 @@ router.delete(
   requirePermission('system:write'),
   async (req, res: Response) => {
     try {
-      const view = await resetSetting(req.params.key);
+      const view = await resetSetting(String(req.params.key ?? ''));
       res.status(200).json({ setting: view });
     } catch (err) {
       const e = err as { status?: number; message?: string };

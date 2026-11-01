@@ -54,6 +54,9 @@ function serializePlugin(row: any) {
   return {
     id: row.id,
     name: row.name,
+    // Short catalog description (see schema.plugins.description) — rendered by
+    // the webapp's plugin picker under the display name; null when undeclared.
+    description: typeof row.description === 'string' && row.description.length > 0 ? row.description : null,
     version: row.version,
     // Build tag baked into the image at CI build time (branch/release); null =
     // local/dev build or not advertised. Shown on the Plugins page next to version.
@@ -100,7 +103,7 @@ function safeIconPath(raw: unknown): string | null {
 // catalog). Deliberately UNAUTHENTICATED so plain <img> tags work without a
 // token; the path is validated to stay within the plugin's own origin.
 router.get('/plugins/:id/icon', async (req, res) => {
-  const { id } = req.params;
+  const id = String(req.params.id ?? '');
   const row = await db.query.plugins.findFirst({
     where: (plugins, { eq }) => eq(plugins.id, id),
   });
@@ -144,7 +147,7 @@ router.get('/plugins/:id/icon', async (req, res) => {
       return;
     }
     // eslint-disable-next-line no-console
-    console.warn(`[plugins] icon proxy failed for ${id} (${path}):`, e.message);
+    console.warn(`[plugins] icon proxy failed for ${id} (${path}): ${e.message ?? 'unknown error'}`);
     res.status(502).json({ error: 'Failed to fetch icon from plugin' });
   }
 });
@@ -155,7 +158,7 @@ router.get('/plugins/:id/icon', async (req, res) => {
 // work without a token; the path is validated to stay within the plugin's own
 // origin and only text-ish content types are forwarded (no binary blobs).
 router.get('/plugins/:id/asset', async (req, res) => {
-  const { id } = req.params;
+  const id = String(req.params.id ?? '');
   const row = await db.query.plugins.findFirst({
     where: (plugins, { eq }) => eq(plugins.id, id),
   });
@@ -203,7 +206,7 @@ router.get('/plugins/:id/asset', async (req, res) => {
       return;
     }
     // eslint-disable-next-line no-console
-    console.warn(`[plugins] asset proxy failed for ${id} (${path}):`, e.message);
+    console.warn(`[plugins] asset proxy failed for ${id} (${path}): ${e.message ?? 'unknown error'}`);
     res.status(502).json({ error: 'Failed to fetch asset from plugin' });
   }
 });
@@ -224,7 +227,7 @@ router.get('/plugins', requireAuth, requirePermission('plugins:read'), async (_r
 // serves POST /tls/renew (mTLS-enabled images); older images answer 404 and we
 // surface that as a clear error.
 router.post('/plugins/:id/tls/renew', requireAuth, requirePermission('ca:manage'), async (req, res) => {
-  const { id } = req.params;
+  const id = String(req.params.id ?? '');
   try {
     const row = await db.query.plugins.findFirst({ where: eq(schema.plugins.id, id) });
     if (!row) {
@@ -251,7 +254,7 @@ router.post('/plugins/:id/tls/renew', requireAuth, requirePermission('ca:manage'
       res.status(502).json({ error: 'Plugin rejected the request (plugin API key mismatch?)' });
       return;
     }
-    console.warn(`[plugins] tls/renew failed for ${id}:`, e.message ?? err);
+    console.warn(`[plugins] tls/renew failed for ${id}: ${e.message ?? String(err)}`);
     res.status(502).json({ error: `Re-enrollment failed: ${e.response?.data?.error ?? e.message ?? 'unknown error'}` });
   }
 });
@@ -263,7 +266,7 @@ router.post('/plugins/:id/tls/renew', requireAuth, requirePermission('ca:manage'
 // types (e.g. usernamePassword OR sshKeyPair); `requiredSecretType` stays for
 // older consumers.
 router.get('/plugins/:id/required-secret-type', requireAuth, requirePermission('plugins:read'), async (req, res) => {
-  const { id } = req.params;
+  const id = String(req.params.id ?? '');
   const [secretTypes, row] = await Promise.all([
     getRequiredSecretTypes(id),
     db.query.plugins.findFirst({ where: eq(schema.plugins.id, id) }),
@@ -279,7 +282,7 @@ router.get('/plugins/:id/required-secret-type', requireAuth, requirePermission('
 // /discover endpoint. The webapp renders device metrics generically from these
 // (gauge/plot/text/table), so new plugins/metrics need no webapp changes.
 router.get('/plugins/:id/metrics', requireAuth, requirePermission('plugins:read'), async (req, res) => {
-  const { id } = req.params;
+  const id = String(req.params.id ?? '');
   const row = await db.query.plugins.findFirst({
     where: (plugins, { eq }) => eq(plugins.id, id),
   });
@@ -305,7 +308,7 @@ router.get('/plugins/:id/metrics', requireAuth, requirePermission('plugins:read'
 // the plugin's auto-mounted GET /metrics endpoint. `latest` is the most recent
 // sample; `history` carries up to `limit` samples newest-first for sparklines.
 router.get('/plugins/:id/self-metrics', requireAuth, requirePermission('plugins:read'), async (req, res) => {
-  const { id } = req.params;
+  const id = String(req.params.id ?? '');
   const row = await db.query.plugins.findFirst({
     where: (plugins, { eq }) => eq(plugins.id, id),
   });
@@ -334,7 +337,7 @@ router.get('/plugins/:id/self-metrics', requireAuth, requirePermission('plugins:
 // /discover endpoint (single-device actions + multi-device intents with input
 // schemas). Drives plan creation: the webapp renders intent/step forms from it.
 router.get('/plugins/:id/actions', requireAuth, requirePermission('plugins:read'), async (req, res) => {
-  const { id } = req.params;
+  const id = String(req.params.id ?? '');
   const row = await db.query.plugins.findFirst({
     where: (plugins, { eq }) => eq(plugins.id, id),
   });
@@ -364,7 +367,7 @@ router.get('/plugins/:id/actions', requireAuth, requirePermission('plugins:read'
 // the read-only restriction is enforced against the persisted catalog, not the
 // caller's claim.
 router.post('/plugins/:id/actions/execute', requireAuth, requirePermission('containers:read'), async (req, res) => {
-  const { id } = req.params;
+  const id = String(req.params.id ?? '');
   const body = req.body ?? {};
   const deviceId = typeof body.deviceId === 'string' ? body.deviceId : '';
   const actionId = typeof body.actionId === 'string' ? body.actionId : '';
@@ -420,7 +423,7 @@ router.post('/plugins/:id/actions/execute', requireAuth, requirePermission('cont
 
 // GET /plugins/:id/options - descriptors + current overrides + effective values.
 router.get('/plugins/:id/options', requireAuth, requirePermission('plugins:read'), async (req, res) => {
-  const { id } = req.params;
+  const id = String(req.params.id ?? '');
   try {
     const view = await getPluginOptions(id);
     res.status(200).json(view);
@@ -432,7 +435,7 @@ router.get('/plugins/:id/options', requireAuth, requirePermission('plugins:read'
 
 // PUT /plugins/:id/settings - validate + persist overrides (all-or-nothing).
 router.put('/plugins/:id/settings', requireAuth, requirePermission('plugins:manage'), async (req, res) => {
-  const { id } = req.params;
+  const id = String(req.params.id ?? '');
   const settings = (req.body ?? {}).settings as Record<string, unknown> | undefined;
   if (!settings || typeof settings !== 'object' || Array.isArray(settings)) {
     res.status(400).json({ error: "Body must be { \"settings\": { [key]: value } }" });
@@ -454,7 +457,7 @@ router.put('/plugins/:id/settings', requireAuth, requirePermission('plugins:mana
 
 // DELETE /plugins/:id/settings - reset all overrides to descriptor defaults.
 router.delete('/plugins/:id/settings', requireAuth, requirePermission('plugins:manage'), async (req, res) => {
-  const { id } = req.params;
+  const id = String(req.params.id ?? '');
   try {
     await resetPluginSettings(id);
     const view = await getPluginOptions(id);

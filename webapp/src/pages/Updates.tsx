@@ -1,13 +1,14 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { ArrowUpCircle, CheckCircle2, ExternalLink, Layers, Loader2, RefreshCw, Rocket, ShieldCheck } from 'lucide-react';
+import { ArrowUpCircle, CheckCircle2, ExternalLink, Layers, Loader2, Lock, RefreshCw, Rocket, ShieldCheck, Unlock, Zap, Workflow } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { DialogShell } from '../components/DialogShell';
 import { Layout } from '../components/Layout';
 import { DataTable, DataTableColumn, type ExpandChildContext } from '../components/DataTable';
 import { DeviceChip } from '../components/DeviceChip';
 import { ReauthDialog } from '../components/ReauthDialog';
 import { runAction, useExecutionMode, type ExecutionMode } from '../executionMode';
-import { api, ApiError, UpdateRow } from '../api/client';
+import { api, ApiError, UpdateRow, FixesSummary } from '../api/client';
 import { can } from '../auth/permissions';
 
 // ---------------------------------------------------------------------------
@@ -19,6 +20,7 @@ const KIND_STYLES: Record<string, string> = {
   'os-package': 'bg-accent-sky text-accent-sky-fg',
   'docker-image': 'bg-accent-teal text-accent-teal-fg',
   app: 'bg-accent-violet text-accent-violet-fg',
+  stack: 'bg-accent-purple text-accent-purple-fg',
 };
 
 function KindBadge({ kind }: { kind: string }) {
@@ -41,6 +43,68 @@ function ActionIconButton({ label, onClick, icon }: { label: string; onClick: ()
 
 function orDash(v?: string | null): string {
   return v && v.trim() !== '' ? v : '—';
+}
+
+// ---------------------------------------------------------------------------
+// "Fixes CVEs" — severity chips for the CVEs each update resolves (computed by
+// the API from the fleet's advisory data; os-package rows with a known
+// current+latest version only)
+// ---------------------------------------------------------------------------
+
+const RANK_STYLES: Record<string, string> = {
+  critical: 'bg-danger text-danger-fg',
+  high: 'bg-warning text-warning-fg',
+  medium: 'bg-info text-info-fg',
+  low: 'bg-muted text-secondary',
+  unknown: 'bg-muted text-faint',
+};
+
+/** Merges the per-row fixesCves summaries (device row = all of its child rows). */
+function aggregateFixes(rows: UpdateRow[]): FixesSummary | null {
+  const acc = { total: 0, critical: 0, high: 0, medium: 0, low: 0, unknown: 0 };
+  const ids: string[] = [];
+  const seen = new Set<string>();
+  for (const r of rows) {
+    const f = r.fixesCves;
+    if (!f) continue;
+    acc.total += f.total;
+    acc.critical += f.critical;
+    acc.high += f.high;
+    acc.medium += f.medium;
+    acc.low += f.low;
+    acc.unknown += f.unknown;
+    for (const id of f.topIds) if (!seen.has(id)) { seen.add(id); ids.push(id); } // per-row lists are already severity-ordered
+  }
+  if (acc.total === 0) return null;
+  return { ...acc, topIds: ids.slice(0, 8) };
+}
+
+/** The fixes summary of one tree node — its own row for children, the merged
+ * child rows for device parents. */
+function fixesOf(n: UpdateNode): FixesSummary | null {
+  if (!n.isDevice) return n.row?.fixesCves ?? null;
+  return aggregateFixes((n.groups ?? []).flatMap((g) => g.rows));
+}
+
+/** "2 critical · 1 high" chips — the tooltip lists the top CVE ids. */
+function FixesChips({ fixes }: { fixes: FixesSummary | null }) {
+  if (!fixes || fixes.total === 0) return <span className="text-faint">—</span>;
+  const parts = [
+    fixes.critical > 0 ? `${fixes.critical} critical` : '',
+    fixes.high > 0 ? `${fixes.high} high` : '',
+    fixes.medium > 0 ? `${fixes.medium} medium` : '',
+    fixes.low > 0 ? `${fixes.low} low` : '',
+    fixes.unknown > 0 ? `${fixes.unknown} unknown` : '',
+  ].filter(Boolean);
+  return (
+    <span className="inline-flex flex-wrap items-center gap-1" title={`Fixes ${fixes.total} known CVE(s): ${fixes.topIds.join(', ')}`}>
+      {parts.map((p) => (
+        <span key={p} className={`inline-flex rounded px-1.5 py-0.5 text-xs font-medium ${RANK_STYLES[p.split(' ')[1]] ?? 'bg-muted text-secondary'}`}>
+          {p}
+        </span>
+      ))}
+    </span>
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -105,35 +169,46 @@ interface UpdateNode {
   groups?: KindGroup[];
 }
 
-/** Display order of kind groups on a device row (firmware first, packages last). */
-const KIND_ORDER: Record<string, number> = { firmware: 0, app: 1, 'docker-image': 2, 'os-package': 3 };
+/** Display order of kind groups on a device row (UNM itself first, packages last). */
+const KIND_ORDER: Record<string, number> = { stack: -1, firmware: 0, app: 1, 'docker-image': 2, 'os-package': 3 };
 
 const KIND_LABELS: Record<string, string> = {
+  stack: 'UNM itself',
   firmware: 'firmware',
   'os-package': 'packages',
   'docker-image': 'images',
   app: 'apps',
 };
 
-/** Merges the per-row apply inputs of one kind-group into a single bulk input.
- * Array-valued fields are concatenated (TrueNAS `containers.upgrade` takes
- * `names: string[]`, `images.update` takes `refs: string[]`). Scalar fields
- * keep their value when every row agrees (`system.firmware.update` carries
- * `{ version }`) and are DROPPED when rows disagree — e.g. the per-package
- * `package` name of a generic-ssh host, where an empty input means "upgrade
- * ALL" in the action's own semantics. */
-function mergeGroupInputs(rows: UpdateRow[]): Record<string, unknown> {
+/** Merges per-row apply inputs into a single bulk input and reports whether the
+ * merge is unambiguous. Array-valued fields are concatenated (TrueNAS
+ * `containers.upgrade` takes `names: string[]`, `images.update` takes
+ * `refs: string[]`). Scalar fields keep their value when every row agrees
+ * (`system.firmware.update` carries `{ version }`); a conflicting scalar is
+ * dropped and the merge marked DIRTY — dropping it would let the action's own
+ * default apply (e.g. generic-ssh `packages.update` with no input means "upgrade
+ * ALL"), so callers must fall back to per-row steps for dirty merges. */
+function mergeInputsSafe(rows: UpdateRow[]): { input: Record<string, unknown>; clean: boolean } {
   const out: Record<string, unknown> = {};
+  let clean = true;
   for (const r of rows) {
     const inp = r.applyInput;
     if (!inp || typeof inp !== 'object') continue;
     for (const [k, v] of Object.entries(inp)) {
       if (Array.isArray(v)) out[k] = [...(Array.isArray(out[k]) ? (out[k] as unknown[]) : []), ...v];
       else if (!(k in out)) out[k] = v;
-      else if (!Object.is(out[k], v)) delete out[k]; // conflicting scalars → action default applies
+      else if (!Object.is(out[k], v)) { delete out[k]; clean = false; } // conflicting scalars → dirty merge
     }
   }
-  return out;
+  return { input: out, clean };
+}
+
+/** Merges the per-row apply inputs of one kind-group into a single bulk input.
+ * Conflicting scalars are dropped — for device-level "update all" that is the
+ * intended semantics (e.g. the per-package `package` name of a generic-ssh host,
+ * where an empty input means "upgrade ALL" in the action's own terms). */
+function mergeGroupInputs(rows: UpdateRow[]): Record<string, unknown> {
+  return mergeInputsSafe(rows).input;
 }
 
 /** The bulk plan steps for one device: ONE step per kind-group — with identical
@@ -170,16 +245,68 @@ function branchOf(n: UpdateNode): string | null {
 /** The "no reboot needed" subset of a device's package rows — everything whose
  * `rebootRequired` is not set (kernel/firmware/initramfs packages are excluded).
  * Becomes ONE plan step with an explicit `packages: string[]` list, so the host
- * upgrades exactly those in a single lock acquisition. Empty when there is no
- * safe subset (e.g. only kernel updates pending) or the plugin has no apply path. */
+ * upgrades exactly those in a single lock acquisition. HELD and KEPT-BACK rows
+ * are excluded too: an explicit list containing a held package makes apt hard-fail
+ * the whole run (a full upgrade skips them on purpose). They stay visible with
+ * their badge — unhold first, or use "Force all". Empty when there is no safe
+ * subset (e.g. only kernel updates pending) or the plugin has no apply path. */
 function noRebootStepsForDevice(node: UpdateNode): Array<{ pluginId: string; actionId: string; deviceId: string; input: Record<string, unknown> }> {
   const pkgs = (node.groups ?? [])
     .filter((g) => g.kind === 'os-package' && g.actionId === 'packages.update')
     .flatMap((g) => g.rows)
     .filter((r) => r.rebootRequired !== true)
+    .filter((r) => r.extra?.['held'] !== true && r.extra?.['keptBack'] !== true)
     .map((r) => r.name);
   if (pkgs.length === 0 || !node.deviceId || !node.pluginId) return [];
   return [{ pluginId: node.pluginId, actionId: 'packages.update', deviceId: node.deviceId, input: { packages: pkgs } }];
+}
+
+/** Plan steps for individually-selected child updates — merged where SAFE.
+ * Rows are grouped by (device, plugin, apply action). Per group:
+ *  - os-package rows applying via `packages.update` collapse into ONE step with
+ *    an explicit `{ packages: [...] }` list (the action's documented list mode)
+ *    — never the empty input that would mean "upgrade ALL";
+ *  - other groups merge their per-row inputs when unambiguous (arrays
+ *    concatenate, scalars must agree — e.g. TrueNAS `containers.upgrade` rows
+ *    `{ names: [app] }` collapse to one step with all selected app names);
+ *  - a DIRTY merge (conflicting non-array scalar dropped) falls back to one
+ *    step per row with its exact prefilled input, so scope never widens. */
+function mergedStepsForRows(rows: UpdateRow[]): Array<{ pluginId: string; actionId: string; deviceId: string; input: Record<string, unknown> }> {
+  const groups = new Map<string, UpdateRow[]>();
+  for (const r of rows) {
+    if (!r.applyActionId) continue; // no safe apply path → manual on the device
+    const gk = `${r.deviceId}|${r.pluginId}|${r.applyActionId}`;
+    let arr = groups.get(gk);
+    if (!arr) { arr = []; groups.set(gk, arr); }
+    arr.push(r);
+  }
+
+  const steps: Array<{ pluginId: string; actionId: string; deviceId: string; input: Record<string, unknown> }> = [];
+  for (const list of groups.values()) {
+    const first = list[0];
+    if (list.length === 1) {
+      steps.push({ pluginId: first.pluginId, actionId: first.applyActionId!, deviceId: first.deviceId, input: first.applyInput ?? {} });
+      continue;
+    }
+    // Explicit package-list mode — the only merge that is safe for os-packages.
+    // Held / kept-back rows are EXCLUDED: an explicit list containing a held
+    // package makes apt hard-fail the whole run (a full upgrade skips them on
+    // purpose). They stay visible with their badge; unhold first or force all.
+    if (first.kind === 'os-package' && first.applyActionId === 'packages.update') {
+      const pkgs = [...new Set(
+        list.filter((r) => r.extra?.['held'] !== true && r.extra?.['keptBack'] !== true).map((r) => r.name),
+      )];
+      if (pkgs.length > 0) steps.push({ pluginId: first.pluginId, actionId: 'packages.update', deviceId: first.deviceId, input: { packages: pkgs } });
+      continue;
+    }
+    const merged = mergeInputsSafe(list);
+    if (merged.clean) {
+      steps.push({ pluginId: first.pluginId, actionId: first.applyActionId!, deviceId: first.deviceId, input: merged.input });
+    } else {
+      for (const r of list) steps.push({ pluginId: r.pluginId, actionId: r.applyActionId!, deviceId: r.deviceId, input: r.applyInput ?? {} });
+    }
+  }
+  return steps;
 }
 
 /** Groups flat update rows into device parent nodes (collapsed by default),
@@ -236,8 +363,12 @@ function buildDeviceTree(rows: UpdateRow[]): { devices: UpdateNode[]; childrenBy
 // Page
 // ---------------------------------------------------------------------------
 
+/** sessionStorage key for a rule draft handed off from another page (Updates quick-create). */
+export const AUTOMATION_DRAFT_STORAGE_KEY = 'unm.pendingAutomationDraft';
+
 export default function Updates() {
   const queryClient = useQueryClient();
+  const navigate = useNavigate();
   const { mode } = useExecutionMode();
   const readOnly = mode === 'readonly';
   const canApply = can('configs:apply'); // server enforces it too; this only gates the UI
@@ -280,8 +411,72 @@ export default function Updates() {
     return !!ids && ids.includes('packages.dist-upgrade');
   }
 
+  /** True when the plugin offers hold/unhold for OS packages (generic-ssh
+   * `packages.hold` / `packages.unhold`). Gates the per-row lock buttons. */
+  function hasPackageHold(pluginId?: string): boolean {
+    if (!pluginId) return false;
+    const ids = catalogsQuery.data?.get(pluginId);
+    return !!ids && ids.includes('packages.hold');
+  }
+
+  /** True when the plugin's package update action supports `force` (generic-ssh
+   * `packages.update` with --allow-change-held-packages). Gates "Force all". */
+  function hasForcePackages(pluginId?: string): boolean {
+    if (!pluginId) return false;
+    const ids = catalogsQuery.data?.get(pluginId);
+    return !!ids && ids.includes('packages.update');
+  }
+
+  /** Total os-package rows of a device (any apply path). */
+  function osPackageCount(node: UpdateNode): number {
+    return (node.groups ?? []).filter((g) => g.kind === 'os-package').reduce((n, g) => n + g.rows.length, 0);
+  }
+
   // --- Device → updates hierarchy ---------------------------------------------
   const { devices, childrenByParentKey } = useMemo(() => buildDeviceTree(rows), [rows]);
+
+  // Child-row (individual update) selection — separate from the device-level
+  // checkboxes DataTable manages. Lets a user tick several specific apps/packages
+  // under one or more devices and update them together instead of clicking each.
+  const [selectedChildKeys, setSelectedChildKeys] = useState<Set<string>>(new Set());
+
+  /** The concrete update rows behind the selected child keys (stale keys drop out). */
+  const selectedChildren: UpdateRow[] = useMemo(() => {
+    if (selectedChildKeys.size === 0) return [];
+    const out: UpdateRow[] = [];
+    for (const kids of childrenByParentKey.values()) {
+      for (const k of kids) if (k.row && selectedChildKeys.has(k.key)) out.push(k.row);
+    }
+    return out;
+  }, [childrenByParentKey, selectedChildKeys]);
+
+  /** How many plan steps the selection would collapse into — shown in the
+   * selection bar so the merge effect is visible before confirming. */
+  const selectedStepCount = useMemo(
+    () => mergedStepsForRows(selectedChildren.filter((r) => r.applyActionId)).length,
+    [selectedChildren]
+  );
+
+  function toggleChild(key: string) {
+    setSelectedChildKeys((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key); else next.add(key);
+      return next;
+    });
+  }
+
+  // Prune child selections whose rows vanished (device deleted / update applied).
+  useEffect(() => {
+    if (selectedChildKeys.size === 0) return;
+    const valid = new Set<string>();
+    for (const kids of childrenByParentKey.values()) for (const k of kids) valid.add(k.key);
+    setSelectedChildKeys((prev) => {
+      let changed = false;
+      const next = new Set<string>();
+      for (const key of prev) if (valid.has(key)) next.add(key); else changed = true;
+      return changed ? next : prev;
+    });
+  }, [childrenByParentKey, selectedChildKeys]);
 
   /** The row that summarizes a node's versions/notes: the device's firmware row
    * (falling back to the first row carrying notes) for parent rows, the source
@@ -406,6 +601,70 @@ export default function Updates() {
     ]);
   }
 
+  /** Parent-row action (secondary): force ALL packages including held/kept-back.
+   * The hold flags stay set afterwards — this upgrades the version once. */
+  function applyForceAll(node: UpdateNode) {
+    if (!node.deviceId || !node.pluginId) return;
+    void firePlanSteps(`Force all packages on ${node.deviceName ?? 'device'}`, [
+      { pluginId: node.pluginId, actionId: 'packages.update', deviceId: node.deviceId, input: { force: true } },
+    ]);
+  }
+
+  /** Child-row action: hold one package against updates (apt-mark hold). */
+  function applyHold(row: UpdateRow) {
+    void firePlanSteps(`Hold ${row.name}`, [
+      { pluginId: row.pluginId, actionId: 'packages.hold', deviceId: row.deviceId, input: { package: row.name } },
+    ]);
+  }
+
+  /** Child-row action: release one package from a hold (apt-mark unhold). */
+  function applyUnhold(row: UpdateRow) {
+    void firePlanSteps(`Release ${row.name} from hold`, [
+      { pluginId: row.pluginId, actionId: 'packages.unhold', deviceId: row.deviceId, input: { package: row.name } },
+    ]);
+  }
+
+  /** Quick-create handoff: build an updateAvailable rule draft from the selected
+   * rows (kinds/names/plugin pre-filled, no-reboot guards on by default), stash it
+   * in sessionStorage and open the Automations page — which consumes it into a
+   * pre-filled builder. Nothing is created until the user saves there. */
+  function createAutomationFromSelection() {
+    const rows = selectedChildren;
+    if (rows.length === 0) return;
+    const kinds = [...new Set(rows.map((r) => r.kind))].sort();
+    const names = [...new Set(rows.map((r) => r.name))];
+    const pluginIds = [...new Set(rows.map((r) => r.pluginId))];
+    const trigger: Record<string, unknown> = {
+      id: 't-update',
+      type: 'updateAvailable',
+      condition: 'available',
+      kinds,
+      // A handful of exact names is a useful pre-fill; a long list isn't.
+      ...(names.length <= 5 ? { names } : {}),
+      ...(pluginIds.length === 1 ? { pluginId: pluginIds[0] } : {}),
+      rebootRequired: false,
+    };
+    const draft = {
+      name: `Auto-update ${kinds.join(' / ')} (no reboot)`,
+      description: `Created from the Updates page selection of ${rows.length} update${rows.length === 1 ? '' : 's'}. Applies via each row's plugin apply action; reboot-required rows are skipped.`,
+      enabled: true,
+      cooldownSec: 3600,
+      triggers: [trigger],
+      actions: [
+        { id: 'a-apply', type: 'intent', resolveFromTrigger: 'update', requireNoReboot: true, devices: {} },
+        {
+          id: 'a-note', type: 'notification', severity: 'info',
+          titleTemplate: 'Update applied on {{device.name}}',
+          messageTemplate: '{{update.kind}} "{{update.name}}" updated to {{update.latestVersion}} by automation.',
+        },
+      ],
+    };
+    try {
+      sessionStorage.setItem(AUTOMATION_DRAFT_STORAGE_KEY, JSON.stringify(draft));
+    } catch { /* storage full/blocked — the navigation still works */ }
+    navigate('/automations');
+  }
+
   /** Child-row action: just this one update, with its own prefilled input. */
   function applySingle(row: UpdateRow) {
     if (!row.applyActionId) return;
@@ -426,10 +685,32 @@ export default function Updates() {
     void firePlanSteps('Update selected devices (no reboot needed)', steps);
   }
 
+  /** Bulk action for individually-selected child updates (apps/packages/images).
+   * Rows are merged into fewer plan steps where safe (see `mergedStepsForRows`):
+   * e.g. N TrueNAS app rows → ONE `containers.upgrade` step with all names, and
+   * os-package rows → one explicit `{ packages: [...] }` list — never the empty
+   * input that would mean "upgrade ALL". Groups whose inputs conflict keep one
+   * step per row with its exact prefilled input. */
+  function applySelectedChildren() {
+    const actionable = selectedChildren.filter((r) => r.applyActionId);
+    if (actionable.length === 0) return;
+    const steps = mergedStepsForRows(actionable);
+    if (steps.length === 0) {
+      setNotice({ kind: 'info', text: 'All selected packages are held or kept back — release them first (unhold button on the row), or use "Force all" on the device.' });
+      return;
+    }
+    const ok = window.confirm(
+      `Start update plans for ${actionable.length} specific update(s)? They are grouped into ${steps.length} plan step${steps.length === 1 ? '' : 's'} where safe (held/kept-back packages excluded) and may require 2FA.`
+    );
+    if (!ok) return;
+    void firePlanSteps('Update selected updates', steps);
+  }
+
   // --- "Check now" — force a fresh poll of the devices that report updates ------
   const [checking, setChecking] = useState(false);
   async function checkNow() {
-    const deviceIds = Array.from(new Set(rows.map((r) => r.deviceId)));
+    // 'unm-stack' is the synthetic UNM-itself row — it has no device to poll.
+    const deviceIds = Array.from(new Set(rows.map((r) => r.deviceId))).filter((id) => id !== 'unm-stack');
     if (deviceIds.length === 0) return;
     setChecking(true);
     try {
@@ -500,6 +781,12 @@ export default function Updates() {
       render: (n) => <span className="font-mono text-xs font-medium text-foreground">{orDash(summaryRowOf(n)?.latestVersion)}</span>,
     },
     {
+      header: 'Fixes CVEs', key: 'fixesCves', width: 190, sortable: false, filterable: true,
+      exportValue: (n) => fixesOf(n)?.topIds.join(', ') ?? '',
+      searchText: (n) => fixesOf(n)?.topIds.join(' ') ?? '',
+      render: (n) => <FixesChips fixes={fixesOf(n)} />,
+    },
+    {
       header: 'Branch', key: 'branch', width: 130, sortable: false, filterable: false,
       exportValue: (n) => branchOf(n) ?? '',
       searchText: (n) => branchOf(n) ?? '',
@@ -533,13 +820,17 @@ export default function Updates() {
           if (!actionable && !hasDistUpgrade(n.pluginId)) {
             return <span className="text-faint text-xs" title="No safe apply path — update manually on the device">manual</span>;
           }
+          const pkgCount = osPackageCount(n);
           return (
             <div className="flex items-center gap-0.5">
               {actionable && (
-                <ActionIconButton label={`Update all on ${n.deviceName ?? 'device'} — one plan step per kind-group (firmware, packages, apps/images)`} onClick={() => applyDevice(n)} icon={<ArrowUpCircle size={14} />} />
+                <ActionIconButton label={`Update all on ${n.deviceName ?? 'device'} — one plan step per kind-group (firmware, packages, apps/images); held/kept-back packages are skipped by the manager`} onClick={() => applyDevice(n)} icon={<ArrowUpCircle size={14} />} />
               )}
               {noRebootCount > 0 && (
-                <ActionIconButton label={`Update ${noRebootCount} package(s) that do not need a reboot`} onClick={() => applyNoReboot(n)} icon={<ShieldCheck size={14} />} />
+                <ActionIconButton label={`Update ${noRebootCount} package(s) that do not need a reboot (held/kept-back excluded)`} onClick={() => applyNoReboot(n)} icon={<ShieldCheck size={14} />} />
+              )}
+              {pkgCount > 0 && hasForcePackages(n.pluginId) && (
+                <ActionIconButton label={`Force-update ALL ${pkgCount} package(s) including held/kept-back — may restart services; hold flags stay set`} onClick={() => applyForceAll(n)} icon={<Zap size={14} />} />
               )}
               {hasDistUpgrade(n.pluginId) && (
                 <ActionIconButton label="Distro upgrade (dist-upgrade) — runs detached, may take hours; re-check via the Plans page" onClick={() => applyDistUpgrade(n)} icon={<Layers size={14} />} />
@@ -566,10 +857,20 @@ export default function Updates() {
         <td className="px-1 py-2 align-middle">
           <span className="inline-block h-6 w-6" />
         </td>
-        {/* Empty selection cell — the table is selectable, so parent rows carry a
-         * checkbox column between chevron and data. Children are NOT selectable,
-         * but without this cell every child's content shifts one column left. */}
-        {ctx.selectable && <td className="px-3 py-2" />}
+        {/* Selection cell — children ARE individually selectable (bulk-update a
+         * few specific apps/packages), so render a real checkbox here; the cell is
+         * only present when the table itself is selectable. */}
+        {ctx.selectable && (
+          <td className="px-3 py-2">
+            <input
+              type="checkbox"
+              aria-label={`Select ${child.row?.name ?? 'update'}`}
+              checked={selectedChildKeys.has(child.key)}
+              onChange={() => toggleChild(child.key)}
+              className="h-3.5 w-3.5 rounded border-border text-foreground focus:ring-focus-ring"
+            />
+          </td>
+        )}
         {ctx.columns.map((col) => (
           <td key={col.key} className="overflow-hidden px-4 py-2 text-secondary">
             {childCell(col.key, child)}
@@ -616,6 +917,8 @@ export default function Updates() {
         return <span className="font-mono text-xs">{orDash(row.currentVersion)}</span>;
       case 'latestVersion':
         return <span className="font-mono text-xs font-medium text-foreground">{orDash(row.latestVersion)}</span>;
+      case 'fixesCves':
+        return <FixesChips fixes={row.fixesCves ?? null} />;
       case 'branch': {
         const b = row.branch ?? null;
         return b ? (
@@ -630,10 +933,21 @@ export default function Updates() {
         return row.rebootRequired ? <span className="text-warning-fg text-xs">yes</span> : <span className="text-faint">—</span>;
       case '__action': {
         if (!canApply || readOnly) return <span className="text-faint text-xs">read-only</span>;
-        return row.applyActionId ? (
-          <ActionIconButton label={`Update ${row.name}`} onClick={() => applySingle(row)} icon={<ArrowUpCircle size={14} />} />
-        ) : (
-          <span className="text-faint text-xs" title="No safe apply path — update manually on the device">manual</span>
+        const held = row.extra?.['held'] === true;
+        const canHold = row.kind === 'os-package' && hasPackageHold(row.pluginId);
+        return (
+          <div className="flex items-center gap-0.5">
+            {row.applyActionId ? (
+              <ActionIconButton label={`Update ${row.name}`} onClick={() => applySingle(row)} icon={<ArrowUpCircle size={14} />} />
+            ) : (
+              <span className="text-faint text-xs" title="No safe apply path — update manually on the device">manual</span>
+            )}
+            {canHold && held ? (
+              <ActionIconButton label={`Release ${row.name} from hold — bulk updates will install it again`} onClick={() => applyUnhold(row)} icon={<Unlock size={14} />} />
+            ) : canHold ? (
+              <ActionIconButton label={`Hold ${row.name} against updates — bulk upgrades skip it on purpose`} onClick={() => applyHold(row)} icon={<Lock size={14} />} />
+            ) : null}
+          </div>
         );
       }
       default: return null;
@@ -678,11 +992,14 @@ export default function Updates() {
                 <span className="text-xs text-faint" title="Set the updateFeedUrl system setting to enable release checks">feed not configured</span>
               )}
             </div>
-            {stack.notesUrl && stack.available && (
-              <a href={stack.notesUrl} target="_blank" rel="noreferrer" className="mt-2 inline-block text-xs text-info underline">
-                Release notes →
-              </a>
-            )}
+            {(() => {
+              const releaseHref = stack.releaseUrl ?? stack.notesUrl ?? undefined;
+              return releaseHref && stack.available ? (
+                <a href={releaseHref} target="_blank" rel="noreferrer" className="mt-2 inline-block text-xs text-info underline">
+                  Release page →
+                </a>
+              ) : null;
+            })()}
             <p className="mt-2 text-xs text-secondary">
               {stack.plugins.length} plugin{stack.plugins.length === 1 ? '' : 's'}: {stack.plugins.map((p) => `${p.name} ${p.version}`).join(' · ')}
             </p>
@@ -705,6 +1022,45 @@ export default function Updates() {
             {Object.entries(byKind).map(([k, n]) => (
               <span key={k} className="inline-flex items-center gap-1"><KindBadge kind={k} /> {n}</span>
             ))}
+          </div>
+        )}
+
+        {/* Child-update selection bar — appears when specific apps/packages are
+            ticked in expanded rows (separate from the device-level checkboxes). */}
+        {selectedChildren.length > 0 && canApply && !readOnly && (
+          <div className="flex flex-wrap items-center gap-2 rounded-md border border-border bg-info/60 px-3 py-1.5 text-sm">
+            <span className="font-medium text-secondary">
+              {selectedChildren.length} update{selectedChildren.length === 1 ? '' : 's'} selected
+              {selectedStepCount > 0 && (
+                <span className="text-muted-foreground"> · grouped into {selectedStepCount} plan step{selectedStepCount === 1 ? '' : 's'}</span>
+              )}
+            </span>
+            <button
+              type="button"
+              onClick={() => applySelectedChildren()}
+              disabled={selectedStepCount === 0}
+              title={selectedStepCount === 0 ? 'All selected packages are held or kept back — unhold them first, or use "Force all" on the device' : undefined}
+              className="rounded-md border border-border bg-card px-2.5 py-1 text-xs font-medium text-secondary hover:bg-background disabled:opacity-50"
+            >
+              Update selected ({selectedStepCount})
+            </button>
+            {can('automations:write') && (
+              <button
+                type="button"
+                onClick={createAutomationFromSelection}
+                title="Open the Automations page with a pre-filled rule for these updates (editable before saving)"
+                className="inline-flex items-center gap-1.5 rounded-md border border-border bg-card px-2.5 py-1 text-xs font-medium text-secondary hover:bg-background"
+              >
+                <Workflow className="h-3.5 w-3.5" /> Create automation
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={() => setSelectedChildKeys(new Set())}
+              className="ml-auto text-xs font-medium text-muted-foreground underline-offset-2 hover:text-secondary hover:underline"
+            >
+              Clear selection
+            </button>
           </div>
         )}
 

@@ -14,8 +14,8 @@
  * stored rows, while a present-but-empty array is authoritative.
  */
 
-import { INVENTORY_INTERVAL_MS, buildDeviceTimeInfo, ianaZoneToOffsetMinutes, listUpgradablePackages } from '@unm/plugin-sdk';
-import type { MetricDescriptor, UpdateRow } from '@unm/plugin-sdk';
+import { collectGpuRows, INVENTORY_INTERVAL_MS, buildDeviceTimeInfo, ianaZoneToOffsetMinutes, listInstalledPackages, listUpgradablePackages } from '@unm/plugin-sdk';
+import type { GpuRow, InstalledPackage, MetricDescriptor, UpdateRow } from '@unm/plugin-sdk';
 import type { CommandRunner } from './client/privilege';
 import { collectDockerInventory } from './containers';
 import type {
@@ -114,6 +114,37 @@ export async function getUpdates(hostKey: string, backend: CommandRunner): Promi
   const rows = await listUpgradablePackages(backend, { applyActionId: 'packages.update', perPackageApply: true });
   updatesCache.set(hostKey, { at: Date.now(), rows });
   return rows;
+}
+
+// --- Installed packages (CVE tracking) ----------------------------------------
+// Full installed set with exact versions — the input to the API's CVE worker.
+// Independent 15-min TTL (matches the inventory cadence): package installs are
+// rare, and `dpkg-query -W` over a big host is one SSH round-trip we don't want
+// on every 30 s poll. pm:null = no known manager → caller OMITS the key (no
+// wipe); a present-but-empty array IS authoritative (the box genuinely has none).
+const PACKAGES_TTL_MS = 15 * 60_000;
+const packagesCache = new Map<string, { at: number; tag: string | null; rows: InstalledPackage[] }>();
+
+/**
+ * Lists every installed OS package with its exact version. Resolves `null` when
+ * no known package manager is present (caller omits the metric key) — distinct
+ * from an authoritative empty list. Never throws.
+ */
+export async function getInstalledPackages(
+  hostKey: string,
+  backend: CommandRunner,
+): Promise<{ ecosystemTag: string | null; rows: InstalledPackage[] } | null> {
+  const hit = packagesCache.get(hostKey);
+  if (hit && Date.now() - hit.at < PACKAGES_TTL_MS) return { ecosystemTag: hit.tag, rows: hit.rows };
+
+  // Liveness gate — a dead box must not be reported as "no packages".
+  const ping = await backend.exec('true', 10_000);
+  if (!ping || ping.code !== 0) throw new Error(`Package listing failed: SSH exec "true" returned code ${ping?.code ?? 'null'}`);
+
+  const res = await listInstalledPackages(backend);
+  if (res.pm === null) return null; // no known manager — omit the key entirely
+  packagesCache.set(hostKey, { at: Date.now(), tag: res.ecosystemTag, rows: res.packages });
+  return { ecosystemTag: res.ecosystemTag, rows: res.packages };
 }
 
 // --- Container inventory (Containers page) ------------------------------------
@@ -691,7 +722,7 @@ export interface MonitoringResult {
 export async function collectMonitoring(
   hostKey: string,
   backend: CommandRunner,
-  opts: { collectInventory: boolean }
+  opts: { collectInventory: boolean; collectGpus?: boolean }
 ): Promise<MonitoringResult> {
   const live = await collectLive(backend);
   const metrics: Record<string, unknown> = { ...live.metrics };
@@ -730,6 +761,22 @@ export async function collectMonitoring(
       } catch {
         /* unreachable or transient — keep previously stored rows */
       }
+      // Installed packages (CVE tracking): full set with exact versions + a
+      // release-aware ecosystem tag. null = no known package manager → omit the
+      // key (no wipe). A present-but-empty array is authoritative and wipes
+      // stale device_packages rows at ingest — same contract as containers.
+      try {
+        const pkgs = await getInstalledPackages(hostKey, backend);
+        if (pkgs !== null) {
+          metrics['installedPackages'] = pkgs.rows.map((p) => ({
+            name: p.name,
+            version: p.version ?? undefined,
+            ecosystem: pkgs.ecosystemTag ?? 'unknown',
+          }));
+        }
+      } catch {
+        /* unreachable or transient — keep previously stored rows */
+      }
       // Containers + images (Containers page): fresh on every inventory poll.
       // null = no docker CLI / SSH failure → omit BOTH keys entirely (absent =
       // no wipe). A present-but-empty array is authoritative (the host genuinely
@@ -737,6 +784,15 @@ export async function collectMonitoring(
       const cont = await collectDockerInventory(backend);
       if (cont.containers !== null) metrics['containers'] = cont.containers;
       if (cont.images !== null) metrics['images'] = cont.images;
+      // GPUs (DeviceDetail GPU cards): fresh on every inventory poll, gated by
+      // the `collectGpus` option so GPU-less stacks skip the probe entirely.
+      // null = exec failed → omit the key (no wipe). A present-but-empty array
+      // is authoritative (the host genuinely has no display controllers) and
+      // wipes stale rows at ingest. One combined SSH round-trip (PCI + vendor tools).
+      if (opts.collectGpus !== false) {
+        const gpus = await collectGpuRows(backend).catch(() => null);
+        if (gpus !== null) metrics['gpus'] = gpus;
+      }
       metrics['arp'] = inventory.arp;
       if (inventory.ndp.length > 0) metrics['ndp'] = inventory.ndp;
       metrics['routes'] = inventory.routes;
@@ -834,12 +890,20 @@ export function descriptorsFromMetrics(metrics: Record<string, unknown>): Metric
     ['routes', 'Routes', ['destination', 'gateway', 'protocol', 'status']],
     ['services', 'Services', ['name', 'type', 'status', 'description']],
     ['filesystems', 'Filesystems', ['name', 'type', 'sizeBytes', 'usedBytes', 'availBytes', 'mountpoint']],
+    // Installed OS packages (CVE tracking input) — also feeds the Security page.
+    ['installedPackages', 'Installed Packages', ['name', 'version', 'ecosystem']],
   ];
   for (const [key, label, columns] of tables) {
     const v = metrics[key];
     if (Array.isArray(v) && v.length > 0) {
       push({ key, label, type: 'string', visualization: 'table', group: 'Inventory', columns, intervalMs: INVENTORY_INTERVAL_MS });
     }
+  }
+
+  // GPUs get their own group so the DeviceDetail page renders a dedicated
+  // "GPU" section (name/vendor/driver + live counters when vendor tools exist).
+  if (Array.isArray(metrics['gpus']) && metrics['gpus'].length > 0) {
+    push({ key: 'gpus', label: 'GPUs', type: 'string', visualization: 'table', group: 'GPU', columns: ['name', 'vendor', 'slot', 'driver', 'driverVersion', 'vramBytes', 'utilPercent', 'tempCelsius'], intervalMs: INVENTORY_INTERVAL_MS });
   }
 
   // Fallback: any other numeric metric becomes a text card so nothing is lost.

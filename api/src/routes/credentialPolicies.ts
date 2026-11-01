@@ -95,7 +95,8 @@ router.put('/auth/policies/global', requireAuth, requirePermission('auth:policie
 // GET /users/:id/policy — the EFFECTIVE policy for one user (per-user override
 // merged onto the global default, field by field) plus the raw override row.
 router.get('/users/:id/policy', requireAuth, async (req: Request, res: Response) => {
-  const targetId = req.params.id;
+  // Express 5 types params as string | string[] — coerce.
+  const targetId = String(req.params.id ?? '');
   const [userRow, effective] = await Promise.all([getUserPolicy(targetId), resolveCredentialPolicy(targetId)]);
 
   if (userRow) {
@@ -108,7 +109,8 @@ router.get('/users/:id/policy', requireAuth, async (req: Request, res: Response)
 
 // PUT /users/:id/policy — set (or update) a per-user override.
 router.put('/users/:id/policy', requireAuth, requirePermission('auth:policies:write'), async (req: Request, res: Response) => {
-  const targetId = req.params.id;
+  // Express 5 types params as string | string[] — coerce.
+  const targetId = String(req.params.id ?? '');
   const body = (req.body ?? {}) as Record<string, unknown>;
 
   const invalid = validatePolicyBody(body);
@@ -129,7 +131,8 @@ router.put('/users/:id/policy', requireAuth, requirePermission('auth:policies:wr
 
 // DELETE /users/:id/policy — clear the per-user override (revert to global).
 router.delete('/users/:id/policy', requireAuth, requirePermission('auth:policies:write'), async (req: Request, res: Response) => {
-  const targetId = req.params.id;
+  // Express 5 types params as string | string[] — coerce.
+  const targetId = String(req.params.id ?? '');
   try {
     await db.delete(schema.credentialPolicies).where(eq(schema.credentialPolicies.userId, targetId));
     const effective = await resolveCredentialPolicy(targetId);

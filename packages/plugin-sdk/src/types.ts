@@ -19,6 +19,20 @@
 /** Plugin health vocabulary (the API derives device status worst-wins from it). */
 export type Health = 'ok' | 'warning' | 'critical' | 'unknown';
 
+/**
+ * One human-readable reason why a monitoring poll reported non-ok health.
+ * Optional on the /monitoring response — plugins that don't report reasons
+ * still work (the API falls back to generic wording). The webapp shows these
+ * in a tooltip when hovering the device status badge, so keep them SHORT:
+ * one line each, no newlines, ideally ≤ 120 chars.
+ */
+export interface HealthReason {
+  /** 'warning' or 'critical' — must match (or be less severe than) `health`. */
+  severity: 'warning' | 'critical';
+  /** Short human-readable reason, e.g. "Pool tank is DEGRADED". */
+  message: string;
+}
+
 /** Capability strings a plugin may advertise in /discover. */
 export const CAPABILITIES = [
   'monitoring',
@@ -477,6 +491,10 @@ export interface PlanRequest<Credentials extends object = Record<string, unknown
 export interface ActionResult {
   success: boolean;
   applied?: boolean;
+  /** Top-level ONLY (never nested in `details`) — the plan executor reads
+   * result.verified to decide succeeded vs unverified. Idempotent no-op skips
+   * that CONFIRMED the desired state (entry already present / absent) should
+   * carry verified: true — they are self-evidently verified. */
   verified?: boolean;
   details?: Record<string, unknown>;
   error?: string;
@@ -526,9 +544,16 @@ export interface MonitoringRequestBody {
   collectInventory?: boolean;
 }
 
-/** Response of POST /monitoring — the API reads exactly these three fields. */
+/** Response of POST /monitoring — the API reads exactly these four fields. */
 export interface MonitoringResponseBody {
   health?: Health;
+  /**
+   * Optional human-readable reasons for a non-ok `health` (see HealthReason).
+   * Omit or leave empty when healthy — the API persists them on the telemetry
+   * snapshot and surfaces them in the webapp's status-badge tooltip. Old APIs
+   * ignore this field, so it is safe to send unconditionally.
+   */
+  healthReasons?: HealthReason[];
   metrics?: Record<string, unknown>;
   metricDescriptors?: MetricDescriptor[];
 }
@@ -764,9 +789,9 @@ export interface StateSection {
   id: string;
   label: string;
   description?: string | null;
-  /** Rendering hint: 'table' (default) renders the item table; 'switch' renders a virtual switch face with per-port selection for bulk actions. */
-  kind?: 'table' | 'switch';
-  /** Switch-face layout (only meaningful when kind === 'switch'). */
+  /** Rendering hint: 'table' (default) renders the item table; 'switch' renders a virtual switch face with per-port selection for bulk actions; 'enclosure' renders a disk-tray face — one LED bay per StateItem, grouped into bands by `layout` (one band per physical enclosure). */
+  kind?: 'table' | 'switch' | 'enclosure';
+  /** Switch-face / enclosure-tray layout (only meaningful when kind === 'switch' or 'enclosure'). For enclosures each group is one physical chassis; its label renders as the tray header. */
   layout?: SwitchLayout | null;
   items?: StateItem[];
   /** Section-level actions with no item context (e.g. reboot system). */

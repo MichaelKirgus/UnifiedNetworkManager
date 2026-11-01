@@ -30,7 +30,11 @@ my-plugin:
 ```
 
 - `PORT` — internal listen port. Leave at `4080`; the SDK's
-  `resolvePluginIdentity` reads it (default 4080).
+  `resolvePluginIdentity` reads it (default 4080). In addition, the SDK opens a
+  second, minimal **plain-HTTP liveness listener on `HEALTH_PORT`** (default
+  `PORT + 1` = `4081`) that serves only `GET /healthz`. It never goes behind
+  mTLS — that is what the compose healthchecks probe. Not published to the
+  host; no action needed unless you override `PORT`.
 - `ADVERTISED_ENDPOINT` — the URL the API calls back on. Without it the plugin
   advertises `http://localhost:4080`, which is unreachable from the API's own
   container. **Always set it to `http://<compose-service-name>:4080`.**

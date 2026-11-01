@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { BaseEdge, EdgeLabelRenderer, getSmoothStepPath, Position } from '@xyflow/react';
 import type { EdgeProps } from '@xyflow/react';
+import { EDGE_BASE_WIDTH, edgeWidth } from './traffic';
 
 /**
  * Cable edge for the topology graph. A plain link renders as one slate line; a
@@ -8,8 +9,11 @@ import type { EdgeProps } from '@xyflow/react';
  * each with its own stable hue, so "each VLAN a dedicated line" holds even
  * when several VLANs share the same cable. More than 4 VLANs collapse into a
  * single multi-stop gradient line to keep dense switches readable (the full
- * list stays in the tooltip). Tunnels render dashed; membership edges are thin
- * and neutral.
+ * list stays in the tooltip). Tunnels render dashed; WLAN links render as a
+ * fine dash in the host hue so they read distinctly from cables and tunnels;
+ * membership edges are thin and neutral. When the traffic overlay is active,
+ * cable/tunnel stroke width scales with the pair's estimated bytes (data.
+ * trafficBytes vs data.trafficMax — see traffic.ts).
  *
  * Routing: ORTHOGONAL smooth-step paths along the grid axes — horizontal
  * neighbors connect side-to-side, vertical ones top/bottom — so lines follow
@@ -165,6 +169,13 @@ export function TrunkEdge({ id, sourceX, sourceY, targetX, targetY, data }: Edge
   const tunnelCount: number = typeof data?.tunnelCount === 'number' ? (data.tunnelCount as number) : 1;
   // Corridor line for same-wall detour edges (Topology.tsx handlesFor).
   const corridorY: number | null = typeof data?.corridorY === 'number' ? (data.corridorY as number) : null;
+  // Traffic overlay (Topology.tsx attaches these when "Show traffic" is on):
+  // this edge's estimated bytes + the window maximum for scaling.
+  const trafficBytes: number | undefined = typeof data?.trafficBytes === 'number' ? (data.trafficBytes as number) : undefined;
+  const trafficMax: number = typeof data?.trafficMax === 'number' ? (data.trafficMax as number) : 0;
+  // Endpoint display names for the wireless chip ("AP · WLAN-1 ↔ host").
+  const sourceLabel = (data?.sourceLabel as string | undefined) ?? '';
+  const targetLabel = (data?.targetLabel as string | undefined) ?? '';
   const { line, cx, cy } = routeEdge(sourceX, sourceY, targetX, targetY, parallelIndex, bendOffset, corridorY);
 
   /** Perpendicular spacing between the per-VLAN lines of one trunk — kept
@@ -178,7 +189,12 @@ export function TrunkEdge({ id, sourceX, sourceY, targetX, targetY, data }: Edge
     label = [portA, portB].filter(Boolean).join(' ↔ ') + (via ? ` (${via})` : '');
   } else if (kind === 'tunnel') {
     label = tunnelCount > 1 ? `${tunnelType} ×${tunnelCount}` : tunnelType;
+  } else if (kind === 'wireless') {
+    label = [sourceLabel, via ? `· ${via}` : '', targetLabel].filter(Boolean).join(' ');
   }
+
+  // Scaled stroke for the traffic overlay — null keeps the resting width.
+  const trafficW = edgeWidth(trafficBytes, trafficMax);
 
   return (
     <>
@@ -201,6 +217,15 @@ export function TrunkEdge({ id, sourceX, sourceY, targetX, targetY, data }: Edge
       ) : vlans.length > MAX_PARALLEL_LINES ? (
             // Collapsed trunk: one line with a multi-stop gradient across the VLAN hues.
             <BaseEdge id={`${id}-trunk`} path={line} style={{ stroke: `url(#${gradId(id)})`, strokeWidth: 3 }} />
+          ) : kind === 'wireless' ? (
+            // WLAN association — a fine dash in the host hue, deliberately
+            // lighter than tunnels so "over the air" reads at a glance. No
+            // traffic scaling: per-host bytes already show on the node badge.
+            <BaseEdge
+              id={id}
+              path={line}
+              style={{ stroke: 'rgb(var(--topo-wireless))', strokeWidth: 1, strokeDasharray: '2 4' }}
+            />
           ) : (
             <BaseEdge
               id={id}
@@ -208,7 +233,7 @@ export function TrunkEdge({ id, sourceX, sourceY, targetX, targetY, data }: Edge
               style={{
                 // Topology canvas palette — centralized in index.css (--topo-*).
                 stroke: kind === 'tunnel' ? 'rgb(var(--topo-tunnel))' : 'rgb(var(--topo-cable))',
-                strokeWidth: kind === 'cable' ? 2.5 : 1,
+                strokeWidth: trafficW ?? (kind === 'cable' ? EDGE_BASE_WIDTH : 1),
                 strokeDasharray: kind === 'tunnel' ? '6 4' : undefined,
               }}
             />

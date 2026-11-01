@@ -22,7 +22,7 @@ setup:
 	  wait )
 	@echo "Dependencies installed successfully."
 
-# Build the shared packages + all plugins + the MCP server.
+# Build the shared packages + all plugins + the MCP server + api + webapp.
 #
 # Ordering: @unm/plugin-sdk and @unm/snmp-client must build FIRST — every
 # plugin (and the api, types-only) depends on them via `file:` links, which npm
@@ -30,7 +30,8 @@ setup:
 # (it depends on each). We refresh those copies from the fresh dist before
 # building the plugins so they compile against current shared code; everything
 # else then runs concurrently (tsc builds are CPU-bound and independent of
-# each other).
+# each other). The api and webapp join the parallel section — their file: deps
+# were already refreshed above, and both build with plain tsc.
 build:
 	@echo "Building @unm/plugin-sdk + @unm/snmp-client..."
 	cd packages/plugin-sdk && npm run build
@@ -55,11 +56,19 @@ build:
 	done
 	rm -rf api/node_modules/@unm/plugin-sdk; \
 	cp -r packages/plugin-sdk api/node_modules/@unm/plugin-sdk
-	@echo "Building plugins + MCP server in parallel..."
+	# POSIX sh (no arrays): PIDs are collected as a space-separated string and
+	# each one is waited on individually — a bare `wait` would return 0 if ANY
+	# job succeeded, silently hiding type errors in the other jobs.
+	@echo "Building plugins + MCP server + api + webapp in parallel..."
 	@( \
-	  $(foreach p,$(PLUGINS),(cd plugins/$(p) && npm run build) & ) \
-	  (cd mcp && npm run build) & \
-	  wait )
+	  pids=""; \
+	  for p in $(PLUGINS); do (cd plugins/$$p && npm run build) & pids="$$pids $$!"; done; \
+	  (cd mcp && npm run build) & pids="$$pids $$!"; \
+	  (cd api && npm run build) & pids="$$pids $$!"; \
+	  (cd webapp && npm run build) & pids="$$pids $$!"; \
+	  fail=0; \
+	  for pid in $$pids; do wait $$pid || fail=1; done; \
+	  exit $$fail )
 	@echo "Build complete."
 
 # Run the offline test suites (no Docker / live services required):
@@ -68,9 +77,13 @@ build:
 #      spawned standalone against in-process mock appliances and checked for
 #      fatal flaws (healthz, /discover validation, monitoring happy-path +
 #      dead-target handling). Requires `make build` first (tests dist/ output).
+#   3. API unit tests (jest) — pure utilities, no DB needed.
+#   4. Webapp unit tests (vitest) — pure utilities, no DOM needed.
 test:
 	./node_modules/.bin/tsx scripts/verify-ip-math.ts
 	node packages/plugin-test-kit/bin/run-all.mjs
+	cd api && npm test
+	cd webapp && npm test
 
 # Just the per-plugin contract suite (see packages/plugin-test-kit/README.md).
 plugin-tests:
@@ -83,18 +96,18 @@ plugin-tests:
 up:
 	@echo "Starting infrastructure..."
 	@if command -v docker-compose &> /dev/null; then \
-		docker-compose up -d postgres mcp $(addsuffix -plugin,$(PLUGINS)); \
+		docker-compose -f docker-compose.dev.yml up -d postgres mcp $(addsuffix -plugin,$(PLUGINS)); \
 	else \
-		docker compose up -d postgres mcp $(addsuffix -plugin,$(PLUGINS)); \
+		docker compose -f docker-compose.dev.yml up -d postgres mcp $(addsuffix -plugin,$(PLUGINS)); \
 	fi
 	@echo "Infrastructure is up."
 
 down:
 	@echo "Stopping infrastructure..."
 	@if docker compose version &> /dev/null; then \
-		docker compose down; \
+		docker compose -f docker-compose.dev.yml down; \
 	elif command -v docker-compose &> /dev/null; then \
-		docker-compose down; \
+		docker-compose -f docker-compose.dev.yml down; \
 	else \
 		echo "Error: No docker-compose or docker compose found"; \
 		exit 1; \
@@ -109,8 +122,8 @@ stop-api:
 
 stop-web:
 	@echo "Stopping Webapp server..."
-	-fuser -k 5173/tcp
-	@echo "Webapp port 5173 cleared."
+	-fuser -k 8080/tcp
+	@echo "Webapp port 8080 cleared."
 
 # Run API in dev mode (with hot reload)
 api-dev:
@@ -126,9 +139,9 @@ web-dev:
 clean:
 	@echo "Cleaning up..."
 	@if docker compose version &> /dev/null; then \
-		docker compose down -v; \
+		docker compose -f docker-compose.dev.yml down -v; \
 	elif command -v docker-compose &> /dev/null; then \
-		docker-compose down -v; \
+		docker-compose -f docker-compose.dev.yml down -v; \
 	else \
 		echo "Error: No docker-compose or docker compose found"; \
 		exit 1; \

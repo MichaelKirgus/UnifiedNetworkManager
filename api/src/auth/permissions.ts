@@ -45,6 +45,14 @@ export const PERMISSION_DESCRIPTIONS: Record<string, string> = {
   // read permission only gates viewing the Mail page.
   'mail:read': 'View the Mail page (domains, mailboxes and aliases across devices)',
   'routes:read': 'View the Routes page (static and dynamic routes across devices)',
+  // Cross-device static DNS entry inventory — host records reported by dns-capable
+  // plugins (OPNsense, OpenWrt, RouterOS, LCOS). Managed via the plan/config
+  // workflow; this read permission only gates viewing the page.
+  'dns:read': 'View the DNS page (static DNS entries across devices)',
+  // Cross-device DHCP inventory — configured server networks/pools and static
+  // reservations reported by dhcp-capable plugins (RouterOS, OPNsense, OpenWrt).
+  // Managed via the plan/config workflow; this read permission only gates viewing.
+  'dhcp:read': 'View the DHCP page (server networks + static reservations across devices)',
   'firewall:read': 'View the Firewall page (filter + NAT rules across devices)',
   'certificates:read': 'View the Certificates page (TLS certs + SSH host keys across devices)',
   // Accepting a CHANGED certificate/host key re-pins it for strict pinning — a
@@ -83,8 +91,13 @@ export const PERMISSION_DESCRIPTIONS: Record<string, string> = {
   // device-to-device pairs. Read-only; collector configuration is global
   // (env-driven) in v1.
   'flows:read': 'View the Flows page (traffic flows between devices and to the internet)',
+  // Actions & Schedules — ITTT-style automation rules (triggers + actions).
+  // Read gates viewing rules/runs; write gates creating/editing/deleting them
+  // and test-running. Firing itself is worker-driven (no per-firing gate);
+  // intent actions create plans, which the plan engine handles as usual.
+  'automations:read': 'View automation rules (Actions & Schedules) and their run history',
+  'automations:write': 'Create, edit, delete and test-run automation rules',
   'sites:read': 'View sites',
-  'config-jobs:read': 'View configuration jobs',
   'plans:read': 'View execution plans and their steps',
   'plugins:read': 'View plugins, their options and self-metrics',
   // Logs can carry critical details (endpoints, error payloads), so they get
@@ -134,6 +147,12 @@ export const PERMISSION_DESCRIPTIONS: Record<string, string> = {
   // permissions — this is UNM's OWN PKI, not appliance cert inventory.
   'ca:read': 'View the certificate authority status and issued certificates',
   'ca:manage': 'Manage the certificate authority (revoke certificates)',
+  // Backup / restore / replication of UNM's OWN database (Backups page): create
+  // section-based backups, download/restore them, and manage replication targets
+  // between instances. Carriers may also act as a replication PEER — inbound
+  // sync pushes from another instance are accepted when the presented token
+  // carries this permission.
+  'instance:backup': "Back up, restore and replicate UNM's own configuration",
 };
 
 /** All known permission ids (stable order — object key insertion order). */
