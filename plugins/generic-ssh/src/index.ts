@@ -46,7 +46,7 @@ import {
 import { GENERIC_SSH_DEVICE_SUPPORT } from './deviceSupport';
 import type { ProbeRequestBody, StateRequestBody } from '@unm/plugin-sdk';
 
-import { SshBackend, closeSshPools, resolveGenericSshCredentials } from './client/sshClient';
+import { SshBackend, applySshIdleTimeout, closeSshPools, resolveGenericSshCredentials } from './client/sshClient';
 import { createElevatedBackend } from './client/privilege';
 import { collectLive, collectMonitoring, getInventory, resolveZone } from './monitoring';
 import { collectProbeStates, collectProbeStats, type ProbeContainerStat, type ProbeContainerState } from './containers';
@@ -96,7 +96,21 @@ const identity = resolvePluginIdentity({
   // incl. enabled iGPUs; nvidia-smi / rocm-smi add util, VRAM, temp, power and
   // core clocks when present). Gated by the new `collectGpus` option so stacks
   // of GPU-less servers/VMs skip the probe entirely.
-  version: '0.4.0',
+  // 0.5.0 — Per-host load tuning: eight new options to right-size what each
+  // poll does on a given box (observed regression: journalctl re-scans at the
+  // 30 s metrics cadence pinned a mini-PC at 100 % CPU). `firewallEventsIntervalMs`
+  // throttles the journal read per host (default 5 min, was every poll),
+  // `firewallEventsScanLimit` caps entries scanned per beat; `collectServices`,
+  // `collectContainers`, `collectUpdates`, `collectPackages` gate the heavy
+  // inventory sections individually (off = key omitted, no wipe);
+  // `sshIdleTimeoutMs` tunes how long idle pooled SSH sessions stay open; and
+  // `lightweightMode` is a one-click master switch that disables all of them at
+  // once for weak mini-PCs. Individual options win over lightweightMode.
+  // 0.5.1 — firewall-events read hardened: native SYSLOG_IDENTIFIER=kernel
+  // filter (no more full-journal JSON dumps), host-side `timeout` bound, and the
+  // throttle window is stamped even when a read fails (a slow journal can no
+  // longer defeat the interval or orphan re-scanning journalctl processes).
+  version: '0.5.1',
   vendors: ['linux'],
   // monitoring + inventory: two-tier cadence collection over SSH (live metrics
   // every poll; interfaces/ARP/routes/filesystems/disks at the 15-min interval).
@@ -211,7 +225,77 @@ const PLUGIN_OPTIONS: PluginOptionDescriptor[] = [
     type: 'boolean' as const,
     default: true,
     description:
-      'Read kernel firewall log lines (netfilter DROP/REJECT logging) from the host journal on every poll and push them to UNM\'s cross-device Firewall Events page. The host must actually LOG drops — install the behavior-preserving nftables log rules via the firewall.log.enable action first; without those, no events exist to collect.',
+      'Read kernel firewall log lines (netfilter DROP/REJECT logging) from the host journal and push them to UNM\'s cross-device Firewall Events page. Reads are throttled per host by "Firewall events read interval". The host must actually LOG drops — install the behavior-preserving nftables log rules via the firewall.log.enable action first; without those, no events exist to collect.',
+  },
+  {
+    key: 'firewallEventsIntervalMs',
+    label: 'Firewall events read interval (ms)',
+    type: 'integer' as const,
+    default: 300_000,
+    min: 10_000,
+    max: 86_400_000,
+    description:
+      'Minimum time between journal reads per host. Each read re-scans the journal from the stored cursor (journalctl), which is real CPU work on busy boxes — at the default 30 s metrics cadence it can pin a weak mini-PC at 100 % CPU. Raise to 5–15 min for quiet hosts; new events are then delayed by up to one interval. 10 s = near-real-time (legacy "every poll" behavior).',
+  },
+  {
+    key: 'firewallEventsScanLimit',
+    label: 'Firewall events scan limit',
+    type: 'integer' as const,
+    default: 5_000,
+    min: 100,
+    max: 100_000,
+    description:
+      'Maximum journal entries scanned per read (backlog protection on busy boxes). When the cap is hit the read resumes from the last pushed event on the next beat — nothing is skipped, only spread over more beats.',
+  },
+  {
+    key: 'collectServices',
+    label: 'Collect services inventory',
+    type: 'boolean' as const,
+    default: true,
+    description:
+      'List init-system services (systemctl list-units + a per-running-unit MainPID lookup) during inventory polls. Heaviest inventory section on hosts with many units — disable on weak boxes; the Services page then keeps its last data (key omitted = no wipe).',
+  },
+  {
+    key: 'collectContainers',
+    label: 'Collect container inventory',
+    type: 'boolean' as const,
+    default: true,
+    description:
+      'Run the docker CLI passes (ps + batched inspect of containers and images) during inventory polls. Disable on hosts without containers or weak boxes; stored Containers page rows are kept (key omitted = no wipe).',
+  },
+  {
+    key: 'collectUpdates',
+    label: 'Check for package updates',
+    type: 'boolean' as const,
+    default: true,
+    description:
+      'Query the host\'s package manager for upgradable OS packages (apt/dnf/pacman/apk) during inventory polls. Slow and network-bound on some distros — disable to skip; stored Updates rows are kept (key omitted = no wipe).',
+  },
+  {
+    key: 'collectPackages',
+    label: 'Collect installed packages (CVE tracking)',
+    type: 'boolean' as const,
+    default: true,
+    description:
+      'List every installed OS package with its exact version during inventory polls — the input to UNM\'s CVE tracking. One large round-trip per window; disable on weak boxes or hosts you don\'t want CVE-scanned (key omitted = no wipe).',
+  },
+  {
+    key: 'sshIdleTimeoutMs',
+    label: 'SSH idle session timeout (ms)',
+    type: 'integer' as const,
+    default: 300_000,
+    min: 30_000,
+    max: 86_400_000,
+    description:
+      'How long an idle pooled SSH session to a host stays open before the plugin closes it (the next poll reconnects). Lower = fewer lingering sessions on quiet hosts; higher = faster re-polls after gaps. Values below 30 s are clamped.',
+  },
+  {
+    key: 'lightweightMode',
+    label: 'Lightweight mode (low-impact polling)',
+    type: 'boolean' as const,
+    default: false,
+    description:
+      'One-click low-impact profile for weak mini-PCs / NAS boxes: disables services inventory, container inventory, package update checks, installed-package listing AND the security checks (whose failed-login scan re-reads the journal) in one go. Individual options above still win when explicitly set — use them to re-enable a single section.',
   },
 ];
 
@@ -401,20 +485,35 @@ app.post('/monitoring', async (req, res) => {
       return;
     }
 
+    // Per-host load tuning — `lightweightMode` is a master switch that disables
+    // every heavy collector at once; an explicitly-set individual option always
+    // wins over the mode (so one section can be re-enabled on a lightweight host).
+    const lw = settings.lightweightMode === true;
+
+    // SSH pool idle TTL from the `sshIdleTimeoutMs` option — applies to ALL
+    // hosts this plugin instance serves (one process-wide pool); cheap no-op
+    // when unchanged.
+    applySshIdleTimeout(settings.sshIdleTimeoutMs);
+
     const result = await collectMonitoring(host, backend, {
       collectInventory: collectInventoryFlag,
       // GPU probe rides the inventory window (one combined SSH round-trip).
       collectGpus: settings.collectGpus !== false,
+      collectServices: lw ? settings.collectServices === true : settings.collectServices !== false,
+      collectContainers: lw ? settings.collectContainers === true : settings.collectContainers !== false,
+      collectUpdates: lw ? settings.collectUpdates === true : settings.collectUpdates !== false,
+      collectPackages: lw ? settings.collectPackages === true : settings.collectPackages !== false,
     });
 
     // Security checks ride the INVENTORY window (like updates): file-integrity
     // baselines + failed-login/rate-limit/account scans are comparatively heavy,
     // so they run at most once per inventory cycle. Failure → omit the key
-    // entirely (absent = no wipe, per the ingestion contract).
+    // entirely (absent = no wipe, per the ingestion contract). Lightweight mode
+    // disables them too (the auth-failures check re-reads the journal).
     if (collectInventoryFlag) {
       try {
         const secSettings: SecuritySettings = {
-          enabled: settings.securityChecksEnabled !== false,
+          enabled: lw ? settings.securityChecksEnabled === true : settings.securityChecksEnabled !== false,
           watchedFiles: String(settings.securityWatchedFiles ?? DEFAULT_WATCHED_FILES.join(', '))
             .split(',')
             .map((s) => s.trim())
@@ -434,8 +533,14 @@ app.post('/monitoring', async (req, res) => {
     // NOT awaited, so it runs in parallel with the response below and can
     // never block or fail this poll; all failures are contained inside
     // collectAndPushFirewallEvents (which also no-ops without a deviceId).
+    // The journal read itself is throttled per host by `firewallEventsIntervalMs`
+    // — that throttle is what keeps quiet hosts from spawning journalctl on
+    // every 30 s metrics poll.
     if (settings.firewallEventsEnabled !== false) {
-      void collectAndPushFirewallEvents(host, deviceId, backend).catch(() => { /* best-effort */ });
+      void collectAndPushFirewallEvents(host, deviceId, backend, {
+        intervalMs: Number(settings.firewallEventsIntervalMs),
+        scanLimit: Number(settings.firewallEventsScanLimit),
+      }).catch(() => { /* best-effort */ });
     }
 
     if (selectedModel) result.metrics['system.model'] = selectedModel;

@@ -33,6 +33,22 @@ export function closeSshPools(): void {
   }
 }
 
+/**
+ * Applies the `sshIdleTimeoutMs` plugin option to the pool's idle TTL so quiet
+ * hosts don't hold open SSH sessions forever (and chatty stacks can keep them
+ * warm longer). Called on every /monitoring + /probe request — cheap no-op when
+ * the value is unchanged. 0/negative = SDK default (5 min).
+ */
+export function applySshIdleTimeout(ms: unknown): void {
+  const n = Number(ms);
+  if (!Number.isFinite(n) || n <= 0) return; // unset → keep current/default TTL
+  try {
+    sshPool.setIdleTtl(n);
+  } catch {
+    /* noop — a pool quirk must never sink the poll */
+  }
+}
+
 const DEFAULT_EXEC_TIMEOUT_MS = 15_000;
 /** Marker prefix/suffix for runSections — must not appear in command output. */
 const MARKER = 'UNM_SECTION';

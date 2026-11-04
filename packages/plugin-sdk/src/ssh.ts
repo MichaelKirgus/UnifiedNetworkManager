@@ -687,8 +687,8 @@ export interface SshPool {
  * two plugins sharing a host reuse one session. Dead clients are evicted lazily
  * on each get(); idle ones after idleTtlMs.
  */
-export function createSshPool(opts: SshPoolOptions = {}): SshPool {
-  const idleTtlMs = opts.idleTtlMs ?? 5 * 60_000;
+export function createSshPool(opts: SshPoolOptions = {}): SshPool & { setIdleTtl(ms: number): void; getIdleTtl(): number } {
+  let idleTtlMs = opts.idleTtlMs ?? 5 * 60_000;
   const maxSize = opts.maxSize ?? 64;
   const entries = new Map<string, PoolEntry>();
 
@@ -721,6 +721,16 @@ export function createSshPool(opts: SshPoolOptions = {}): SshPool {
       }
       entry.lastUsedAt = now;
       return entry.client;
+    },
+    /** Runtime override for the idle TTL (e.g. from a per-host plugin option).
+     *  Values below 30 s are clamped — shorter than that would churn sessions
+     *  on every poll gap and cost more in re-auths than it saves. */
+    setIdleTtl(ms: number): void {
+      if (Number.isFinite(ms) && ms > 0) idleTtlMs = Math.max(30_000, Math.trunc(ms));
+    },
+    /** The currently effective idle TTL in ms. */
+    getIdleTtl(): number {
+      return idleTtlMs;
     },
     closeAll(): void {
       for (const e of entries.values()) e.client.close();

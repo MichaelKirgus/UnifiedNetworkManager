@@ -30,6 +30,14 @@
  *    ACCEPT/ALLOW-ish prefixes → 'pass'; unmarked lines default to 'block'.
  *  - Runs fire-and-forget from /monitoring (never blocks or fails the poll);
  *    one extra cheap exec per beat on hosts without journalctl yields nothing.
+ *  - THROTTLING: `journalctl --cursor=…` re-scans the journal from the stored
+ *    cursor on EVERY call — on a busy box that is real CPU work, and at the
+ *    default 30 s metrics cadence it kept spawning journalctl processes
+ *    continuously (observed: host pinned at 100 % CPU). The read therefore
+ *    runs at most once per `intervalMs` per host (plugin option
+ *    `firewallEventsIntervalMs`, default = every poll for backward compat); a
+ *    quiet host's cursor already sits at the journal tail, so skipping beats
+ *    only delays new events by up to one interval.
  */
 
 import { createHash } from 'node:crypto';
@@ -37,7 +45,7 @@ import type { CommandRunner } from './client/privilege';
 import { stateStore, EFFECTIVE_UUID } from './stateStore';
 
 const STATE_NAMESPACE = 'firewall-events'; // must be unique per feature
-/** Max journal entries scanned per beat (backlog protection on busy boxes). */
+/** Default max journal entries scanned per beat (backlog protection on busy boxes). */
 const SCAN_LIMIT = 5000;
 /** First-sight baseline: the newest N journal entries. */
 const BASELINE_ENTRIES = 2000;
@@ -164,16 +172,32 @@ export function parseUtcOffset(s: string): number {
 // is observable (a pipe would mask it with head/grep's status).
 // ---------------------------------------------------------------------------
 
-function buildReadScript(cursor: string | null): string {
-  const limit = String(SCAN_LIMIT);
+function buildReadScript(cursor: string | null, scanLimit: number): string {
+  const limit = String(scanLimit);
   const baseline = String(BASELINE_ENTRIES);
+  // Native journald field filter — only KERNEL entries are serialized to JSON.
+  // Without it a cursor read dumps EVERY entry in the window (every service's
+  // log) as JSON: on a busy box that is hundreds of MB and takes MINUTES, which
+  // orphaned journalctl processes pinned the host at 100 % CPU (observed: ~15
+  // concurrent re-scans from one stale cursor). With the filter journald walks
+  // the range but never serializes non-kernel entries — tiny + fast output even
+  // for a huge backlog window. Netfilter log lines arrive via kmsg and carry
+  // SYSLOG_IDENTIFIER=kernel, so nothing we care about is filtered out.
+  const jctlArgs = cursor
+    ? `--cursor=${shq(cursor)} -o json SYSLOG_IDENTIFIER=kernel`
+    : `-n ${baseline} -o json SYSLOG_IDENTIFIER=kernel`;
   return [
     'printf \'__OFFSET__ %s\\n\' "$(date +%z 2>/dev/null || echo +0000)"',
     'if command -v journalctl >/dev/null 2>&1; then',
     '  TMPF=$(mktemp) || exit 1',
-    cursor
-      ? `  journalctl --no-pager --cursor=${shq(cursor)} -o json >"$TMPF" 2>/dev/null`
-      : `  journalctl --no-pager -n ${baseline} -o json >"$TMPF" 2>/dev/null`,
+    // Host-side hard bound (coreutils/busybox `timeout` when present): even a
+    // slow filtered scan dies after ~20 s (exit code 124) instead of running for
+    // minutes and orphaning on the host when the SSH exec budget ends.
+    '  if command -v timeout >/dev/null 2>&1; then',
+    `    timeout -k 5 20 journalctl --no-pager ${jctlArgs} >"$TMPF" 2>/dev/null`,
+    '  else',
+    `    journalctl --no-pager ${jctlArgs} >"$TMPF" 2>/dev/null`,
+    '  fi',
     '  JRC=$?',
     '  printf \'__JRCODE__ %s\\n\' "$JRC"',
     '  if [ "$JRC" = "0" ]; then',
@@ -277,64 +301,125 @@ async function pushEventBatch(deviceId: string, events: KernelFirewallEvent[]): 
 // Entry point — fire-and-forget from /monitoring
 // ---------------------------------------------------------------------------
 
+/** Per-host throttle + scan-cap options (from plugin settings). */
+export interface FirewallEventOptions {
+  /** Minimum ms between journal reads per host. ≤0/undefined = every poll
+   *  (legacy behavior). Default in the option descriptor: 300_000. */
+  intervalMs?: number;
+  /** Max journal entries scanned per beat (backlog protection). */
+  scanLimit?: number;
+}
+
+/** Shape of the persisted state row: `{ cursor, lastReadAt }`. */
+interface FwState {
+  cursor?: string | null;
+  lastReadAt?: number;
+}
+
+function readFwState(stored: unknown): FwState {
+  if (!stored || typeof stored !== 'object') return {};
+  const o = stored as Record<string, unknown>;
+  const out: FwState = {};
+  if (typeof o['cursor'] === 'string' && o['cursor'] !== '') out.cursor = o['cursor'];
+  else if (o['cursor'] === null) out.cursor = null;
+  if (typeof o['lastReadAt'] === 'number' && Number.isFinite(o['lastReadAt'])) out.lastReadAt = o['lastReadAt'];
+  return out;
+}
+
 /**
  * Reads new kernel firewall log lines for one host and pushes them to the API.
  * Never throws: a dead journal, missing journalctl or an unreachable API must
- * never break the poll. The cursor lives in the shared state store keyed by
- * management address (survives container restarts; instance-scoped).
+ * never break the poll. The cursor + last-read timestamp live in the shared
+ * state store keyed by management address (survive container restarts;
+ * instance-scoped).
+ *
+ * THROTTLING: when `intervalMs` > 0 and a read happened less than that long
+ * ago, this call returns WITHOUT touching the host — no journalctl process is
+ * spawned. That is what keeps quiet hosts at zero journal load between reads;
+ * on busy boxes it bounds the re-scan rate to one per interval instead of one
+ * per metrics poll (the 100 %-CPU regression).
  */
 export async function collectAndPushFirewallEvents(
   host: string,
   deviceId: string | null,
   backend: CommandRunner,
+  opts?: FirewallEventOptions,
 ): Promise<void> {
   if (!deviceId) return; // no device scope → nothing to attribute rows to
 
+  const intervalMs = Math.max(0, Number(opts?.intervalMs) || 0);
+  const scanLimit = Math.max(100, Math.trunc(Number(opts?.scanLimit) || SCAN_LIMIT));
+
   let cursor: string | null = null;
+  let lastReadAt: number | undefined;
   try {
     const stored = await stateStore.get(STATE_NAMESPACE, host);
-    if (stored && typeof stored === 'object' && typeof (stored as Record<string, unknown>)['cursor'] === 'string') {
-      cursor = ((stored as Record<string, unknown>)['cursor'] as string) || null;
-    }
+    const st = readFwState(stored);
+    cursor = st.cursor ?? null;
+    lastReadAt = st.lastReadAt;
   } catch { /* best-effort — no cursor means a fresh baseline */ }
 
-  const r = await backend.exec(buildReadScript(cursor), 30_000).catch(() => null);
-  if (!r || (r.stdout ?? '').trim() === '') return; // exec failed — keep the old cursor
+  // Throttle: a recent successful read already consumed this window. Skipping
+  // here is safe — the stored cursor still points at the journal tail (or just
+  // behind it), so nothing is lost, only delayed by ≤ intervalMs.
+  if (intervalMs > 0 && typeof lastReadAt === 'number' && Date.now() - lastReadAt < intervalMs) {
+    return;
+  }
+
+  const r = await backend.exec(buildReadScript(cursor, scanLimit), 30_000).catch(() => null);
+
+  // Stamp the throttle window EVEN WHEN THE READ FAILED. Without this a
+  // persistently slow journal (huge backlog → every read exceeds the exec
+  // budget) defeats the interval entirely: each beat retries immediately and —
+  // because the SDK timeout only drops the SSH socket, never kills the remote
+  // process — leaves an orphaned `journalctl --cursor=…` re-scanning on the
+  // host for minutes (observed: ~15 concurrent orphans, load 16 on 4 cores).
+  // With the stamp, a slow journal costs at most ONE bounded attempt per
+  // interval; the cursor is untouched so nothing is lost.
+  const persist = async (value: string | null): Promise<void> => {
+    // Always stamp lastReadAt — it is the throttle window itself. A failed
+    // push keeps the OLD cursor so the next beat re-reads the same rows (the
+    // API dedupes by vendorEventId, so a lost-ack race can't duplicate).
+    try {
+      await stateStore.put([{ namespace: STATE_NAMESPACE, key: host, value: { cursor: value ?? null, lastReadAt: Date.now() }, deviceId }]);
+    } catch { /* best-effort — worst case the next beat re-sends and dedupe absorbs it */ }
+  };
+
+  if (!r || (r.stdout ?? '').trim() === '') {
+    await persist(cursor); // exec failed — keep the old cursor, throttle until next interval
+    return;
+  }
 
   const parsed = parseReadOutput(host, r.stdout ?? '');
 
   // A stored cursor that journald can no longer resolve (journal rotated or
-  // vacuumed) → drop it so the next beat takes a fresh baseline.
-  if (cursor !== null && parsed.jrcode !== null && parsed.jrcode !== 0) {
+  // vacuumed) → drop it so the next beat takes a fresh baseline. Exit code 124
+  // is `timeout` killing a slow scan — NOT a bad cursor: keep it and retry on
+  // the next interval (the host-side bound makes that attempt cheap).
+  if (cursor !== null && parsed.jrcode !== null && parsed.jrcode !== 0 && parsed.jrcode !== 124) {
     try { await stateStore.delete(STATE_NAMESPACE, [host]); } catch { /* best-effort */ }
     return;
   }
-
-  const storeCursor = async (value: string): Promise<void> => {
-    if (value === cursor) return; // nothing moved
-    try {
-      await stateStore.put([{ namespace: STATE_NAMESPACE, key: host, value: { cursor: value }, deviceId }]);
-    } catch { /* best-effort — worst case the next beat re-sends and dedupe absorbs it */ }
-  };
 
   if (parsed.events.length === 0) {
     // Nothing new. If a window was read, advance past it so its entries are not
     // re-scanned next beat; an empty SUCCESSFUL read means we sit at the tail —
     // keep the cursor as-is (no ping-pong back to baseline on quiet hosts).
-    if (parsed.endCursor) await storeCursor(parsed.endCursor);
+    await persist(parsed.endCursor ?? cursor);
     return;
   }
 
   const ok = await pushEventBatch(String(deviceId), parsed.events);
-  if (!ok) return; // cursor NOT advanced — re-read next beat, API dedupes
+  if (!ok) {
+    await persist(cursor); // NOT advanced — re-read next beat, API dedupes
+    return;
+  }
 
-  // Advance the cursor only after a successful push. The API dedupes by
-  // (deviceId, pluginId, vendorEventId), so even a lost-ack race can't create
-  // duplicate rows. When the read hit the scan cap the window was NOT fully
-  // consumed — resume from the last pushed event instead of skipping over the
-  // remainder (it is picked up on the next beat).
-  const target = parsed.events.length >= SCAN_LIMIT
+  // Advance the cursor only after a successful push. When the read hit the scan
+  // cap the window was NOT fully consumed — resume from the last pushed event
+  // instead of skipping over the remainder (it is picked up on the next beat).
+  const target = parsed.events.length >= scanLimit
     ? (parsed.lastPushedCursor ?? parsed.endCursor)
     : parsed.endCursor;
-  await storeCursor(target ?? '');
+  await persist(target);
 }

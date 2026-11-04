@@ -48,7 +48,11 @@ const INVENTORY_FAILURE_BACKOFF_MS = 60_000;
  * treat null as "no inventory data this poll" and emit NO inventory keys at
  * all (absent key = no wipe of stored rows, per the ingestion contract).
  */
-export async function getInventory(hostKey: string, backend: CommandRunner): Promise<InventorySnapshot | null> {
+export async function getInventory(
+  hostKey: string,
+  backend: CommandRunner,
+  opts?: { collectServices?: boolean },
+): Promise<InventorySnapshot | null> {
   const hit = inventoryCache.get(hostKey);
   if (hit && Date.now() - hit.at < INVENTORY_INTERVAL_MS) return hit.snapshot;
 
@@ -62,7 +66,7 @@ export async function getInventory(hostKey: string, backend: CommandRunner): Pro
   if (!pending) {
     const collector = new GenericSshCollector(backend);
     pending = collector
-      .collectInventory()
+      .collectInventory({ collectServices: opts?.collectServices !== false })
       .then((snap: InventorySnapshot) => {
         // Only SUCCESSFUL collections are cached — a failure must never poison
         // the cache with an authoritative-empty snapshot.
@@ -656,7 +660,7 @@ export class GenericSshCollector {
   }
 
   /** Full inventory snapshot (15-min cadence). Throws when the box is unreachable. */
-  async collectInventory(): Promise<InventorySnapshot> {
+  async collectInventory(opts?: { collectServices?: boolean }): Promise<InventorySnapshot> {
     // Liveness gate FIRST: if even one trivial read fails, the whole collection
     // failed — throw so the caller emits NO inventory keys (absent = no wipe)
     // and the failure backoff kicks in instead of caching an empty snapshot.
@@ -665,12 +669,15 @@ export class GenericSshCollector {
       throw new Error(`Inventory collection failed: SSH exec "true" returned code ${ping?.code ?? 'null'}`);
     }
 
+    // Services is the heaviest section (systemctl list-units + a per-running-unit
+    // MainPID loop) — skippable via the `collectServices` option. Skipped = null
+    // → caller omits the key entirely (absent = no wipe).
     const [board, networks, neighborsRes, routes, services, filesystems, disks] = await Promise.all([
       this.boardInfo().catch(() => null),
       this.interfaces().catch(() => [] as NetworkRow[]),
       this.neighbors().catch(() => ({ arp: [], ndp: [] })),
       this.routes().catch(() => [] as RouteRow[]),
-      this.services().catch(() => null),
+      opts?.collectServices === false ? Promise.resolve(null) : this.services().catch(() => null),
       this.filesystems().catch(() => [] as FilesystemRow[]),
       this.disks().catch(() => [] as DiskRow[]),
     ]);
@@ -718,11 +725,32 @@ export interface MonitoringResult {
   metricDescriptors: MetricDescriptor[];
 }
 
+/** Per-host collection gates (from plugin options). Every gate defaults to ON
+ *  when undefined — old behavior is preserved unless the user disables it. */
+export interface MonitoringOpts {
+  collectInventory: boolean;
+  /** GPU probe (inventory window) — `collectGpus` option. */
+  collectGpus?: boolean;
+  /** Services inventory section (`systemctl list-units` + per-unit MainPID loop).
+   *  Heavy on hosts with many units — `collectServices` option. Off = omit the
+   *  key entirely (absent = no wipe, per the ingestion contract). */
+  collectServices?: boolean;
+  /** Docker/container inventory (`docker ps`/`inspect` passes) —
+   *  `collectContainers` option. Off = omit both keys (no wipe). */
+  collectContainers?: boolean;
+  /** Upgradable-package check (`apt list --upgradable` / dnf / …) —
+   *  `collectUpdates` option. Slow + network-bound on some distros. */
+  collectUpdates?: boolean;
+  /** Installed-packages listing for CVE tracking (`dpkg-query -W`, …) —
+   *  `collectPackages` option. One big round-trip per inventory window. */
+  collectPackages?: boolean;
+}
+
 /** Assembles the complete monitoring response for one poll. */
 export async function collectMonitoring(
   hostKey: string,
   backend: CommandRunner,
-  opts: { collectInventory: boolean; collectGpus?: boolean }
+  opts: MonitoringOpts
 ): Promise<MonitoringResult> {
   const live = await collectLive(backend);
   const metrics: Record<string, unknown> = { ...live.metrics };
@@ -736,7 +764,7 @@ export async function collectMonitoring(
     // null = collection failed or in backoff → emit NO inventory keys at all.
     // An absent key means "no wipe" for the API's ingestion contract, so a
     // transient outage never blanks stored interfaces/routes/filesystems.
-    const inventory = await getInventory(hostKey, backend).catch(() => null);
+    const inventory = await getInventory(hostKey, backend, { collectServices: opts.collectServices }).catch(() => null);
     if (inventory) {
       const board = inventory.board;
       if (board?.hostname) metrics['system.hostname'] = board.hostname;
@@ -756,34 +784,46 @@ export async function collectMonitoring(
       // Updates (Updates page): independent 5-min TTL so a forced refresh
       // re-checks even when the inventory snapshot above came from cache.
       // Failure → omit the key entirely (absent = no wipe, per ingestion contract).
-      try {
-        metrics['updates'] = await getUpdates(hostKey, backend);
-      } catch {
-        /* unreachable or transient — keep previously stored rows */
+      // Gated by `collectUpdates` — package-manager update checks are slow and
+      // network-bound on some distros; off = omit the key (no wipe of stored rows).
+      if (opts.collectUpdates !== false) {
+        try {
+          metrics['updates'] = await getUpdates(hostKey, backend);
+        } catch {
+          /* unreachable or transient — keep previously stored rows */
+        }
       }
       // Installed packages (CVE tracking): full set with exact versions + a
       // release-aware ecosystem tag. null = no known package manager → omit the
       // key (no wipe). A present-but-empty array is authoritative and wipes
       // stale device_packages rows at ingest — same contract as containers.
-      try {
-        const pkgs = await getInstalledPackages(hostKey, backend);
-        if (pkgs !== null) {
-          metrics['installedPackages'] = pkgs.rows.map((p) => ({
-            name: p.name,
-            version: p.version ?? undefined,
-            ecosystem: pkgs.ecosystemTag ?? 'unknown',
-          }));
+      // Gated by `collectPackages` — one big round-trip per inventory window;
+      // off = omit the key (CVE tracking simply has no data for this host).
+      if (opts.collectPackages !== false) {
+        try {
+          const pkgs = await getInstalledPackages(hostKey, backend);
+          if (pkgs !== null) {
+            metrics['installedPackages'] = pkgs.rows.map((p) => ({
+              name: p.name,
+              version: p.version ?? undefined,
+              ecosystem: pkgs.ecosystemTag ?? 'unknown',
+            }));
+          }
+        } catch {
+          /* unreachable or transient — keep previously stored rows */
         }
-      } catch {
-        /* unreachable or transient — keep previously stored rows */
       }
       // Containers + images (Containers page): fresh on every inventory poll.
       // null = no docker CLI / SSH failure → omit BOTH keys entirely (absent =
       // no wipe). A present-but-empty array is authoritative (the host genuinely
-      // runs none) and wipes stale rows at ingest.
-      const cont = await collectDockerInventory(backend);
-      if (cont.containers !== null) metrics['containers'] = cont.containers;
-      if (cont.images !== null) metrics['images'] = cont.images;
+      // runs none) and wipes stale rows at ingest. Gated by `collectContainers`
+      // — the batched `docker inspect` passes are real work on container hosts;
+      // off = omit both keys (no wipe of stored rows).
+      if (opts.collectContainers !== false) {
+        const cont = await collectDockerInventory(backend);
+        if (cont.containers !== null) metrics['containers'] = cont.containers;
+        if (cont.images !== null) metrics['images'] = cont.images;
+      }
       // GPUs (DeviceDetail GPU cards): fresh on every inventory poll, gated by
       // the `collectGpus` option so GPU-less stacks skip the probe entirely.
       // null = exec failed → omit the key (no wipe). A present-but-empty array
