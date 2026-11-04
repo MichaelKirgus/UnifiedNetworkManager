@@ -699,6 +699,32 @@ services:
       - api
     restart: unless-stopped
     image: ${UNM_REGISTRY:-ghcr.io/michaelkirgus/unifiednetworkmanager}/web-fetch-plugin:${UNM_IMAGE_TAG:-dev}
+  wled-plugin:
+    ports:
+      - 4025:4080
+    environment:
+      - PORT=4080
+      - ADVERTISED_ENDPOINT=http://wled-plugin:4080
+      - UNM_DEFAULT_GATEWAY=${UNM_DEFAULT_GATEWAY:-}
+      - UNM_RUN_AS_ROOT=${UNM_RUN_AS_ROOT:-}
+      - UNM_SKIP_CHOWN=${UNM_SKIP_CHOWN:-}
+      - UNM_DOCKER_GID=${UNM_DOCKER_GID:-}
+      - UNM_DOCKER_UID=${UNM_DOCKER_UID:-}
+      - UNM_API_URL=http://api:3000/v1
+      - UNM_TLS=${UNM_TLS:-}
+      - PLUGIN_API_KEY=${PLUGIN_API_KEY:-dev-plugin-key}
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - node -e 'require("http").get({host:"127.0.0.1",port:4081,path:"/healthz"},function(r){process.exit(r.statusCode===200?0:1)}).on("error",function(){process.exit(1)})'
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+    depends_on:
+      - api
+    restart: unless-stopped
+    image: ${UNM_REGISTRY:-ghcr.io/michaelkirgus/unifiednetworkmanager}/wled-plugin:${UNM_IMAGE_TAG:-dev}
   mcp:
     environment:
       - MCP_PORT=3901

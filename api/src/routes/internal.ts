@@ -1211,6 +1211,52 @@ export function internalRouter() {
     }
   });
 
+  // POST /plugin/webfetch — brokered outbound web fetch for plugins.
+  //
+  // UNM's egress invariant: neither the API container nor any plugin opens
+  // outbound internet connections directly (enterprise deployments route all
+  // egress through a proxy, or the API segment has no internet at all). This
+  // route lets device plugins download what they need — firmware images,
+  // release feeds — by asking the web-fetch plugin (capability `webFetch`) to
+  // do the hop. Provider resolution + proxy/timeout settings are identical to
+  // the GeoIP/OSV workers (see ../webFetchBroker.ts). The response mirrors the
+  // web-fetch plugin's own /fetch contract: raw octet-stream body with metadata
+  // in x-webfetch-* headers, so SDK clients can treat both paths uniformly.
+  router.post('/plugin/webfetch', pluginAuth, async (req: Request, res: Response) => {
+    const { fetchViaWebFetch, resolveWebFetchProvider } = await import('../webFetchBroker');
+    const { getEffectiveValues } = await import('../systemSettings');
+
+    const body = req.body ?? {};
+    const url = typeof body.url === 'string' ? body.url.trim() : '';
+    if (!/^https?:\/\//i.test(url)) {
+      return res.status(400).json({ error: 'url must be an absolute http(s) URL' });
+    }
+
+    try {
+      const provider = await resolveWebFetchProvider();
+      if (!provider) {
+        return res.status(503).json({ error: 'No web-fetch plugin is registered/online — start the web-fetch-plugin service (or another plugin with capability `webFetch`)' });
+      }
+
+      const values = await getEffectiveValues();
+      const proxyUrl = String(body.proxyUrl ?? '').trim() || String(values.webFetchProxyUrl ?? '').trim() || undefined;
+      const timeoutMs = Number(body.timeoutMs) > 0 ? Math.min(Number(body.timeoutMs), 3_600_000) : (Number(values.webFetchTimeoutMs) || 120_000);
+      const maxBytes = Number(body.maxBytes) > 0 ? Math.min(Number(body.maxBytes), 2_147_483_648) : undefined;
+
+      const { bytes, result } = await fetchViaWebFetch(provider, { url, proxyUrl, timeoutMs, maxBytes, headers: body.headers });
+      res.status(200);
+      res.setHeader('Content-Type', 'application/octet-stream');
+      res.setHeader('x-webfetch-status', String(result.status));
+      res.setHeader('x-webfetch-content-type', result.contentType);
+      res.setHeader('x-webfetch-size-bytes', String(result.sizeBytes));
+      return res.send(bytes);
+    } catch (error) {
+      // eslint-disable-next-line no-console
+      console.error(`[webfetch] brokered fetch for ${url} failed:`, (error as Error).message);
+      return res.status(502).json({ error: `Web fetch failed: ${(error as Error).message}` });
+    }
+  });
+
   return router;
 }
 

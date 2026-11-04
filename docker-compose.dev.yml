@@ -1247,6 +1247,50 @@ services:
       - api
     restart: unless-stopped
 
+  # WLED plugin: monitoring (heap/fps/WiFi metrics) + firmware updates for WLED
+  # light controllers over their plain-HTTP JSON API. Firmware images and the
+  # GitHub release feed are downloaded through the web-fetch broker — this
+  # service never opens outbound internet connections itself.
+  wled-plugin:
+    build:
+      context: .
+      dockerfile: plugins/wled/Dockerfile
+    ports:
+      - "4025:4080"
+    environment:
+      - PORT=4080
+      # Endpoint the API (in its own container) uses to reach this plugin.
+      - ADVERTISED_ENDPOINT=http://wled-plugin:4080
+      # Optional macvlan default gateway (scripts/docker-entrypoint.sh) — empty = no-op.
+      - UNM_DEFAULT_GATEWAY=${UNM_DEFAULT_GATEWAY:-}
+      # Privilege drop (scripts/docker-entrypoint.sh): the app runs as uid/gid 1001
+      # by default. UNM_RUN_AS_ROOT=1 skips the drop, UNM_SKIP_CHOWN=1 skips the
+      # data-dir chown, UNM_DOCKER_GID/UID join a host group / set the uid.
+      - UNM_RUN_AS_ROOT=${UNM_RUN_AS_ROOT:-}
+      - UNM_SKIP_CHOWN=${UNM_SKIP_CHOWN:-}
+      - UNM_DOCKER_GID=${UNM_DOCKER_GID:-}
+      - UNM_DOCKER_UID=${UNM_DOCKER_UID:-}
+      # Base URL of the API's internal endpoints (plugin -> API) — used for log
+      # shipping AND the brokered web fetch (POST /v1/plugin/webfetch).
+      - UNM_API_URL=http://api:3000/v1
+      # mTLS (Stage 1): enroll against the CA and serve TLS on :4080.
+      # Off by default — set UNM_TLS=1 in .env to enable fleet-wide.
+      - UNM_TLS=${UNM_TLS:-}
+      - PLUGIN_API_KEY=${PLUGIN_API_KEY:-dev-plugin-key}
+    # Liveness check against the SDK's dedicated plain-HTTP health listener on
+    # :4081 (HEALTH_PORT) — a minimal second server that never goes behind mTLS,
+    # so no client cert is needed. A dead process fails this; a broken TLS swap
+    # or failed enrollment does NOT (the main API plane stays up independently).
+    healthcheck:
+      test: ["CMD-SHELL", 'node -e ''require("http").get({host:"127.0.0.1",port:4081,path:"/healthz"},function(r){process.exit(r.statusCode===200?0:1)}).on("error",function(){process.exit(1)})''']
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+    depends_on:
+      - api
+    restart: unless-stopped
+
   # MCP server for AI agents: exposes the API's OpenAPI operations as MCP tools
   # over Streamable HTTP. Two endpoints:
   #   POST :3901/mcp        — production-safe (OpenAPI tools only; scope the

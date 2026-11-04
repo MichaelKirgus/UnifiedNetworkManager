@@ -54,8 +54,8 @@ export { CounterTracker } from './rates';
 export type { CounterTrackerOptions } from './rates';
 export { TtlCache } from './ttlCache';
 export type { TtlCacheOptions } from './ttlCache';
-export { createApiClient, isNotFound } from './apiClient';
-export type { ApiClientOptions } from './apiClient';
+export { createApiClient, isNotFound, webFetchViaApi } from './apiClient';
+export type { ApiClientOptions, WebFetchViaApiOptions, WebFetchViaApiResult } from './apiClient';
 // Central file repository client (capability 'fileRepo'): the ONE implementation of
 // the API's /plugin/files/* contract — list/get/upload/remove/recordUse. See fileRepo.ts.
 export { createFileRepoClient } from './fileRepo';
