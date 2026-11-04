@@ -112,7 +112,7 @@ const identity = resolvePluginIdentity({
   // labels incl. compose project/service, ports, binds/volumes, restart policy,
   // static IPs + aliases); named volumes are never touched and stopped
   // containers stay stopped. Compose members are recreated in depends_on order.
-  version: '0.10.0',
+  version: '0.11.0',
   vendors: ['generic'],
   capabilities: ['monitoring', 'configuration', 'planning', 'deviceState', 'probe'],
 });
@@ -177,6 +177,9 @@ const METRIC_DESCRIPTORS: MetricDescriptor[] = [
   gaugeMetric('docker.compose.projects', 'Compose projects', { group: 'Docker', min: 0 }),
   gaugeMetric('docker.compose.projects.running', 'Projects running', { group: 'Docker', min: 0 }),
   textMetric('docker.compose.projects.list', 'Compose project status', { group: 'Docker' }),
+  // Canonical contract (docs/PLUGIN-DEVELOPMENT.md §5): the running software
+  // version under system.swVersion on every poll — Devices page column.
+  textMetric('system.swVersion', 'Software version', { group: 'System' }),
   textMetric('docker.version', 'Engine version', { group: 'Docker' }),
 ];
 
@@ -464,7 +467,11 @@ app.post('/monitoring', async (req, res) => {
         }
       }
     }
-    if (result.engineVersionText) metrics['docker.version'] = result.engineVersionText;
+    if (result.engineVersionText) {
+      // Canonical contract: system.swVersion on every poll (Devices page column).
+      metrics['system.swVersion'] = result.engineVersionText;
+      metrics['docker.version'] = result.engineVersionText; // vendor-specific alias
+    }
     // The generic images[] key — ingested into the cross-device `docker_images`
     // table (Containers page → collapsible images panel). Emitted even when
     // empty so a host that removes all images clears its rows; omitted entirely

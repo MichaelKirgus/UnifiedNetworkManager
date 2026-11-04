@@ -245,6 +245,26 @@ The API's telemetry worker polls every ~30 s with a **hard 10 s budget**.
 Health conventions: unreachable/bad creds → `critical`; stale snapshot or
 degraded state → `warning`; wrong device type → `unknown`.
 
+### 5c. Canonical identity metrics (the Devices page columns)
+
+Two metric keys are part of a cross-plugin **contract** — the API's Devices
+page reads exactly these keys from each plugin's LATEST telemetry row (no name
+pattern matching, no history look-back):
+
+- `system.swVersion` (string) — the device's RUNNING firmware/software version.
+  Every device-monitoring plugin MUST emit it on **EVERY poll** (not just during
+  the inventory window), so the latest row always carries it. If your version
+  comes from a slow read, serve it from your per-host cache on metrics-only
+  polls (see openwrt / generic-ssh). Omit it only while you genuinely cannot
+  determine one yet — absent = no wipe, and the column shows "—" until the first
+  value lands. Keep any vendor-specific alias (`wled.version`, `docker.version`,
+  …) for your own detail views; the canonical key is what the overview renders.
+- `system.serialNumber` (string) — hardware serial, when your device exposes one.
+
+Do NOT invent new version-like keys (`version`, `system.version`,
+`…detectedFirmwareVersion`) for the running version — they will not show up in
+the Devices page column.
+
 ### 5a. Security checks (capability `'securityChecks'`)
 
 Cross-device **Security page** of actionable findings (failed logins, file-integrity changes, active rate limiting, exposed services, account hygiene). Advertise the capability and emit `metrics['securityChecks']` during your INVENTORY window (the checks are comparatively heavy — never on every 30 s poll):

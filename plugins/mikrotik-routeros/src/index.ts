@@ -82,7 +82,7 @@ const identity = resolvePluginIdentity({
   // auto key generation, IPsec inventory), config backup/restore over SSH+SFTP
   // into UNM's file repository, and firmware check/update via the package
   // manager. All writes apply immediately and are verified by re-read.
-  version: '0.4.0',
+  version: '0.5.0',
   vendors: ['mikrotik'],
   // monitoring + inventory over the REST API, plus an interactive SSH console
   // ('sshConsole') — RouterOS exposes a full CLI shell over SSH (port 22).

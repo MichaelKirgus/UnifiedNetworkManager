@@ -422,6 +422,7 @@ async function main(): Promise<void> {
   check('wled.ledMaxPowerMa', m['wled.ledMaxPowerMa'] === 5_000, m['wled.ledMaxPowerMa']);
   check('wled.coreVersion', m['wled.coreVersion'] === '4.4.8.240628', m['wled.coreVersion']);
   check('wled.version', m['wled.version'] === '16.0.0', m['wled.version']);
+  check('canonical system.swVersion emitted', m['system.swVersion'] === '16.0.0', m['system.swVersion']);
   check('wled.release (board variant)', m['wled.release'] === 'ESP32', m['wled.release']);
   check('wled.name + hostname consistency', m['wled.name'] === 'WLEDTest' && m['hostname'] === 'WLEDTest', { name: m['wled.name'], hostname: m['hostname'] });
 
@@ -445,7 +446,7 @@ async function main(): Promise<void> {
 
   // Descriptors cover the emitted metrics.
   const keys = new Set((mon.data.metricDescriptors ?? []).map((d: any) => d.key));
-  for (const k of ['wled.freeHeapBytes', 'wled.fps', 'wled.wifiRssiDbm', 'wled.wifiSignalPercent', 'wled.wifiBssid', 'wled.wifiSsid', 'wled.fsUsedKb', 'wled.ledMaxPowerMa', 'wled.coreVersion', 'wled.version']) {
+  for (const k of ['wled.freeHeapBytes', 'wled.fps', 'wled.wifiRssiDbm', 'wled.wifiSignalPercent', 'wled.wifiBssid', 'wled.wifiSsid', 'wled.fsUsedKb', 'wled.ledMaxPowerMa', 'wled.coreVersion', 'system.swVersion', 'wled.version']) {
     check(`descriptor present: ${k}`, keys.has(k), [...keys]);
   }
 
@@ -527,7 +528,8 @@ async function main(): Promise<void> {
   // --- updates row now EMPTY (current == latest → authoritative wipe) -------------------
   console.log('\n/monitoring (already up to date — empty updates row)');
   mon = await post('/monitoring', monitoringBody(`localhost:${MOCK_DEVICE_PORT}`));
-  check('device reports 16.0.1 after flash', (mon.data.metrics ?? {})['wled.version'] === '16.0.1', mon.data.metrics?.['wled.version']);
+  const postMetrics = mon.data.metrics ?? {};
+  check('device reports 16.0.1 after flash', postMetrics['wled.version'] === '16.0.1' && postMetrics['system.swVersion'] === '16.0.1', { wled: postMetrics['wled.version'], canonical: postMetrics['system.swVersion'] });
   check('updates = [] (authoritative wipe)', Array.isArray(mon.data.metrics?.['updates']) && mon.data.metrics['updates'].length === 0, mon.data.metrics?.['updates']);
 
   // --- wled.rename round-trip ------------------------------------------------------------

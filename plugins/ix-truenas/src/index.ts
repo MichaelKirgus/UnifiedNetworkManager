@@ -331,7 +331,7 @@ const identity = resolvePluginIdentity({
   // app.update (the matched `image:` fields of their structured config are
   // rewritten and the app redeployed); catalog apps have no editable compose
   // config and are skipped with a note — version bumps stay on containers.upgrade.
-  version: '0.29.0',
+  version: '0.30.0',
   vendors: ['truenas'],
   capabilities: ['monitoring', 'configuration', 'planning', 'deviceState', 'ssh', 'probe', 'filesystem', 'sshConsole', 'updates', 'quickActions'],
 });
@@ -460,7 +460,9 @@ function buildMetricDescriptors(): MetricDescriptor[] {
     gaugeMetric('system.cpuLoad', 'CPU Load (1-min avg)', { unit: '%', min: 0, max: 100, group: 'System', summary: true }),
     { key: 'system.memoryTotal', label: 'Memory Total', type: 'number', visualization: 'text', unit: 'bytes', format: 'bytes', group: 'System' },
     gaugeMetric('storage.poolUsedPct', 'Pool Usage (all pools)', { unit: '%', min: 0, max: 100, group: 'Storage', summary: true }),
-    textMetric('system.version', 'Version', { group: 'System', intervalMs: INVENTORY_INTERVAL_MS }),
+    // Canonical contract (docs/PLUGIN-DEVELOPMENT.md §5): running software version
+    // under system.swVersion on every poll — the Devices page column reads this.
+    textMetric('system.swVersion', 'Software version', { group: 'System' }),
     textMetric('system.hostname', 'Hostname', { group: 'System', intervalMs: INVENTORY_INTERVAL_MS }),
     textMetric('system.model', 'Model', { group: 'System', intervalMs: INVENTORY_INTERVAL_MS }),
     textMetric('system.serialNumber', 'Serial Number', { group: 'System', intervalMs: INVENTORY_INTERVAL_MS }),
@@ -2321,7 +2323,8 @@ async function handleMonitoring(req: Request, res: Response): Promise<void> {
       if (typeof memTotal === 'number' && memTotal > 0) metrics['system.memoryTotal'] = memTotal;
       // Inventory text (changes rarely — cheap to re-read every poll).
       const version = pickString(si, ['version']);
-      if (version) metrics['system.version'] = version;
+      // Canonical contract: system.swVersion on every poll (Devices page column).
+      if (version) metrics['system.swVersion'] = version;
       const hostname = pickString(si, ['hostname']);
       if (hostname) metrics['system.hostname'] = hostname;
       const model = pickString(si, ['model', 'cpu_model']);
@@ -2809,7 +2812,7 @@ async function handleMonitoring(req: Request, res: Response): Promise<void> {
     (collectApps ? appsRes.status === 'fulfilled' && appImagesRes.status === 'fulfilled' : true);
   if (updatesReady) {
     metrics['updates'] = buildUpdateRows({
-      version: pickString(metrics, ['system.version']),
+      version: pickString(metrics, ['system.swVersion']),
       updateAvail: updateAvailRes.status === 'fulfilled' ? updateAvailRes.value : null,
       branch: updateConfigRes.status === 'fulfilled' && updateConfigRes.value ? (pickString(updateConfigRes.value, ['profile']) ?? null) : null,
       apps: collectApps && appsRes.status === 'fulfilled' && Array.isArray(appsRes.value) ? (appsRes.value as Record<string, unknown>[]) : [],
@@ -3027,7 +3030,7 @@ function descriptorsFromMetrics(metrics: Record<string, unknown>): MetricDescrip
   if ('system.memoryTotal' in metrics)
     out.push({ key: 'system.memoryTotal', label: 'Memory Total', type: 'number', visualization: 'text', unit: 'bytes', format: 'bytes', group: 'System' });
   if ('storage.poolUsedPct' in metrics) out.push(gaugeMetric('storage.poolUsedPct', 'Pool Usage (all pools)', { unit: '%', min: 0, max: 100, group: 'Storage', summary: true }));
-  for (const key of ['system.version', 'system.hostname', 'system.model', 'system.serialNumber'] as const) {
+  for (const key of ['system.swVersion', 'system.hostname', 'system.model', 'system.serialNumber'] as const) {
     if (key in metrics) out.push(textMetric(key, key.split('.')[1] ?? key, { group: 'System' }));
   }
   if ('system.uptime' in metrics)

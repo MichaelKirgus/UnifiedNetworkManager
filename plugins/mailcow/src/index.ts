@@ -54,7 +54,7 @@ const identity = resolvePluginIdentity({
   name: 'Mailcow Plugin',
   description:
     'mailcow-dockerized management — domains, mailboxes and aliases via the REST API, with DKIM/fail2ban security checks.',
-  version: '0.1.0',
+  version: '0.2.0',
   vendors: ['mailcow'],
   // securityChecks: fail2ban (rate limiting) + per-domain DKIM over the REST API.
   capabilities: ['monitoring', 'inventory', 'configuration', 'planning', 'securityChecks'],
@@ -118,7 +118,9 @@ const PLUGIN_OPTIONS: PluginOptionDescriptor[] = [
 // The three inventory tables are THE data of this plugin — declared statically so
 // the webapp renders them even before the first poll, and re-emitted every poll.
 const METRIC_DESCRIPTORS: MetricDescriptor[] = [
-  { key: 'system.version', label: 'Version', type: 'string', visualization: 'text', group: 'System' },
+  // Canonical contract (docs/PLUGIN-DEVELOPMENT.md §5): running software version
+  // under system.swVersion on every poll — the Devices page column reads this.
+  { key: 'system.swVersion', label: 'Version', type: 'string', visualization: 'text', group: 'System' },
   {
     key: 'mailDomains',
     label: 'Mail Domains',
@@ -376,7 +378,8 @@ async function handleMonitoring(req: Request, res: Response, body: Record<string
       });
       return;
     }
-    metrics['system.version'] = version;
+    // Canonical contract: system.swVersion on every poll (Devices page column).
+    metrics['system.swVersion'] = version;
 
     if (collectInventory) {
       // Fan out the three inventory reads in parallel — one slow list shouldn't

@@ -66,7 +66,7 @@ const identity = resolvePluginIdentity({
   // Also: basePath "/" now means "frontend served at the web root" (previously
   // an empty value silently fell back to /zabbix), and problem.get was fixed to
   // use its only legal sortfield (eventid) without the invalid selectEvents param.
-  version: '0.2.0',
+  version: '0.3.0',
   vendors: ['zabbix'],
   capabilities: ['monitoring', 'inventorySync'],
 });
@@ -188,7 +188,9 @@ const PLUGIN_OPTIONS: PluginOptionDescriptor[] = [
 
 // --- Metric descriptors -----------------------------------------------------------
 const METRIC_DESCRIPTORS: MetricDescriptor[] = [
-  { key: 'system.version', label: 'Zabbix Version', type: 'string', visualization: 'text', group: 'System' },
+  // Canonical contract (docs/PLUGIN-DEVELOPMENT.md §5): running software version
+  // under system.swVersion on every poll — the Devices page column reads this.
+  { key: 'system.swVersion', label: 'Zabbix Version', type: 'string', visualization: 'text', group: 'System' },
   {
     key: 'zabbix.hosts',
     label: 'Monitored Hosts',
@@ -348,7 +350,8 @@ async function handleMonitoring(req: Request, res: Response, body: Record<string
   }
 
   const metrics: Record<string, unknown> = {};
-  if (version) metrics['system.version'] = version;
+  // Canonical contract: system.swVersion on every poll (Devices page column).
+  if (version) metrics['system.swVersion'] = version;
 
   let health: Health = 'ok';
   let firstError = '';

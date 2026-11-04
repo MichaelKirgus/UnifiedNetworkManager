@@ -862,7 +862,9 @@ export function buildDescriptors(s: RouterOsSnapshot): MetricDescriptor[] {
   const d: MetricDescriptor[] = [
     // --- System ---------------------------------------------------------------
     { key: 'system.identity', label: 'Identity', type: 'string', visualization: 'text', group: 'System' },
-    { key: 'system.version', label: 'RouterOS version', type: 'string', visualization: 'text', group: 'System' },
+    // Canonical contract (docs/PLUGIN-DEVELOPMENT.md §5): running firmware version
+    // under system.swVersion on every poll — the Devices page column reads this.
+    { key: 'system.swVersion', label: 'Firmware version', type: 'string', visualization: 'text', group: 'System' },
     { key: 'system.buildTime', label: 'Build time', type: 'string', visualization: 'text', group: 'System' },
     { key: 'system.platform', label: 'Platform', type: 'string', visualization: 'text', group: 'System' },
     { key: 'system.boardName', label: 'Board name', type: 'string', visualization: 'text', group: 'System' },
@@ -910,7 +912,8 @@ export function totalLinkCapacityBitsPerSec(interfaces: RosInterfaceInfo[]): num
 export function buildMetrics(s: RouterOsSnapshot, selectedModel?: string | null, selectedFirmware?: string | null): Record<string, unknown> {
   const m: Record<string, unknown> = {};
   m['system.identity'] = s.identity || null;
-  m['system.version'] = s.version || null;
+  // Canonical contract: system.swVersion on every poll (Devices page column).
+  m['system.swVersion'] = s.version || null;
   m['system.buildTime'] = s.buildTime || null;
   m['system.platform'] = s.platform || null;
   m['system.boardName'] = s.boardName || null;

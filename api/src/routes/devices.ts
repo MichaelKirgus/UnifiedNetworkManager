@@ -238,10 +238,11 @@ function summaryMetricsFor(telemetry: { metrics: unknown; metricDescriptors: unk
 }
 
 // Firmware version + serial number for the overview table's at-a-glance columns.
-// Plugins report these under different metric keys:
-//   lancom-lx/lcos/sx → system.swVersion, mikrotik-swos → system.detectedFirmwareVersion,
-//   opnsense → version. Serial is system.serialNumber (lancom-*, swos).
-const FIRMWARE_METRIC_KEYS = ['system.swVersion', 'system.detectedFirmwareVersion', 'system.version', 'version'];
+// Canonical contract (docs/PLUGIN-DEVELOPMENT.md §5): every device-monitoring
+// plugin emits the running firmware/software version under system.swVersion on
+// EVERY poll, so reading exactly this one key from each plugin's latest telemetry
+// row is sufficient — no name-pattern matching, no history scans.
+const FIRMWARE_METRIC_KEYS = ['system.swVersion'];
 const SERIAL_METRIC_KEYS = ['system.serialNumber'];
 
 function parseTelemetryMetrics(row: { metrics: unknown } | undefined): Record<string, unknown> {
@@ -324,11 +325,13 @@ router.get('/devices', requireAuth, requirePermission('devices:read'), async (re
       const orderedTelemetry = [...perPluginTelemetry].sort(
         (a, b) => Number(b?.pluginId === primaryPluginId) - Number(a?.pluginId === primaryPluginId)
       );
+
       return {
         ...serializeDevice(device, siteNames.get(device.siteId ?? '') ?? null),
         plugins,
         summaryMetrics,
         ips,
+        // Canonical contract: every plugin emits system.swVersion on every poll.
         detectedFirmwareVersion: firstMetricValue(orderedTelemetry, FIRMWARE_METRIC_KEYS),
         serialNumber: firstMetricValue(orderedTelemetry, SERIAL_METRIC_KEYS),
       };

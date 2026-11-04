@@ -82,7 +82,7 @@ const identity = resolvePluginIdentity({
   name: PLUGIN_NAME,
   description:
     'OpenWrt router management over SSH — live metrics, ARP/NDP/DHCP/network inventory and uci-based config actions (firewall, VPN, wireless).',
-  version: '0.1.0',
+  version: '0.2.0',
   vendors: ['openwrt'],
   // monitoring + inventory: two-tier cadence collection (live metrics every poll,
   // ARP/NDP/DHCP/networks/routes/tunnels/wifi/firewall at the 15-min interval).

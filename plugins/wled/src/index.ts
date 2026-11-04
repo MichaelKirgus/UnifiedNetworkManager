@@ -53,7 +53,7 @@ const identity = resolvePluginIdentity({
   // 0.3.0 — config backup: new read-level wled.config.backup action (full
   // /json/cfg snapshot as base64 in the step result), auto-prepended best-effort
   // before every firmware flash; schedulable on its own for periodic backups.
-  version: '0.3.0',
+  version: '0.4.0',
   vendors: ['wled'],
   // monitoring: /json/info metrics every poll.
   // updates: GitHub release feed (via UNM's web-fetch broker) → Updates page rows.
@@ -120,7 +120,11 @@ const METRIC_DESCRIPTORS: MetricDescriptor[] = [
   { key: 'wled.fsTotalKb', label: 'Flash total (KB)', unit: 'kB', format: 'bytes', type: 'number', visualization: 'text', group: 'System' },
   { key: 'wled.ledMaxPowerMa', label: 'LED max power limit (mA)', unit: 'mA', type: 'number', visualization: 'text', group: 'LEDs' },
   { key: 'wled.coreVersion', label: 'Core version', type: 'string', visualization: 'text', group: 'System' },
-  { key: 'wled.version', label: 'Firmware version', type: 'string', visualization: 'text', group: 'System' },
+  // Canonical contract (docs/PLUGIN-DEVELOPMENT.md §5): every plugin emits the
+  // running firmware/software version under system.swVersion on EVERY poll —
+  // the Devices page "Software version" column reads exactly this key.
+  { key: 'system.swVersion', label: 'Firmware version', type: 'string', visualization: 'text', group: 'System' },
+  { key: 'wled.version', label: 'Firmware version (vendor)', type: 'string', visualization: 'text', group: 'System' },
   { key: 'wled.release', label: 'Board variant', type: 'string', visualization: 'text', group: 'System' },
   { key: 'wled.name', label: 'Instance name', type: 'string', visualization: 'text', group: 'System' },
 ];
@@ -254,7 +258,11 @@ app.post('/monitoring', async (req, res) => {
     }
   }
   if (typeof info.uptime === 'number') metrics['wled.uptimeSeconds'] = info.uptime;
-  if (typeof info.ver === 'string' && info.ver) metrics['wled.version'] = info.ver;
+  // Canonical contract: system.swVersion on every poll (Devices page column).
+  if (typeof info.ver === 'string' && info.ver) {
+    metrics['system.swVersion'] = info.ver;
+    metrics['wled.version'] = info.ver; // vendor-specific alias, kept for detail views
+  }
   if (typeof info.release === 'string' && info.release) metrics['wled.release'] = info.release;
   if (typeof info.name === 'string' && info.name) {
     metrics['wled.name'] = info.name;

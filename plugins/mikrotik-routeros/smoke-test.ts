@@ -232,7 +232,7 @@ async function main(): Promise<void> {
   );
   check('health ok', ok.health === 'ok', ok);
   const m = (ok.metrics ?? {}) as Record<string, any>;
-  check('system.version parsed', m['system.version'] === '7.14', m['system.version']);
+  check('canonical system.swVersion parsed', m['system.swVersion'] === '7.14', m['system.swVersion']);
   check('system.hostname from /system/identity', m['system.hostname'] === 'router-mock', m['system.hostname']);
   check('cpu load gauge value (string→number)', m['system.cpuLoad'] === 35, m['system.cpuLoad']);
   check('uptime parsed to seconds', m['system.uptime'] === 2 * 86_400 + 20 * 3_600 + 12 * 60 + 20, m['system.uptime']);
@@ -272,7 +272,7 @@ async function main(): Promise<void> {
 
   // Descriptors cover every emitted metric key.
   const descKeys = new Set(((ok.metricDescriptors ?? []) as Record<string, any>[]).map((d) => d.key));
-  check('descriptors cover system + summary metrics', ['system.version', 'system.hostname', 'system.cpuLoad', 'router.interfacesUp', 'router.interfaces'].every((k) => descKeys.has(k)), [...descKeys]);
+  check('descriptors cover system + summary metrics', ['system.swVersion', 'system.hostname', 'system.cpuLoad', 'router.interfacesUp', 'router.interfaces'].every((k) => descKeys.has(k)), [...descKeys]);
 
   // Settings echo (API→plugin loop proof).
   const as = (ok.activeSettings ?? {}) as Record<string, any>;

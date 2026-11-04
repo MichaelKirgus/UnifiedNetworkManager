@@ -68,7 +68,7 @@ const identity = resolvePluginIdentity({
   // field "blob" → /reboot), swos.config.restore (multipart POST /backup.swb
   // field "file" → /reboot) and system.reboot. Files ride along as base64 in
   // the plan-step input; a future Files page will manage them.
-  version: '0.3.0',
+  version: '0.4.0',
   vendors: ['mikrotik'],
   // 'deviceState' advertises POST /state — the dynamic document behind the
   // per-device Config page (ports with live state + PoE/LAG/VLAN actions).

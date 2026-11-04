@@ -548,7 +548,7 @@ async function main(): Promise<void> {
   // TrueNAS ≥ 25 template text must be formatted with args — no raw %(key)s.
   check('healthReasons alert text is template-formatted', reasons.some((r) => r.message === 'SMARTFailedSelfTestAlert: da1 (SAMSUNG-XYZ) failed a SMART selftest.') && !reasons.some((r) => r.message.includes('%(')), reasons);
   const m = monJson.metrics ?? {};
-  check('hostname + version collected', m['system.hostname'] === 'mock-truenas' && m['system.version'] === 'SCALE 25.04.2');
+  check('hostname + version collected (canonical key)', m['system.hostname'] === 'mock-truenas' && m['system.swVersion'] === 'SCALE 25.04.2', { hostname: m['system.hostname'], sw: m['system.swVersion'] });
   check('CPU load computed from loadavg/cores', typeof m['system.cpuLoad'] === 'number', m['system.cpuLoad']);
   const pools = (m['pools'] ?? []) as Record<string, unknown>[];
   check('pools table has 2 rows', pools.length === 2, `count=${pools.length}`);

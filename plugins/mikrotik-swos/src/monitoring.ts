@@ -631,7 +631,9 @@ export function buildDescriptors(s: SwosSnapshot): MetricDescriptor[] {
     { key: 'system.identity', label: 'Identity', type: 'string', visualization: 'text', group: 'System' },
     { key: 'system.platform', label: 'Platform', type: 'string', visualization: 'text', group: 'System' },
     { key: 'system.detectedModel', label: 'Detected model', type: 'string', visualization: 'text', group: 'System' },
-    { key: 'system.detectedFirmwareVersion', label: 'Detected firmware', type: 'string', visualization: 'text', group: 'System' },
+    // Canonical contract (docs/PLUGIN-DEVELOPMENT.md §5): running firmware version
+    // under system.swVersion on every poll — the Devices page column reads this.
+    { key: 'system.swVersion', label: 'Firmware version', type: 'string', visualization: 'text', group: 'System' },
     { key: 'system.macAddress', label: 'MAC address', type: 'string', visualization: 'text', group: 'System' },
     { key: 'system.serialNumber', label: 'Serial number', type: 'string', visualization: 'text', group: 'System' },
     { key: 'system.uptime', label: 'Uptime', unit: 's', format: 'duration', type: 'number', visualization: 'text', group: 'System' },
@@ -707,7 +709,8 @@ export function buildMetrics(s: SwosSnapshot, selectedModel?: string | null, sel
   m['system.identity'] = s.identity || null;
   m['system.platform'] = s.platformName;
   m['system.detectedModel'] = s.model || null;
-  m['system.detectedFirmwareVersion'] = s.firmwareVersion || null;
+  // Canonical contract: system.swVersion on every poll (Devices page column).
+  m['system.swVersion'] = s.firmwareVersion || null;
   m['system.macAddress'] = s.macAddress || null;
   m['system.serialNumber'] = s.serialNumber || null;
   m['system.uptime'] = s.uptimeSeconds;

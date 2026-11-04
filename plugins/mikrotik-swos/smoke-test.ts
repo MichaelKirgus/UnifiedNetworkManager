@@ -503,7 +503,7 @@ async function main(): Promise<void> {
   check('health ok', monLite.health === 'ok', monLite.metrics?.['system.error']);
   const m = monLite.metrics ?? {};
   check('identity decoded from hex', m['system.identity'] === 'CSS610-Office', m['system.identity']);
-  check('detected model + firmware', m['system.detectedModel'] === 'CSS610-8G-2S+' && m['system.detectedFirmwareVersion'] === 'SwOS Lite 2.20');
+  check('detected model + firmware (canonical key)', m['system.detectedModel'] === 'CSS610-8G-2S+' && m['system.swVersion'] === 'SwOS Lite 2.20', { model: m['system.detectedModel'], sw: m['system.swVersion'] });
   check('MAC decoded with colons', m['system.macAddress'] === '48:a9:8a:19:54:b4', m['system.macAddress']);
   check('little-endian IP decoded', m['system.currentIp'] === '192.168.88.1', m['system.currentIp']);
   check('uptime collected', m['system.uptime'] === 36_000);

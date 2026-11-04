@@ -120,7 +120,7 @@ const identity = resolvePluginIdentity({
   //   - security-check findings at warning/critical (file-integrity change,
   //     brute-force login burst, unexpected uid-0 account).
   // Gated by the `notifyAlerts` option. Device-state mirroring stays API-side.
-  version: '0.5.0',
+  version: '0.6.0',
   vendors: ['opnsense'],
   // 'planning' advertises the /plan endpoint (multi-device intents) so the API
   // can offer bulk rollout + tunnel provisioning flows in the webapp.
@@ -905,13 +905,14 @@ function buildMetricDescriptors(interfaces: string[]): MetricDescriptor[] {
       group: 'Inventory',
       intervalMs: INVENTORY_INTERVAL_MS,
     },
+    // Canonical contract (docs/PLUGIN-DEVELOPMENT.md §5): running firmware version
+    // under system.swVersion on every poll — the Devices page column reads this.
     {
-      key: 'version',
-      label: 'Version',
+      key: 'system.swVersion',
+      label: 'Firmware version',
       type: 'string',
       visualization: 'text',
-      group: 'Inventory',
-      intervalMs: INVENTORY_INTERVAL_MS,
+      group: 'System',
     },
     {
       key: 'arp',
@@ -1031,8 +1032,9 @@ function descriptorsFromMetrics(metrics: Record<string, unknown>): MetricDescrip
   if (metrics['hostname'] !== undefined) {
     push({ key: 'hostname', label: 'Hostname', type: 'string', visualization: 'text', group: 'Inventory', intervalMs: INVENTORY_INTERVAL_MS });
   }
-  if (metrics['version'] !== undefined) {
-    push({ key: 'version', label: 'Version', type: 'string', visualization: 'text', group: 'Inventory', intervalMs: INVENTORY_INTERVAL_MS });
+  // Canonical contract: system.swVersion is emitted on every poll (no interval).
+  if (metrics['system.swVersion'] !== undefined) {
+    push({ key: 'system.swVersion', label: 'Firmware version', type: 'string', visualization: 'text', group: 'System' });
   }
   // Selected model/firmware echoed from the device form (see /monitoring).
   if (metrics['system.model'] !== undefined) {
@@ -1599,7 +1601,8 @@ async function collectMetrics(
       const d = info.data as Record<string, unknown>;
       if (d['name'] !== undefined) metrics['hostname'] = String(d['name']);
       const versions = d['versions'];
-      if (Array.isArray(versions) && versions.length > 0) metrics['version'] = String(versions[0]);
+      // Canonical contract: system.swVersion on every poll (Devices page column).
+      if (Array.isArray(versions) && versions.length > 0) metrics['system.swVersion'] = String(versions[0]);
     }
   } else {
     inventory = await getInventory(host, apiKey, apiSecret, transport, credentials, ports, sshPort, dhcpBackendOverride);
@@ -1608,7 +1611,8 @@ async function collectMetrics(
     // slow-changing). Drives notification mirroring in /monitoring.
     zfsFresh = inventory.zfsSshCollected === true;
     if (inventory.hostname) metrics['hostname'] = inventory.hostname;
-    if (inventory.version) metrics['version'] = inventory.version;
+    // Canonical contract: system.swVersion on every poll (Devices page column).
+    if (inventory.version) metrics['system.swVersion'] = inventory.version;
     if (inventory.arp.length > 0) metrics['arp'] = inventory.arp;
     if (inventory.ndp.length > 0) metrics['ndp'] = inventory.ndp;
     // Configured networks (interface IPs with CIDR + VLAN id) and active DHCP

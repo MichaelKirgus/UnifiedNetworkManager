@@ -760,6 +760,15 @@ export async function collectMonitoring(
   // that package/route/snapshot actions will run elevated).
   if (backend.describePrivilege) metrics['system.privilege'] = backend.describePrivilege();
 
+  // Canonical contract (docs/PLUGIN-DEVELOPMENT.md §5): the running software
+  // version under system.swVersion on EVERY poll — the Devices page column reads
+  // exactly this key. Served from the per-host inventory cache, so metrics-only
+  // polls cost nothing extra; absent until the first successful collection.
+  const cachedInv = inventoryCache.get(hostKey);
+  if (cachedInv && Date.now() - cachedInv.at < INVENTORY_INTERVAL_MS) {
+    if (cachedInv.snapshot.board?.release) metrics['system.swVersion'] = cachedInv.snapshot.board.release;
+  }
+
   if (opts.collectInventory) {
     // null = collection failed or in backoff → emit NO inventory keys at all.
     // An absent key means "no wipe" for the API's ingestion contract, so a
@@ -904,6 +913,10 @@ export function descriptorsFromMetrics(metrics: Record<string, unknown>): Metric
   }
   if (typeof metrics['system.privilege'] === 'string') {
     push({ key: 'system.privilege', label: 'Execution mode', type: 'string', visualization: 'text', group: 'System' });
+  }
+  // Canonical contract: system.swVersion is emitted on every poll (no interval).
+  if (metrics['system.swVersion'] !== undefined) {
+    push({ key: 'system.swVersion', label: 'Software version', type: 'string', visualization: 'text', group: 'System' });
   }
   if (metrics['system.hostname'] !== undefined) {
     push({ key: 'system.hostname', label: 'Hostname', type: 'string', visualization: 'text', group: 'Inventory', intervalMs: INVENTORY_INTERVAL_MS });

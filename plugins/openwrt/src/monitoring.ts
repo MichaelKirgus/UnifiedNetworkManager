@@ -140,7 +140,6 @@ export async function collectMonitoring(
     inventory = await getInventory(hostKey, backend, certs);
 
     if (inventory.board?.hostname) metrics['hostname'] = inventory.board.hostname;
-    if (inventory.board?.release) metrics['version'] = inventory.board.release;
     if (inventory.networks.length > 0) {
       metrics['networks'] = inventory.networks;
       // Ports: one row per interface (deduped by name) → device_ports table.
@@ -200,6 +199,15 @@ export async function collectMonitoring(
     if (inventory.certificates.length > 0) {
       metrics['certificates'] = inventory.certificates;
     }
+  }
+
+  // Canonical contract (docs/PLUGIN-DEVELOPMENT.md §5): the running firmware
+  // version under system.swVersion on EVERY poll — the Devices page column reads
+  // exactly this key. Served from the per-host inventory cache, so metrics-only
+  // polls cost nothing extra; absent until the first successful collection.
+  const cachedSnap = inventoryCache.get(hostKey);
+  if (cachedSnap && Date.now() - cachedSnap.at < INVENTORY_INTERVAL_MS) {
+    if (cachedSnap.snapshot.board?.release) metrics['system.swVersion'] = cachedSnap.snapshot.board.release;
   }
 
   // Health: anything collected at all → ok. NOTE: running on the SSH transport
@@ -282,8 +290,9 @@ export function descriptorsFromMetrics(metrics: Record<string, unknown>): Metric
   if (metrics['hostname'] !== undefined) {
     push({ key: 'hostname', label: 'Hostname', type: 'string', visualization: 'text', group: 'Inventory', intervalMs: INVENTORY_INTERVAL_MS });
   }
-  if (metrics['version'] !== undefined) {
-    push({ key: 'version', label: 'Version', type: 'string', visualization: 'text', group: 'Inventory', intervalMs: INVENTORY_INTERVAL_MS });
+  // Canonical contract: system.swVersion is emitted on every poll (no interval).
+  if (metrics['system.swVersion'] !== undefined) {
+    push({ key: 'system.swVersion', label: 'Firmware version', type: 'string', visualization: 'text', group: 'System' });
   }
   if (typeof metrics['system.transport'] === 'string') {
     push({ key: 'system.transport', label: 'Transport', type: 'string', visualization: 'text', group: 'System' });

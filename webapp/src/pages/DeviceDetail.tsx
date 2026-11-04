@@ -371,10 +371,9 @@ export default function DeviceDetail() {
   const settingsAssignment = assignments.find((a) => a.pluginId === settingsPluginId);
 
   // --- Identity rows (firmware + serial) ----------------------------------
-  // Plugins report these under different metric keys:
-  //   lancom-lx/lcos/sx → system.swVersion, mikrotik-swos → system.detectedFirmwareVersion,
-  //   opnsense → version. Serial is system.serialNumber (lancom-*, swos).
-  const FIRMWARE_METRIC_KEYS = ['system.swVersion', 'system.detectedFirmwareVersion', 'version'];
+  // Canonical contract (docs/PLUGIN-DEVELOPMENT.md §5): every plugin emits the
+  // running firmware/software version under system.swVersion on every poll.
+  const FIRMWARE_METRIC_KEYS = ['system.swVersion'];
   const SERIAL_METRIC_KEYS = ['system.serialNumber'];
 
   /** First non-empty value across the snapshots; the primary plugin's snapshot wins. */
