@@ -110,7 +110,10 @@ const identity = resolvePluginIdentity({
   // filter (no more full-journal JSON dumps), host-side `timeout` bound, and the
   // throttle window is stamped even when a read fails (a slow journal can no
   // longer defeat the interval or orphan re-scanning journalctl processes).
-  version: '0.5.1',
+  // 0.5.2 — SDK fix: package-manager update checks now run with LC_ALL=C; apt
+  // localizes its output with the host locale, so a de_DE box printed
+  // "[aktualisierbar von: …]" and the parser silently returned zero updates.
+  version: '0.5.2',
   vendors: ['linux'],
   // monitoring + inventory: two-tier cadence collection over SSH (live metrics
   // every poll; interfaces/ARP/routes/filesystems/disks at the 15-min interval).

@@ -408,11 +408,16 @@ export const PACKAGE_MANAGER_ADAPTERS: PmAdapter[] = [
       // The sim tells us which of those apt will SKIP on purpose — phased-rollout
       // deferrals and kept-back packages stay "upgradable" forever, so callers
       // must be able to tell them apart from genuinely installable updates.
+      // LC_ALL=C is MANDATORY: apt localizes its output with the host locale —
+      // a German box prints "[aktualisierbar von: …]" instead of
+      // "[upgradable from: …]" and the parser below would silently return []
+      // (observed on a de_DE mini-PC: 4 real updates, 0 parsed). Package names
+      // and versions are locale-independent; only the prose is translated.
       const r = await b.exec(
         [
-          'echo UNM_HELD_BEGIN; apt-mark showhold 2>/dev/null || true; echo UNM_HELD_END',
-          'DEBIAN_FRONTEND=noninteractive apt list --upgradable 2>/dev/null || true',
-          'echo UNM_SIM_BEGIN; DEBIAN_FRONTEND=noninteractive apt-get -s upgrade 2>&1 | grep -A30 -E "deferred due to phasing|kept back" || true; echo UNM_SIM_END',
+          'echo UNM_HELD_BEGIN; LC_ALL=C apt-mark showhold 2>/dev/null || true; echo UNM_HELD_END',
+          'LC_ALL=C DEBIAN_FRONTEND=noninteractive apt list --upgradable 2>/dev/null || true',
+          'echo UNM_SIM_BEGIN; LC_ALL=C DEBIAN_FRONTEND=noninteractive apt-get -s upgrade 2>&1 | grep -A30 -E "deferred due to phasing|kept back" || true; echo UNM_SIM_END',
         ].join('; ')
       );
       const held = new Set<string>();
@@ -484,7 +489,8 @@ export const PACKAGE_MANAGER_ADAPTERS: PmAdapter[] = [
     detect: (b) => commandExists(b, 'dnf'),
     listUpgradable: async (b) => {
       // "name.arch version repo" — exit code 100 means updates exist.
-      const r = await b.exec('dnf -q check-update 2>/dev/null || true');
+      // LC_ALL=C keeps any localized prose from interfering with the parse.
+      const r = await b.exec('LC_ALL=C dnf -q check-update 2>/dev/null || true');
       const out: UpgradablePackage[] = [];
       for (const line of r.stdout.split('\n')) {
         const m = line.match(/^([A-Za-z0-9._+-]+)\.(x86_64|noarch|i[35]86|aarch64|s390x|ppc64le|riscv64)\s+([\w.:+~-]+)\s+\S+/);
@@ -506,7 +512,8 @@ export const PACKAGE_MANAGER_ADAPTERS: PmAdapter[] = [
     distros: DNF_DISTROS,
     detect: async (b) => (await commandExists(b, 'dnf')) ? false : commandExists(b, 'yum'),
     listUpgradable: async (b) => {
-      const r = await b.exec('yum -q check-update 2>/dev/null || true');
+      // LC_ALL=C keeps any localized prose from interfering with the parse.
+      const r = await b.exec('LC_ALL=C yum -q check-update 2>/dev/null || true');
       const out: UpgradablePackage[] = [];
       for (const line of r.stdout.split('\n')) {
         // Newer yum: "name.arch version repo"; older: "name arch current -> latest"
