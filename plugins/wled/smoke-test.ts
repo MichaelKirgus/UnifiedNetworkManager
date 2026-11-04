@@ -48,6 +48,12 @@ interface DeviceState {
   rssi: number;
   pin: string | null; // settings PIN (null = none)
   downUntil: number; // simulated reboot window (epoch ms)
+  /** Simulated flash-write delay before /update answers (ms). Real WLED writes
+   *  the image to SPI flash WHILE serving the request — a slow box takes well
+   *  beyond the default 5 s poll budget. Regression guard for UPLOAD_TIMEOUT_MS. */
+  updateDelayMs: number;
+  fsUsedKb: number; // /json/info fs.u (KB)
+  fsTotalKb: number; // /json/info fs.t (KB)
   /** Captured from the last /update multipart. */
   updateFieldNames: string[];
   updateFileName: string | null;
@@ -64,6 +70,10 @@ const deviceState: DeviceState = {
   rssi: -73,
   pin: null,
   downUntil: 0,
+  updateDelayMs: 0,
+  fsUsedKb: 196,
+  fsTotalKb: 983,
+  ssid: 'KirgusNET_IoT',
   updateFieldNames: [],
   updateFileName: null,
   updateBytes: 0,
@@ -80,11 +90,14 @@ function deviceInfo(): Record<string, unknown> {
     release: 'ESP32',
     repo: 'wled/WLED',
     arch: 'esp32',
+    core: '4.4.8.240628',
     freeheap: deviceState.freeheap,
     uptime: 2_341_116,
     name: deviceState.name,
     wifi: { bssid: '00:A0:57:A8:1E:A2', rssi: deviceState.rssi, signal: 54, channel: 1 },
-    leds: { count: 160, pwr: 1602, fps: 43 },
+    leds: { count: 160, pwr: 1602, fps: 43, maxpwr: 5_000 },
+    mac: 'A4:CB:88:11:22:33',
+    fs: { u: deviceState.fsUsedKb, t: deviceState.fsTotalKb },
     mac: 'f8b3b75921e8',
     ip: `localhost:${MOCK_DEVICE_PORT}`,
   };
@@ -150,7 +163,7 @@ function makeMockDevice(): http.Server {
     if (url.startsWith('/update')) {
       const chunks: Buffer[] = [];
       req.on('data', (c) => chunks.push(c));
-      req.on('end', () => {
+      req.on('end', async () => {
         const raw = Buffer.concat(chunks);
         // GET /update?revert — ESP8266 only; this mock is esp32 → 404 like a real box.
         if (req.method === 'GET') {
@@ -178,6 +191,13 @@ function makeMockDevice(): http.Server {
         deviceState.updateFileName = fw.filename;
         deviceState.updateBytes = fw.data.length;
 
+        // Simulate the flash write: real WLED only answers AFTER writing the
+        // image to SPI flash, which on a slow box takes longer than the default
+        // 5 s poll budget (the bug that broke every real firmware update).
+        if (deviceState.updateDelayMs > 0) {
+          await new Promise((r) => setTimeout(r, deviceState.updateDelayMs));
+        }
+
         // Accept → the box reboots into the new firmware (simulated: down 1.2 s, then new ver).
         const targetM = fw.filename.match(/(\d+\.\d+(?:\.\d+)?)/);
         if (targetM) deviceState.ver = targetM[1];
@@ -186,6 +206,18 @@ function makeMockDevice(): http.Server {
         return res.end('Update successful!');
       });
       return;
+    }
+
+    // GET /json/cfg — config read (PIN-free). `nw.ins` is the preferred-network
+    // list; first non-empty ssid is what the device associates with.
+    if (url === '/json/cfg' && req.method === 'GET') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      return res.end(
+        JSON.stringify({
+          nw: { ins: [{ ssid: deviceState.ssid, pskl: 20, bssid: '', ip: [0, 0, 0, 0] }] },
+          wifi: { sleep: false, phy: false, txpwr: 78 },
+        })
+      );
     }
 
     if (url === '/json/cfg' && req.method === 'POST') {
@@ -351,10 +383,12 @@ async function main(): Promise<void> {
   check('iconUrl advertised', disc.iconUrl === '/icons/wled.svg', disc.iconUrl);
   const actionIds = (disc.actions ?? []).map((a: any) => a.id);
   check(
-    'action catalog has all four actions',
-    ['wled.firmware.update', 'wled.firmware.revert', 'wled.rename', 'wled.state.set'].every((id: string) => actionIds.includes(id)),
+    'action catalog has all five actions',
+    ['wled.firmware.update', 'wled.firmware.revert', 'wled.config.backup', 'wled.rename', 'wled.state.set'].every((id: string) => actionIds.includes(id)),
     actionIds
   );
+  const backupAction = (disc.actions ?? []).find((a: any) => a.id === 'wled.config.backup');
+  check('config.backup is read-level', backupAction?.riskLevel === 'read', backupAction);
   const fwAction = (disc.actions ?? []).find((a: any) => a.id === 'wled.firmware.update');
   check('firmware.update is dangerous + no retry', fwAction?.riskLevel === 'dangerous' && fwAction?.retryOnDispatchFailure === false, fwAction);
   check('quick action webui advertised', (disc.quickActions ?? []).some((q: any) => q.id === 'webui' && q.kind === 'url'), disc.quickActions);
@@ -380,7 +414,13 @@ async function main(): Promise<void> {
   check('wled.ledPowerMa', m['wled.ledPowerMa'] === 1_602, m['wled.ledPowerMa']);
   check('wled.uptimeSeconds', m['wled.uptimeSeconds'] === 2_341_116, m['wled.uptimeSeconds']);
   check('wled.wifiRssiDbm', m['wled.wifiRssiDbm'] === -73, m['wled.wifiRssiDbm']);
+  check('wled.wifiSignalPercent', m['wled.wifiSignalPercent'] === 54, m['wled.wifiSignalPercent']);
+  check('wled.wifiBssid (AP MAC from /json/info)', m['wled.wifiBssid'] === '00:A0:57:A8:1E:A2', m['wled.wifiBssid']);
+  check('wled.wifiSsid (from GET /json/cfg nw.ins[0])', m['wled.wifiSsid'] === 'KirgusNET_IoT', m['wled.wifiSsid']);
   check('wled.wifiChannel', m['wled.wifiChannel'] === 1, m['wled.wifiChannel']);
+  check('wled.fsUsedKb / wled.fsTotalKb', m['wled.fsUsedKb'] === 196 && m['wled.fsTotalKb'] === 983, { u: m['wled.fsUsedKb'], t: m['wled.fsTotalKb'] });
+  check('wled.ledMaxPowerMa', m['wled.ledMaxPowerMa'] === 5_000, m['wled.ledMaxPowerMa']);
+  check('wled.coreVersion', m['wled.coreVersion'] === '4.4.8.240628', m['wled.coreVersion']);
   check('wled.version', m['wled.version'] === '16.0.0', m['wled.version']);
   check('wled.release (board variant)', m['wled.release'] === 'ESP32', m['wled.release']);
   check('wled.name + hostname consistency', m['wled.name'] === 'WLEDTest' && m['hostname'] === 'WLEDTest', { name: m['wled.name'], hostname: m['hostname'] });
@@ -405,7 +445,7 @@ async function main(): Promise<void> {
 
   // Descriptors cover the emitted metrics.
   const keys = new Set((mon.data.metricDescriptors ?? []).map((d: any) => d.key));
-  for (const k of ['wled.freeHeapBytes', 'wled.fps', 'wled.wifiRssiDbm', 'wled.version']) {
+  for (const k of ['wled.freeHeapBytes', 'wled.fps', 'wled.wifiRssiDbm', 'wled.wifiSignalPercent', 'wled.wifiBssid', 'wled.wifiSsid', 'wled.fsUsedKb', 'wled.ledMaxPowerMa', 'wled.coreVersion', 'wled.version']) {
     check(`descriptor present: ${k}`, keys.has(k), [...keys]);
   }
 
@@ -423,8 +463,34 @@ async function main(): Promise<void> {
   check('health warning', mon.data.health === 'warning', mon.data.health);
   const warn = String((mon.data.metrics ?? {})['system.warning'] ?? '');
   check('warnings mention heap + wifi', /free heap/.test(warn) && /weak WiFi/.test(warn), warn);
-  deviceState.freeheap = 131_616;
-  deviceState.rssi = -73;
+  // --- /monitoring flash nearly full → warning ------------------------------------------
+  console.log('\n/monitoring (flash nearly full)');
+  deviceState.fsUsedKb = 950; // ~96.6 % of 983 KB
+  mon = await post('/monitoring', monitoringBody(`localhost:${MOCK_DEVICE_PORT}`));
+  check('health warning on flash ≥ 90 %', mon.data.health === 'warning', mon.data.health);
+  const fsWarn = String((mon.data.metrics ?? {})['system.warning'] ?? '');
+  check('warning mentions the full flash', /flash nearly full/i.test(fsWarn), fsWarn);
+  deviceState.fsUsedKb = 196;
+
+  // --- wled.firmware.update: SLOW FLASH regression (upload timeout) ----------------------
+  // Real WLED writes the image to SPI flash while serving /update — a slow box
+  // answers in well over the default 5 s poll budget. With the old code this
+  // failed with "request timed out after 5000 ms"; UPLOAD_TIMEOUT_MS (300 s)
+  // must absorb it.
+  console.log('\n/config wled.firmware.update (slow flash — upload timeout regression)');
+  deviceState.updateDelayMs = 6_000; // > the default 5 s poll budget
+  const slowCfg = await post('/config', {
+    deviceId: 'test-device',
+    managementAddress: `localhost:${MOCK_DEVICE_PORT}`,
+    actionId: 'wled.firmware.update',
+    input: { url: 'https://download.wled.me/WLED_16.0.1_ESP32.bin', fileName: 'WLED_16.0.1_ESP32.bin' },
+  });
+  const slowDetails = (slowCfg.data.result?.details ?? {}) as any;
+  check('slow flash succeeds (no 5 s timeout)', slowCfg.data.success === true && slowCfg.data.result?.applied === true, { success: slowCfg.data.success, details: slowDetails });
+  deviceState.updateDelayMs = 0;
+  // Reset the version so the later PIN full-flow section flashes for real
+  // (otherwise its idempotency guard would short-circuit).
+  deviceState.ver = '16.0.0';
 
   // --- wled.firmware.update: PIN gate first (401 without pin) ---------------------------
   console.log('\n/config wled.firmware.update (PIN 401 path)');
@@ -507,6 +573,22 @@ async function main(): Promise<void> {
   const revertDetails = (cfg.data.result?.details ?? {}) as any;
   check('refused on esp32 with a clear error', cfg.data.success === false && /ESP8266/.test(String(revertDetails.error ?? '')), cfg.data);
 
+  // --- wled.config.backup: full cfg snapshot ---------------------------------------------
+  console.log('\n/config wled.config.backup');
+  cfg = await post('/config', {
+    deviceId: 'test-device',
+    managementAddress: `localhost:${MOCK_DEVICE_PORT}`,
+    actionId: 'wled.config.backup',
+    input: {},
+  });
+  const bkDetails = (cfg.data.result?.details ?? {}) as any;
+  check('backup success + base64 payload + size', cfg.data.success === true && typeof bkDetails.backupBase64 === 'string' && Number(bkDetails.sizeBytes) > 0, { size: bkDetails.sizeBytes });
+  let decodedCfg: Record<string, unknown> = {};
+  try {
+    decodedCfg = JSON.parse(Buffer.from(String(bkDetails.backupBase64), 'base64').toString('utf8')) as Record<string, unknown>;
+  } catch { /* leave empty → next check fails */ }
+  check('decoded backup carries the wifi network list (ssid)', String((decodedCfg['nw'] as any)?.ins?.[0]?.ssid ?? '') === 'KirgusNET_IoT', decodedCfg);
+
   // --- input validation ------------------------------------------------------------------
   console.log('\n/config (input validation)');
   cfg = await post('/config', {
@@ -528,12 +610,13 @@ async function main(): Promise<void> {
   const p1 = (plan.data.plan ?? {}) as any;
   check('intentActionId echoed', p1.intentActionId === 'wled.firmware.update', p1.intentActionId);
   check(
-    'one update step + settle/refresh tail (unm.wait → unm.inventory.refresh)',
-    JSON.stringify(p1.steps?.map((s: any) => s.actionId)) === JSON.stringify(['wled.firmware.update', 'unm.wait', 'unm.inventory.refresh']),
+    'backup step prepended + update + settle/refresh tail',
+    JSON.stringify(p1.steps?.map((s: any) => s.actionId)) === JSON.stringify(['wled.config.backup', 'wled.firmware.update', 'unm.wait', 'unm.inventory.refresh']),
     p1.steps?.map((s: any) => s.actionId)
   );
-  check('step input carries url + fileName verbatim', p1.steps?.[0]?.input?.url === planBody.intent.inputs.url && p1.steps?.[0]?.input?.fileName === 'WLED_16.0.1_ESP32.bin', p1.steps?.[0]?.input);
-  check('settle tail is best-effort + refresh depends on the wait', p1.steps?.[1]?.bestEffort === true && p1.steps?.[2]?.bestEffort === true && JSON.stringify(p1.steps?.[2]?.dependsOn) === '[1]', p1.steps?.slice(1));
+  check('backup step is best-effort with empty input', p1.steps?.[0]?.bestEffort === true && JSON.stringify(p1.steps?.[0]?.input ?? {}) === '{}', p1.steps?.[0]);
+  check('update step input carries url + fileName verbatim', p1.steps?.[1]?.input?.url === planBody.intent.inputs.url && p1.steps?.[1]?.input?.fileName === 'WLED_16.0.1_ESP32.bin', p1.steps?.[1]?.input);
+  check('settle tail is best-effort + refresh depends on the wait', p1.steps?.[2]?.bestEffort === true && p1.steps?.[3]?.bestEffort === true && JSON.stringify(p1.steps?.[3]?.dependsOn) === '[2]', p1.steps?.slice(2));
   check('no provision requests (credential-free)', Array.isArray(p1.provisionRequests) && p1.provisionRequests.length === 0, p1.provisionRequests);
 
   // A rename intent produces a single step with NO settle tail.

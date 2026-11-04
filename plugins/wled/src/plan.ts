@@ -4,12 +4,14 @@
  * (deviceCount 1), so planning is a pure fan-out — no multi-device intents,
  * no dependencies between steps.
  *
- * No rollback snapshot exists for WLED (there is no config backup to restore):
- * the plan workflow's confirm dialogs + audit trail are the safety net. The one
- * extra tail we append: after `wled.firmware.update` succeeds the device has
- * already rebooted into the new firmware (the action verifies it), so a short
- * settle wait + forced inventory re-poll refreshes the Updates page row to the
- * new version without waiting for the next poll cycle.
+ * Safety net before risky steps: every plan containing `wled.firmware.update`
+ * gets a best-effort `wled.config.backup` step prepended per device — the full
+ * /json/cfg snapshot lands in that step's result (base64) and can be restored
+ * through WLED's own web editor if the flash goes sideways. The one extra tail
+ * we append: after `wled.firmware.update` succeeds the device has already
+ * rebooted into the new firmware (the action verifies it), so a short settle
+ * wait + forced inventory re-poll refreshes the Updates page row to the new
+ * version without waiting for the next poll cycle.
  */
 
 import { PlanningError, appendSettleAndRefresh, finalizePlan, validateInput } from '@unm/plugin-sdk';
@@ -58,15 +60,20 @@ export function buildPlan(req: PlanRequest): Plan {
     input: { ...(inputs ?? {}), ...((req.deviceInputs ?? {})[d.deviceId] ?? {}) },
   }));
 
-  const plan = finalizePlan(actionId, devices, [], rawSteps, isDirtyStep);
+  // Prepend a best-effort config backup per device that receives a firmware
+  // flash — the snapshot (base64 in the step result) is the rollback artifact.
+  const plan = finalizePlan(actionId, devices, [], rawSteps, needsConfigBackup, {
+    rollbackStep: () => ({ actionId: 'wled.config.backup', input: {} }),
+  });
 
   // After a verified flash the device already reports the new version — refresh
   // the cached updates inventory so the Updates page clears the row immediately.
   return appendSettleAndRefresh(plan, ['wled.firmware.update'], POST_FLASH_SETTLE_MS);
 }
 
-/** True when a step's action mutates the controller (write/dangerous). */
-function isDirtyStep(stepActionId: string): boolean {
-  const a = wledActions.getAction(stepActionId);
-  return !!a && a.riskLevel !== 'read';
+/** True when a step warrants a pre-step config backup. Only the firmware flash
+ *  can lose or corrupt settings (rename/state.set are trivially reversible), so
+ *  only it triggers the best-effort wled.config.backup prepend. */
+function needsConfigBackup(stepActionId: string): boolean {
+  return stepActionId === 'wled.firmware.update';
 }

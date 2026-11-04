@@ -1,6 +1,6 @@
 {
   "name": "unm-plugin-wled",
-  "version": "0.1.0",
+  "version": "0.3.0",
   "license": "EUPL-1.2",
   "private": true,
   "description": "UnifiedNetworkManager plugin: WLED light-controller monitoring (heap/fps/WiFi metrics) + firmware updates over the device's own /update endpoint.",

@@ -37,7 +37,7 @@ import {
   isTransientTransportError,
 } from '@unm/plugin-sdk';
 import type { ActionResult } from '@unm/plugin-sdk';
-import { WledClientOptions, getInfo, WledInfo } from './client';
+import { WledClientOptions, getCfg, getInfo, WledCfg, WledInfo } from './client';
 import { getWledUpdateRows } from './updates';
 import { wledActions, WledActionContext } from './actions';
 import { buildPlan, PlanningError } from './plan';
@@ -50,7 +50,10 @@ const identity = resolvePluginIdentity({
   name: PLUGIN_NAME,
   description:
     'Monitoring (heap/fps/WiFi) + firmware updates for WLED light controllers — the update flow mirrors WLED\'s own web UI and verifies the version after reboot.',
-  version: '0.1.0',
+  // 0.3.0 — config backup: new read-level wled.config.backup action (full
+  // /json/cfg snapshot as base64 in the step result), auto-prepended best-effort
+  // before every firmware flash; schedulable on its own for periodic backups.
+  version: '0.3.0',
   vendors: ['wled'],
   // monitoring: /json/info metrics every poll.
   // updates: GitHub release feed (via UNM's web-fetch broker) → Updates page rows.
@@ -109,7 +112,14 @@ const METRIC_DESCRIPTORS: MetricDescriptor[] = [
   { key: 'wled.ledPowerMa', label: 'LED power (mA)', unit: 'mA', type: 'number', visualization: 'plot', group: 'LEDs', color: '#f59e0b' },
   { key: 'wled.uptimeSeconds', label: 'Uptime', unit: 's', format: 'duration', type: 'number', visualization: 'text', group: 'System' },
   { key: 'wled.wifiRssiDbm', label: 'WiFi RSSI', unit: 'dBm', type: 'number', visualization: 'gauge', group: 'WiFi', min: -100, max: 0, color: '#8b5cf6' },
+  { key: 'wled.wifiSignalPercent', label: 'WiFi signal (%)', unit: '%', type: 'number', visualization: 'plot', group: 'WiFi', min: 0, max: 100, color: '#a78bfa' },
   { key: 'wled.wifiChannel', label: 'WiFi channel', type: 'number', visualization: 'text', group: 'WiFi' },
+  { key: 'wled.wifiBssid', label: 'AP MAC (BSSID)', type: 'string', visualization: 'text', group: 'WiFi' },
+  { key: 'wled.wifiSsid', label: 'WiFi SSID', type: 'string', visualization: 'text', group: 'WiFi' },
+  { key: 'wled.fsUsedKb', label: 'Flash used (KB)', unit: 'kB', format: 'bytes', type: 'number', visualization: 'gauge', group: 'System', color: '#ef4444' },
+  { key: 'wled.fsTotalKb', label: 'Flash total (KB)', unit: 'kB', format: 'bytes', type: 'number', visualization: 'text', group: 'System' },
+  { key: 'wled.ledMaxPowerMa', label: 'LED max power limit (mA)', unit: 'mA', type: 'number', visualization: 'text', group: 'LEDs' },
+  { key: 'wled.coreVersion', label: 'Core version', type: 'string', visualization: 'text', group: 'System' },
   { key: 'wled.version', label: 'Firmware version', type: 'string', visualization: 'text', group: 'System' },
   { key: 'wled.release', label: 'Board variant', type: 'string', visualization: 'text', group: 'System' },
   { key: 'wled.name', label: 'Instance name', type: 'string', visualization: 'text', group: 'System' },
@@ -257,9 +267,13 @@ app.post('/monitoring', async (req, res) => {
     if (typeof info.leds.count === 'number') metrics['wled.ledCount'] = info.leds.count;
     if (typeof info.leds.fps === 'number') metrics['wled.fps'] = info.leds.fps;
     if (typeof info.leds.pwr === 'number') metrics['wled.ledPowerMa'] = info.leds.pwr;
+    // The configured power LIMIT — useful to spot a misconfigured cap that
+    // throttles the strip well below what it could do.
+    if (typeof info.leds.maxpwr === 'number') metrics['wled.ledMaxPowerMa'] = info.leds.maxpwr;
   }
 
-  // WiFi group — RSSI is the headline signal-quality metric.
+  // WiFi group — RSSI is the headline signal-quality metric; WLED also reports
+  // a normalized 0–100 % figure (its own UI uses both).
   if (info.wifi && typeof info.wifi === 'object') {
     if (typeof info.wifi.rssi === 'number') {
       metrics['wled.wifiRssiDbm'] = info.wifi.rssi;
@@ -268,8 +282,50 @@ app.post('/monitoring', async (req, res) => {
         warnings.push(`weak WiFi signal (${info.wifi.rssi} dBm)`);
       }
     }
+    if (typeof info.wifi.signal === 'number') metrics['wled.wifiSignalPercent'] = info.wifi.signal;
     if (typeof info.wifi.channel === 'number') metrics['wled.wifiChannel'] = info.wifi.channel;
+    // The AP the device is currently associated with (its MAC). With multiple
+    // access points under one SSID this is what tells you which box serves it —
+    // a changed BSSID means the device roamed.
+    if (typeof info.wifi.bssid === 'string' && info.wifi.bssid) metrics['wled.wifiBssid'] = info.wifi.bssid;
   }
+
+  // WiFi SSID — not in /json/info; read from GET /json/cfg (`nw.ins[]` is the
+  // preferred-network list, first non-empty entry wins). Rides the inventory
+  // window: the network name rarely changes, and metrics-only polls stay at a
+  // single request. Best-effort — a cfg read failure must never break the poll.
+  if (collectInventory) {
+    try {
+      const cfgRes = await getCfg(client);
+      if (cfgRes.ok && cfgRes.data && typeof cfgRes.data === 'object') {
+        const ins = (cfgRes.data as WledCfg).nw?.ins;
+        if (Array.isArray(ins)) {
+          const ssid = ins.map((n) => n.ssid).find((s) => typeof s === 'string' && s.length > 0);
+          if (ssid) metrics['wled.wifiSsid'] = ssid;
+        }
+      }
+    } catch {
+      /* best-effort — omit the key, keep the poll green */
+    }
+  }
+
+  // Filesystem group — WLED reports SPI-flash usage in KB. A full flash breaks
+  // OTA updates and custom palettes/effects, so warn well before it is full.
+  if (info.fs && typeof info.fs === 'object' && typeof info.fs.t === 'number' && info.fs.t > 0) {
+    const used = typeof info.fs.u === 'number' ? info.fs.u : null;
+    metrics['wled.fsTotalKb'] = info.fs.t;
+    if (used !== null) {
+      metrics['wled.fsUsedKb'] = used;
+      const pct = Math.round((used / info.fs.t) * 100);
+      if (pct >= 90) {
+        health = 'warning';
+        warnings.push(`flash nearly full (${pct} % — OTA updates and custom content will fail)`);
+      }
+    }
+  }
+
+  // Core version (ESP-IDF / Arduino core) — informational, next to the WLED version.
+  if (typeof info.core === 'string' && info.core) metrics['wled.coreVersion'] = info.core;
 
   // Updates page — rides the inventory window. Emission contract: present-but-
   // empty is authoritative (wipe stale rows); a feed transport failure OMITS the

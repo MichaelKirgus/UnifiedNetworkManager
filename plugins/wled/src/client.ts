@@ -12,6 +12,9 @@
  *   GET /json/info → { name, ver, vid, cn, release, arch, freeheap, uptime,
  *                      wifi{rssi,signal,channel,band,bssid}, leds{count,fps,pwr},
  *                      mac, ip }
+ *   GET /json/cfg  → { nw: { ins: [{ ssid, bssid, … }] }, … } — the preferred-
+ *                      network list (source of the connected SSID; reads are
+ *                      PIN-free, only POSTs require the settings PIN)
  */
 
 import http from 'http';
@@ -68,10 +71,14 @@ async function request<T>(
   method: string,
   path: string,
   body?: Buffer | string,
-  headers?: Record<string, string>
+  headers?: Record<string, string>,
+  /** Per-call timeout override (ms) — e.g. firmware uploads need far more than
+   *  the default poll budget to transfer + flash over WiFi. */
+  callTimeoutMs?: number
 ): Promise<WledResult<T>> {
   const candidates = wledCandidates(opts);
   if (candidates.length === 0) return { ok: false, status: 0, error: 'No candidate endpoints for address' };
+  const timeoutMs = callTimeoutMs && callTimeoutMs > 0 ? callTimeoutMs : opts.timeoutMs;
 
   let lastError = '';
   for (const base of candidates) {
@@ -129,11 +136,11 @@ async function request<T>(
 
       const timer = setTimeout(() => {
         try {
-          req.destroy(new Error(`request timed out after ${opts.timeoutMs} ms`));
+          req.destroy(new Error(`request timed out after ${timeoutMs} ms`));
         } catch {
           /* already closed */
         }
-      }, opts.timeoutMs);
+      }, timeoutMs);
       req.on('error', (err) => {
         clearTimeout(timer);
         lastError = err.message;
@@ -157,10 +164,15 @@ export interface WledInfo {
   release?: string; // board variant, e.g. "ESP32" — matches the firmware asset suffix
   repo?: string; // GitHub repo of this firmware (default "wled/WLED") — source of update rows
   arch?: string; // e.g. "esp32", "esp8266"
+  core?: string; // ESP-IDF/Arduino core version, e.g. "4.4.8.240628" (ESP32) / "2.7.4" (ESP8266)
+  clock?: number; // CPU MHz
+  flash?: number; // flash size in MB
   freeheap?: number; // bytes
   uptime?: number; // seconds (rollover-safe)
   wifi?: { rssi?: number; signal?: number; channel?: number; band?: string; bssid?: string };
-  leds?: { count?: number; fps?: number; pwr?: number };
+  leds?: { count?: number; fps?: number; pwr?: number; maxpwr?: number };
+  /** Filesystem usage in KB: u = used, t = total (source-verified against /json/info). */
+  fs?: { u?: number; t?: number };
   mac?: string;
   ip?: string;
 }
@@ -168,6 +180,19 @@ export interface WledInfo {
 /** GET /json/info — the single source of truth for monitoring + update rows. */
 export function getInfo(opts: WledClientOptions): Promise<WledResult<WledInfo>> {
   return request<WledInfo>(opts, 'GET', '/json/info');
+}
+
+/** The parsed /json/cfg payload (only the fields UNM consumes). */
+export interface WledCfg {
+  /** Network config — `ins` is the preferred-network list (up to 3 entries);
+   *  the device associates with the best available of them. */
+  nw?: { ins?: Array<{ ssid?: string; bssid?: string }> };
+}
+
+/** GET /json/cfg — full config read (PIN-free). Used for the connected SSID,
+ *  which /json/info does not carry. */
+export function getCfg(opts: WledClientOptions): Promise<WledResult<WledCfg>> {
+  return request<WledCfg>(opts, 'GET', '/json/cfg');
 }
 
 /** Plain GET against an arbitrary path (e.g. /update?revert). */
@@ -205,7 +230,13 @@ export function buildMultipart(fields: Record<string, string>, file?: { name: st
 }
 
 /** POST a multipart form (firmware upload to /update, or any file field). */
-export function postMultipart(opts: WledClientOptions, path: string, fields: Record<string, string>, file?: { name: string; filename: string; contentType: string; data: Buffer }): Promise<WledResult<unknown>> {
+export function postMultipart(
+  opts: WledClientOptions,
+  path: string,
+  fields: Record<string, string>,
+  file?: { name: string; filename: string; contentType: string; data: Buffer },
+  callTimeoutMs?: number
+): Promise<WledResult<unknown>> {
   const mp = buildMultipart(fields, file);
-  return request(opts, 'POST', path, mp.body, { 'Content-Type': mp.contentType });
+  return request(opts, 'POST', path, mp.body, { 'Content-Type': mp.contentType }, callTimeoutMs);
 }

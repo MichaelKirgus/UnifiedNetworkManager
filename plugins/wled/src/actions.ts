@@ -10,7 +10,7 @@
  */
 
 import { ActionResult, ActionDescriptor, createRegistry, compareVersions, webFetchViaApi } from '@unm/plugin-sdk';
-import { WledClientOptions, get, getInfo, postJson, postMultipart } from './client';
+import { WledClientOptions, getCfg, get, getInfo, postJson, postMultipart } from './client';
 
 /** Hard cap for a firmware image (WLED bins are ~1–2 MB; 20 MB is generous). */
 export const FIRMWARE_MAX_BYTES = 20 * 1024 * 1024;
@@ -20,6 +20,17 @@ export const FIRMWARE_MAX_BYTES = 20 * 1024 * 1024;
  *  production runs use the defaults below. */
 const REBOOT_WAIT_MS = Number(process.env.WLED_REBOOT_WAIT_MS) > 0 ? Math.min(Number(process.env.WLED_REBOOT_WAIT_MS), 3_600_000) : 3 * 60_000;
 const REBOOT_POLL_INTERVAL_MS = Number(process.env.WLED_REBOOT_POLL_MS) > 0 ? Math.max(250, Number(process.env.WLED_REBOOT_POLL_MS)) : 10_000;
+
+/**
+ * Timeout for the /update multipart POST itself. The device's default poll
+ * budget (timeoutMs option, ~5 s) is FAR too short here: WLED writes the whole
+ * image to flash WHILE handling the request — a 1–2 MB bin over WiFi takes well
+ * beyond that, and the endpoint only answers after the write completes. Using
+ * the default made every real update fail with "request timed out after 5000 ms"
+ * (observed on an ESP32; the mock smoke test answered instantly so it never
+ * caught this). 5 min is generous even for a slow link + large image.
+ */
+const UPLOAD_TIMEOUT_MS = Number(process.env.WLED_UPLOAD_TIMEOUT_MS) > 0 ? Math.min(Number(process.env.WLED_UPLOAD_TIMEOUT_MS), 600_000) : 300_000;
 
 export interface WledActionContext {
   /** Client options bound to this device (address + effective settings). */
@@ -99,13 +110,16 @@ const firmwareUpdateAction: ActionDescriptor<WledActionContext> = {
     if (image.length === 0) return { success: false, details: { error: 'Downloaded firmware image is empty' } };
 
     // Upload to the device — multipart field "update" (+ optional PIN param).
+    // The upload gets its OWN generous timeout (see UPLOAD_TIMEOUT_MS): WLED
+    // flashes while serving the request, so the default poll budget is not a
+    // valid bound here.
     const pin = str(input, 'pin') ?? ctx.pin;
-    const res = await postMultipart(ctx.client, '/update', pin ? { pin } : {}, { name: 'update', filename: fileName || 'update.bin', contentType: 'application/octet-stream', data: image });
+    const res = await postMultipart(ctx.client, '/update', pin ? { pin } : {}, { name: 'update', filename: fileName || 'update.bin', contentType: 'application/octet-stream', data: image }, UPLOAD_TIMEOUT_MS);
 
     if (!res.ok) {
       // WLED's distinct failure modes (source-verified): 401 = PIN required/wrong,
       // otaLock active, or a validation error in the body. Surface verbatim.
-      return { success: false, details: { error: `Device rejected the firmware upload (${res.error})`, hint: res.status === 401 ? 'The controller has a settings PIN — pass it via "pin" or bind an apiKey secret carrying it.' : undefined } };
+      return { success: false, details: { error: `Device rejected the firmware upload (${res.error})`, hint: res.status === 401 ? 'The controller has a settings PIN — pass it via "pin" or bind an apiKey secret carrying it.' : /timed out/i.test(res.error ?? '') ? 'The device did not answer within the upload window — check its WiFi link quality (weak RSSI makes flashing very slow) and retry.' : undefined } };
     }
 
     // The device reboots now. Verify it comes back on the target version.
@@ -144,6 +158,43 @@ const firmwareRevertAction: ActionDescriptor<WledActionContext> = {
     const res = await get(ctx.client, '/update?revert'); // WLED's own endpoint is a GET (source-verified)
     if (!res.ok) return { success: false, details: { error: `Revert rejected (${res.error})` } };
     return { success: true, applied: true, details: { note: 'Revert accepted — the device is rebooting into the previous firmware.' } };
+  },
+};
+
+/**
+ * Backs up the full configuration — GET /json/cfg is PIN-free for READS
+ * (source-verified: WLED's JSON handler only gates POSTs behind the settings
+ * PIN). The snapshot lands in the step result as base64 so it survives in the
+ * plan audit trail. Caveat (also source-verified): WiFi passwords are NOT part
+ * of /json/cfg — WLED keeps them in a separate wsec.json that it deliberately
+ * never serves over HTTP; `pskl` is only their length.
+ */
+const configBackupAction: ActionDescriptor<WledActionContext> = {
+  id: 'wled.config.backup',
+  label: 'Back up configuration',
+  description:
+    "Reads the controller's FULL configuration (GET /json/cfg — PIN-free) and returns it as base64 in the step result (details.backupBase64 + sizeBytes). Run before risky operations or on a schedule; restore by uploading the decoded JSON as cfg.json through WLED's own web editor. Note: WiFi passwords are excluded — WLED keeps them in wsec.json, which it never serves over HTTP.",
+  module: 'Config',
+  riskLevel: 'read' as const,
+  deviceCount: 1 as const,
+  timeoutMs: 30_000,
+  inputSchema: {},
+  async execute(ctx: WledActionContext): Promise<ActionResult> {
+    const res = await getCfg(ctx.client);
+    if (!res.ok || !res.data || typeof res.data === 'string') {
+      return { success: false, details: { error: `Config read failed (${res.error ?? 'no response'})` } };
+    }
+    const json = JSON.stringify(res.data);
+    return {
+      success: true,
+      applied: false,
+      verified: true,
+      details: {
+        backupBase64: Buffer.from(json, 'utf8').toString('base64'),
+        sizeBytes: Buffer.byteLength(json),
+        note: 'Full /json/cfg snapshot (WiFi passwords excluded — WLED keeps them in wsec.json).',
+      },
+    };
   },
 };
 
@@ -204,4 +255,4 @@ const setStateAction: ActionDescriptor<WledActionContext> = {
 };
 
 /** The full WLED action registry. */
-export const wledActions = createRegistry<WledActionContext>([firmwareUpdateAction, firmwareRevertAction, renameAction, setStateAction]);
+export const wledActions = createRegistry<WledActionContext>([firmwareUpdateAction, firmwareRevertAction, configBackupAction, renameAction, setStateAction]);
