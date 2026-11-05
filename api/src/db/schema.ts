@@ -350,9 +350,57 @@ export const caCertificates = pgTable(
     status: text('status').notNull().default('issued'),
     revokedAt: text('revokedAt'),
     createdAt: text('createdAt').notNull(),
+    // Which class of leaf this is. 'mtls' = plugin/api/mcp service leaves (the
+    // original ACME flow); 'wifi' = EAP-TLS client certs for WiFi enrollment
+    // (POST /ca/enroll). The private key for a wifi leaf lives in the separate
+    // wifi_client_certs table (encrypted), never here.
+    kind: text('kind').notNull().default('mtls'),
   },
   (table) => ({
     idxCaCertificatesSubject: index('idx_ca_certificates_subject').on(table.subject),
+  })
+);
+
+// WiFi (EAP-TLS) client certificates issued by UNM's own CA via POST /ca/enroll.
+// These are LONG-LIVED user/client certs (default 3 years, up to the CA chain
+// expiry) — distinct from the short-lived mTLS service leaves in ca_certificates.
+// The private key is stored ENCRYPTED (AES-256-GCM via ca/keyVault.ts) so it can
+// be re-downloaded for a supplicant at any time; only the cert bundle + metadata
+// are ever exposed unencrypted. `serial` mirrors the leaf's serial and is also
+// registered in ca_certificates (kind='wifi') so revocation/expiry tooling sees
+// one unified registry.
+export const wifiClientCerts = pgTable(
+  'wifi_client_certs',
+  {
+    id: text('id').primaryKey(),
+    // Human label chosen at enrollment (e.g. a device or person name). Unique —
+    // re-enrolling the same name is a new cert, not an overwrite.
+    name: text('name').notNull().unique(),
+    // Certificate subject CN (the EAP-TLS identity / SAN[0]).
+    cn: text('cn').notNull(),
+    organization: text('organization').notNull().default(''),
+    organizationalUnit: text('organizationalUnit').notNull().default(''),
+    // Extra SAN DNS names beyond the CN (JSON array).
+    sansJson: text('sansJson').notNull().default('[]'),
+    // Key type used for this leaf: ec-p256 | ec-p384 | rsa-2048 | rsa-3072 | rsa-4096.
+    keyType: text('keyType').notNull(),
+    // Hex serial of the issued leaf (matches ca_certificates.serial).
+    serial: text('serial').notNull().unique(),
+    issuer: text('issuer').notNull().default(''),
+    notBefore: text('notBefore').notNull(),
+    notAfter: text('notAfter').notNull(),
+    // issued | revoked. Mirrors ca_certificates.status for this leaf.
+    status: text('status').notNull().default('issued'),
+    revokedAt: text('revokedAt'),
+    // AES-256-GCM encrypted PKCS#8 private key (base64 iv‖tag‖ct). Decrypted only
+    // on download (GET /ca/wifi-certs/:serial/download) and never logged.
+    keyEncrypted: text('keyEncrypted').notNull(),
+    // Full PEM bundle: leaf + intermediate (+ root), ready to install on a supplicant.
+    certPem: text('certPem').notNull(),
+    createdAt: text('createdAt').notNull(),
+  },
+  (table) => ({
+    idxWifiClientCertsName: index('idx_wifi_client_certs_name').on(table.name),
   })
 );
 

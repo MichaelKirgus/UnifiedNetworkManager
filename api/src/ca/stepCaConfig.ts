@@ -87,6 +87,12 @@ export async function renderStepCaConfig(): Promise<StepCaConfig> {
   const minDays = Number(v.caLeafMinDays ?? 7);
   const maxDays = Number(v.caLeafMaxDays ?? 365);
   const defaultDays = Number(v.caLeafDefaultDays ?? 90);
+  // EAP-TLS client certs (WiFi enrollment) get their OWN duration claims on the
+  // unm-admin provisioner — step-ca's per-provisioner `claims` block overrides
+  // the authority-level values for signs made with that provisioner only, so
+  // long-lived WiFi leaves don't touch the ACME/plugin mTLS limits.
+  const wifiDefaultDays = Number(v.caWifiCertDefaultDays ?? 1095);
+  const wifiMaxDays = Number(v.caWifiCertMaxDays ?? 3650);
 
   // SAN allow-list: the configured core names + every registered plugin's
   // advertised host (collected from the plugins table — no static catalog).
@@ -114,7 +120,15 @@ export async function renderStepCaConfig(): Promise<StepCaConfig> {
   // private key lives in admin-jwk.pem on this same volume and never leaves it) is
   // ALWAYS present so the CA stays manageable even when ACME enrollment is off.
   const provisioners: Array<Record<string, unknown>> = [
-    { type: 'JWK', name: ADMIN_PROVISIONER_NAME, key: adminJwk.public },
+    {
+      type: 'JWK',
+      name: ADMIN_PROVISIONER_NAME,
+      key: adminJwk.public,
+      claims: {
+        defaultTLSCertDuration: daysToDuration(wifiDefaultDays),
+        maxTLSCertDuration: daysToDuration(wifiMaxDays),
+      },
+    },
   ];
   if (acmeEnabled) provisioners.unshift({ type: 'ACME', name: ACME_PROVISIONER_NAME, challenges });
 

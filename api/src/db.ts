@@ -345,6 +345,42 @@ export async function initDb(): Promise<void> {
   // the Certificates page started listing UNM-issued mTLS leaves alongside device certs.
   await pool.query(`ALTER TABLE ca_certificates ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEFAULT 'plugin'`);
   await pool.query(`ALTER TABLE ca_certificates ADD COLUMN IF NOT EXISTS issuer TEXT NOT NULL DEFAULT ''`);
+  // Leaf class: 'mtls' (service leaves, the original ACME flow) vs 'wifi'
+  // (EAP-TLS client certs for WiFi enrollment). Existing rows are mTLS.
+  await pool.query(`ALTER TABLE ca_certificates ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAULT 'mtls'`);
+
+  // WiFi (EAP-TLS) client certificates issued via POST /ca/enroll — long-lived
+  // user/client certs with the private key stored encrypted (see schema.ts).
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS wifi_client_certs (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL UNIQUE,
+      cn TEXT NOT NULL,
+      organization TEXT NOT NULL DEFAULT '',
+      "organizationalUnit" TEXT NOT NULL DEFAULT '',
+      "sansJson" TEXT NOT NULL DEFAULT '[]',
+      "keyType" TEXT NOT NULL,
+      serial TEXT NOT NULL UNIQUE,
+      issuer TEXT NOT NULL DEFAULT '',
+      "notBefore" TEXT NOT NULL,
+      "notAfter" TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'issued',
+      "revokedAt" TEXT,
+      "keyEncrypted" TEXT NOT NULL,
+      "certPem" TEXT NOT NULL,
+      "createdAt" TEXT NOT NULL
+    )`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_wifi_client_certs_name ON wifi_client_certs (name)`);
+  // Migration for DBs created before the columns were quoted: unquoted DDL
+  // folded them to lowercase, which broke drizzle's quoted queries.
+  await pool.query(`DO $$ BEGIN
+    IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'wifi_client_certs' AND column_name = 'keytype') THEN
+      ALTER TABLE wifi_client_certs RENAME COLUMN keytype TO "keyType";
+    END IF;
+    IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'wifi_client_certs' AND column_name = 'certpem') THEN
+      ALTER TABLE wifi_client_certs RENAME COLUMN certpem TO "certPem";
+    END IF;
+  END $$`);
 
   // Execution plans (see workers/planExecutor.ts). Plans persist a plugin's
   // /plan output + its provisioned secrets; steps run in dependency order.

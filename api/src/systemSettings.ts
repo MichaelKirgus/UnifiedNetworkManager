@@ -646,6 +646,34 @@ export const SETTING_DESCRIPTORS: SettingDescriptor[] = [
     help:
       'Minimum TLS version the CA\'s own listener negotiates (and the floor UNM documents for plugin listeners). 1.2 is the default; 1.3 requires all clients to support it.',
   },
+  {
+    key: 'caWifiCertDefaultDays',
+    label: 'WiFi client cert default lifetime',
+    type: 'integer',
+    category: 'Certificate Authority',
+    unit: 'days',
+    min: 1,
+    max: 3650,
+    default: 1095,
+    envVar: 'UNM_CA_WIFI_CERT_DEFAULT_DAYS',
+    onChange: () => require('./ca/stepCaConfig').writeStepCaConfig(),
+    help:
+      "Validity used when a WiFi (EAP-TLS) client certificate enrollment does not specify days — 3 years by default. Rendered into the unm-admin provisioner's own claims block, so it does NOT affect plugin/API mTLS leaves. The actual issued validity is additionally clamped to the CA chain expiry minus a 7-day safety margin.",
+  },
+  {
+    key: 'caWifiCertMaxDays',
+    label: 'WiFi client cert maximum lifetime',
+    type: 'integer',
+    category: 'Certificate Authority',
+    unit: 'days',
+    min: 1,
+    max: 3650,
+    default: 3650,
+    envVar: 'UNM_CA_WIFI_CERT_MAX_DAYS',
+    onChange: () => require('./ca/stepCaConfig').writeStepCaConfig(),
+    help:
+      "Hard cap for WiFi (EAP-TLS) client certificate validity — step-ca enforces it per-provisioner, so requests above this are clamped down. Raise it to issue long-lived certificates (e.g. 10 years); the CA chain expiry still limits what can actually be issued.",
+  },
 
   // Fleet rollout safety net (network.create plans).
   {

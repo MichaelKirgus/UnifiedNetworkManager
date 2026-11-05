@@ -27,6 +27,8 @@ export interface RegistryLeaf extends TlsCertInfo {
   subject: string;
   /** Which UNM service holds the leaf ('plugin' | 'api' | 'mcp'). */
   source?: 'plugin' | 'api' | 'mcp';
+  /** Leaf class — 'wifi' for EAP-TLS client certs (default 'mtls'). */
+  kind?: 'mtls' | 'wifi';
 }
 
 /**
@@ -49,6 +51,7 @@ export async function registerLeaf(leaf: RegistryLeaf): Promise<void> {
       notAfter: leaf.notAfter,
       status: 'issued',
       createdAt: now,
+      kind: leaf.kind ?? 'mtls',
     })
     .onConflictDoUpdate({
       target: schema.caCertificates.serial,
@@ -59,6 +62,7 @@ export async function registerLeaf(leaf: RegistryLeaf): Promise<void> {
         issuer: leaf.issuer,
         notBefore: leaf.notBefore,
         notAfter: leaf.notAfter,
+        kind: leaf.kind ?? 'mtls',
         // Keep an explicit revocation — the CA refuses renewals for a revoked
         // serial anyway, so resurrecting it here would only confuse the UI.
         status: sql`CASE WHEN ${schema.caCertificates.status} = 'revoked' THEN 'revoked' ELSE 'issued' END`,
