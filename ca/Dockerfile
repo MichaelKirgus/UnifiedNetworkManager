@@ -27,7 +27,11 @@ RUN chmod 755 /entrypoint-unm.sh \
     && mkdir -p /pki /data/ca \
     && chown step:step /pki \
     && chown step:unm /data/ca \
-    && chmod 2775 /data/ca
+    && chmod 2775 /data/ca \
+    # openssl is needed by the entrypoint's intermediate-renewal path (CSR from
+    # the existing key + chain verification of the renewed cert). The base image
+    # ships only `step`/`step-ca`. ~17 MB.
+    && apk add --no-cache openssl
 USER step
 
 ENTRYPOINT ["/bin/sh", "/entrypoint-unm.sh"]

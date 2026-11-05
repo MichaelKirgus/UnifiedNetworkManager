@@ -85,7 +85,10 @@ services:
       - UNM_SKIP_CHOWN=${UNM_SKIP_CHOWN:-}
       - UNM_DOCKER_GID=${UNM_DOCKER_GID:-}
       - UNM_DOCKER_UID=${UNM_DOCKER_UID:-}
-      - UNM_CHOWN_PATHS=/data/backups /data/file-repo /data/tls
+      # The /data/ca DIR stays group-shared with unm-ca; only the two API-owned
+      # files inside it are chowned (legacy root-owned copies from before the
+      # unprivileged switch would otherwise block reads/writes).
+      - UNM_CHOWN_PATHS=/data/backups /data/file-repo /data/tls /data/ca/admin-jwk.pem /data/ca/ca.json
     volumes:
       - ${UNM_BACKUP_VOLUME:-unm-backups}:/data/backups
       - filerepo:/data/file-repo

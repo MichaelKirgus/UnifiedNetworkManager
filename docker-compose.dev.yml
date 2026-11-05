@@ -179,9 +179,11 @@ services:
       - UNM_DOCKER_GID=${UNM_DOCKER_GID:-}
       - UNM_DOCKER_UID=${UNM_DOCKER_UID:-}
       # Runtime chown of pre-existing root-owned data volumes (first boot after
-      # the unprivileged switch; no-op once owned by uid 1001). /data/ca is
-      # deliberately EXCLUDED — it's shared with unm-ca and group-writable there.
-      - UNM_CHOWN_PATHS=/data/backups /data/file-repo /data/tls
+      # the unprivileged switch; no-op once owned by uid 1001). The /data/ca DIR
+      # is deliberately EXCLUDED — it's shared with unm-ca and group-writable
+      # there — but the two API-owned FILES inside it are chowned so legacy
+      # root-owned copies (pre-unprivileged switch) don't block reads/writes.
+      - UNM_CHOWN_PATHS=/data/backups /data/file-repo /data/tls /data/ca/admin-jwk.pem /data/ca/ca.json
     volumes:
       # Stored UNM backups (Backups page) — local-destination archives live here.
       # Named volume by default; set UNM_BACKUP_VOLUME to a host path or another
