@@ -15,7 +15,7 @@ import { ADMIN_PROVISIONER_NAME } from './stepCaConfig';
  * CA signing keys and UNM never needs step-ca's internal password.
  */
 
-const CA_BASE = process.env.UNM_CA_URL ?? 'https://unm-ca:9000';
+export const CA_BASE = process.env.UNM_CA_URL ?? 'https://unm-ca:9000';
 const ROOT_PEM_PATH = '/data/ca/root_ca.crt';
 
 let cachedAgent: https.Agent | null = null;
@@ -35,11 +35,15 @@ function caAgent(): https.Agent {
 function request(
   method: string,
   urlPath: string,
-  opts: { body?: unknown; authed?: boolean } = {}
+  opts: { body?: unknown; authed?: boolean; token?: string } = {}
 ): Promise<{ status: number; json: () => Promise<unknown> }> {
   const headers: Record<string, string> = {};
   if (opts.body !== undefined) headers['Content-Type'] = 'application/json';
-  if (opts.authed) {
+  // `token` carries a PRE-MINTED JWT verbatim (e.g. the /1.0/sign OTT with
+  // sub/sans from enroll.ts); otherwise mint a fresh management token.
+  if (opts.token !== undefined) {
+    headers.Authorization = `Bearer ${opts.token}`;
+  } else if (opts.authed) {
     const adminJwk = loadAdminJwk();
     const aud = `${CA_BASE}${urlPath}`;
     const { token } = mintAdminToken(adminJwk.privateKeyPem, {
@@ -155,9 +159,60 @@ export async function revokeCertificate(
   serial: string,
   reason?: number
 ): Promise<{ status: number; body: unknown }> {
+  // step-ca's /1.0/revoke wants base-10 or base-16 WITH a '0x' prefix — bare
+  // hex (our storage format) is rejected with "not a valid serial number".
+  const caSerial = /^[0-9]+$/.test(serial) ? serial : `0x${serial}`;
+  // passive: true = mark revoked in the CA's DB only. Non-passive revocation
+  // (pushing CRL/OCSP updates to live connections) is unimplemented in step-ca
+  // v0.30.x and answers 501 — fine for UNM, whose leaves are short-lived and
+  // re-enrolled on renewal anyway.
+  // Like /1.0/sign, the JWK token must ride in the BODY as `ott` (the
+  // Authorization header alone is rejected with "missing ott or client
+  // certificate"). The JWK provisioner's AuthorizeRevoke enforces a
+  // self-service model: the token's `sub` MUST equal the revoked cert's serial
+  // in DECIMAL form ("request serial number X and token subject Y do not
+  // match" otherwise). UNM holds every private key it issues, so minting such
+  // tokens is always possible.
+  const decimalSerial = /^[0-9]+$/.test(serial) ? serial : BigInt(`0x${serial}`).toString();
+  const adminJwk = loadAdminJwk();
+  const { token } = mintAdminToken(adminJwk.privateKeyPem, {
+    aud: `${CA_BASE}/1.0/revoke`,
+    provisionerName: ADMIN_PROVISIONER_NAME,
+    sub: decimalSerial,
+  });
   const res = await request('POST', '/1.0/revoke', {
-    authed: true,
-    body: { serial, ...(reason !== undefined ? { reason } : {}) },
+    token,
+    body: { serial: caSerial, passive: true, ott: token, ...(reason !== undefined ? { reason } : {}) },
   });
   return { status: res.status, body: await res.json() };
+}
+
+/**
+ * Signs a PKCS#10 CSR via step-ca's /1.0/sign (one-time-token flow). The OTT
+ * is the pre-minted unm-admin JWT carrying sub/sans — it goes in the BODY as
+ * `ott` (step-ca reads it from there, not the Authorization header) and also
+ * rides along as Bearer for API-key-style clients. Returns 201 with PEMs.
+ */
+export async function signCsr(
+  csrPem: string,
+  ott: string,
+  notBeforeIso?: string,
+  notAfterIso?: string
+): Promise<{ crt: string; ca: string; certChain?: string[] }> {
+  const res = await request('POST', '/1.0/sign', {
+    token: ott,
+    body: {
+      csr: csrPem,
+      ott,
+      ...(notBeforeIso ? { notBefore: notBeforeIso } : {}),
+      ...(notAfterIso ? { notAfter: notAfterIso } : {}),
+    },
+  });
+  if (res.status !== 201) {
+    const body = await res.json().catch(() => null);
+    throw new Error(`CA /1.0/sign returned ${res.status}: ${JSON.stringify(body ?? 'no body')}`);
+  }
+  const out = (await res.json()) as { crt?: string; ca?: string; certChain?: string[] };
+  if (!out.crt) throw new Error('CA /1.0/sign response missing certificate');
+  return { crt: out.crt, ca: out.ca ?? '', certChain: out.certChain };
 }

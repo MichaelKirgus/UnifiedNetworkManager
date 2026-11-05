@@ -75,23 +75,57 @@ export interface MintedToken {
  */
 export function mintAdminToken(
   privateKeyPem: string,
-  opts: { aud: string; provisionerName?: string; ttlSeconds?: number }
+  opts: { aud: string; provisionerName?: string; ttlSeconds?: number; sub?: string; sans?: string[] }
 ): MintedToken {
   const priv = crypto.createPrivateKey(privateKeyPem);
   const now = Math.floor(Date.now() / 1000);
   const exp = now + (opts.ttlSeconds ?? 300);
-  const header = b64url(JSON.stringify({ alg: 'ES256', typ: 'JWT' }));
+  // step-ca's JWK provisioner selects the verification key via the token's `kid`
+  // (RFC 7638 thumbprint of the public key) — a header without it is rejected
+  // with "provisioner not found or invalid audience".
+  const kid = toPublicJwk(crypto.createPublicKey(priv)).kid;
+  const header = b64url(JSON.stringify({ alg: 'ES256', typ: 'JWT', kid }));
+  // `sub`/`sans` are for /1.0/sign OTTs — step-ca's JWK provisioner validates
+  // the CSR CN against {sub} ∪ {sans} and requires the token sans set to equal
+  // the CSR dNSNames exactly (see enroll.ts). Absent = plain management call.
   const payload = b64url(
     JSON.stringify({
       aud: opts.aud,
       exp,
       iat: now - 5, // small skew tolerance for clock drift between containers
       iss: opts.provisionerName ?? 'unm-admin',
-      sub: opts.provisionerName ?? 'unm-admin',
+      sub: opts.sub ?? (opts.provisionerName ?? 'unm-admin'),
+      ...(opts.sans ? { sans: opts.sans } : {}),
       jti: crypto.randomUUID(),
     })
   );
   const signingInput = `${header}.${payload}`;
-  const signature = b64url(crypto.sign('sha256', Buffer.from(signingInput), priv));
+  // Node's crypto.sign returns a DER-encoded ECDSA signature for EC keys, but
+  // JWS ES256 (RFC 7518 §3.4) requires the raw r‖s concatenation (exactly 64
+  // bytes for P-256). step-ca's JWT verifier rejects anything else — convert.
+  const derSig = crypto.sign('sha256', Buffer.from(signingInput), priv);
+  const signature = b64url(priv.asymmetricKeyType === 'ec' ? derToRawEcdsa(derSig) : derSig);
   return { token: `${signingInput}.${signature}`, exp };
+}
+
+/** Converts a DER-encoded ECDSA signature (SEQ{INTEGER r, INTEGER s}) to raw r‖s. */
+function derToRawEcdsa(der: Buffer): Buffer {
+  const ints: Buffer[] = [];
+  let i = 2; // skip SEQUENCE tag + length (short form — always true for P-256)
+  while (i < der.length && der[i] === 0x02) {
+    const len = der[i + 1];
+    ints.push(der.subarray(i + 2, i + 2 + len));
+    i += 2 + len;
+  }
+  if (ints.length !== 2) throw new Error('malformed DER ECDSA signature');
+  // Right-align into 32 bytes. A 33-byte integer is a leading-0x00 sign pad —
+  // drop the FIRST byte, never the last (a naive copy at offset 0 truncates
+  // the low byte and silently corrupts ~75% of signatures).
+  const pad = (b: Buffer): Buffer => {
+    const out = Buffer.alloc(32);
+    if (b.length <= 32) b.copy(out, 32 - b.length);
+    else b.copy(out, 0, b.length - 32);
+    return out;
+  };
+  return Buffer.concat([pad(ints[0]), pad(ints[1])]);
 }
