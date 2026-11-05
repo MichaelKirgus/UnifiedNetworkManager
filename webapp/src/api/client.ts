@@ -2318,6 +2318,57 @@ export interface RepoFileUse {
   usedByName?: string | null;
 }
 
+// --- Certificate Authority (unm-ca / step-ca) types --------------------------
+/** GET /ca/status — CA health + identity. */
+export interface CaStatus {
+  version: string;
+  rootFingerprint: string;
+  rootSubject: string;
+  /** ISO expiry of the root certificate. */
+  rootNotAfter: string;
+  /** ISO expiry of the intermediate (signing) cert, when readable. */
+  intermediateNotAfter?: string | null;
+}
+
+export type CaKeyType = 'ec-p256' | 'ec-p384' | 'rsa-2048' | 'rsa-3072' | 'rsa-4096';
+
+/** POST /ca/enroll — issued EAP-TLS client cert (no key material in the response). */
+export interface CaEnrollResult {
+  serial: string;
+  cn: string;
+  notBefore: string;
+  notAfter: string;
+  /** True when the chain guard shortened the requested validity. */
+  clamped?: boolean;
+  clampReason?: string;
+}
+
+/** One enrolled WiFi (EAP-TLS) client cert (GET /ca/wifi-certs). No key material. */
+export interface WifiClientCert {
+  name: string;
+  cn: string;
+  organization: string;
+  organizationalUnit: string;
+  sans: string[];
+  keyType: CaKeyType;
+  serial: string;
+  issuer: string;
+  notBefore: string;
+  notAfter: string;
+  status: 'issued' | 'revoked';
+  revokedAt?: string | null;
+  createdAt: string;
+}
+
+/** GET /ca/wifi-certs/:serial/download?format=p12 — PKCS#12 install bundle. */
+export interface WifiP12Bundle {
+  format: 'p12';
+  /** Base64-encoded .p12 bytes (leaf + intermediates + private key). */
+  p12Base64: string;
+  /** Random import password — shown to the user for re-entry on import. Returned once. */
+  password: string;
+}
+
 // --- Backup / restore / replication types -----------------------------------
 /** GET /backups/meta — section keys, presets and excluded-table info. */
 export interface BackupMeta {
@@ -4463,6 +4514,59 @@ export const api = {
   // Force a fresh mTLS leaf for one of UNM's own services ('api' | 'mcp').
   renewServiceTls: (subject: 'api' | 'mcp') =>
     apiFetch<{ renewed: boolean; ok: boolean }>('/ca/renew', { method: 'POST', body: JSON.stringify({ subject }) }),
+  // --- Certificate Authority (unm-ca / step-ca) ------------------------------
+  /** CA health + identity — version, root fingerprint/expiry, intermediate expiry. */
+  caStatus: () => apiFetch<{ status: CaStatus }>('/ca/status'),
+  /** Enroll a WiFi (EAP-TLS) client certificate (keygen + sign via the CA). */
+  caEnroll: (body: { name: string; cn?: string; organization?: string; organizationalUnit?: string; sans?: string[]; keyType?: CaKeyType; days?: number }) =>
+    apiFetch<CaEnrollResult>('/ca/enroll', { method: 'POST', body: JSON.stringify(body) }),
+  /** List enrolled WiFi client certs (metadata only — no keys). */
+  caWifiCerts: () => apiFetch<{ certificates: WifiClientCert[] }>('/ca/wifi-certs'),
+  /** Revoke a WiFi client cert by serial (CA-first, then registries). Idempotent. */
+  caRevokeWifi: (serial: string) =>
+    apiFetch<{ serial: string; caStatus: number }>(`/ca/wifi-certs/${encodeURIComponent(serial)}/revoke`, { method: 'POST' }),
+  /** Trigger an intermediate CA renewal now (same key, clamped to root expiry −7d). */
+  caRenewIntermediate: () =>
+    apiFetch<{ renewed: boolean; intermediateNotAfter?: string }>('/ca/renew-intermediate', { method: 'POST' }),
+  /** Download a WiFi client cert bundle + private key as one PEM file. */
+  caWifiDownload: async (serial: string): Promise<Blob> => {
+    const token = getToken();
+    const res = await fetch(`${BASE}/ca/wifi-certs/${encodeURIComponent(serial)}/download`, {
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+    });
+    if (!res.ok) {
+      let message = `API error ${res.status}`;
+      try { const b = await res.json(); if (b?.error) message = b.error; } catch { /* keep generic */ }
+      throw new ApiError(message, res.status);
+    }
+    return res.blob();
+  },
+  /** Download a WiFi client cert as PKCS#12 (.p12) — for Windows/Android/iOS/macOS import. */
+  caWifiDownloadP12: async (serial: string): Promise<WifiP12Bundle> => {
+    const token = getToken();
+    const res = await fetch(`${BASE}/ca/wifi-certs/${encodeURIComponent(serial)}/download?format=p12`, {
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+    });
+    if (!res.ok) {
+      let message = `API error ${res.status}`;
+      try { const b = await res.json(); if (b?.error) message = b.error; } catch { /* keep generic */ }
+      throw new ApiError(message, res.status);
+    }
+    return (await res.json()) as WifiP12Bundle;
+  },
+  /** Download the CA root PEM for client trust stores / RADIUS servers. */
+  caRootBundle: async (): Promise<Blob> => {
+    const token = getToken();
+    const res = await fetch(`${BASE}/ca/root-bundle`, {
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+    });
+    if (!res.ok) {
+      let message = `API error ${res.status}`;
+      try { const b = await res.json(); if (b?.error) message = b.error; } catch { /* keep generic */ }
+      throw new ApiError(message, res.status);
+    }
+    return res.blob();
+  },
   // In-session 2FA re-validation (mint a fresh token without a full re-login).
   revalidateChallenge: () => apiFetch<RevalidateChallenge>('/auth/revalidate/challenge', { method: 'POST' }),
   verifyRevalidateTotp: (body: { challengeToken: string; totpCode: string }) =>
