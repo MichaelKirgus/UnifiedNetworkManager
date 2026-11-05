@@ -7604,6 +7604,192 @@ paths:
         '502':
           description: CA unreachable — revocation NOT applied
 
+  /ca/enroll:
+    post:
+      tags: [Certificate Authority]
+      summary: Enroll a WiFi (EAP-TLS) client certificate
+      description: >-
+        Generates a private key of the requested type, builds an EAP-TLS CSR
+        (SAN + keyUsage digitalSignature + EKU clientAuth/EAP-TLS), signs it via
+        step-ca's /1.0/sign under the unm-admin provisioner and stores the leaf
+        with its ENCRYPTED private key. The validity is clamped to the CA chain
+        expiry minus a 7-day safety margin (clamped/clampReason in the response).
+        Requires permission `ca:manage`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CaEnrollRequest'
+      responses:
+        '201':
+          description: Certificate issued and stored
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CaEnrollResponse'
+        '400':
+          description: Validation error (bad name/RDN/SAN/keyType/days)
+        '401':
+          description: Authentication required
+        '403':
+          description: Missing ca:manage permission
+        '409':
+          description: A certificate with this name already exists
+        '502':
+          description: CA sign request failed
+
+  /ca/wifi-certs:
+    get:
+      tags: [Certificate Authority]
+      summary: List enrolled WiFi (EAP-TLS) client certificates
+      description: >-
+        Metadata for every enrolled WiFi client certificate — the private key is
+        never included here. Requires permission `ca:read`.
+      responses:
+        '200':
+          description: Enrolled WiFi client certificates
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CaWifiCertsResponse'
+        '401':
+          description: Authentication required
+        '403':
+          description: Missing ca:read permission
+
+  /ca/wifi-certs/{serial}/revoke:
+    post:
+      tags: [Certificate Authority]
+      summary: Revoke a WiFi (EAP-TLS) client certificate by serial
+      description: >-
+        CA-first revocation: step-ca marks the serial revoked in its own DB, then
+        UNM mirrors it into both registries. Idempotent — an already-revoked cert
+        returns 200. Requires permission `ca:manage`.
+      parameters:
+        - name: serial
+          in: path
+          required: true
+          schema: { type: string }
+          description: Hex serial number of the certificate (no 0x prefix)
+      responses:
+        '200':
+          description: Revocation applied (CA + registries)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  serial: { type: string }
+                  caStatus: { type: integer, description: "HTTP status returned by the CA's /1.0/revoke endpoint" }
+        '400':
+          description: Invalid serial format
+        '401':
+          description: Authentication required
+        '403':
+          description: Missing ca:manage permission
+        '404':
+          description: No WiFi client certificate with this serial
+        '502':
+          description: CA unreachable — revocation NOT applied
+
+  /ca/wifi-certs/{serial}/download:
+    get:
+      tags: [Certificate Authority]
+      summary: Download a WiFi (EAP-TLS) install bundle (PEM or PKCS#12)
+      description: >-
+        Returns the full install bundle for a supplicant. Default (`format=pem`):
+        certificate chain plus the decrypted PKCS#8 private key as one PEM file.
+        `format=p12`: PKCS#12 (.p12) — what Windows/Android/iOS/macOS import
+        dialogs expect; JSON response with base64-encoded .p12 bytes and a freshly
+        generated random import password (returned once). Revoked certificates are
+        refused (409). Requires permission `ca:manage`.
+      parameters:
+        - name: serial
+          in: path
+          required: true
+          schema: { type: string }
+          description: Hex serial number of the certificate (no 0x prefix)
+        - name: format
+          in: query
+          required: false
+          schema: { type: string, enum: [pem, p12], default: pem }
+          description: Bundle format — `pem` (default) or `p12` (PKCS#12 for Windows/Android/iOS/macOS import)
+      responses:
+        '200':
+          description: Install bundle — PEM file (format=pem) or JSON { p12Base64, password } (format=p12)
+          content:
+            application/x-pem-file:
+              schema: { type: string, format: binary }
+            application/json:
+              schema:
+                type: object
+                properties:
+                  format: { type: string, enum: [p12] }
+                  p12Base64: { type: string, description: Base64-encoded .p12 bytes }
+                  password: { type: string, description: Random import password (returned once) }
+        '400':
+          description: Invalid serial format or unknown format value
+        '401':
+          description: Authentication required
+        '403':
+          description: Missing ca:manage permission
+        '404':
+          description: No WiFi client certificate with this serial
+        '409':
+          description: Certificate is revoked — download disabled
+
+  /ca/root-bundle:
+    get:
+      tags: [Certificate Authority]
+      summary: Download the CA root certificate (PEM)
+      description: >-
+        The UNM CA's self-signed root PEM, for client trust stores and RADIUS/EAP
+        server configuration. Requires permission `ca:read`.
+      responses:
+        '200':
+          description: Root certificate PEM
+          content:
+            application/x-pem-file:
+              schema: { type: string, format: binary }
+        '401':
+          description: Authentication required
+        '403':
+          description: Missing ca:read permission
+        '503':
+          description: Root certificate not available (CA not bootstrapped)
+
+  /ca/renew-intermediate:
+    post:
+      tags: [Certificate Authority]
+      summary: Trigger an intermediate CA renewal now
+      description: >-
+        Drops a trigger file into the shared config volume; the unm-ca entrypoint
+        renews the intermediate with its EXISTING key (subject preserved, CA
+        extensions forced) and clamps the new validity to the root expiry minus 7
+        days so the chain can never break. The route polls for the new expiry and
+        reports it. This is the manual counterpart of the automatic <90-day
+        renewal — use it after a root rekey or to force rotation. Requires
+        permission `ca:manage`.
+      responses:
+        '200':
+          description: Intermediate renewed (new expiry reported)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  renewed: { type: boolean }
+                  intermediateNotAfter: { type: string, format: date-time }
+        '401':
+          description: Authentication required
+        '403':
+          description: Missing ca:manage permission
+        '500':
+          description: Could not write the trigger file
+        '504':
+          description: CA did not report a renewed intermediate within 90s
+
   # ── Actions & Schedules (automation engine) ────────────────────────────────
   /automations:
     get:
@@ -12169,6 +12355,61 @@ components:
       properties:
         serial: { type: string, description: "Hex serial number of the leaf to revoke" }
         reason: { type: integer, nullable: true, description: "Optional CRL revocation reason code (0–10)" }
+
+    CaEnrollRequest:
+      type: object
+      required: [name]
+      properties:
+        name: { type: string, maxLength: 64, pattern: '^[A-Za-z0-9._-]{1,64}$', description: "Stable identity label (unique per enrollment); also the default CN" }
+        cn: { type: string, maxLength: 64, description: "Subject CN override (defaults to name)" }
+        organization: { type: string, maxLength: 64, description: "Subject O RDN (optional)" }
+        organizationalUnit: { type: string, maxLength: 64, description: "Subject OU RDN (optional)" }
+        sans:
+          type: array
+          items: { type: string }
+          description: "Extra SAN dNSNames beyond the CN"
+        keyType: { type: string, enum: [ec-p256, ec-p384, rsa-2048, rsa-3072, rsa-4096], default: ec-p256 }
+        days: { type: integer, minimum: 1, description: "Requested validity in days (default caWifiCertDefaultDays; clamped to caWifiCertMaxDays and the CA chain expiry)" }
+
+    CaEnrollResponse:
+      type: object
+      required: [serial, cn, notBefore, notAfter]
+      properties:
+        serial: { type: string, description: "Hex serial number of the issued leaf" }
+        cn: { type: string, description: "Subject CN (the EAP-TLS identity)" }
+        notBefore: { type: string, format: date-time }
+        notAfter: { type: string, format: date-time }
+        clamped: { type: boolean, description: "True when the chain guard shortened the requested validity" }
+        clampReason: { type: string, description: "Human-readable reason for the clamp (present when clamped)" }
+
+    CaWifiClientCertView:
+      type: object
+      required: [name, cn, keyType, serial, notBefore, notAfter, status, createdAt]
+      properties:
+        name: { type: string, description: "Enrollment label (unique)" }
+        cn: { type: string, description: "Subject CN" }
+        organization: { type: string }
+        organizationalUnit: { type: string }
+        sans:
+          type: array
+          items: { type: string }
+        keyType: { type: string, enum: [ec-p256, ec-p384, rsa-2048, rsa-3072, rsa-4096] }
+        serial: { type: string, description: "Hex serial number (no 0x prefix)" }
+        issuer: { type: string }
+        notBefore: { type: string, format: date-time }
+        notAfter: { type: string, format: date-time }
+        status: { type: string, enum: [issued, revoked] }
+        revokedAt: { type: string, nullable: true, format: date-time }
+        createdAt: { type: string, format: date-time }
+
+    CaWifiCertsResponse:
+      type: object
+      required: [certificates]
+      properties:
+        certificates:
+          type: array
+          items:
+            $ref: '#/components/schemas/CaWifiClientCertView'
 
     BackupMetaResponse:
       type: object
