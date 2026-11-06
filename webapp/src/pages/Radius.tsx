@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Activity, Check, Copy, Download, EyeOff, KeyRound, Loader2, Network, Pencil, Plus, RefreshCw, Trash2 } from 'lucide-react';
+import { Activity, Check, Copy, Download, EyeOff, KeyRound, Loader2, Network, Pencil, Plus, RefreshCw, ShieldOff, Trash2 } from 'lucide-react';
 import { Layout } from '../components/Layout';
 import { DialogShell } from '../components/DialogShell';
 import { DataTable, DataTableColumn } from '../components/DataTable';
@@ -607,18 +607,18 @@ function WifiCertsPanel({ radiusLoaded, onHide }: { radiusLoaded: boolean; onHid
           {
             header: 'Actions',
             key: 'actions',
-            width: 180,
+            width: 96,
             sortable: false,
             filterable: false,
             excludeFromExport: true,
             render: (row: WifiClientCert) =>
               row.status !== 'revoked' ? (
-                <div className="flex items-center justify-end gap-2">
-                  <button type="button" onClick={() => setInstallRow(row)} title="Download for Windows / Android / iOS / macOS (.p12) or PEM bundle" className="inline-flex items-center gap-1 rounded border px-2 py-1 text-[10px] font-medium hover:bg-muted/40">
-                    <Download className="h-3 w-3" /> Download
+                <div className="flex gap-1">
+                  <button type="button" aria-label={`Download certificate ${row.name}`} onClick={() => setInstallRow(row)} title="Download for Windows / Android / iOS / macOS (.p12) or PEM bundle" className="rounded-md p-1.5 text-secondary hover:bg-muted hover:text-foreground">
+                    <Download className="h-4 w-4" />
                   </button>
-                  <button type="button" onClick={() => void revokeWifi(row)} title="Revoke this certificate" className="inline-flex items-center gap-1 rounded border px-2 py-1 text-[10px] font-medium text-danger-fg hover:bg-danger/10">
-                    Revoke
+                  <button type="button" aria-label={`Revoke certificate ${row.name}`} onClick={() => void revokeWifi(row)} title="Revoke this certificate" className="rounded-md p-1.5 text-secondary hover:bg-danger hover:text-danger-fg">
+                    <ShieldOff className="h-4 w-4" />
                   </button>
                 </div>
               ) : null,
@@ -1200,6 +1200,7 @@ function RadiusNasClientsSection() {
   const { mode } = useExecutionMode();
   const [bulkNotice, setBulkNotice] = useState<string | null>(null);
   const [bulkReauth, setBulkReauth] = useState<{ ids: string[]; retry: () => Promise<void> } | null>(null);
+  const [rowError, setRowError] = useState<string | null>(null);
 
   // Same capability gate as the EAP-TLS client-cert section — a 'radius' plugin makes this relevant.
   const pluginsQuery = useQuery({ queryKey: ['plugins'], queryFn: api.plugins, staleTime: 5 * 60_000 });
@@ -1271,16 +1272,16 @@ function RadiusNasClientsSection() {
           {
             header: 'Actions',
             key: 'actions',
-            width: 160,
+            width: 96,
             sortable: false,
             filterable: false,
             excludeFromExport: true,
             render: (row: RadiusNasClient) => (
-              <div className="flex items-center justify-end gap-2">
-                <button type="button" onClick={() => setDialog({ mode: 'edit', row })} title="Edit this NAS client" className="rounded border px-2 py-1 text-[10px] font-medium hover:bg-muted/40">
-                  Edit
+              <div className="flex gap-1">
+                <button type="button" aria-label={`Edit NAS client ${row.name || row.ip}`} onClick={() => setDialog({ mode: 'edit', row })} title="Edit this NAS client" className="rounded-md p-1.5 text-secondary hover:bg-muted hover:text-foreground">
+                  <Pencil className="h-4 w-4" />
                 </button>
-                <RadiusDeleteButton id={row.id} label={`${row.name || row.ip}`} />
+                <RadiusDeleteButton id={row.id} label={`${row.name || row.ip}`} onError={(msg) => setRowError(msg)} />
               </div>
             ),
           },
@@ -1309,6 +1310,13 @@ function RadiusNasClientsSection() {
         credentials — single-value secrets (API key, PSK) are used directly; for multi-field types the password/secret half applies. Changes apply live
         without a restart. A localhost entry with a stable dev secret is always present for testing.
       </p>
+
+      {rowError && (
+        <div className="flex items-start gap-2 rounded-md border border-danger-border bg-danger px-3 py-2 text-xs text-danger-fg">
+          <span>{rowError}</span>
+          <button type="button" onClick={() => setRowError(null)} className="ml-auto shrink-0 font-medium underline-offset-2 hover:underline">Dismiss</button>
+        </div>
+      )}
 
       <DataTable
         columns={clientColumns}
@@ -1367,55 +1375,49 @@ function RadiusNasClientsSection() {
   );
 }
 
-/** Delete with confirm — runs through a system plan (radius.nas-client.delete). */
-function RadiusDeleteButton({ id, label }: { id: string; label: string }) {
+/** Delete with confirm — runs through a system plan (radius.nas-client.delete).
+ *  Icon-only button; failures surface via `onError` (section-level banner) or the reauth dialog. */
+function RadiusDeleteButton({ id, label, onError }: { id: string; label: string; onError?: (msg: string) => void }) {
   const queryClient = useQueryClient();
   const { mode } = useExecutionMode();
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
   const [reauth, setReauth] = useState(false);
 
   async function doDelete() {
     if (mode === 'readonly') return; // Read-Only — safety net.
     setBusy(true);
-    setError(null);
     const attempt = async () => {
       const planId = await createAndExecuteSystemPlan('radius.nas-client.delete', { id }, mode);
       if (mode !== 'plan') {
         await waitForPlan(planId);
         void queryClient.invalidateQueries({ queryKey: ['radiusNasClients'] });
-      } else {
-        setError(null); // Plan saved — the section-level notice covers it.
       }
     };
     try {
       await attempt();
     } catch (err) {
       if (isReauthError(err)) setReauth(true);
-      else setError((err as Error).message);
+      else onError?.((err as Error).message);
     } finally {
       setBusy(false);
     }
   }
 
   return (
-    <span className="inline-flex items-center gap-1.5">
+    <>
       <button
         type="button"
+        aria-label={`Remove NAS client ${label}`}
         onClick={() => {
           if (!window.confirm(`Remove NAS client "${label}"? It will no longer be able to authenticate.`)) return;
           void doDelete();
         }}
         disabled={busy || mode === 'readonly'}
-        title={mode === 'readonly' ? 'Read-only mode — switch to Plan or Execute to make changes' : 'Remove this NAS client'}
-        className="inline-flex items-center gap-1 rounded border px-2 py-1 text-[10px] font-medium text-danger-fg hover:bg-danger/10 disabled:opacity-50"
+        title={mode === 'readonly' ? 'Read-only mode — switch to Plan or Execute to make changes' : mode === 'plan' ? 'Save removal as plan (not executed)' : 'Remove this NAS client'}
+        className="rounded-md p-1.5 text-secondary hover:bg-danger hover:text-danger-fg disabled:opacity-50"
       >
-        {busy ? <Loader2 size={10} className="animate-spin" /> : null}
-        {mode === 'plan' ? 'Save removal as plan' : busy ? 'Removing…' : 'Remove'}
+        {busy ? <Loader2 size={16} className="animate-spin" /> : <Trash2 className="h-4 w-4" />}
       </button>
-      {error && !reauth && (
-        <span className="max-w-[240px] rounded border border-danger-border bg-danger px-2 py-1 text-[10px] text-danger-fg" title={error}>{error}</span>
-      )}
       {reauth && (
         <div onClick={(e) => e.stopPropagation()}>
           <ReauthDialog
@@ -1423,12 +1425,12 @@ function RadiusDeleteButton({ id, label }: { id: string; label: string }) {
             onClose={() => setReauth(false)}
             onSuccess={async () => {
               setReauth(false);
-              try { await doDelete(); } catch { /* error state shown */ }
+              try { await doDelete(); } catch { /* error surfaced via onError */ }
             }}
           />
         </div>
       )}
-    </span>
+    </>
   );
 }
 
@@ -1576,6 +1578,7 @@ function RadiusUserProfilesSection() {
   const { mode } = useExecutionMode();
   const [bulkNotice, setBulkNotice] = useState<string | null>(null);
   const [bulkReauth, setBulkReauth] = useState<{ ids: string[]; retry: () => Promise<void> } | null>(null);
+  const [rowError, setRowError] = useState<string | null>(null);
 
   // Same capability gate as the NAS clients section.
   const pluginsQuery = useQuery({ queryKey: ['plugins'], queryFn: api.plugins, staleTime: 5 * 60_000 });
@@ -1673,16 +1676,16 @@ function RadiusUserProfilesSection() {
           {
             header: 'Actions',
             key: 'actions',
-            width: 160,
+            width: 96,
             sortable: false,
             filterable: false,
             excludeFromExport: true,
             render: (row: RadiusUserProfile) => (
-              <div className="flex items-center justify-end gap-2">
-                <button type="button" onClick={() => setDialog({ mode: 'edit', row })} title="Edit this profile" className="rounded border px-2 py-1 text-[10px] font-medium hover:bg-muted/40">
-                  Edit
+              <div className="flex gap-1">
+                <button type="button" aria-label={`Edit profile ${row.certName || row.name || row.serial.slice(0, 16)}`} onClick={() => setDialog({ mode: 'edit', row })} title="Edit this profile" className="rounded-md p-1.5 text-secondary hover:bg-muted hover:text-foreground">
+                  <Pencil className="h-4 w-4" />
                 </button>
-                <RadiusProfileDeleteButton id={row.id} label={row.certName || row.name || row.serial.slice(0, 16)} />
+                <RadiusProfileDeleteButton id={row.id} label={row.certName || row.name || row.serial.slice(0, 16)} onError={(msg) => setRowError(msg)} />
               </div>
             ),
           },
@@ -1711,6 +1714,13 @@ function RadiusUserProfilesSection() {
         A VLAN ID is sent as Tunnel-Type=IEEE-802 + Tunnel-Medium-Type=IEEE-802 + Tunnel-Private-Group-ID; static IPs and session limits are
         applied to that session only, on top of whatever the NAS would assign otherwise. No profile = plain access.
       </p>
+
+      {rowError && (
+        <div className="flex items-start gap-2 rounded-md border border-danger-border bg-danger px-3 py-2 text-xs text-danger-fg">
+          <span>{rowError}</span>
+          <button type="button" onClick={() => setRowError(null)} className="ml-auto shrink-0 font-medium underline-offset-2 hover:underline">Dismiss</button>
+        </div>
+      )}
 
       <DataTable
         columns={profileColumns}
@@ -1770,17 +1780,17 @@ function RadiusUserProfilesSection() {
 }
 
 /** Delete with confirm — runs through a system plan (radius.profile.delete). */
-function RadiusProfileDeleteButton({ id, label }: { id: string; label: string }) {
+/** Delete with confirm — runs through a system plan (radius.profile.delete).
+ *  Icon-only button; failures surface via `onError` (section-level banner) or the reauth dialog. */
+function RadiusProfileDeleteButton({ id, label, onError }: { id: string; label: string; onError?: (msg: string) => void }) {
   const queryClient = useQueryClient();
   const { mode } = useExecutionMode();
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
   const [reauth, setReauth] = useState(false);
 
   async function doDelete() {
     if (mode === 'readonly') return; // Read-Only — safety net.
     setBusy(true);
-    setError(null);
     const attempt = async () => {
       const planId = await createAndExecuteSystemPlan('radius.profile.delete', { id }, mode);
       if (mode !== 'plan') {
@@ -1792,30 +1802,27 @@ function RadiusProfileDeleteButton({ id, label }: { id: string; label: string })
       await attempt();
     } catch (err) {
       if (isReauthError(err)) setReauth(true);
-      else setError((err as Error).message);
+      else onError?.((err as Error).message);
     } finally {
       setBusy(false);
     }
   }
 
   return (
-    <span className="inline-flex items-center gap-1.5">
+    <>
       <button
         type="button"
+        aria-label={`Remove profile ${label}`}
         onClick={() => {
           if (!window.confirm(`Remove the RADIUS profile for "${label}"? The client will get plain access again.`)) return;
           void doDelete();
         }}
         disabled={busy || mode === 'readonly'}
-        title={mode === 'readonly' ? 'Read-only mode — switch to Plan or Execute to make changes' : 'Remove this profile'}
-        className="inline-flex items-center gap-1 rounded border px-2 py-1 text-[10px] font-medium text-danger-fg hover:bg-danger/10 disabled:opacity-50"
+        title={mode === 'readonly' ? 'Read-only mode — switch to Plan or Execute to make changes' : mode === 'plan' ? 'Save removal as plan (not executed)' : 'Remove this profile'}
+        className="rounded-md p-1.5 text-secondary hover:bg-danger hover:text-danger-fg disabled:opacity-50"
       >
-        {busy ? <Loader2 size={10} className="animate-spin" /> : null}
-        {mode === 'plan' ? 'Save removal as plan' : busy ? 'Removing…' : 'Remove'}
+        {busy ? <Loader2 size={16} className="animate-spin" /> : <Trash2 className="h-4 w-4" />}
       </button>
-      {error && !reauth && (
-        <span className="max-w-[240px] rounded border border-danger-border bg-danger px-2 py-1 text-[10px] text-danger-fg" title={error}>{error}</span>
-      )}
       {reauth && (
         <div onClick={(e) => e.stopPropagation()}>
           <ReauthDialog
@@ -1823,12 +1830,12 @@ function RadiusProfileDeleteButton({ id, label }: { id: string; label: string })
             onClose={() => setReauth(false)}
             onSuccess={async () => {
               setReauth(false);
-              try { await doDelete(); } catch { /* error state shown */ }
+              try { await doDelete(); } catch { /* error surfaced via onError */ }
             }}
           />
         </div>
       )}
-    </span>
+    </>
   );
 }
 
