@@ -2386,6 +2386,31 @@ export interface RadiusNasClient {
   createdAt: string;
 }
 
+/** GET /radius/status — self-monitoring state of the unm-radius sidecar. */
+export interface RadiusStatus {
+  enabled: boolean;
+  /** Latest probe outcome; null until the monitor worker has run once. */
+  probe: {
+    lastProbeAt: string | null;
+    /** ok = well-formed reply (Access-Reject is expected for the EAP-only site). */
+    outcome: 'ok' | 'bad-auth' | 'timeout' | null;
+    packetType: string | null;
+    latencyMs: number | null;
+    detail: string | null;
+  } | null;
+  last24h: { rejects: number; accepts: number; lastAttemptAt: string | null };
+}
+
+/** One row of the RADIUS authentication log (GET /radius/auth-log). */
+export interface RadiusAuthLogRow {
+  id: number;
+  username: string;
+  result: 'accept' | 'reject' | string | null;
+  calledStationId?: string | null;
+  callingStationId?: string | null;
+  authdate: string;
+}
+
 /** Per-user RADIUS reply profile — keyed by client cert serial (EAP-TLS). */
 export interface RadiusUserProfile {
   id: string;
@@ -4607,6 +4632,18 @@ export const api = {
   /** Remove a profile. */
   radiusUserProfileDelete: (id: string) =>
     apiFetch<void>(`/radius/user-profiles/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+  // --- RADIUS self-monitoring + auth log ------------------------------------
+  /** Latest probe outcome of the sidecar (+ 24h accept/reject counters). */
+  radiusStatus: () => apiFetch<RadiusStatus>('/radius/status'),
+  /** Recent auth attempts (accept AND reject) — the failed-login audit trail. */
+  radiusAuthLog: (params?: { result?: 'reject' | 'accept'; search?: string; limit?: number }) => {
+    const q = new URLSearchParams();
+    if (params?.result) q.set('result', params.result);
+    if (params?.search) q.set('search', params.search);
+    if (params?.limit) q.set('limit', String(params.limit));
+    const qs = q.toString();
+    return apiFetch<RadiusAuthLogRow[]>(`/radius/auth-log${qs ? `?${qs}` : ''}`);
+  },
   /** Download a WiFi client cert bundle + private key as one PEM file. */
   caWifiDownload: async (serial: string): Promise<Blob> => {
     const token = getToken();

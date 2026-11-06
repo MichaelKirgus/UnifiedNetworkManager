@@ -1,11 +1,11 @@
 import { useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Check, Copy, Download, History, KeyRound, Network, Plus, RefreshCw, ShieldAlert, Wifi } from 'lucide-react';
+import { Activity, Check, Copy, Download, History, KeyRound, Network, Plus, RefreshCw, ShieldAlert, Wifi } from 'lucide-react';
 import { Layout } from '../components/Layout';
 import { DataTable, DataTableColumn } from '../components/DataTable';
 import { DeviceChip } from '../components/DeviceChip';
 import { DialogShell } from '../components/DialogShell';
-import { api, CaStatus, CaKeyType, CertificateRow, CertificateHistoryRow, RadiusNasClient, RadiusUserProfile, Secret, WifiClientCert } from '../api/client';
+import { api, CaStatus, CaKeyType, CertificateRow, CertificateHistoryRow, RadiusAuthLogRow, RadiusNasClient, RadiusStatus, RadiusUserProfile, Secret, WifiClientCert } from '../api/client';
 import { can } from '../auth/permissions';
 import { useTimeFormat } from '../utils/time';
 
@@ -826,6 +826,152 @@ function SummaryStrip({ rows }: { rows: CertificateRow[] }) {
 }
 
 /**
+ * RADIUS self-monitoring + auth log. The radiusMonitor worker probes the
+ * sidecar every minute with UNM's internal probe client (any well-formed reply
+ * = alive — the EAP-only site answers the PAP test with Access-Reject) and
+ * audits radpostauth for failed logins, which it turns into notifications.
+ * This section shows the latest probe outcome + recent auth attempts (the
+ * unsuccessful-login audit trail). Read-only; requires radius:read.
+ */
+function RadiusStatusSection() {
+  const canRead = can('radius:read');
+  const { formatDateTime } = useTimeFormat();
+
+  // Same capability gate as the other RADIUS sections.
+  const pluginsQuery = useQuery({ queryKey: ['plugins'], queryFn: api.plugins, staleTime: 5 * 60_000 });
+  const radiusLoaded = (pluginsQuery.data ?? []).some((p) => (p.capabilities ?? []).includes(RADIUS_CAPABILITY));
+
+  const statusQuery = useQuery({
+    queryKey: ['radiusStatus'],
+    queryFn: () => api.radiusStatus(),
+    enabled: canRead,
+    refetchInterval: 30_000,
+  });
+
+  const [filter, setFilter] = useState<'all' | 'reject' | 'accept'>('all');
+  const logQuery = useQuery({
+    queryKey: ['radiusAuthLog', filter],
+    queryFn: () => api.radiusAuthLog(filter === 'all' ? { limit: 50 } : { result: filter, limit: 50 }),
+    enabled: canRead && radiusLoaded,
+    refetchInterval: 30_000,
+  });
+
+  if (!canRead) return null;
+  if (!radiusLoaded) return null;
+
+  const status: RadiusStatus | undefined = statusQuery.data;
+  const probe = status?.probe ?? null;
+  const logRows: RadiusAuthLogRow[] = logQuery.data ?? [];
+
+  // Probe chip — ok is the expected steady state (Access-Reject IS healthy).
+  const probeChip = !probe ? (
+    <span className="rounded bg-muted px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-secondary">no data yet</span>
+  ) : probe.outcome === 'ok' ? (
+    <span className="inline-flex items-center gap-1 rounded bg-success/15 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-success-fg" title={probe.detail ?? undefined}>
+      <Activity className="h-3 w-3" /> {probe.packetType} · {probe.latencyMs != null ? `${probe.latencyMs}ms` : ''}
+    </span>
+  ) : (
+    <span className="inline-flex items-center gap-1 rounded bg-danger/15 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-danger-fg" title={probe.detail ?? undefined}>
+      {probe.outcome === 'bad-auth' ? 'secret out of sync' : 'unreachable'}
+    </span>
+  );
+
+  return (
+    <section className="mb-6 space-y-3">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <h2 className="inline-flex items-center gap-2 text-sm font-semibold">
+          <Activity className="h-4 w-4" /> RADIUS server status
+        </h2>
+        {probe && probe.lastProbeAt && (
+          <span className="text-[10px] text-faint" title={probe.detail ?? undefined}>
+            last probe {formatDateTime(probe.lastProbeAt)}
+          </span>
+        )}
+      </div>
+
+      <div className="flex flex-wrap items-center gap-2 rounded-lg border p-3">
+        {probeChip}
+        {!status?.enabled && (
+          <span className="rounded bg-warning/15 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-warning-fg">RADIUS disabled</span>
+        )}
+        <span className="text-[11px] text-secondary" title={probe?.detail ?? undefined}>
+          {status?.enabled === false
+            ? 'The RADIUS server is switched off — no probe runs while it stays off.'
+            : !probe
+              ? 'Waiting for the first self-monitoring probe (runs every 60s).'
+              : probe.outcome === 'ok'
+                ? `Sidecar alive — answered with ${probe.packetType}. The EAP-only site rejects the plain test request, which is exactly what proves it is up and loaded its config.`
+                : probe.detail ?? 'Probe failing.'}
+        </span>
+        <span className="ml-auto flex items-center gap-2 text-[10px] text-faint">
+          last 24h: <span className="font-medium text-secondary">{status?.last24h.accepts ?? 0} accepted</span> ·{' '}
+          <span className={status && status.last24h.rejects > 0 ? 'font-medium text-warning-fg' : 'text-secondary'}>{status?.last24h.rejects ?? 0} rejected</span>
+        </span>
+      </div>
+
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <p className="max-w-3xl text-[11px] text-faint">
+          Authentication log — one row per completed EAP-TLS attempt (accept and reject). Failed logins raise a notification; rows are kept for the
+          configured retention period.
+        </p>
+        <div className="flex items-center gap-1">
+          {(['all', 'reject', 'accept'] as const).map((f) => (
+            <button
+              key={f}
+              type="button"
+              onClick={() => setFilter(f)}
+              className={`rounded-md px-2 py-1 text-[10px] font-medium ${filter === f ? 'bg-primary text-white' : 'border hover:bg-muted/40'}`}
+            >
+              {f}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      <div className="overflow-x-auto rounded-lg border">
+        <table className="w-full text-left text-xs">
+          <thead className="bg-background/60 text-[10px] uppercase tracking-wide text-faint">
+            <tr>
+              <th className="px-2 py-1.5 font-medium">Time</th>
+              <th className="px-2 py-1.5 font-medium">User (cert CN)</th>
+              <th className="px-2 py-1.5 font-medium">Result</th>
+              <th className="px-2 py-1.5 font-medium">NAS / client</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-border">
+            {logRows.length === 0 && (
+              <tr>
+                <td colSpan={4} className="px-2 py-3 text-faint">
+                  No auth attempts logged yet{filter !== 'all' ? ` for this filter` : ''}.
+                </td>
+              </tr>
+            )}
+            {logRows.map((row) => (
+              <tr key={row.id}>
+                <td className="whitespace-nowrap px-2 py-1.5 text-secondary">{formatDateTime(row.authdate)}</td>
+                <td className="px-2 py-1.5 font-medium">{row.username}</td>
+                <td className="px-2 py-1.5">
+                  {row.result === 'reject' ? (
+                    <span className="rounded bg-danger/15 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-danger-fg">rejected</span>
+                  ) : row.result === 'accept' ? (
+                    <span className="rounded bg-success/15 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-success-fg">accepted</span>
+                  ) : (
+                    <span className="text-faint">{row.result ?? '—'}</span>
+                  )}
+                </td>
+                <td className="whitespace-nowrap px-2 py-1.5 font-mono text-[10px] text-secondary">
+                  {[row.calledStationId, row.callingStationId].filter(Boolean).join(' / ') || '—'}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  );
+}
+
+/**
  * RADIUS NAS clients — the allowlist of access points / gateways permitted to
  * send RADIUS requests to the unm-radius sidecar. Each row is an IP plus a
  * reference to a secret from the installed credentials providers (same pattern
@@ -1429,6 +1575,7 @@ export default function Certificates() {
   return (
     <Layout title="Certificates">
       <WifiCertsSection />
+      <RadiusStatusSection />
       <RadiusNasClientsSection />
       <RadiusUserProfilesSection />
       {certsQuery.isLoading && <p className="text-sm text-muted-foreground">Loading certificates…</p>}

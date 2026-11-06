@@ -59,6 +59,7 @@ import { startInactiveUsersWorker } from './workers/inactiveUsers';
 import { startReplicationSchedulerWorker } from './workers/replication';
 import { startAutoBackupWorker } from './workers/autoBackup';
 import { startAutomationEvaluatorWorker } from './workers/automations';
+import { startRadiusMonitorWorker } from './workers/radiusMonitor';
 import { LEADER_KEYS, runAsLeader } from './workers/leader';
 import { initWorker } from './workers/stats';
 import { attachConsoleProxy } from './consoleProxy';
@@ -430,6 +431,11 @@ async function main(): Promise<void> {
     // Actions & Schedules: evaluates automation rule triggers and fires their
     // actions (leader-gated; gated by the automationsEnabled setting).
     void runAsLeader(LEADER_KEYS.automationEvaluator, 'automationEvaluator', () => startAutomationEvaluatorWorker()).then((stop) => workerStops.push(stop));
+
+    // RADIUS self-monitoring: probes the unm-radius sidecar with the internal
+    // probe client + audits radpostauth for failed logins (leader-gated; no-op
+    // while radiusEnabled is off).
+    void runAsLeader(LEADER_KEYS.radiusMonitor, 'radiusMonitor', () => startRadiusMonitorWorker()).then((stop) => workerStops.push(stop));
 
     // CA config rendering: the API owns ca.json (rendered from global settings)
     // on the shared volume; the CA service SIGHUPs itself when it changes.

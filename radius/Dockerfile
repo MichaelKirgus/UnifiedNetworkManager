@@ -16,8 +16,8 @@
 #                 the revoked_serials table, see api/src/radius/).
 #
 # Accounting writes go straight to UNM's Postgres through rlm_sql (postgresql
-# dialect); the API applies the stock schema.sql at boot, so this image needs no
-# DB tooling of its own.
+# dialect). The post-auth audit log (radius-auth-log.sh) inserts radpostauth rows
+# via psql as the least-privilege unm_radius role — hence postgresql-client.
 
 FROM debian:trixie-slim
 
@@ -29,6 +29,15 @@ ENV DEBIAN_FRONTEND=noninteractive \
 RUN apt-get update && apt-get install -y --no-install-recommends \
         freeradius \
         freeradius-postgresql \
+        # radclient — a real RADIUS client for testing the auth channel from
+        # inside the sidecar (e.g. `radclient -x 127.0.0.1:1812 test user pass`
+        # with the rendered localhost dev secret). Small, and invaluable when
+        # debugging EAP-TLS or the post-auth logging without a real supplicant.
+        freeradius-utils \
+        # psql — used by radius-auth-log.sh (post-auth audit inserts into
+        # radpostauth as the unm_radius role; rlm_sql has no post-auth binding
+        # on FreeRADIUS 3.2.x, so a small exec script does it instead).
+        postgresql-client \
         openssl \
         procps \
     && rm -rf /var/lib/apt/lists/*

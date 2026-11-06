@@ -200,6 +200,11 @@ services:
       # server's own /tls/renew endpoint (gated by its debug key).
       - MCP_DEBUG_KEY=${MCP_DEBUG_KEY:-dev-mcp-debug-key}
       - UNM_MCP_URL=http://mcp:3901
+      # RADIUS self-monitoring target (radiusMonitor worker): the host:port of
+      # the unm-radius sidecar as seen from THIS container. Defaults match the
+      # compose service name + standard auth port; override for custom layouts.
+      - UNM_RADIUS_HOST=${UNM_RADIUS_HOST:-unm-radius}
+      - UNM_RADIUS_PORT=${UNM_RADIUS_PORT:-1812}
       # Optional macvlan default gateway (scripts/docker-entrypoint.sh) — empty = no-op.
       - UNM_DEFAULT_GATEWAY=${UNM_DEFAULT_GATEWAY:-}
       # Privilege drop (scripts/docker-entrypoint.sh): the app runs as uid/gid 1001

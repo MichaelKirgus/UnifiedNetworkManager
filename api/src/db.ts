@@ -415,6 +415,61 @@ export async function initDb(): Promise<void> {
   await pool.query(`CREATE INDEX IF NOT EXISTS radacct_bulk_close ON radacct (NASIPAddress, AcctStartTime) WHERE AcctStopTime IS NULL`);
   await pool.query(`CREATE INDEX IF NOT EXISTS radacct_start_user_idx ON radacct (AcctStartTime, UserName)`);
 
+  // RADIUS authentication log — one row per completed auth attempt (ACCEPT and
+  // REJECT), written by rlm_sql's postauth_query from the EAP-TLS site's
+  // post-auth section. This is the audit trail for unsuccessful logins: the
+  // radiusMonitor worker turns fresh rejects into notifications (deduped per
+  // username) and prunes rows past the retention window. Stock column names
+  // from freeradius's mods-config/sql/main/postgresql/schema.sql; `reply` holds
+  // %{reply:Packet-Type} ("Access-Accept" / "Access-Reject").
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS radpostauth (
+      id                bigserial PRIMARY KEY,
+      username          text NOT NULL,
+      pass              text,
+      reply             text,
+      CalledStationId   text,
+      CallingStationId  text,
+      authdate          timestamp with time zone NOT NULL default now(),
+      Class             text
+    )`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS radpostauth_username_idx ON radpostauth (username)`);
+  // The worker scans for NEW rows each cycle — this is the hot path.
+  await pool.query(`CREATE INDEX IF NOT EXISTS radpostauth_authdate_idx ON radpostauth (id, authdate)`);
+
+  // UNM's own RADIUS probe client (self-monitoring). FreeRADIUS silently DROPS
+  // requests from source IPs not in clients.conf ("Ignoring request … from
+  // unknown client", no reply — verified), so a liveness check is only possible
+  // from an allowlisted address. The API renders ONE internal entry for its own
+  // container IP with this generated secret; the radiusMonitor worker sends a
+  // test Access-Request and treats ANY well-formed response (the EAP-only site
+  // answers PAP with Access-Reject) as proof that radiusd is up, listening on
+  // 1812, has loaded its config, and recognizes UNM's source IP. The secret is
+  // machine-generated at bootstrap — like radius_db_credentials it lives in the
+  // DB (never user-supplied), rendered into clients.conf by the API only.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS radius_probe_client (
+      id TEXT PRIMARY KEY,
+      ip TEXT NOT NULL,
+      secret TEXT NOT NULL,
+      "createdAt" TEXT NOT NULL
+    )`);
+
+  // RADIUS self-monitoring state — ONE row (id='unm'), owned by the
+  // radiusMonitor worker. Holds the latest probe outcome (for GET /radius/status
+  // + the webapp) and the radpostauth scan cursor (lastAuthLogId), so a restart
+  // never re-notifies old rejects or misses new ones.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS radius_monitor_state (
+      id TEXT PRIMARY KEY,
+      "lastProbeAt" TEXT,
+      "probeOutcome" TEXT,
+      "packetType" TEXT,
+      "latencyMs" INTEGER,
+      "detail" TEXT,
+      "lastAuthLogId" BIGINT DEFAULT 0
+    )`);
+
   // Revoked WiFi client cert serials — the per-auth revocation list FreeRADIUS
   // checks via the exec module (radius-user-profile.sh). step-ca has no CRL endpoint,
   // so this table is the enforcement point: both revoke routes insert here after
@@ -524,12 +579,17 @@ export async function initDb(): Promise<void> {
     // created by older versions too. GRANT is idempotent — re-running it is a no-op.
     if ((await pool.query(`SELECT 1 FROM pg_roles WHERE rolname = $1`, [role])).rows.length > 0) {
       try {
-        // Exactly what rlm_sql (accounting) + radius-user-profile.sh need — and
-        // nothing else. No access to secrets/users/devices/… is possible.
+        // Exactly what rlm_sql (accounting + post-auth logging) +
+        // radius-user-profile.sh need — and nothing else. No access to
+        // secrets/users/devices/… is possible.
         await pool.query(`GRANT INSERT, UPDATE ON radacct TO ${role}`);
         await pool.query(`GRANT SELECT ON revoked_serials TO ${role}`);
         await pool.query(`GRANT SELECT ON radius_user_profiles TO ${role}`);
         await pool.query(`GRANT USAGE ON SEQUENCE radacct_RadAcctId_seq TO ${role}`);
+        // Post-auth logging (unsuccessful-login audit trail): rlm_sql's
+        // postauth_query INSERTs one row per completed auth attempt.
+        await pool.query(`GRANT INSERT ON radpostauth TO ${role}`);
+        await pool.query(`GRANT USAGE ON SEQUENCE radpostauth_id_seq TO ${role}`);
       } catch (err) {
         console.warn(
           `[api] could not refresh grants for Postgres role "${role}" (${(err as Error).message}) — ` +
@@ -537,6 +597,29 @@ export async function initDb(): Promise<void> {
         );
       }
     }
+  }
+
+  // UNM's internal RADIUS probe client (self-monitoring, see radius_probe_client
+  // DDL above). The row is created ONCE with a machine-generated secret and never
+  // rotated — it is not user data. The `ip` column records the source address the
+  // renderer used at bootstrap; the renderer re-detects its own IP on every
+  // render (container IPs can change across recreations) and updates this row,
+  // so the rendered clients.conf entry always matches where the probe actually
+  // comes from. Best-effort: a failure here only disables self-monitoring — it
+  // must never block DB init or RADIUS itself.
+  try {
+    const [probeRes] = await Promise.all([pool.query(`SELECT 1 FROM radius_probe_client WHERE id = $1`, ['unm'])]);
+    if (probeRes.rows.length === 0) {
+      const secret = crypto.randomBytes(24).toString('hex');
+      // The API's own IP is not knowable from SQL — the renderer fills it in on
+      // its first render. A placeholder keeps the NOT NULL constraint happy.
+      await pool.query(
+        `INSERT INTO radius_probe_client (id, ip, secret, "createdAt") VALUES ($1, $2, $3, $4)`,
+        ['unm', '0.0.0.0', secret, new Date().toISOString()]
+      );
+    }
+  } catch (err) {
+    console.warn(`[api] could not bootstrap the RADIUS probe client row: ${(err as Error).message}`);
   }
 
   // Migration for DBs created before the columns were quoted: unquoted DDL

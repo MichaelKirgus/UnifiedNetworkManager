@@ -701,6 +701,19 @@ export const SETTING_DESCRIPTORS: SettingDescriptor[] = [
     help:
       'Write RADIUS accounting (start/interim/stop) to the radacct table in UNM\'s Postgres via FreeRADIUS\' SQL module. Powers the WiFi session view on the Certificates page.',
   },
+  {
+    key: 'radiusAuthLogRetentionDays',
+    label: 'RADIUS auth log retention (days)',
+    type: 'integer',
+    category: 'RADIUS',
+    unit: 'days',
+    min: 1,
+    max: 3650,
+    default: 30,
+    envVar: 'UNM_RADIUS_AUTH_LOG_RETENTION_DAYS',
+    help:
+      "How long rows in the RADIUS authentication log (radpostauth — one row per completed EAP-TLS auth attempt, accept and reject) are kept. The radiusMonitor worker prunes older rows; failed logins also raise notifications while they happen.",
+  },
 
   // Fleet rollout safety net (network.create plans).
   {

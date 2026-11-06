@@ -1,4 +1,4 @@
-import { pgTable, text, boolean, integer, bigint, doublePrecision, jsonb, index, uniqueIndex, primaryKey } from 'drizzle-orm/pg-core';
+import { pgTable, text, boolean, integer, bigint, doublePrecision, jsonb, timestamp, index, uniqueIndex, primaryKey } from 'drizzle-orm/pg-core';
 import { sql } from 'drizzle-orm';
 
 export const users = pgTable('users', {
@@ -281,6 +281,41 @@ export const radiusNasClients = pgTable(
     secretId: text('secretId'),
     createdAt: text('createdAt').notNull(),
   }
+);
+
+// UNM's internal RADIUS probe client (self-monitoring). One row, bootstrapped
+// by initDb with a machine-generated secret; the renderer re-detects the API
+// container IP on every render and updates `ip` so the rendered clients.conf
+// entry always matches the probe's actual source address. See radius_probe_client
+// DDL in db.ts and api/src/radius/probe.ts for how it is used.
+export const radiusProbeClient = pgTable('radius_probe_client', {
+  id: text('id').primaryKey(),
+  ip: text('ip').notNull(),
+  secret: text('secret').notNull(),
+  createdAt: text('createdAt').notNull(),
+});
+
+// RADIUS authentication log — one row per completed auth attempt (ACCEPT and
+// REJECT), written by rlm_sql's postauth_query from the EAP-TLS site. This is
+// the unsuccessful-login audit trail; the radiusMonitor worker turns fresh
+// rejects into notifications and prunes rows past the retention window.
+// `id` is a bigserial owned by FreeRADIUS (the API never inserts here).
+export const radpostauth = pgTable(
+  'radpostauth',
+  {
+    id: bigint('id', { mode: 'number' }).primaryKey(),
+    username: text('username').notNull(),
+    pass: text('pass'),
+    // "Access-Accept" or "Access-Reject" (%{reply:Packet-Type}).
+    reply: text('reply'),
+    // NOTE: the raw DDL (and rlm_sql's INSERT) use UNQUOTED identifiers, so
+    // Postgres folded them to lowercase — drizzle must reference the folded
+    // names or every query fails with "column does not exist".
+    calledStationId: text('calledstationid'),
+    callingStationId: text('callingstationid'),
+    authdate: timestamp('authdate', { withTimezone: true }).notNull(),
+  },
+  (t) => [index('radpostauth_username_idx').on(t.username), index('radpostauth_authdate_idx').on(t.id, t.authdate)]
 );
 
 // Per-user, per-device session-credential defaults (SSH console / SFTP). Lets a

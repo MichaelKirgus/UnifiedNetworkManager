@@ -1,8 +1,10 @@
 import { Router, Request, Response } from 'express';
 import { v4 as uuidv4 } from 'uuid';
-import { asc, eq, inArray } from 'drizzle-orm';
-import { db } from '../db';
+import { and, asc, desc, eq, ilike, inArray, like, ne } from 'drizzle-orm';
+import { db, pool } from '../db';
 import * as schema from '../db/schema';
+import { PROBE_USERNAME } from '../radius/probe';
+import { getEffectiveSettingValue } from '../systemSettings';
 import { requireAuth, requirePermission } from '../auth/middleware';
 
 /**
@@ -438,4 +440,94 @@ router.delete(
     res.status(204).send();
   }
 );
+
+/**
+ * RADIUS self-monitoring + auth log (unsuccessful-login audit trail).
+ *
+ *   GET /radius/status     -> latest probe outcome of the radiusMonitor worker
+ *                             (+ whether RADIUS is enabled) — no secret material.
+ *   GET /radius/auth-log   -> recent radpostauth rows (one per completed auth
+ *                             attempt, accept AND reject), newest first, with
+ *                             optional result/username filters + limit.
+ *
+ * Both are read-only and require `radius:read`. The probe client's shared
+ * secret is NEVER exposed here — only the outcome of probing with it.
+ */
+
+// GET /radius/status — latest self-monitoring state (probe outcome + counters).
+router.get(
+  '/radius/status',
+  requireAuth,
+  requirePermission('radius:read'),
+  async (_req: Request, res: Response) => {
+    const [stateRes] = await Promise.all([pool.query(`SELECT * FROM radius_monitor_state WHERE id = $1`, ['unm'])]);
+    const s = stateRes.rows[0];
+
+    // Recent auth-attempt counters for the last 24h (cheap — indexed by id/authdate).
+    // The probe's own test requests are excluded: they are UNM's heartbeat, not
+    // real login attempts (they would otherwise count as a reject every minute).
+    const counts = await pool.query(
+      `SELECT count(*) FILTER (WHERE reply LIKE 'Access-Reject%') AS rejects,
+              count(*) FILTER (WHERE reply LIKE 'Access-Accept%') AS accepts,
+              max(authdate) AS lastAttemptAt
+       FROM radpostauth
+       WHERE authdate > now() - interval '24 hours' AND username <> $1`,
+      [PROBE_USERNAME]
+    );
+    const c = counts.rows[0];
+
+    const enabled = String(await getEffectiveSettingValue('radiusEnabled')) !== 'false';
+    res.status(200).json({
+      enabled,
+      probe: s
+        ? {
+            lastProbeAt: s['lastProbeAt'] as string | null,
+            outcome: (s['probeOutcome'] as string | null) ?? null, // ok | bad-auth | timeout
+            packetType: (s['packetType'] as string | null) ?? null,
+            latencyMs: s['latencyMs'] != null ? Number(s['latencyMs']) : null,
+            detail: (s['detail'] as string | null) ?? null,
+          }
+        : null, // worker has not run yet (or RADIUS was just enabled)
+      last24h: {
+        rejects: Number(c?.rejects ?? 0),
+        accepts: Number(c?.accepts ?? 0),
+        lastAttemptAt: c?.lastAttemptAt ? new Date(c.lastAttemptAt).toISOString() : null,
+      },
+    });
+  }
+);
+
+// GET /radius/auth-log — recent auth attempts (the failed-login audit trail).
+router.get(
+  '/radius/auth-log',
+  requireAuth,
+  requirePermission('radius:read'),
+  async (req: Request, res: Response) => {
+    const limit = Math.min(500, Math.max(1, Number(req.query.limit ?? 100) || 100));
+    const result = String(req.query.result ?? ''); // '' | 'reject' | 'accept'
+    const search = typeof req.query.search === 'string' ? req.query.search.trim() : '';
+
+    const clauses: Array<ReturnType<typeof like>> = [ne(schema.radpostauth.username, PROBE_USERNAME)]; // heartbeat rows are not logins
+    if (result === 'reject') clauses.push(like(schema.radpostauth.reply, 'Access-Reject%'));
+    else if (result === 'accept') clauses.push(like(schema.radpostauth.reply, 'Access-Accept%'));
+    if (search) clauses.push(ilike(schema.radpostauth.username, `%${search}%`));
+
+    const rows = await db.query.radpostauth.findMany({
+      where: clauses.length > 0 ? and(...clauses) : undefined,
+      orderBy: [desc(schema.radpostauth.id)],
+      limit,
+    });
+    res.status(200).json(
+      rows.map((r) => ({
+        id: Number(r.id),
+        username: r.username,
+        result: (r.reply ?? '').startsWith('Access-Reject') ? 'reject' : (r.reply ?? '').startsWith('Access-Accept') ? 'accept' : (r.reply ?? null),
+        calledStationId: r.calledStationId,
+        callingStationId: r.callingStationId,
+        authdate: r.authdate instanceof Date ? r.authdate.toISOString() : String(r.authdate),
+      }))
+    );
+  }
+);
+
 export default router;

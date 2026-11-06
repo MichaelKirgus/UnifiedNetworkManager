@@ -99,6 +99,11 @@ services:
       - UNM_CORS_ORIGINS=${UNM_CORS_ORIGINS:-}
       - UNM_TRUST_PROXY=${UNM_TRUST_PROXY:-}
       - UNM_CLIENT_IP_HEADER=${UNM_CLIENT_IP_HEADER:-}
+      # RADIUS self-monitoring target (radiusMonitor worker): the host:port of
+      # the unm-radius sidecar as seen from THIS container. Defaults match the
+      # compose service name + standard auth port; override for custom layouts.
+      - UNM_RADIUS_HOST=${UNM_RADIUS_HOST:-unm-radius}
+      - UNM_RADIUS_PORT=${UNM_RADIUS_PORT:-1812}
       - LOG_RETENTION_DAYS=${LOG_RETENTION_DAYS:-7}
       - FILE_REPO_PLUGIN_ID=${FILE_REPO_PLUGIN_ID:-00000000-0000-4000-8000-000000000011}
       - FILE_REPO_PATH=${FILE_REPO_PATH:-/data/file-repo}

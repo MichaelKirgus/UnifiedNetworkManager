@@ -18,6 +18,8 @@
 #        site-eaptls.conf   -> raddb/sites-enabled/eap-tls    (REPLACES `default`)
 #        radius-user-profile.sh -> raddb/radius-user-profile.sh (per-auth: revocation
 #                                                       check + per-user reply attributes)
+#        radius-auth-log.sh     -> raddb/radius-auth-log.sh      (post-auth audit:
+#                                                       one radpostauth row per attempt)
 #      Files are COPIED (not symlinked) so freerad's ownership stays correct no
 #      matter who wrote the source. A fresh volume still boots: missing files are
 #      skipped and the package defaults remain in place.
@@ -90,6 +92,7 @@ sync_config() {
   # A stale script from an older render is removed so it can't shadow the new one.
   rm -f "$RADD/revoked-check.sh"
   copy_if radius-user-profile.sh "$RADD/radius-user-profile.sh"
+  copy_if radius-auth-log.sh     "$RADD/radius-auth-log.sh"
 
   # The EAP-TLS site REPLACES the stock `default` site (which would also accept
   # PAP/CHAP/EAP-MD5). inner-tunnel stays as-is — it only runs inside an outer
@@ -114,6 +117,7 @@ sync_config() {
   chmod_if "$RADD/mods-enabled/sql-unm.conf" 640
   chmod_if "$RADD/sites-enabled/eap-tls" 644
   chmod_if "$RADD/radius-user-profile.sh" 750
+  chmod_if "$RADD/radius-auth-log.sh" 750
 }
 
 # --- 3. Start radiusd ----------------------------------------------------------
@@ -148,7 +152,7 @@ trap shutdown TERM INT
 last_sig=""
 signature() {
   local out="" f
-  for f in clients.conf eap.conf exec-unm.conf sql-unm.conf radius-user-profile.sh site-eaptls.conf; do
+  for f in clients.conf eap.conf exec-unm.conf sql-unm.conf radius-user-profile.sh radius-auth-log.sh site-eaptls.conf; do
     [ -f "$CFG/$f" ] && out="$out $(stat -c %Y "$CFG/$f")"
   done
   [ -f "$CA_CFG/root_ca.crt" ] && out="$out $(stat -c %Y "$CA_CFG/root_ca.crt")"

@@ -51,6 +51,7 @@ export const LEADER_KEYS = {
   autoBackup: 9017,
   cve: 9018,
   automationEvaluator: 9019,
+  radiusMonitor: 9020,
 } as const;
 
 /**

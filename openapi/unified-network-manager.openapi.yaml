@@ -8010,6 +8010,64 @@ paths:
         '404':
           description: Profile not found
 
+  /radius/status:
+    get:
+      tags: [Radius]
+      summary: RADIUS self-monitoring status (latest probe + 24h counters)
+      description: >-
+        Latest outcome of the radiusMonitor worker's liveness probe against the
+        unm-radius sidecar, plus accept/reject counters for the last 24 hours.
+        The probe sends a test Access-Request from UNM's internal probe client;
+        any well-formed reply (the EAP-only site answers with Access-Reject)
+        proves the server is up and loaded its config. Probe-heartbeat rows are
+        excluded from the counters. Requires permission `radius:read`.
+      responses:
+        '200':
+          description: Current self-monitoring state
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RadiusStatus'
+        '401':
+          description: Authentication required
+        '403':
+          description: Missing radius:read permission
+
+  /radius/auth-log:
+    get:
+      tags: [Radius]
+      summary: RADIUS authentication log (accept + reject attempts)
+      description: >-
+        Recent rows from radpostauth — one per completed EAP-TLS auth attempt,
+        ACCEPT and REJECT alike. This is the unsuccessful-login audit trail;
+        failed logins also raise notifications. The probe's own heartbeat rows
+        are excluded. Requires permission `radius:read`.
+      parameters:
+        - in: query
+          name: result
+          schema: { type: string, enum: [reject, accept] }
+          description: "Filter by outcome (default: all)"
+        - in: query
+          name: search
+          schema: { type: string }
+          description: "Substring match on the username"
+        - in: query
+          name: limit
+          schema: { type: integer, minimum: 1, maximum: 500, default: 100 }
+      responses:
+        '200':
+          description: Auth attempts, newest first
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/RadiusAuthLogRow'
+        '401':
+          description: Authentication required
+        '403':
+          description: Missing radius:read permission
+
   # ── Actions & Schedules (automation engine) ────────────────────────────────
   /automations:
     get:
@@ -12590,6 +12648,41 @@ components:
         sessionTimeoutSec: { type: integer, nullable: true, minimum: 60, description: "null clears the limit" }
         idleTimeoutSec: { type: integer, nullable: true, minimum: 60, description: "null clears the limit" }
         replyMessage: { type: string, nullable: true, maxLength: 256, description: "null clears the note" }
+
+    RadiusStatus:
+      type: object
+      required: [enabled]
+      properties:
+        enabled: { type: boolean, description: "Whether the RADIUS server is switched on (radiusEnabled setting)" }
+        probe:
+          type: object
+          nullable: true
+          description: "Latest self-monitoring probe; null until the monitor worker has run once"
+          required: [lastProbeAt]
+          properties:
+            lastProbeAt: { type: string, format: date-time, nullable: true }
+            outcome: { type: string, enum: [ok, bad-auth, timeout], nullable: true, description: "ok = well-formed reply (Access-Reject is expected for the EAP-only site); bad-auth = shared secret out of sync; timeout = no reply" }
+            packetType: { type: string, nullable: true, description: "\"Access-Accept\" / \"Access-Reject\"" }
+            latencyMs: { type: integer, nullable: true }
+            detail: { type: string, nullable: true }
+        last24h:
+          type: object
+          required: [rejects, accepts]
+          properties:
+            rejects: { type: integer, description: "Rejected auth attempts in the last 24h (probe heartbeat excluded)" }
+            accepts: { type: integer, description: "Accepted auth attempts in the last 24h" }
+            lastAttemptAt: { type: string, format: date-time, nullable: true }
+
+    RadiusAuthLogRow:
+      type: object
+      required: [id, username, authdate]
+      properties:
+        id: { type: integer }
+        username: { type: string, description: "The EAP-TLS client's User-Name (the cert CN)" }
+        result: { type: string, enum: [accept, reject], nullable: true }
+        calledStationId: { type: string, nullable: true, description: "NAS identifier (Called-Station-Id)" }
+        callingStationId: { type: string, nullable: true, description: "Client MAC / Calling-Station-Id" }
+        authdate: { type: string, format: date-time }
 
     CaStatus:
       type: object
