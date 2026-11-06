@@ -1,3 +1,4 @@
+import * as crypto from 'crypto';
 import { Pool } from 'pg';
 import { drizzle } from 'drizzle-orm/node-postgres';
 import bcrypt from 'bcryptjs';
@@ -371,6 +372,173 @@ export async function initDb(): Promise<void> {
       "createdAt" TEXT NOT NULL
     )`);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_wifi_client_certs_name ON wifi_client_certs (name)`);
+
+  // RADIUS accounting (unm-radius sidecar — FreeRADIUS rlm_sql writes here).
+  // Stock schema from freeradius's mods-config/sql/main/postgresql/schema.sql;
+  // the API owns it so a fresh Postgres works before the first auth.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS radacct (
+      RadAcctId               bigserial PRIMARY KEY,
+      AcctSessionId           text NOT NULL,
+      AcctUniqueId            text NOT NULL UNIQUE,
+      UserName                text,
+      Realm                   text,
+      NASIPAddress            inet NOT NULL,
+      NASPortId               text,
+      NASPortType             text,
+      AcctStartTime           timestamp with time zone,
+      AcctUpdateTime          timestamp with time zone,
+      AcctStopTime            timestamp with time zone,
+      AcctInterval            bigint,
+      AcctSessionTime         bigint,
+      AcctAuthentic           text,
+      ConnectInfo_start       text,
+      ConnectInfo_stop        text,
+      AcctInputOctets         bigint,
+      AcctOutputOctets        bigint,
+      CalledStationId         text,
+      CallingStationId        text,
+      AcctTerminateCause      text,
+      ServiceType             text,
+      FramedProtocol          text,
+      FramedIPAddress         inet,
+      FramedIPv6Address       inet,
+      FramedIPv6Prefix        inet,
+      FramedInterfaceId       text,
+      DelegatedIPv6Prefix     inet,
+      Class                   text
+    )`);
+  // Stock indexes. PG ≥ 9.5 supports IF NOT EXISTS on CREATE INDEX (we run 16),
+  // so these are idempotent without exception handling — a re-run over an existing
+  // index is a no-op, not a "relation already exists" error.
+  await pool.query(`CREATE INDEX IF NOT EXISTS radacct_active_session_idx ON radacct (AcctUniqueId) WHERE AcctStopTime IS NULL`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS radacct_bulk_close ON radacct (NASIPAddress, AcctStartTime) WHERE AcctStopTime IS NULL`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS radacct_start_user_idx ON radacct (AcctStartTime, UserName)`);
+
+  // Revoked WiFi client cert serials — the per-auth revocation list FreeRADIUS
+  // checks via the exec module (radius-user-profile.sh). step-ca has no CRL endpoint,
+  // so this table is the enforcement point: both revoke routes insert here after
+  // a successful CA revocation. Serials are lowercase hex (no 0x prefix) — the
+  // same format FreeRADIUS puts in TLS-Client-Cert-Serial and step-ca reports.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS revoked_serials (
+      serial TEXT PRIMARY KEY,
+      subject TEXT NOT NULL DEFAULT '',
+      "revokedAt" TEXT NOT NULL
+    )`);
+
+  // RADIUS NAS clients (unm-radius sidecar). The shared secret is a reference to
+  // secrets.id — never plaintext here; the renderer resolves + decrypts it via
+  // the owning provider at render time (same pattern as device_plugins.secretId).
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS radius_nas_clients (
+      id TEXT PRIMARY KEY,
+      name TEXT,
+      ip TEXT NOT NULL UNIQUE,
+      "secretId" TEXT,
+      "createdAt" TEXT NOT NULL
+    )`);
+
+  // Per-user RADIUS reply profiles (VLAN, static IP, session limits) keyed by
+  // client cert serial — see schema.radiusUserProfiles. The exec script reads
+  // this at auth time and prints the set fields as reply attributes.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS radius_user_profiles (
+      id TEXT PRIMARY KEY,
+      serial TEXT NOT NULL UNIQUE,
+      name TEXT,
+      "vlanId" INTEGER,
+      "framedIp" TEXT,
+      "framedIpv6" TEXT,
+      "sessionTimeoutSec" INTEGER,
+      "idleTimeoutSec" INTEGER,
+      "replyMessage" TEXT,
+      "createdAt" TEXT NOT NULL
+    )`);
+
+  // Least-privilege Postgres role for the unm-radius sidecar. The rendered
+  // sql-unm.conf + radius-user-profile.sh must NOT carry the API's own credentials —
+  // a compromised radius container would otherwise read/write every table in
+  // the appliance DB (secrets ciphertext, users, …). This role can only write
+  // accounting rows and read the revocation list. The password is generated
+  // once here and persisted; the renderer reads it back at render time
+  // (radiusConfig.ts → getRadiusDbCredentials), which falls back to DATABASE_URL
+  // when no row exists — i.e. exactly what happens on managed Postgres where
+  // the `unm` user cannot CREATE ROLE (best-effort, see below).
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS radius_db_credentials (
+      id TEXT PRIMARY KEY,
+      username TEXT NOT NULL,
+      password TEXT NOT NULL,
+      "createdAt" TEXT NOT NULL
+    )`);
+  {
+    const role = 'unm_radius';
+    // Self-healing bootstrap: skip only when BOTH the credential row and the
+    // Postgres role exist (the normal restart case — we are the only writer of
+    // this password). Any other combination is repaired here: no role → create
+    // it; role without row (e.g. created manually on a managed DB) → adopt it;
+    // row without role (dropped externally / partial failure) → recreate +
+    // re-seed the row. A failed bootstrap leaves no usable pair, and the
+    // renderer then falls back to DATABASE_URL (getRadiusDbCredentials).
+    const [rowRes, roleRes] = await Promise.all([
+      pool.query(`SELECT 1 FROM radius_db_credentials WHERE id = $1`, [role]),
+      pool.query(`SELECT 1 FROM pg_roles WHERE rolname = $1`, [role])
+    ]);
+    if (rowRes.rows.length === 0 || roleRes.rows.length === 0) {
+      try {
+        const pw = crypto.randomBytes(32).toString('hex');
+        if (roleRes.rows.length > 0) {
+          // Role exists but no credential row — e.g. created manually by an admin
+          // on a managed DB. Take it over: set the password we will render.
+          await pool.query(`ALTER ROLE ${role} WITH LOGIN PASSWORD '${pw.replace(/'/g, "''")}'`);
+        } else {
+          await pool.query(
+            `CREATE ROLE ${role} LOGIN PASSWORD '${pw.replace(/'/g, "''")}' NOINHERIT NOSUPERUSER NOCREATEDB NOREPLICATION`
+          );
+        }
+        if (rowRes.rows.length > 0) {
+          await pool.query(
+            `UPDATE radius_db_credentials SET password = $2, username = $3 WHERE id = $1`,
+            [role, pw, role]
+          );
+        } else {
+          await pool.query(
+            `INSERT INTO radius_db_credentials (id, username, password, "createdAt") VALUES ($1, $2, $3, $4)`,
+            [role, role, pw, new Date().toISOString()]
+          );
+        }
+      } catch (err) {
+        // Managed Postgres (RDS, Hetzner Cloud, …): the `unm` user usually has no
+        // CREATE ROLE privilege. Not fatal — RADIUS then runs with the API's own
+        // credentials (renderer fallback). Documented in README.md ("Postgres").
+        console.warn(
+          `[api] could not create least-privilege Postgres role "${role}" for the ` +
+          `RADIUS sidecar (${(err as Error).message}) — RADIUS will use the API's own DB credentials. ` +
+          `To restore isolation, create the role manually (see README.md → Postgres).`
+        );
+      }
+    }
+    // Idempotent grants on EVERY boot (not just first creation): an upgrade that
+    // adds a table the sidecar needs (e.g. radius_user_profiles) must reach roles
+    // created by older versions too. GRANT is idempotent — re-running it is a no-op.
+    if ((await pool.query(`SELECT 1 FROM pg_roles WHERE rolname = $1`, [role])).rows.length > 0) {
+      try {
+        // Exactly what rlm_sql (accounting) + radius-user-profile.sh need — and
+        // nothing else. No access to secrets/users/devices/… is possible.
+        await pool.query(`GRANT INSERT, UPDATE ON radacct TO ${role}`);
+        await pool.query(`GRANT SELECT ON revoked_serials TO ${role}`);
+        await pool.query(`GRANT SELECT ON radius_user_profiles TO ${role}`);
+        await pool.query(`GRANT USAGE ON SEQUENCE radacct_RadAcctId_seq TO ${role}`);
+      } catch (err) {
+        console.warn(
+          `[api] could not refresh grants for Postgres role "${role}" (${(err as Error).message}) — ` +
+          `RADIUS may lack access to new tables until an admin re-runs the GRANTs manually.`
+        );
+      }
+    }
+  }
+
   // Migration for DBs created before the columns were quoted: unquoted DDL
   // folded them to lowercase, which broke drizzle's quoted queries.
   await pool.query(`DO $$ BEGIN

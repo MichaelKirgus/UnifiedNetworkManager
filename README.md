@@ -150,6 +150,24 @@ Tear down with `docker compose down` (add `-v` to also remove the Postgres volum
 
 **Postgres is not published to the host** — api/mcp reach it over the internal compose network only. If you need psql-from-host, add a loopback-only mapping (`"127.0.0.1:5432:5432"`) rather than `"5432:5432"`. Note that `POSTGRES_USER/PASSWORD/DB` are applied when the data volume is first initialized; to rotate credentials on an existing deployment, run `ALTER USER <user> PASSWORD '<new>';` inside Postgres and set the same value in `.env`.
 
+#### RADIUS sidecar — least-privilege database role (managed Postgres)
+
+The optional **unm-radius** service (FreeRADIUS for WiFi EAP-TLS + native accounting into Postgres) connects to the appliance DB with a dedicated, least-privilege role `unm_radius` — it can only write accounting rows (`radacct`) and read the revocation list (`revoked_serials`). The API creates this role at boot and stores its generated password in the `radius_db_credentials` table; the rendered FreeRADIUS config never carries the API's own credentials.
+
+On **managed Postgres** (RDS, Hetzner Cloud, …) the `POSTGRES_USER` usually has no `CREATE ROLE` privilege. That is not fatal: the API logs a warning and RADIUS falls back to the API's own DB credentials until you create the role manually — as a privileged account of your database provider:
+
+```sql
+CREATE ROLE unm_radius LOGIN PASSWORD '<strong-password>' NOINHERIT NOSUPERUSER NOCREATEDB NOREPLICATION;
+GRANT INSERT, UPDATE ON radacct TO unm_radius;
+GRANT SELECT ON revoked_serials TO unm_radius;
+GRANT SELECT ON radius_user_profiles TO unm_radius;
+GRANT USAGE ON SEQUENCE radacct_RadAcctId_seq TO unm_radius;
+```
+
+(The API also attempts to (re-)apply these grants on every start, so upgrades that add tables pick up existing roles automatically; if your `unm` user lacks GRANT rights too, run them manually as shown above — the API logs a warning when it cannot.)
+
+The API picks the role up on its next start: it adopts any pre-existing `unm_radius` role (the password you set there can be a placeholder — the API generates its own, stores it in `radius_db_credentials`, and renders that into the FreeRADIUS config). The grants above are idempotent; re-running them after an upgrade is harmless.
+
 ### First login
 
 On a fresh deployment the API seeds an **admin** user (username `admin`, password `admin`). Sign in at <http://localhost:8080> — no `.env` file is needed, every variable has a sane default.

@@ -675,6 +675,33 @@ export const SETTING_DESCRIPTORS: SettingDescriptor[] = [
       "Hard cap for WiFi (EAP-TLS) client certificate validity — step-ca enforces it per-provisioner, so requests above this are clamped down. Raise it to issue long-lived certificates (e.g. 10 years); the CA chain expiry still limits what can actually be issued.",
   },
 
+  // RADIUS / WiFi EAP-TLS (the unm-radius sidecar — FreeRADIUS, see api/src/radius/).
+  // These knobs are rendered into the raddb files on the shared volume by
+  // writeRadiusConfig() and hot-applied via SIGHUP; revocation is enforced per-auth
+  // against the revoked_serials table (step-ca has no CRL endpoint).
+  {
+    key: 'radiusEnabled',
+    label: 'RADIUS server enabled',
+    type: 'boolean',
+    category: 'RADIUS',
+    default: true,
+    envVar: 'UNM_RADIUS_ENABLED',
+    onChange: () => require('./radius/radiusConfig').writeRadiusConfig(),
+    help:
+      'Master switch for the unm-radius sidecar (FreeRADIUS EAP-TLS). When off, no config is rendered and the service should not be started. WiFi clients authenticate with certificates issued by UNM\'s own CA.',
+  },
+  {
+    key: 'radiusAccountingEnabled',
+    label: 'RADIUS accounting enabled',
+    type: 'boolean',
+    category: 'RADIUS',
+    default: true,
+    envVar: 'UNM_RADIUS_ACCOUNTING_ENABLED',
+    onChange: () => require('./radius/radiusConfig').writeRadiusConfig(),
+    help:
+      'Write RADIUS accounting (start/interim/stop) to the radacct table in UNM\'s Postgres via FreeRADIUS\' SQL module. Powers the WiFi session view on the Certificates page.',
+  },
+
   // Fleet rollout safety net (network.create plans).
   {
     key: 'rolloutOverlapMode',

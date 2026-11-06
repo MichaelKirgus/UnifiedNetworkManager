@@ -7790,6 +7790,226 @@ paths:
         '504':
           description: CA did not report a renewed intermediate within 90s
 
+  # ── RADIUS server (unm-radius sidecar — FreeRADIUS EAP-TLS) ────────────────
+  /radius/nas-clients:
+    get:
+      tags: [Radius]
+      summary: List RADIUS NAS clients
+      description: >-
+        The allowlist of NAS devices (access points / gateways) permitted to send
+        RADIUS requests to the unm-radius sidecar. Each row references a secret by
+        id — only metadata (label + type) is returned, never the value. Requires
+        permission `radius:read`.
+      responses:
+        '200':
+          description: NAS client list (ordered by IP)
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/RadiusNasClient'
+        '401':
+          description: Authentication required
+        '403':
+          description: Missing radius:read permission
+    post:
+      tags: [Radius]
+      summary: Add a RADIUS NAS client
+      description: >-
+        Adds one NAS client. `ip` must be a valid IPv4/IPv6 literal and is unique;
+        `secretId` references an existing secret (the shared secret) — 404 when the
+        referenced credentials do not exist, 409 on a duplicate IP. The change
+        re-renders the raddb files so it hot-applies via SIGHUP. Requires permission
+        `radius:write`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RadiusNasClientCreateRequest'
+      responses:
+        '201':
+          description: NAS client created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RadiusNasClient'
+        '400':
+          description: Invalid payload (bad IP or secretId)
+        '401':
+          description: Authentication required
+        '403':
+          description: Missing radius:write permission
+        '404':
+          description: Referenced credentials not found
+        '409':
+          description: A NAS client with this IP already exists
+
+  /radius/nas-clients/{id}:
+    patch:
+      tags: [Radius]
+      summary: Update a RADIUS NAS client (name, ip and/or secretId)
+      description: >-
+        Only the provided fields change. `secretId` may be set to null to clear the
+        credential; a new IP must stay unique (409 on collision). The change re-renders
+        the raddb files so it hot-applies via SIGHUP. Requires permission `radius:write`.
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RadiusNasClientUpdateRequest'
+      responses:
+        '200':
+          description: Updated NAS client
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RadiusNasClient'
+        '400':
+          description: No updatable fields provided or a field is invalid
+        '401':
+          description: Authentication required
+        '403':
+          description: Missing radius:write permission
+        '404':
+          description: NAS client not found, or referenced credentials not found
+        '409':
+          description: A NAS client with this IP already exists
+    delete:
+      tags: [Radius]
+      summary: Remove a RADIUS NAS client
+      description: >-
+        Deletes the row and re-renders the raddb files so the change hot-applies via
+        SIGHUP. Requires permission `radius:write`.
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        '204':
+          description: NAS client deleted
+        '401':
+          description: Authentication required
+        '403':
+          description: Missing radius:write permission
+        '404':
+          description: NAS client not found
+
+  /radius/user-profiles:
+    get:
+      tags: [Radius]
+      summary: List per-user RADIUS reply profiles
+      description: >-
+        Per-client (per WiFi EAP-TLS certificate) RADIUS reply attributes — VLAN
+        assignment, static IP and session limits. Keyed by client cert serial;
+        the matching wifi_client_certs name is included as metadata. Requires
+        permission `radius:read`.
+      responses:
+        '200':
+          description: Profile list (ordered by serial)
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/RadiusUserProfile'
+        '401':
+          description: Authentication required
+        '403':
+          description: Missing radius:read permission
+    post:
+      tags: [Radius]
+      summary: Add a per-user RADIUS reply profile
+      description: >-
+        Adds one profile for a client cert serial (lowercase hex, no 0x prefix —
+        the same value FreeRADIUS puts in TLS-Client-Cert-Serial). All attribute
+        fields are optional; an empty profile means plain access. The change
+        re-renders the raddb files so it hot-applies via SIGHUP. Requires permission
+        `radius:write`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RadiusUserProfileCreateRequest'
+      responses:
+        '201':
+          description: Profile created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RadiusUserProfile'
+        '400':
+          description: Invalid payload (bad serial or attribute field)
+        '401':
+          description: Authentication required
+        '403':
+          description: Missing radius:write permission
+        '409':
+          description: A profile for this certificate already exists
+
+  /radius/user-profiles/{id}:
+    patch:
+      tags: [Radius]
+      summary: Update a per-user RADIUS reply profile
+      description: >-
+        Only the provided fields change; null clears a field. The change re-renders
+        the raddb files so it hot-applies via SIGHUP. Requires permission `radius:write`.
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RadiusUserProfileUpdateRequest'
+      responses:
+        '200':
+          description: Updated profile
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RadiusUserProfile'
+        '400':
+          description: No updatable fields provided or a field is invalid
+        '401':
+          description: Authentication required
+        '403':
+          description: Missing radius:write permission
+        '404':
+          description: Profile not found
+    delete:
+      tags: [Radius]
+      summary: Remove a per-user RADIUS reply profile
+      description: >-
+        Deletes the row and re-renders the raddb files so the change hot-applies via
+        SIGHUP. Requires permission `radius:write`.
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        '204':
+          description: Profile deleted
+        '401':
+          description: Authentication required
+        '403':
+          description: Missing radius:write permission
+        '404':
+          description: Profile not found
+
   # ── Actions & Schedules (automation engine) ────────────────────────────────
   /automations:
     get:
@@ -12303,6 +12523,73 @@ components:
       properties:
         setting:
           $ref: '#/components/schemas/SettingView'
+
+    RadiusNasClient:
+      type: object
+      required: [id, ip, createdAt]
+      properties:
+        id: { type: string }
+        name: { type: string, nullable: true, description: "Display name (e.g. office-ap-01)" }
+        ip: { type: string, description: "IPv4 or IPv6 literal of the NAS device" }
+        secretId: { type: string, nullable: true, description: "Reference to secrets.id holding the shared secret; null = not configured" }
+        secretLabel: { type: string, nullable: true, description: "Display label of the referenced secret (metadata only)" }
+        secretType: { type: string, nullable: true, description: "The secret's type (e.g. apiKeyNoSecret, tunnelPsk)" }
+        createdAt: { type: string }
+
+    RadiusNasClientCreateRequest:
+      type: object
+      required: [ip]
+      properties:
+        name: { type: string, nullable: true, description: "Optional display name" }
+        ip: { type: string, description: "IPv4 or IPv6 literal (unique)" }
+        secretId: { type: string, nullable: true, description: "Reference to an existing secret holding the shared secret" }
+
+    RadiusNasClientUpdateRequest:
+      type: object
+      properties:
+        name: { type: string, nullable: true, description: "New display name (empty/null clears it)" }
+        ip: { type: string, description: "New IPv4 or IPv6 literal (must stay unique)" }
+        secretId: { type: string, nullable: true, description: "New secret reference; null clears the credential" }
+
+    RadiusUserProfile:
+      type: object
+      required: [id, serial, createdAt]
+      properties:
+        id: { type: string }
+        serial: { type: string, description: "Client cert serial (lowercase hex, no 0x prefix) — unique" }
+        name: { type: string, nullable: true, description: "Display label (usually the cert's name); informational only" }
+        certName: { type: string, nullable: true, description: "Name of the matching wifi_client_certs row (metadata only)" }
+        vlanId: { type: integer, nullable: true, minimum: 1, maximum: 4094, description: "VLAN for the session — sent as Tunnel-Type=IEEE-802 + Tunnel-Medium-Type=IEEE-802 + Tunnel-Private-Group-ID" }
+        framedIp: { type: string, nullable: true, description: "Static IPv4 for the session (Framed-IP-Address)" }
+        framedIpv6: { type: string, nullable: true, description: "Static IPv6 for the session (Framed-IPv6-Address)" }
+        sessionTimeoutSec: { type: integer, nullable: true, minimum: 60, description: "Force re-auth after N seconds (Session-Timeout + Termination-Action=RESTART)" }
+        idleTimeoutSec: { type: integer, nullable: true, minimum: 60, description: "Drop the session after N seconds of inactivity (Idle-Timeout)" }
+        replyMessage: { type: string, nullable: true, maxLength: 256, description: "Human note on accept/reject (Reply-Message) — cheap debugging aid" }
+        createdAt: { type: string }
+
+    RadiusUserProfileCreateRequest:
+      type: object
+      required: [serial]
+      properties:
+        serial: { type: string, pattern: '^[0-9a-fA-F]{2,64}$', description: "Client cert serial (lowercase hex, no 0x prefix) — unique" }
+        name: { type: string, nullable: true, description: "Optional display label" }
+        vlanId: { type: integer, nullable: true, minimum: 1, maximum: 4094 }
+        framedIp: { type: string, nullable: true, description: "IPv4 or IPv6 literal" }
+        framedIpv6: { type: string, nullable: true, description: "IPv4 or IPv6 literal" }
+        sessionTimeoutSec: { type: integer, nullable: true, minimum: 60 }
+        idleTimeoutSec: { type: integer, nullable: true, minimum: 60 }
+        replyMessage: { type: string, nullable: true, maxLength: 256 }
+
+    RadiusUserProfileUpdateRequest:
+      type: object
+      properties:
+        name: { type: string, nullable: true, description: "New display label (empty/null clears it)" }
+        vlanId: { type: integer, nullable: true, minimum: 1, maximum: 4094, description: "null clears the VLAN assignment" }
+        framedIp: { type: string, nullable: true, description: "New static IPv4; null clears it" }
+        framedIpv6: { type: string, nullable: true, description: "New static IPv6; null clears it" }
+        sessionTimeoutSec: { type: integer, nullable: true, minimum: 60, description: "null clears the limit" }
+        idleTimeoutSec: { type: integer, nullable: true, minimum: 60, description: "null clears the limit" }
+        replyMessage: { type: string, nullable: true, maxLength: 256, description: "null clears the note" }
 
     CaStatus:
       type: object

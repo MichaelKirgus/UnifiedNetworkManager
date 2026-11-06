@@ -1,7 +1,7 @@
 import { Router, Response } from 'express';
 import * as fs from 'fs';
 import * as crypto from 'crypto';
-import { db } from '../db';
+import { db, pool } from '../db';
 import { caCertificates, wifiClientCerts } from '../db/schema';
 import { eq } from 'drizzle-orm';
 import { requireAuth, requirePermission } from '../auth/middleware';
@@ -37,6 +37,25 @@ import { registerLeaf } from '../ca/registry';
  */
 
 const ROOT_PEM_PATH = '/data/ca/root_ca.crt';
+
+/**
+ * Mirrors a successful CA revocation into revoked_serials — the per-auth
+ * enforcement list FreeRADIUS checks (radius-user-profile.sh, see api/src/radius/).
+ * step-ca has no CRL endpoint, so without this row a revoked WiFi client cert
+ * would keep authenticating until it expires. Best-effort: a failure here logs
+ * but never fails the revocation itself (the CA is already authoritative).
+ */
+async function recordRevokedSerial(serial: string, subject = ''): Promise<void> {
+  try {
+    await pool.query(
+      `INSERT INTO revoked_serials (serial, subject, "revokedAt") VALUES ($1, $2, $3)
+       ON CONFLICT (serial) DO UPDATE SET subject = EXCLUDED.subject`,
+      [serial.toLowerCase(), subject, new Date().toISOString()]
+    );
+  } catch (err) {
+    console.warn(`[ca] failed to record revoked serial ${serial} in revoked_serials:`, (err as Error).message);
+  }
+}
 
 const router = Router();
 
@@ -104,6 +123,10 @@ router.post(
         await db.update(caCertificates).set({ status: 'revoked', revokedAt: new Date().toISOString() }).where(eq(caCertificates.id, row.id));
       }
     }
+
+    // 3. Per-auth enforcement for WiFi EAP-TLS clients (FreeRADIUS revocation check).
+    const subject = rows[0]?.subject ?? '';
+    await recordRevokedSerial(serial, subject);
 
     res.status(200).json({ serial, caStatus: caResult.status, caResponse: caResult.body });
   }
@@ -343,6 +366,10 @@ router.post(
         await db.update(caCertificates).set({ status: 'revoked', revokedAt: now }).where(eq(caCertificates.id, row.id));
       }
     }
+
+    // Per-auth enforcement: FreeRADIUS rejects this serial on the next EAP-TLS auth.
+    const subject = rows[0] ? `CN=${rows[0].cn}` : '';
+    await recordRevokedSerial(serial, subject);
 
     res.status(200).json({ serial, caStatus: caResult.status });
   }

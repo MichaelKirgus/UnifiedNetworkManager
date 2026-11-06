@@ -2369,6 +2369,46 @@ export interface WifiP12Bundle {
   password: string;
 }
 
+// --- RADIUS server (unm-radius sidecar — FreeRADIUS EAP-TLS) -----------------
+/** One NAS client allowed to send RADIUS requests (GET /radius/nas-clients).
+ *  The shared secret is a reference to the secrets table — only metadata is
+ *  returned, never the value. */
+export interface RadiusNasClient {
+  id: string;
+  name?: string | null;
+  ip: string;
+  /** Reference to secrets.id holding the shared secret; null = not configured. */
+  secretId?: string | null;
+  /** Display label of the referenced secret (metadata only). */
+  secretLabel?: string | null;
+  /** The secret's type (e.g. apiKeyNoSecret, tunnelPsk) for the picker UI. */
+  secretType?: string | null;
+  createdAt: string;
+}
+
+/** Per-user RADIUS reply profile — keyed by client cert serial (EAP-TLS). */
+export interface RadiusUserProfile {
+  id: string;
+  /** Client cert serial (lowercase hex, no 0x prefix) — unique. */
+  serial: string;
+  name?: string | null;
+  /** Name of the matching wifi_client_certs row (metadata only). */
+  certName?: string | null;
+  /** VLAN for the session (Tunnel-Private-Group-ID + IEEE-802 tunnel pair). */
+  vlanId?: number | null;
+  /** Static IPv4 for the session (Framed-IP-Address). */
+  framedIp?: string | null;
+  /** Static IPv6 for the session (Framed-IPv6-Address). */
+  framedIpv6?: string | null;
+  /** Force re-auth after N seconds. */
+  sessionTimeoutSec?: number | null;
+  /** Drop the session after N seconds of inactivity. */
+  idleTimeoutSec?: number | null;
+  /** Human note on accept/reject (Reply-Message). */
+  replyMessage?: string | null;
+  createdAt: string;
+}
+
 // --- Backup / restore / replication types -----------------------------------
 /** GET /backups/meta — section keys, presets and excluded-table info. */
 export interface BackupMeta {
@@ -4528,6 +4568,45 @@ export const api = {
   /** Trigger an intermediate CA renewal now (same key, clamped to root expiry −7d). */
   caRenewIntermediate: () =>
     apiFetch<{ renewed: boolean; intermediateNotAfter?: string }>('/ca/renew-intermediate', { method: 'POST' }),
+  // --- RADIUS NAS clients (unm-radius sidecar) -------------------------------
+  /** List NAS clients allowed to send RADIUS requests (+ resolved secret metadata). */
+  radiusNasClients: () => apiFetch<RadiusNasClient[]>('/radius/nas-clients'),
+  /** Add a NAS client. `secretId` references an existing secret (the shared secret). */
+  radiusNasClientCreate: (body: { name?: string | null; ip: string; secretId?: string | null }) =>
+    apiFetch<RadiusNasClient>('/radius/nas-clients', { method: 'POST', body: JSON.stringify(body) }),
+  /** Update a NAS client's name / ip and/or its secret reference (null clears it). */
+  radiusNasClientUpdate: (id: string, body: { name?: string | null; ip?: string; secretId?: string | null }) =>
+    apiFetch<RadiusNasClient>(`/radius/nas-clients/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify(body) }),
+  /** Remove a NAS client. */
+  radiusNasClientDelete: (id: string) =>
+    apiFetch<void>(`/radius/nas-clients/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+  // --- RADIUS per-user reply profiles (VLAN / static IP / session limits) ----
+  /** List per-user RADIUS reply profiles (+ resolved cert name). */
+  radiusUserProfiles: () => apiFetch<RadiusUserProfile[]>('/radius/user-profiles'),
+  /** Add a profile for one client cert serial. All attribute fields optional. */
+  radiusUserProfileCreate: (body: {
+    serial: string;
+    name?: string | null;
+    vlanId?: number | null;
+    framedIp?: string | null;
+    framedIpv6?: string | null;
+    sessionTimeoutSec?: number | null;
+    idleTimeoutSec?: number | null;
+    replyMessage?: string | null;
+  }) => apiFetch<RadiusUserProfile>('/radius/user-profiles', { method: 'POST', body: JSON.stringify(body) }),
+  /** Update a profile's fields (null clears a field). */
+  radiusUserProfileUpdate: (id: string, body: {
+    name?: string | null;
+    vlanId?: number | null;
+    framedIp?: string | null;
+    framedIpv6?: string | null;
+    sessionTimeoutSec?: number | null;
+    idleTimeoutSec?: number | null;
+    replyMessage?: string | null;
+  }) => apiFetch<RadiusUserProfile>(`/radius/user-profiles/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify(body) }),
+  /** Remove a profile. */
+  radiusUserProfileDelete: (id: string) =>
+    apiFetch<void>(`/radius/user-profiles/${encodeURIComponent(id)}`, { method: 'DELETE' }),
   /** Download a WiFi client cert bundle + private key as one PEM file. */
   caWifiDownload: async (serial: string): Promise<Blob> => {
     const token = getToken();

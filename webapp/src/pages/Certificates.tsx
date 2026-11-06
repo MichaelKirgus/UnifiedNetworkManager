@@ -1,11 +1,11 @@
 import { useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Check, Copy, Download, History, KeyRound, RefreshCw, ShieldAlert, Wifi } from 'lucide-react';
+import { Check, Copy, Download, History, KeyRound, Network, Plus, RefreshCw, ShieldAlert, Wifi } from 'lucide-react';
 import { Layout } from '../components/Layout';
 import { DataTable, DataTableColumn } from '../components/DataTable';
 import { DeviceChip } from '../components/DeviceChip';
 import { DialogShell } from '../components/DialogShell';
-import { api, CaStatus, CaKeyType, CertificateHistoryRow, CertificateRow, WifiClientCert } from '../api/client';
+import { api, CaStatus, CaKeyType, CertificateRow, CertificateHistoryRow, RadiusNasClient, RadiusUserProfile, Secret, WifiClientCert } from '../api/client';
 import { can } from '../auth/permissions';
 import { useTimeFormat } from '../utils/time';
 
@@ -825,6 +825,494 @@ function SummaryStrip({ rows }: { rows: CertificateRow[] }) {
   );
 }
 
+/**
+ * RADIUS NAS clients — the allowlist of access points / gateways permitted to
+ * send RADIUS requests to the unm-radius sidecar. Each row is an IP plus a
+ * reference to a secret from the installed credentials providers (same pattern
+ * as device plugin assignments) — no plaintext secrets in this table, and the
+ * rendered raddb file resolves + decrypts them at render time.
+ *
+ * VISIBILITY: hidden entirely until either a RADIUS server plugin is loaded
+ * (capability 'radius') or rows already exist — on instances without any of
+ * that there is nothing to manage here (the WiFi hint card above explains the
+ * missing plugin).
+ */
+function RadiusNasClientsSection() {
+  const canRead = can('radius:read');
+  const canWrite = can('radius:write');
+
+  // Same capability gate as the WiFi section — a 'radius' plugin makes this relevant.
+  const pluginsQuery = useQuery({ queryKey: ['plugins'], queryFn: api.plugins, staleTime: 5 * 60_000 });
+  const radiusLoaded = (pluginsQuery.data ?? []).some((p) => (p.capabilities ?? []).includes(RADIUS_CAPABILITY));
+
+  const clientsQuery = useQuery({
+    queryKey: ['radiusNasClients'],
+    queryFn: () => api.radiusNasClients(),
+    enabled: canRead,
+    refetchInterval: 60_000,
+  });
+  // All secrets (metadata only) — the picker offers every installed credential,
+  // same as the device form; single-value types map directly to the shared secret.
+  const secretsQuery = useQuery({
+    queryKey: ['secrets'],
+    queryFn: () => api.secrets(),
+    enabled: canWrite && can('secrets:read'),
+  });
+
+  const [dialog, setDialog] = useState<{ mode: 'create' } | { mode: 'edit'; row: RadiusNasClient } | null>(null);
+
+  if (!canRead) return null;
+  if (!radiusLoaded && (clientsQuery.data ?? []).length === 0) return null;
+
+  const clients = clientsQuery.data ?? [];
+  const secrets: Secret[] = secretsQuery.data ?? [];
+
+  return (
+    <section className="mb-6 space-y-3">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <h2 className="inline-flex items-center gap-2 text-sm font-semibold">
+          <KeyRound className="h-4 w-4" /> RADIUS NAS clients
+          {!radiusLoaded && (
+            <span className="rounded bg-warning/15 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-warning-fg">no RADIUS plugin</span>
+          )}
+        </h2>
+        {canWrite && (
+          <button type="button" onClick={() => setDialog({ mode: 'create' })} className="inline-flex items-center gap-1.5 rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-white hover:bg-primary-hover">
+            <Plus className="h-3.5 w-3.5" /> Add NAS client
+          </button>
+        )}
+      </div>
+
+      <p className="max-w-4xl text-[11px] text-faint">
+        Access points and gateways allowed to send RADIUS requests (EAP-TLS) to the UNM RADIUS server. The shared secret is picked from your installed
+        credentials — single-value secrets (API key, PSK) are used directly; for multi-field types the password/secret half applies. Changes apply live
+        without a restart. A localhost entry with a stable dev secret is always present for testing.
+      </p>
+
+      <div className="overflow-x-auto rounded-lg border">
+        <table className="w-full text-left text-xs">
+          <thead className="bg-background/60 text-[10px] uppercase tracking-wide text-faint">
+            <tr>
+              <th className="px-2 py-1.5 font-medium">Name</th>
+              <th className="px-2 py-1.5 font-medium">IP address</th>
+              <th className="px-2 py-1.5 font-medium">Shared secret</th>
+              {canWrite && <th className="px-2 py-1.5 font-medium text-right">Actions</th>}
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-border">
+            {clients.length === 0 && (
+              <tr><td colSpan={canWrite ? 4 : 3} className="px-2 py-3 text-faint">No NAS clients configured yet.</td></tr>
+            )}
+            {clients.map((row) => (
+              <tr key={row.id}>
+                <td className="px-2 py-1.5 font-medium">{row.name || <span className="text-faint">—</span>}</td>
+                <td className="whitespace-nowrap px-2 py-1.5 font-mono text-[11px]">{row.ip}</td>
+                <td className="px-2 py-1.5">
+                  {row.secretId ? (
+                    <span className="inline-flex items-center gap-1.5" title={row.secretType ?? undefined}>
+                      <KeyRound className="h-3 w-3 text-faint" />
+                      <span>{row.secretLabel || row.secretId}</span>
+                      {row.secretType && <span className="rounded bg-muted px-1 py-0.5 font-mono text-[9px] uppercase tracking-wide text-secondary">{row.secretType}</span>}
+                    </span>
+                  ) : (
+                    <span className="rounded bg-warning/15 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-warning-fg">no secret</span>
+                  )}
+                </td>
+                {canWrite && (
+                  <td className="whitespace-nowrap px-2 py-1.5 text-right">
+                    <button type="button" onClick={() => setDialog({ mode: 'edit', row })} title="Edit this NAS client" className="mr-2 rounded border px-2 py-1 text-[10px] font-medium hover:bg-muted/40">
+                      Edit
+                    </button>
+                    <RadiusDeleteButton id={row.id} label={`${row.name || row.ip}`} />
+                  </td>
+                )}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      {dialog && (
+        <RadiusNasClientDialog
+          initial={dialog.mode === 'edit' ? dialog.row : null}
+          secrets={secrets}
+          onClose={() => setDialog(null)}
+        />
+      )}
+    </section>
+  );
+}
+
+/** Delete with confirm — invalidates the list on success. */
+function RadiusDeleteButton({ id, label }: { id: string; label: string }) {
+  const queryClient = useQueryClient();
+  const mutation = useMutation({
+    mutationFn: () => api.radiusNasClientDelete(id),
+    onSuccess: () => void queryClient.invalidateQueries({ queryKey: ['radiusNasClients'] }),
+  });
+  return (
+    <button
+      type="button"
+      onClick={() => {
+        if (!window.confirm(`Remove NAS client "${label}"? It will no longer be able to authenticate.`)) return;
+        mutation.mutate();
+      }}
+      disabled={mutation.isPending}
+      title="Remove this NAS client"
+      className="inline-flex items-center gap-1 rounded border px-2 py-1 text-[10px] font-medium text-danger-fg hover:bg-danger/10 disabled:opacity-50"
+    >
+      {mutation.isPending ? 'Removing…' : 'Remove'}
+    </button>
+  );
+}
+
+/** Add / edit dialog — IP + name + secret picker (same pattern as device forms). */
+function RadiusNasClientDialog({ initial, secrets, onClose }: { initial: RadiusNasClient | null; secrets: Secret[]; onClose: () => void }) {
+  const queryClient = useQueryClient();
+  const [name, setName] = useState(initial?.name ?? '');
+  const [ip, setIp] = useState(initial?.ip ?? '');
+  const [secretId, setSecretId] = useState(initial?.secretId ?? '');
+
+  const mutation = useMutation({
+    mutationFn: () =>
+      initial
+        ? api.radiusNasClientUpdate(initial.id, { name: name.trim() || null, ip: ip.trim(), secretId: secretId || null })
+        : api.radiusNasClientCreate({ name: name.trim() || null, ip: ip.trim(), secretId: secretId || null }),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ['radiusNasClients'] });
+      onClose();
+    },
+  });
+
+  const inputCls = 'w-full rounded-md border bg-background px-2 py-1.5 text-xs';
+
+  return (
+    <DialogShell
+      title={initial ? `Edit NAS client ${initial.name || initial.ip}` : 'Add NAS client'}
+      subtitle="Access points / gateways allowed to send RADIUS requests"
+      icon={<KeyRound className="h-4 w-4 text-primary" />}
+      onClose={onClose}
+      maxWidth="max-w-md"
+      footer={
+        <div className="flex items-center justify-end gap-2">
+          <button type="button" onClick={onClose} className="rounded-md border px-3 py-1.5 text-xs font-medium hover:bg-muted/40">Cancel</button>
+          <button
+            type="submit"
+            disabled={!ip.trim() || mutation.isPending}
+            className="inline-flex items-center gap-1.5 rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-white hover:bg-primary-hover disabled:opacity-50"
+          >
+            <Check className="h-3.5 w-3.5" />
+            {mutation.isPending ? 'Saving…' : initial ? 'Save changes' : 'Add client'}
+          </button>
+        </div>
+      }
+    >
+      <form
+        onSubmit={(e) => {
+          e.preventDefault();
+          mutation.mutate();
+        }}
+        className="space-y-3"
+      >
+        <label className="flex flex-col gap-1 text-[10px] uppercase tracking-wide text-faint">
+          IP address *
+          <input value={ip} onChange={(e) => setIp(e.target.value)} placeholder="192.168.1.50" className={`${inputCls} font-mono`} />
+        </label>
+        <label className="flex flex-col gap-1 text-[10px] uppercase tracking-wide text-faint">
+          Name (optional)
+          <input value={name} onChange={(e) => setName(e.target.value)} placeholder="office-ap-01" className={inputCls} />
+        </label>
+        <label className="flex flex-col gap-1 text-[10px] uppercase tracking-wide text-faint">
+          Shared secret *
+          <select value={secretId} onChange={(e) => setSecretId(e.target.value)} className={inputCls}>
+            <option value="">No credentials</option>
+            {secrets.map((s) => (
+              <option key={s.id} value={s.id}>{s.label || s.id} [{s.type}]</option>
+            ))}
+          </select>
+        </label>
+        {secrets.length === 0 && can('secrets:read') && (
+          <p className="text-[11px] text-warning-fg">No credentials are visible to you — create one on the Secrets page first.</p>
+        )}
+        <p className="text-[11px] text-faint">
+          Single-value secrets (API key, PSK) are used directly as the RADIUS shared secret; for multi-field types the password/secret half applies. The
+          value is resolved from the credentials provider at render time — it never leaves UNM in plaintext here.
+        </p>
+        {mutation.isError && <div className="text-xs text-danger-fg">{(mutation.error as Error).message}</div>}
+      </form>
+    </DialogShell>
+  );
+}
+
+/** Per-user RADIUS reply profiles (VLAN / static IP / session limits) — keyed by client cert serial. */
+function RadiusUserProfilesSection() {
+  const canRead = can('radius:read');
+  const canWrite = can('radius:write');
+
+  // Same capability gate as the NAS clients section.
+  const pluginsQuery = useQuery({ queryKey: ['plugins'], queryFn: api.plugins, staleTime: 5 * 60_000 });
+  const radiusLoaded = (pluginsQuery.data ?? []).some((p) => (p.capabilities ?? []).includes(RADIUS_CAPABILITY));
+
+  const profilesQuery = useQuery({
+    queryKey: ['radiusUserProfiles'],
+    queryFn: () => api.radiusUserProfiles(),
+    enabled: canRead,
+    refetchInterval: 60_000,
+  });
+  // Issued WiFi certs — the serial picker offers every enrolled client cert.
+  const wifiCertsQuery = useQuery({
+    queryKey: ['caWifiCerts'],
+    queryFn: () => api.caWifiCerts(),
+    enabled: canWrite,
+    staleTime: 5 * 60_000,
+  });
+
+  const [dialog, setDialog] = useState<{ mode: 'create' } | { mode: 'edit'; row: RadiusUserProfile } | null>(null);
+
+  if (!canRead) return null;
+  if (!radiusLoaded && (profilesQuery.data ?? []).length === 0) return null;
+
+  const profiles = profilesQuery.data ?? [];
+  const wifiCerts: WifiClientCert[] = (wifiCertsQuery.data?.certificates ?? []).filter((c) => c.status === 'issued');
+
+  return (
+    <section className="mb-6 space-y-3">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <h2 className="inline-flex items-center gap-2 text-sm font-semibold">
+          <Network className="h-4 w-4" /> RADIUS user profiles
+          {!radiusLoaded && (
+            <span className="rounded bg-warning/15 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-warning-fg">no RADIUS plugin</span>
+          )}
+        </h2>
+        {canWrite && (
+          <button type="button" onClick={() => setDialog({ mode: 'create' })} className="inline-flex items-center gap-1.5 rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-white hover:bg-primary-hover">
+            <Plus className="h-3.5 w-3.5" /> Add profile
+          </button>
+        )}
+      </div>
+
+      <p className="max-w-4xl text-[11px] text-faint">
+        Per-client RADIUS reply attributes for WiFi EAP-TLS — keyed by the client certificate's serial. A VLAN ID is sent as
+        Tunnel-Type=IEEE-802 + Tunnel-Medium-Type=IEEE-802 + Tunnel-Private-Group-ID; static IPs and session limits are applied to that
+        session only, on top of whatever the NAS would assign otherwise. No profile = plain access.
+      </p>
+
+      <div className="overflow-x-auto rounded-lg border">
+        <table className="w-full text-left text-xs">
+          <thead className="bg-background/60 text-[10px] uppercase tracking-wide text-faint">
+            <tr>
+              <th className="px-2 py-1.5 font-medium">Certificate</th>
+              <th className="px-2 py-1.5 font-medium">VLAN</th>
+              <th className="px-2 py-1.5 font-medium">Static IP</th>
+              <th className="px-2 py-1.5 font-medium">Session limits</th>
+              {canWrite && <th className="px-2 py-1.5 font-medium text-right">Actions</th>}
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-border">
+            {profiles.length === 0 && (
+              <tr><td colSpan={canWrite ? 5 : 4} className="px-2 py-3 text-faint">No user profiles configured — all clients get plain access.</td></tr>
+            )}
+            {profiles.map((row) => (
+              <tr key={row.id}>
+                <td className="px-2 py-1.5">
+                  <div className="font-medium">{row.certName || row.name || 'unknown cert'}</div>
+                  <div className="font-mono text-[10px] text-faint" title={`serial ${row.serial}`}>{row.serial.slice(0, 24)}…</div>
+                </td>
+                <td className="whitespace-nowrap px-2 py-1.5">
+                  {row.vlanId ? (
+                    <span className="rounded bg-primary/10 px-1.5 py-0.5 font-mono text-[10px] font-semibold text-primary">{row.vlanId}</span>
+                  ) : (
+                    <span className="text-faint">—</span>
+                  )}
+                </td>
+                <td className="whitespace-nowrap px-2 py-1.5 font-mono text-[11px]">
+                  {[row.framedIp, row.framedIpv6].filter(Boolean).join(' / ') || <span className="text-faint">—</span>}
+                </td>
+                <td className="whitespace-nowrap px-2 py-1.5 text-[11px]">
+                  {row.sessionTimeoutSec ? `re-auth ${Math.round(row.sessionTimeoutSec / 60)}m` : null}
+                  {row.sessionTimeoutSec && row.idleTimeoutSec ? ' · ' : ''}
+                  {row.idleTimeoutSec ? `idle ${Math.round(row.idleTimeoutSec / 60)}m` : null}
+                  {!row.sessionTimeoutSec && !row.idleTimeoutSec ? <span className="text-faint">—</span> : null}
+                </td>
+                {canWrite && (
+                  <td className="whitespace-nowrap px-2 py-1.5 text-right">
+                    <button type="button" onClick={() => setDialog({ mode: 'edit', row })} title="Edit this profile" className="mr-2 rounded border px-2 py-1 text-[10px] font-medium hover:bg-muted/40">
+                      Edit
+                    </button>
+                    <RadiusProfileDeleteButton id={row.id} label={row.certName || row.name || row.serial.slice(0, 16)} />
+                  </td>
+                )}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      {dialog && (
+        <RadiusUserProfileDialog
+          initial={dialog.mode === 'edit' ? dialog.row : null}
+          wifiCerts={wifiCerts}
+          onClose={() => setDialog(null)}
+        />
+      )}
+    </section>
+  );
+}
+
+/** Delete with confirm — invalidates the list on success. */
+function RadiusProfileDeleteButton({ id, label }: { id: string; label: string }) {
+  const queryClient = useQueryClient();
+  const mutation = useMutation({
+    mutationFn: () => api.radiusUserProfileDelete(id),
+    onSuccess: () => void queryClient.invalidateQueries({ queryKey: ['radiusUserProfiles'] }),
+  });
+  return (
+    <button
+      type="button"
+      onClick={() => {
+        if (!window.confirm(`Remove the RADIUS profile for "${label}"? The client will get plain access again.`)) return;
+        mutation.mutate();
+      }}
+      disabled={mutation.isPending}
+      title="Remove this profile"
+      className="inline-flex items-center gap-1 rounded border px-2 py-1 text-[10px] font-medium text-danger-fg hover:bg-danger/10 disabled:opacity-50"
+    >
+      {mutation.isPending ? 'Removing…' : 'Remove'}
+    </button>
+  );
+}
+
+/** Add / edit dialog — cert serial picker + VLAN / static IP / session limits. */
+function RadiusUserProfileDialog({ initial, wifiCerts, onClose }: { initial: RadiusUserProfile | null; wifiCerts: WifiClientCert[]; onClose: () => void }) {
+  const queryClient = useQueryClient();
+  const [serial, setSerial] = useState(initial?.serial ?? '');
+  const [vlanId, setVlanId] = useState(initial?.vlanId ? String(initial.vlanId) : '');
+  const [framedIp, setFramedIp] = useState(initial?.framedIp ?? '');
+  const [framedIpv6, setFramedIpv6] = useState(initial?.framedIpv6 ?? '');
+  const [sessionTimeoutSec, setSessionTimeoutSec] = useState(initial?.sessionTimeoutSec ? String(initial.sessionTimeoutSec) : '');
+  const [idleTimeoutSec, setIdleTimeoutSec] = useState(initial?.idleTimeoutSec ? String(initial.idleTimeoutSec) : '');
+  const [replyMessage, setReplyMessage] = useState(initial?.replyMessage ?? '');
+
+  // The picker lists enrolled certs; a freeform serial is also accepted (e.g.
+  // for certs issued by another CA that still authenticates here).
+  const knownSerials = new Set(wifiCerts.map((c) => c.serial.toLowerCase()));
+  const selectedCert = wifiCerts.find((c) => c.serial.toLowerCase() === serial.trim().toLowerCase());
+
+  const mutation = useMutation({
+    mutationFn: () => {
+      const body = {
+        vlanId: vlanId ? Number(vlanId) : null,
+        framedIp: framedIp.trim() || null,
+        framedIpv6: framedIpv6.trim() || null,
+        sessionTimeoutSec: sessionTimeoutSec ? Number(sessionTimeoutSec) : null,
+        idleTimeoutSec: idleTimeoutSec ? Number(idleTimeoutSec) : null,
+        replyMessage: replyMessage.trim() || null,
+      };
+      return initial
+        ? api.radiusUserProfileUpdate(initial.id, body)
+        : api.radiusUserProfileCreate({ serial: serial.trim().toLowerCase(), name: selectedCert?.name ?? null, ...body });
+    },
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ['radiusUserProfiles'] });
+      onClose();
+    },
+  });
+
+  const inputCls = 'w-full rounded-md border bg-background px-2 py-1.5 text-xs';
+
+  return (
+    <DialogShell
+      title={initial ? `Edit profile — ${initial.certName || initial.name || initial.serial.slice(0, 16)}` : 'Add RADIUS user profile'}
+      subtitle="Per-client reply attributes for WiFi EAP-TLS sessions"
+      icon={<Network className="h-4 w-4 text-primary" />}
+      onClose={onClose}
+      maxWidth="max-w-md"
+      footer={
+        <div className="flex items-center justify-end gap-2">
+          <button type="button" onClick={onClose} className="rounded-md border px-3 py-1.5 text-xs font-medium hover:bg-muted/40">Cancel</button>
+          <button
+            type="submit"
+            disabled={!serial.trim() || mutation.isPending}
+            className="inline-flex items-center gap-1.5 rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-white hover:bg-primary-hover disabled:opacity-50"
+          >
+            <Check className="h-3.5 w-3.5" />
+            {mutation.isPending ? 'Saving…' : initial ? 'Save changes' : 'Add profile'}
+          </button>
+        </div>
+      }
+    >
+      <form
+        onSubmit={(e) => {
+          e.preventDefault();
+          mutation.mutate();
+        }}
+        className="space-y-3"
+      >
+        {!initial && (
+          <label className="flex flex-col gap-1 text-[10px] uppercase tracking-wide text-faint">
+            Client certificate *
+            {wifiCerts.length > 0 ? (
+              <select value={serial} onChange={(e) => setSerial(e.target.value)} className={inputCls}>
+                <option value="">Select a certificate…</option>
+                {wifiCerts.map((c) => (
+                  <option key={c.serial} value={c.serial}>{c.name} — {c.cn}</option>
+                ))}
+              </select>
+            ) : (
+              <input value={serial} onChange={(e) => setSerial(e.target.value)} placeholder="cert serial (lowercase hex, no 0x prefix)" className={`${inputCls} font-mono`} />
+            )}
+          </label>
+        )}
+        {initial && (
+          <div className="rounded-md border bg-background/60 px-2 py-1.5 text-[11px]">
+            <span className="font-medium">{initial.certName || initial.name}</span>{' '}
+            <span className="font-mono text-faint" title={initial.serial}>{initial.serial.slice(0, 32)}…</span>
+          </div>
+        )}
+        {wifiCerts.length > 0 && !knownSerials.has(serial.trim().toLowerCase()) && serial.trim() !== '' && (
+          <p className="text-[11px] text-warning-fg">This serial is not an enrolled UNM WiFi cert — make sure it matches the client's certificate.</p>
+        )}
+
+        <div className="grid grid-cols-2 gap-3">
+          <label className="flex flex-col gap-1 text-[10px] uppercase tracking-wide text-faint">
+            VLAN ID (1–4094)
+            <input value={vlanId} onChange={(e) => setVlanId(e.target.value)} placeholder="e.g. 20" inputMode="numeric" className={`${inputCls} font-mono`} />
+          </label>
+          <label className="flex flex-col gap-1 text-[10px] uppercase tracking-wide text-faint">
+            Static IPv4
+            <input value={framedIp} onChange={(e) => setFramedIp(e.target.value)} placeholder="192.168.50.10" className={`${inputCls} font-mono`} />
+          </label>
+        </div>
+        <div className="grid grid-cols-2 gap-3">
+          <label className="flex flex-col gap-1 text-[10px] uppercase tracking-wide text-faint">
+            Static IPv6
+            <input value={framedIpv6} onChange={(e) => setFramedIpv6(e.target.value)} placeholder="fd00::50:10" className={`${inputCls} font-mono`} />
+          </label>
+          <div className="grid grid-cols-2 gap-3">
+            <label className="flex flex-col gap-1 text-[10px] uppercase tracking-wide text-faint">
+              Re-auth (sec)
+              <input value={sessionTimeoutSec} onChange={(e) => setSessionTimeoutSec(e.target.value)} placeholder="86400" inputMode="numeric" className={`${inputCls} font-mono`} />
+            </label>
+            <label className="flex flex-col gap-1 text-[10px] uppercase tracking-wide text-faint">
+              Idle (sec)
+              <input value={idleTimeoutSec} onChange={(e) => setIdleTimeoutSec(e.target.value)} placeholder="3600" inputMode="numeric" className={`${inputCls} font-mono`} />
+            </label>
+          </div>
+        </div>
+        <label className="flex flex-col gap-1 text-[10px] uppercase tracking-wide text-faint">
+          Reply message (optional)
+          <input value={replyMessage} onChange={(e) => setReplyMessage(e.target.value)} placeholder='"IoT device — VLAN 20"' maxLength={256} className={inputCls} />
+        </label>
+        <p className="text-[11px] text-faint">
+          All fields optional — empty means the NAS default applies. The VLAN is sent as Tunnel-Type=IEEE-802 +
+          Tunnel-Medium-Type=IEEE-802 + Tunnel-Private-Group-ID; re-auth adds Termination-Action=RESTART.
+        </p>
+        {mutation.isError && <div className="text-xs text-danger-fg">{(mutation.error as Error).message}</div>}
+      </form>
+    </DialogShell>
+  );
+}
+
 export default function Certificates() {
   const { formatDateTime } = useTimeFormat();
   // The API polls plugins on the inventory window and upserts these rows — refresh
@@ -941,6 +1429,8 @@ export default function Certificates() {
   return (
     <Layout title="Certificates">
       <WifiCertsSection />
+      <RadiusNasClientsSection />
+      <RadiusUserProfilesSection />
       {certsQuery.isLoading && <p className="text-sm text-muted-foreground">Loading certificates…</p>}
       {certsQuery.isError && (
         <p className="text-sm text-danger-fg">Failed to load certificates: {(certsQuery.error as Error).message}</p>

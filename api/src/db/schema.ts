@@ -224,6 +224,65 @@ export const secrets = pgTable('secrets', {
   createdAt: text('createdAt').notNull(),
 });
 
+// RADIUS NAS clients (unm-radius sidecar — FreeRADIUS). Each row is one NAS
+// device (access point / gateway) allowed to send RADIUS requests, with its
+// shared secret stored as a reference to the secrets table (same pattern as
+// device_plugins.secretId — no plaintext in this table; the renderer resolves
+// + decrypts via the owning provider at render time). See api/src/radius/.
+// Per-user RADIUS reply profiles for WiFi EAP-TLS clients (unm-radius sidecar).
+// Keyed by client cert SERIAL (lowercase hex, no 0x prefix) — the same key
+// radius-user-profile.sh uses and what FreeRADIUS puts in TLS-Client-Cert-Serial.
+// The exec script prints the set fields as RADIUS reply attributes on stdout;
+// rlm_exec adds them to the Access-Accept (output_pairs = request-pair). All
+// columns nullable — an empty profile means plain access, exactly like no row.
+export const radiusUserProfiles = pgTable('radius_user_profiles', {
+  id: text('id').primaryKey(),
+  // Client cert serial (lowercase hex) — unique; matches wifi_client_certs.serial.
+  serial: text('serial').notNull().unique(),
+  // Display label (usually the cert's name); informational only.
+  name: text('name'),
+  // VLAN assignment: Tunnel-Type=IEEE-802 + Tunnel-Medium-Type=IEEE-802 are
+  // always sent together with this when it is set.
+  vlanId: integer('vlanId'),
+  // Static addressing for the session (Framed-IP-Address / Framed-IPv6-Address).
+  framedIp: text('framedIp'),
+  framedIpv6: text('framedIpv6'),
+  // Session limits in seconds (Session-Timeout + Termination-Action=RESTART,
+  // Idle-Timeout). NULL = NAS default.
+  sessionTimeoutSec: integer('sessionTimeoutSec'),
+  idleTimeoutSec: integer('idleTimeoutSec'),
+  // Optional human note on the accept/reject (Reply-Message) — cheap debugging.
+  replyMessage: text('replyMessage'),
+  createdAt: text('createdAt').notNull(),
+});
+
+// Least-privilege Postgres role credentials for the unm-radius sidecar (see
+// initDb in db.ts — the role is created + granted there). The renderer reads
+// this row to embed the DB password into sql-unm.conf / radius-user-profile.sh.
+export const radiusDbCredentials = pgTable('radius_db_credentials', {
+  id: text('id').primaryKey(),
+  username: text('username').notNull(),
+  password: text('password').notNull(),
+  createdAt: text('createdAt').notNull()
+});
+
+export const radiusNasClients = pgTable(
+  'radius_nas_clients',
+  {
+    id: text('id').primaryKey(),
+    // Display name (e.g. "office-ap-01") — optional, for the webapp table.
+    name: text('name'),
+    // A NAS has one address — unique inline constraint (matches the raw DDL's
+    // `ip TEXT NOT NULL UNIQUE`, so drizzle-kit push never sees a drift).
+    ip: text('ip').notNull().unique(),
+    // Reference to secrets.id holding the shared secret. NULL = not configured
+    // yet (the renderer skips such rows). Validated at write time (404 if the
+    // referenced secret does not exist), like device_plugins.secretId.
+    secretId: text('secretId'),
+    createdAt: text('createdAt').notNull(),
+  }
+);
+
 // Per-user, per-device session-credential defaults (SSH console / SFTP). Lets a
 // user rank WHICH of their eligible secrets is used when an interactive session
 // opens on a device — without prompting. `secretIds` is an ORDERED list: the

@@ -35,6 +35,8 @@ import notificationsRouter from './routes/notifications';
 import systemRouter from './routes/system';
 import settingsRouter from './routes/settings';
 import caRouter from './routes/ca';
+// RADIUS NAS clients (unm-radius sidecar) — self-defining /radius/nas-clients paths.
+import radiusRouter from './routes/radius';
 import countsRouter from './routes/counts';
 import { filesRouter, internalFileRepoRouter } from './routes/files';
 import { backupsRouter } from './routes/backups';
@@ -312,6 +314,8 @@ async function main(): Promise<void> {
   api.use(settingsRouter);
   // Certificate Authority management (/ca/status, /ca/certificates, /ca/revoke).
   api.use(caRouter);
+  // RADIUS NAS clients (/radius/nas-clients) — the FreeRADIUS EAP-TLS allowlist.
+  api.use(radiusRouter);
   // Aggregated nav-badge counts for the sidebar (permission-aware).
   api.use(countsRouter);
   // Central file repository (/files: list/upload/download/delete + usage audit).
@@ -451,6 +455,34 @@ async function main(): Promise<void> {
     void (async () => {
       for (;;) {
         if (await renderCaConfig()) break;
+        await new Promise((r) => setTimeout(r, 15_000));
+      }
+    })();
+
+    // RADIUS config rendering: the API owns the raddb files on the shared volume
+    // (rendered from global settings + DATABASE_URL); the unm-radius service
+    // SIGHUPs itself when they change. Same retry pattern as the CA — the volume
+    // may not be mounted yet at our first write; after that, setting changes
+    // re-render via their onChange hooks (systemSettings.ts).
+    let radiusRenderWarned = false;
+    const renderRadiusConfig = async (): Promise<boolean> => {
+      try {
+        const { changed } = await require('./radius/radiusConfig').writeRadiusConfig();
+        if (changed) console.log('[api] rendered RADIUS config from global settings');
+        return true;
+      } catch (err) {
+        // Volume not mounted yet — retry on next beat.
+        const e = err as { message?: string };
+        if (!radiusRenderWarned) {
+          radiusRenderWarned = true;
+          console.log(`[api] RADIUS config render deferred (volume not ready?): ${e.message}`);
+        }
+        return false;
+      }
+    };
+    void (async () => {
+      for (;;) {
+        if (await renderRadiusConfig()) break;
         await new Promise((r) => setTimeout(r, 15_000));
       }
     })();
