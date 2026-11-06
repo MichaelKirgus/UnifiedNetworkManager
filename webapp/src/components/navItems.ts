@@ -93,6 +93,10 @@ export const NAV_ITEMS: NavItem[] = [
   // badge counts endpoints that are NOT healthy right now — expired leaf or
   // issuer, chain-invalid, or presenting a different key than trusted.
   { to: '/certificates', label: 'Certificates', icon: FileKey2, requiresPermission: 'certificates:read', countKey: 'certificates' },
+  // RADIUS server (unm-radius sidecar) — 802.1X for WiFi EAP-TLS and wired
+  // clients: self-monitoring probe, auth-fail audit trail, NAS allowlist,
+  // per-user reply profiles + CA-issued client certificates.
+  { to: '/radius', label: 'RADIUS', icon: KeyRound, requiresPermission: 'radius:read' },
   // Waypoints — Route is already used by the Plans item.
   { to: '/routes', label: 'Routes', icon: Waypoints, requiresPermission: 'routes:read' },
   // Structured log entries shipped by plugins (gated — logs can carry critical details).

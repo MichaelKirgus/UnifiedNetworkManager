@@ -27,6 +27,7 @@ import Mail from './pages/Mail';
 import Firewall from './pages/Firewall';
 import FirewallEvents from './pages/FirewallEvents';
 import Certificates from './pages/Certificates';
+import Radius from './pages/Radius';
 import RoutesPage from './pages/Routes';
 import Logs from './pages/Logs';
 import Notifications from './pages/Notifications';
@@ -94,6 +95,9 @@ const PAGE_PERMISSIONS: Array<{ path: string; permission?: string | string[] }> 
   // Firewall event log (blocked/allowed traffic) — same read perm as the rules page.
   { path: '/firewall-events', permission: 'firewall:read' },
   { path: '/certificates', permission: 'certificates:read' },
+  // RADIUS server (unm-radius sidecar) — self-monitoring probe, auth-fail audit
+  // trail, NAS client allowlist, per-user reply profiles + EAP-TLS client certs.
+  { path: '/radius', permission: 'radius:read' },
   { path: '/routes', permission: 'routes:read' },
   { path: '/logs', permission: 'logs:read' },
   // Notification center — full history + filters (the bell is visible to everyone
@@ -216,6 +220,7 @@ export default function App() {
       {/* Firewall event log — which traffic is allowed and which is blocked. */}
       <Route path="/firewall-events" element={<Page permission="firewall:read"><FirewallEvents /></Page>} />
       <Route path="/certificates" element={<Page permission="certificates:read"><Certificates /></Page>} />
+      <Route path="/radius" element={<Page permission="radius:read"><Radius /></Page>} />
       <Route path="/routes" element={<Page permission="routes:read"><RoutesPage /></Page>} />
       <Route path="/logs" element={<Page permission="logs:read"><Logs /></Page>} />
       {/* Notification center — full history with filters + visibility settings. */}

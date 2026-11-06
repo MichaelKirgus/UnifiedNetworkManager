@@ -147,11 +147,12 @@ export const PERMISSION_DESCRIPTIONS: Record<string, string> = {
   // permissions — this is UNM's OWN PKI, not appliance cert inventory.
   'ca:read': 'View the certificate authority status and issued certificates',
   'ca:manage': 'Manage the certificate authority (revoke certificates)',
-  // RADIUS server (unm-radius sidecar — FreeRADIUS EAP-TLS): view/manage the NAS
-  // client list (IP + shared-secret reference). Distinct from ca:* — this is the
-  // RADIUS access-point allowlist, not UNM's PKI.
-  'radius:read': 'View RADIUS NAS clients',
-  'radius:write': 'Add, edit or remove RADIUS NAS clients',
+  // RADIUS server (unm-radius sidecar — FreeRADIUS EAP-TLS): the dedicated
+  // /radius page — self-monitoring probe + auth-fail audit trail, the NAS client
+  // allowlist (IP + shared-secret reference) and per-user reply profiles.
+  // Distinct from ca:* — this is RADIUS access control, not UNM's PKI.
+  'radius:read': 'View the RADIUS page (server status, auth log, NAS clients, user profiles)',
+  'radius:write': 'Add, edit or remove RADIUS NAS clients and user profiles',
   // Backup / restore / replication of UNM's OWN database (Backups page): create
   // section-based backups, download/restore them, and manage replication targets
   // between instances. Carriers may also act as a replication PEER — inbound
