@@ -498,6 +498,37 @@ export const wifiClientCerts = pgTable(
   })
 );
 
+// Reusable enrollment presets for EAP-TLS client certificates — the "cert
+// templates" of the RADIUS page. A template stores EVERY field of an enroll
+// request (same shape as the ca.client-cert.enroll plan input) so enrolling a
+// new supplicant is one click: pick a template, optionally override the name /
+// CN (which default to the target host's hostname), done. Templates are pure
+// metadata — creating/deleting them never touches the CA and needs no 2FA;
+// only USING one (enrollment) is plan-gated like every other cert mutation.
+export const clientCertTemplates = pgTable(
+  'client_cert_templates',
+  {
+    id: text('id').primaryKey(),
+    // Display label (e.g. "Office APs", "Wired lab PCs"). Unique.
+    name: text('name').notNull().unique(),
+    // Subject CN override; empty = the enrollment name is used as CN.
+    cn: text('cn').notNull().default(''),
+    organization: text('organization').notNull().default(''),
+    organizationalUnit: text('organizationalUnit').notNull().default(''),
+    // Extra SAN DNS names beyond the CN (JSON array).
+    sansJson: text('sansJson').notNull().default('[]'),
+    // ec-p256 | ec-p384 | rsa-2048 | rsa-3072 | rsa-4096.
+    keyType: text('keyType').notNull(),
+    // Requested validity in days; null = the CA default (caWifiCertDefaultDays).
+    days: integer('days'),
+    createdAt: text('createdAt').notNull(),
+    updatedAt: text('updatedAt').notNull(),
+  },
+  (table) => ({
+    idxClientCertTemplatesName: index('idx_client_cert_templates_name').on(table.name),
+  })
+);
+
 // User-set plugin option values, owned by the API (plugins never store their
 // own settings). `value` is JSON-encoded so any future option type fits.
 // Global rows have device_id = NULL; per-device override rows carry a

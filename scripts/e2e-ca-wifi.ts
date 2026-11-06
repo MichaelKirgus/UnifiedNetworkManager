@@ -21,6 +21,9 @@
  *   6. Revocation — idempotent (second plan reports alreadyRevoked), both
  *      download formats then answer 409, DB rows mirrored (wifi_client_certs +
  *      ca_certificates). Revoked through a SYSTEM plan (ca.client-cert.revoke).
+ *   6b. Templates — CRUD of the reusable enrollment presets (plain routes, NOT
+ *      plan-gated: create/list/duplicate-409/bad-keyType-400/patch/delete) plus
+ *      enrolling with a template's values through the plan workflow.
  *   7. Cleanup — test cert rows AND the system plans created by this run are
  *      removed again (revoked leaves stay in the CA's own DB; that is expected
  *      and harmless).
@@ -353,6 +356,49 @@ async function main(): Promise<void> {
     const rows = (((await list.json()) as { certificates?: Array<Record<string, unknown>> }).certificates ?? []) as Array<Record<string, unknown>>;
     const listed = rows.find((r) => r.serial === serial1);
     check('listing shows the revoked cert with status=revoked', listed?.status === 'revoked' && Boolean(listed.revokedAt), listed);
+
+    // ---------------------------------------------------------------------------
+    // 6b. Client-cert templates (pure metadata CRUD, NOT plan-gated) + using one
+    // ---------------------------------------------------------------------------
+    console.log('\n— Templates (CRUD + enroll with template values) —');
+    const tplName = `e2e-tpl-${suffix}`;
+    const tplCreate = await authed('POST', '/ca/client-cert-templates', {
+      name: tplName, organization: 'Tpl Org', organizationalUnit: 'Tpl OU',
+      sans: ['tpl-a.lan'], keyType: 'ec-p384', days: 120,
+    });
+    const tpl = ((await tplCreate.json()) as Record<string, unknown>) ?? {}; // single read — the body stream is consumed once
+    check('template create → 201 with full shape', tplCreate.status === 201 && typeof tpl.id === 'string' && Array.isArray(tpl.sans), { status: tplCreate.status });
+    const tplId = String(tpl.id ?? '');
+
+    const tplList = await authed('GET', '/ca/client-cert-templates');
+    const tplListBody = ((await tplList.json()) as { templates?: unknown[] }) ?? {}; // single read
+    check('template list → 200 {templates:[…]} incl. the new one', tplList.status === 200 && (tplListBody.templates ?? []).some((t) => (t as Record<string, unknown>).id === tplId), { status: tplList.status });
+
+    const tplDup = await authed('POST', '/ca/client-cert-templates', { name: tplName });
+    check('duplicate template name → 409', tplDup.status === 409, { status: tplDup.status });
+
+    const tplBad = await authed('POST', '/ca/client-cert-templates', { name: `e2e-tpl-bad-${suffix}`, keyType: 'ml-dsa' });
+    check('bad template keyType → 400', tplBad.status === 400, { status: tplBad.status });
+
+    const tplPatch = await authed('PATCH', `/ca/client-cert-templates/${tplId}`, { days: null, organizationalUnit: 'Tpl OU v2' });
+    const patched = ((await tplPatch.json()) as Record<string, unknown>) ?? {};
+    check('template patch (partial) → 200 with updated fields', tplPatch.status === 200 && patched.organizationalUnit === 'Tpl OU v2' && patched.days === null, { status: tplPatch.status });
+
+    // USING a template = enrolling with its values through the plan-gated workflow.
+    const nameTpl = `e2e-ca-wifi-tpl-${suffix}`;
+    const pTpl = await runSystemPlan('ca.client-cert.enroll', {
+      name: nameTpl, organization: 'Tpl Org', organizationalUnit: 'Tpl OU v2',
+      sans: ['tpl-a.lan'], keyType: 'ec-p384', days: 120,
+    });
+    check('enroll with template values (via plan) succeeded', pTpl.status === 'succeeded' || pTpl.status === 'unverified', { status: pTpl.status, error: pTpl.error });
+    const rTpl = stepResultOf(pTpl.steps[0] ?? { status: '', result: null });
+    if (rTpl.serial) serials.push(String(rTpl.serial));
+
+    // Template delete → 204; deleting again → 404.
+    const tplDel = await authed('DELETE', `/ca/client-cert-templates/${tplId}`);
+    check('template delete → 204', tplDel.status === 204, { status: tplDel.status });
+    const tplDelAgain = await authed('DELETE', `/ca/client-cert-templates/${tplId}`);
+    check('second template delete → 404', tplDelAgain.status === 404, { status: tplDelAgain.status });
 
     // ---------------------------------------------------------------------------
     // 7. Cleanup — remove this run's test cert rows AND system plans

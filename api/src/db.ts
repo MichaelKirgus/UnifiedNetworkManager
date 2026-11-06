@@ -18,6 +18,17 @@ const POOL_MAX = Math.max(1, Number(process.env.DATABASE_POOL_MAX ?? 20));
 export const pool = new Pool({ connectionString: DATABASE_URL, max: POOL_MAX });
 export const db = drizzle(pool, { schema });
 
+/**
+ * The Postgres SQLSTATE of a failed query, or undefined. drizzle-orm ≥0.45 wraps
+ * pg errors in `DrizzleQueryError` ("Failed query: …") and moves the original
+ * error — the one carrying `.code` — onto `.cause`, so callers must check both
+ * levels (a top-level-only check silently misses every constraint violation).
+ */
+export function pgErrorCode(err: unknown): string | undefined {
+  const e = err as { code?: string; cause?: { code?: string } };
+  return e?.code ?? e?.cause?.code;
+}
+
 export type User = typeof schema.users.$inferSelect;
 export type Device = typeof schema.devices.$inferSelect;
 export type Plugin = typeof schema.plugins.$inferSelect;
@@ -372,6 +383,26 @@ export async function initDb(): Promise<void> {
       "createdAt" TEXT NOT NULL
     )`);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_wifi_client_certs_name ON wifi_client_certs (name)`);
+
+  // Reusable enrollment presets for EAP-TLS client certs (see schema.ts
+  // clientCertTemplates). Created here too so EXISTING deployments get the table
+  // without a drizzle-kit push — on an existing DB, `push` would otherwise hit
+  // its interactive rename-resolution prompt (orphaned raw-SQL tables like
+  // radacct/flow_agg_* + one new schema table) and throw in the TTY-less container.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS client_cert_templates (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL UNIQUE,
+      cn TEXT NOT NULL DEFAULT '',
+      organization TEXT NOT NULL DEFAULT '',
+      "organizationalUnit" TEXT NOT NULL DEFAULT '',
+      "sansJson" TEXT NOT NULL DEFAULT '[]',
+      "keyType" TEXT NOT NULL,
+      days INTEGER,
+      "createdAt" TEXT NOT NULL,
+      "updatedAt" TEXT NOT NULL
+    )`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_client_cert_templates_name ON client_cert_templates (name)`);
 
   // RADIUS accounting (unm-radius sidecar — FreeRADIUS rlm_sql writes here).
   // Stock schema from freeradius's mods-config/sql/main/postgresql/schema.sql;

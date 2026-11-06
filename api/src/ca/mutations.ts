@@ -16,7 +16,7 @@
 
 import * as crypto from 'crypto';
 import { eq } from 'drizzle-orm';
-import { db, pool } from '../db';
+import { db, pgErrorCode, pool } from '../db';
 import { caCertificates, wifiClientCerts } from '../db/schema';
 import { revokeCertificate } from './stepCaAdmin';
 import { enrollEapTlsClient, EnrollValidationError } from './enroll';
@@ -102,8 +102,8 @@ export async function enrollWifiCert(input: Record<string, unknown>): Promise<{
       createdAt: new Date().toISOString(),
     });
   } catch (e) {
-    const err = e as { code?: string; message?: string };
-    if (err.code === '23505') {
+    const err = e as { message?: string };
+    if (pgErrorCode(e) === '23505') {
       // Lost a race with a concurrent enrollment of the same name — the CA
       // already signed a leaf we cannot track. Revoke it so nothing untracked
       // stays valid, then report the conflict.
@@ -111,9 +111,12 @@ export async function enrollWifiCert(input: Record<string, unknown>): Promise<{
       try { await revokeCertificate(enrolled.serial); } catch { /* CA may be unreachable; log only */ }
       throw new Error(`A WiFi client certificate named "${name}" already exists`);
     }
-    // Never echo the raw DB error — it embeds every SQL parameter, i.e.
-    // the encrypted private key and the full cert chain.
-    console.error('[ca] failed to store the enrolled WiFi certificate:', err.message);
+    // Never echo the raw DB error — drizzle-orm ≥0.45 wraps it in a
+    // DrizzleQueryError whose message embeds every SQL parameter, i.e. the
+    // encrypted private key and the full cert chain. Log only the CAUSE's
+    // message (the plain pg error text).
+    const cause = (e as { cause?: { message?: string } }).cause;
+    console.error('[ca] failed to store the enrolled WiFi certificate:', cause?.message ?? err.message);
     throw new Error('The certificate was issued but could not be stored — check the API logs');
   }
 

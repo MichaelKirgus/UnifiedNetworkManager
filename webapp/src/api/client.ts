@@ -2369,6 +2369,33 @@ export interface WifiP12Bundle {
   password: string;
 }
 
+/** A reusable client-cert enrollment template (GET /ca/client-cert-templates).
+ *  Pure metadata — creating/editing templates is NOT plan-gated, but USING a
+ *  template still enrolls through the 'ca.client-cert.enroll' system plan. */
+export interface ClientCertTemplate {
+  id: string;
+  name: string;
+  cn: string;
+  organization: string;
+  organizationalUnit: string;
+  sans: string[];
+  keyType: CaKeyType;
+  /** Validity in days; null = CA default. */
+  days: number | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ClientCertTemplateInput {
+  name?: string;
+  cn?: string;
+  organization?: string;
+  organizationalUnit?: string;
+  sans?: string[];
+  keyType?: CaKeyType;
+  days?: number | null;
+}
+
 // --- RADIUS server (unm-radius sidecar — FreeRADIUS EAP-TLS) -----------------
 /** One NAS client allowed to send RADIUS requests (GET /radius/nas-clients).
  *  The shared secret is a reference to the secrets table — only metadata is
@@ -4597,6 +4624,18 @@ export const api = {
   // then executePlan). The new serial lands in the executed step's result.
   /** List enrolled WiFi client certs (metadata only — no keys). */
   caWifiCerts: () => apiFetch<{ certificates: WifiClientCert[] }>('/ca/wifi-certs'),
+  // --- Client-cert enrollment templates (pure metadata, NOT plan-gated) -----
+  /** List reusable client-cert enrollment templates. */
+  caClientCertTemplates: () => apiFetch<{ templates: ClientCertTemplate[] }>('/ca/client-cert-templates'),
+  /** Create a template (requires ca:manage). */
+  createClientCertTemplate: (body: ClientCertTemplateInput & { name: string }) =>
+    apiFetch<ClientCertTemplate>('/ca/client-cert-templates', { method: 'POST', body: JSON.stringify(body) }),
+  /** Update a template (partial; requires ca:manage). */
+  updateClientCertTemplate: (id: string, body: ClientCertTemplateInput) =>
+    apiFetch<ClientCertTemplate>(`/ca/client-cert-templates/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify(body) }),
+  /** Delete a template (requires ca:manage). */
+  deleteClientCertTemplate: (id: string) =>
+    apiFetch<void>(`/ca/client-cert-templates/${encodeURIComponent(id)}`, { method: 'DELETE' }),
   /** Trigger an intermediate CA renewal now (same key, clamped to root expiry −7d). */
   caRenewIntermediate: () =>
     apiFetch<{ renewed: boolean; intermediateNotAfter?: string }>('/ca/renew-intermediate', { method: 'POST' }),

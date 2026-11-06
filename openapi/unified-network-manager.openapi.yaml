@@ -7767,6 +7767,113 @@ paths:
         '503':
           description: Root certificate not available (CA not bootstrapped)
 
+  # Client-cert templates — reusable enrollment presets for EAP-TLS client
+  # certificates. Pure metadata (no cert changes), so NOT plan-gated; using a
+  # template still goes through POST /plans/system with ca.client-cert.enroll.
+
+  /ca/client-cert-templates:
+    get:
+      tags: [Certificate Authority]
+      summary: List client-cert templates
+      description: >-
+        All reusable enrollment presets for EAP-TLS client certificates (the RADIUS
+        page's template picker). Requires permission `ca:read`.
+      responses:
+        '200':
+          description: Client-cert templates
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  templates:
+                    type: array
+                    items: { $ref: '#/components/schemas/CaClientCertTemplate' }
+        '401':
+          description: Authentication required
+        '403':
+          description: Missing ca:read permission
+    post:
+      tags: [Certificate Authority]
+      summary: Create a client-cert template
+      description: >-
+        Creates one enrollment preset. `name` is required and unique; `keyType`
+        defaults to `ec-p256`, `days` defaults to null (the CA default validity).
+        Requires permission `ca:manage`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CaClientCertTemplateCreateRequest' }
+      responses:
+        '201':
+          description: Created template
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CaClientCertTemplate' }
+        '400':
+          description: Validation error (bad name / keyType / days / sans)
+        '401':
+          description: Authentication required
+        '403':
+          description: Missing ca:manage permission
+        '409':
+          description: A template with this name already exists
+
+  /ca/client-cert-templates/{id}:
+    patch:
+      tags: [Certificate Authority]
+      summary: Update a client-cert template
+      description: >-
+        Partial update — only the provided fields change. Renaming to an existing
+        template's name is refused (409). Requires permission `ca:manage`.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CaClientCertTemplateUpdateRequest' }
+      responses:
+        '200':
+          description: Updated template
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CaClientCertTemplate' }
+        '400':
+          description: Validation error or no valid fields provided
+        '401':
+          description: Authentication required
+        '403':
+          description: Missing ca:manage permission
+        '404':
+          description: No template with this id
+        '409':
+          description: A template with the new name already exists
+    delete:
+      tags: [Certificate Authority]
+      summary: Delete a client-cert template
+      description: >-
+        Removes one preset. Enrolled certificates are NOT affected — templates are
+        only enrollment shortcuts. Requires permission `ca:manage`.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '204':
+          description: Deleted
+        '401':
+          description: Authentication required
+        '403':
+          description: Missing ca:manage permission
+        '404':
+          description: No template with this id
+
   /ca/renew-intermediate:
     post:
       tags: [Certificate Authority]
@@ -12637,6 +12744,51 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/CaWifiClientCertView'
+
+    CaClientCertTemplate:
+      type: object
+      required: [id, name, keyType, createdAt, updatedAt]
+      properties:
+        id: { type: string }
+        name: { type: string, maxLength: 64, description: "Unique template label" }
+        cn: { type: string, maxLength: 64, description: "Subject CN (empty = derive from enrollment name)" }
+        organization: { type: string, maxLength: 64, description: "Subject O RDN" }
+        organizationalUnit: { type: string, maxLength: 64, description: "Subject OU RDN" }
+        sans:
+          type: array
+          items: { type: string }
+          description: "Extra SAN dNSNames beyond the CN"
+        keyType: { type: string, enum: [ec-p256, ec-p384, rsa-2048, rsa-3072, rsa-4096] }
+        days: { type: integer, minimum: 1, nullable: true, description: "Validity in days; null = CA default" }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+
+    CaClientCertTemplateCreateRequest:
+      type: object
+      required: [name]
+      properties:
+        name: { type: string, maxLength: 64, description: "Unique template label" }
+        cn: { type: string, maxLength: 64 }
+        organization: { type: string, maxLength: 64 }
+        organizationalUnit: { type: string, maxLength: 64 }
+        sans:
+          type: array
+          items: { type: string }
+        keyType: { type: string, enum: [ec-p256, ec-p384, rsa-2048, rsa-3072, rsa-4096], default: ec-p256 }
+        days: { type: integer, minimum: 1, nullable: true, description: "Validity in days; null/omitted = CA default" }
+
+    CaClientCertTemplateUpdateRequest:
+      type: object
+      properties:
+        name: { type: string, maxLength: 64 }
+        cn: { type: string, maxLength: 64 }
+        organization: { type: string, maxLength: 64 }
+        organizationalUnit: { type: string, maxLength: 64 }
+        sans:
+          type: array
+          items: { type: string }
+        keyType: { type: string, enum: [ec-p256, ec-p384, rsa-2048, rsa-3072, rsa-4096] }
+        days: { type: integer, minimum: 1, nullable: true, description: "Validity in days; null = CA default" }
 
     BackupMetaResponse:
       type: object

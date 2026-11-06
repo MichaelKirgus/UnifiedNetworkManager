@@ -1,7 +1,8 @@
 import { Router, Response } from 'express';
 import * as fs from 'fs';
-import { db } from '../db';
-import { caCertificates, wifiClientCerts } from '../db/schema';
+import * as crypto from 'crypto';
+import { db, pgErrorCode } from '../db';
+import { caCertificates, clientCertTemplates, wifiClientCerts } from '../db/schema';
 import { eq } from 'drizzle-orm';
 import { requireAuth, requirePermission } from '../auth/middleware';
 import { getCaStatus, revokeCertificate } from '../ca/stepCaAdmin';
@@ -24,6 +25,13 @@ import { recordRevokedSerial } from '../ca/mutations';
  *   GET  /ca/wifi-certs/:serial/download -> install bundle: PEM (default) or P12 (?format=p12)
  *   GET  /ca/root-bundle             -> the CA root PEM for client trust stores
  *   POST /ca/renew-intermediate      -> trigger an intermediate renewal in the CA container
+ *
+ * Client-cert templates (reusable enrollment presets — pure metadata, NOT plan-gated):
+ *
+ *   GET    /ca/client-cert-templates        -> list all templates
+ *   POST   /ca/client-cert-templates        -> create one
+ *   PATCH  /ca/client-cert-templates/:id    -> update fields (partial ok)
+ *   DELETE /ca/client-cert-templates/:id    -> remove one
  *
  * Enrolling and revoking WiFi certs is PLAN-GATED (no direct mutation routes):
  * the webapp creates system plans via POST /plans/system with intentActionId
@@ -288,6 +296,194 @@ router.get(
     } catch (err) {
       const e = err as { message?: string };
       res.status(503).json({ error: `Root certificate not available: ${e.message ?? 'unknown error'}` });
+    }
+  }
+);
+
+/**
+ * Client-cert template CRUD — reusable enrollment presets for EAP-TLS client
+ * certificates. Templates are pure metadata: creating/updating/deleting them
+ * never touches the CA and is NOT plan-gated (no cert changes, no 2FA needed).
+ * USING a template (enrollment) goes through POST /plans/system with
+ * ca.client-cert.enroll like every other cert mutation.
+ *
+ *   GET    /ca/client-cert-templates        -> list all templates
+ *   POST   /ca/client-cert-templates        -> create one (201)
+ *   PATCH  /ca/client-cert-templates/:id    -> update fields (partial ok)
+ *   DELETE /ca/client-cert-templates/:id    -> remove (204)
+ */
+
+const TEMPLATE_KEY_TYPES = ['ec-p256', 'ec-p384', 'rsa-2048', 'rsa-3072', 'rsa-4096'];
+const TEMPLATE_NAME_RE = /^[A-Za-z0-9._-]{1,64}$/;
+
+/** Validates one template payload (create or partial update). Returns the normalized fields. */
+function validateTemplateInput(body: Record<string, unknown>, partial: boolean): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  if (!partial || body.name !== undefined) {
+    const name = typeof body.name === 'string' ? body.name.trim() : '';
+    if (name.length < 1 || name.length > 64) throw Object.assign(new Error('"name" must be 1–64 characters'), { status: 400 });
+    out.name = name;
+  }
+  for (const field of ['cn', 'organization', 'organizationalUnit'] as const) {
+    if (body[field] === undefined) continue;
+    if (typeof body[field] !== 'string' || body[field].trim().length > 64) {
+      throw Object.assign(new Error(`"${field}" must be a string of at most 64 characters`), { status: 400 });
+    }
+    out[field] = (body[field] as string).trim();
+  }
+  if (body.sans !== undefined) {
+    if (!Array.isArray(body.sans)) throw Object.assign(new Error('"sans" must be an array of DNS names'), { status: 400 });
+    for (const s of body.sans as unknown[]) {
+      if (typeof s !== 'string' || !TEMPLATE_NAME_RE.test(s)) {
+        throw Object.assign(new Error(`each SAN must be 1–64 chars of [A-Za-z0-9._-] (got ${JSON.stringify(s)})`), { status: 400 });
+      }
+    }
+    out.sansJson = JSON.stringify(Array.from(new Set(body.sans as string[])));
+  }
+  if (body.keyType !== undefined) {
+    if (!TEMPLATE_KEY_TYPES.includes(String(body.keyType))) {
+      throw Object.assign(new Error(`"keyType" must be one of ${TEMPLATE_KEY_TYPES.join(', ')}`), { status: 400 });
+    }
+    out.keyType = String(body.keyType);
+  }
+  if (body.days !== undefined) {
+    if (body.days === null || body.days === '') {
+      out.days = null; // explicit "use the CA default"
+    } else {
+      const d = Number(body.days);
+      if (!Number.isInteger(d) || d < 1 || d > 3650) throw Object.assign(new Error('"days" must be an integer between 1 and 3650 (or null for the CA default)'), { status: 400 });
+      out.days = d;
+    }
+  }
+  if (!partial && !out.name) throw Object.assign(new Error('"name" is required'), { status: 400 });
+  return out;
+}
+
+function serializeTemplate(r: (typeof clientCertTemplates.$inferSelect)): Record<string, unknown> {
+  return {
+    id: r.id,
+    name: r.name,
+    cn: r.cn,
+    organization: r.organization,
+    organizationalUnit: r.organizationalUnit,
+    sans: JSON.parse(r.sansJson || '[]') as string[],
+    keyType: r.keyType,
+    days: r.days,
+    createdAt: r.createdAt,
+    updatedAt: r.updatedAt,
+  };
+}
+
+// GET /ca/client-cert-templates - list all enrollment presets.
+router.get(
+  '/ca/client-cert-templates',
+  requireAuth,
+  requirePermission('ca:read'),
+  async (_req, res: Response) => {
+    try {
+      const rows = await db.query.clientCertTemplates.findMany();
+      res.status(200).json({ templates: rows.map(serializeTemplate) });
+    } catch (err) {
+      const e = err as { message?: string };
+      res.status(500).json({ error: e.message ?? 'Failed to list client-cert templates' });
+    }
+  }
+);
+
+// POST /ca/client-cert-templates - create one enrollment preset.
+router.post(
+  '/ca/client-cert-templates',
+  requireAuth,
+  requirePermission('ca:manage'),
+  async (req, res: Response) => {
+    try {
+      const fields = validateTemplateInput((req.body ?? {}) as Record<string, unknown>, false);
+      if (!fields.keyType) fields.keyType = 'ec-p256'; // default key type
+      if (fields.days === undefined) fields.days = null; // CA default validity
+      const now = new Date().toISOString();
+      const id = crypto.randomUUID();
+      try {
+        await db.insert(clientCertTemplates).values({
+          id,
+          name: String(fields.name),
+          cn: typeof fields.cn === 'string' ? fields.cn : '',
+          organization: typeof fields.organization === 'string' ? fields.organization : '',
+          organizationalUnit: typeof fields.organizationalUnit === 'string' ? fields.organizationalUnit : '',
+          sansJson: typeof fields.sansJson === 'string' ? fields.sansJson : '[]',
+          keyType: String(fields.keyType),
+          days: typeof fields.days === 'number' ? fields.days : null,
+          createdAt: now,
+          updatedAt: now,
+        });
+      } catch (e) {
+        if (pgErrorCode(e) === '23505') {
+          res.status(409).json({ error: `A client-cert template named "${String(fields.name)}" already exists` });
+          return;
+        }
+        throw e;
+      }
+      const row = (await db.query.clientCertTemplates.findFirst({ where: eq(clientCertTemplates.id, id) }))!;
+      res.status(201).json(serializeTemplate(row));
+    } catch (err) {
+      const e = err as { status?: number; message?: string };
+      res.status(e.status ?? 500).json({ error: e.message ?? 'Failed to create client-cert template' });
+    }
+  }
+);
+
+// PATCH /ca/client-cert-templates/:id - update one preset (partial ok).
+router.patch(
+  '/ca/client-cert-templates/:id',
+  requireAuth,
+  requirePermission('ca:manage'),
+  async (req, res: Response) => {
+    const id = String(req.params.id ?? '');
+    try {
+      const fields = validateTemplateInput((req.body ?? {}) as Record<string, unknown>, true);
+      if (Object.keys(fields).length === 0) throw Object.assign(new Error('No valid fields to update'), { status: 400 });
+      const existing = await db.query.clientCertTemplates.findFirst({ where: eq(clientCertTemplates.id, id) });
+      if (!existing) {
+        res.status(404).json({ error: `No client-cert template with id ${id}` });
+        return;
+      }
+      // Name uniqueness across OTHER rows (23505 would also fire for self-equal).
+      if (fields.name && fields.name !== existing.name) {
+        const clash = await db.query.clientCertTemplates.findFirst({ where: eq(clientCertTemplates.name, String(fields.name)) });
+        if (clash && clash.id !== id) {
+          res.status(409).json({ error: `A client-cert template named "${String(fields.name)}" already exists` });
+          return;
+        }
+      }
+      const set: Record<string, unknown> = { ...fields, updatedAt: new Date().toISOString() };
+      await db.update(clientCertTemplates)
+        .set(set as Partial<typeof clientCertTemplates.$inferInsert>)
+        .where(eq(clientCertTemplates.id, id));
+      const row = (await db.query.clientCertTemplates.findFirst({ where: eq(clientCertTemplates.id, id) }))!;
+      res.status(200).json(serializeTemplate(row));
+    } catch (err) {
+      const e = err as { status?: number; message?: string };
+      res.status(e.status ?? 500).json({ error: e.message ?? 'Failed to update client-cert template' });
+    }
+  }
+);
+
+// DELETE /ca/client-cert-templates/:id - remove one preset (204).
+router.delete(
+  '/ca/client-cert-templates/:id',
+  requireAuth,
+  requirePermission('ca:manage'),
+  async (req, res: Response) => {
+    const id = String(req.params.id ?? '');
+    try {
+      const result = await db.delete(clientCertTemplates).where(eq(clientCertTemplates.id, id)).returning({ id: clientCertTemplates.id });
+      if (result.length === 0) {
+        res.status(404).json({ error: `No client-cert template with id ${id}` });
+        return;
+      }
+      res.status(204).send();
+    } catch (err) {
+      const e = err as { message?: string };
+      res.status(500).json({ error: e.message ?? 'Failed to delete client-cert template' });
     }
   }
 );

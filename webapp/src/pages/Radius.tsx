@@ -1,11 +1,11 @@
 import { useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Activity, Check, Copy, Download, EyeOff, KeyRound, Loader2, Network, Plus, RefreshCw } from 'lucide-react';
+import { Activity, Check, Copy, Download, EyeOff, KeyRound, Loader2, Network, Pencil, Plus, RefreshCw, Trash2 } from 'lucide-react';
 import { Layout } from '../components/Layout';
 import { DialogShell } from '../components/DialogShell';
 import { DataTable, DataTableColumn } from '../components/DataTable';
 import { ReauthDialog } from '../components/ReauthDialog';
-import { api, ApiError, CaStatus, CaKeyType, RadiusAuthLogRow, RadiusNasClient, RadiusStatus, RadiusUserProfile, Secret, WifiClientCert } from '../api/client';
+import { api, ApiError, CaStatus, CaKeyType, ClientCertTemplate, RadiusAuthLogRow, RadiusNasClient, RadiusStatus, RadiusUserProfile, Secret, WifiClientCert } from '../api/client';
 import { can } from '../auth/permissions';
 import { useTimeFormat } from '../utils/time';
 import { createAndExecuteSystemPlan, stepResultOf, waitForPlan, useExecutionMode } from '../executionMode';
@@ -367,6 +367,49 @@ function WifiCertsPanel({ radiusLoaded, onHide }: { radiusLoaded: boolean; onHid
   const [keyType, setKeyType] = useState<CaKeyType>('ec-p256');
   const [days, setDays] = useState('');
 
+  // Enrollment templates — pure metadata (CRUD is NOT plan-gated); USING one
+  // still enrolls through the 'ca.client-cert.enroll' system plan.
+  const templatesQuery = useQuery({
+    queryKey: ['caClientCertTemplates'],
+    queryFn: () => api.caClientCertTemplates(),
+    enabled: canManage,
+  });
+  const [templateId, setTemplateId] = useState('');
+  const [templatesOpen, setTemplatesOpen] = useState(false);
+  const templates: ClientCertTemplate[] = templatesQuery.data?.templates ?? [];
+
+  /** Fill the enrollment form from a saved template (name stays — it's per-enrollment). */
+  function applyTemplate(id: string): void {
+    setTemplateId(id);
+    const t = templates.find((x) => x.id === id);
+    if (!t) return; // 'custom' or unknown id → keep current values.
+    setCn(t.cn);
+    setOrganization(t.organization);
+    setOrganizationalUnit(t.organizationalUnit);
+    setSans(t.sans.join(', '));
+    setKeyType(t.keyType);
+    setDays(t.days == null ? '' : String(t.days));
+  }
+
+  // Host autofill — pick a known host (device or documented host) to derive name + CN.
+  const devicesQuery = useQuery({ queryKey: ['devices'], queryFn: api.devices, staleTime: 5 * 60_000 });
+  const docHostsQuery = useQuery({ queryKey: ['documentedHosts'], queryFn: () => api.documentedHosts(), staleTime: 5 * 60_000 });
+
+  interface HostOption { value: string; label: string }
+  const hostOptions: HostOption[] = [
+    ...(devicesQuery.data ?? []).map((d) => ({ value: d.name, label: `device · ${d.name}` })),
+    ...(docHostsQuery.data ?? [])
+      .filter((h) => h.isActive && (h.dnsNames.length > 0 || h.friendlyName))
+      .map((h) => ({ value: h.dnsNames[0] ?? h.friendlyName!, label: `host · ${h.dnsNames[0] ?? h.friendlyName}` })),
+  ];
+
+  function applyHost(value: string): void {
+    setTemplateId(''); // a host pick is a fresh start, not a template fill
+    if (!value) return;
+    setName(value);
+    setCn(value);
+  }
+
   // Plan-based action state (enroll + revokes share the reauth dialog).
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -397,7 +440,7 @@ function WifiCertsPanel({ radiusLoaded, onHide }: { radiusLoaded: boolean; onHid
       // the new serial from the step result.
       const detail = await waitForPlan(planId);
       void queryClient.invalidateQueries({ queryKey: ['caWifiCerts'] });
-      setName(''); setCn(''); setOrganization(''); setOrganizationalUnit(''); setSans(''); setDays('');
+      setName(''); setCn(''); setOrganization(''); setOrganizationalUnit(''); setSans(''); setDays(''); setTemplateId('');
       const r = stepResultOf(detail.steps[0] ?? { result: null }) as { serial?: string; cn?: string; notBefore?: string; notAfter?: string };
       if (!r.serial) throw new Error('Plan succeeded but no certificate serial was returned');
       // Offer the install dialog immediately — the fresh cert is ready to ship.
@@ -484,6 +527,16 @@ function WifiCertsPanel({ radiusLoaded, onHide }: { radiusLoaded: boolean; onHid
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ['caStatus'] });
     },
+  });
+
+  // Template management dialog (create / edit). Templates are metadata only —
+  // plain mutations, no plan workflow.
+  const [templateDialog, setTemplateDialog] = useState<{ id?: string } | null>(null);
+  const invalidateTemplates = () => void queryClient.invalidateQueries({ queryKey: ['caClientCertTemplates'] });
+
+  const deleteTemplateMutation = useMutation({
+    mutationFn: (id: string) => api.deleteClientCertTemplate(id),
+    onSuccess: invalidateTemplates,
   });
 
   const downloadRoot = async () => {
@@ -591,6 +644,9 @@ function WifiCertsPanel({ radiusLoaded, onHide }: { radiusLoaded: boolean; onHid
           )}
         {canManage && (
           <div className="flex flex-wrap items-center gap-2">
+            <button type="button" onClick={() => setTemplatesOpen(true)} title="Reusable enrollment presets — fill the form with one click" className="inline-flex items-center gap-1.5 rounded-md border px-3 py-1.5 text-xs font-medium hover:bg-muted/40">
+              <KeyRound className="h-3.5 w-3.5" /> Templates{templates.length ? ` (${templates.length})` : ''}
+            </button>
             <button type="button" onClick={downloadRoot} className="inline-flex items-center gap-1.5 rounded-md border px-3 py-1.5 text-xs font-medium hover:bg-muted/40">
               <Download className="h-3.5 w-3.5" /> Root bundle (PEM)
             </button>
@@ -625,8 +681,37 @@ function WifiCertsPanel({ radiusLoaded, onHide }: { radiusLoaded: boolean; onHid
       {/* Enrollment form. */}
       {canManage && (
         <div className="rounded-lg border bg-card p-3">
-          <div className="mb-2 text-xs font-medium">Enroll a new client certificate</div>
+          <div className="mb-2 flex items-center justify-between gap-2">
+            <span className="text-xs font-medium">Enroll a new client certificate</span>
+            {canManage && (
+              <button type="button" onClick={() => setTemplatesOpen(true)} className="inline-flex items-center gap-1 text-[10px] font-medium text-primary underline-offset-2 hover:underline">
+                Manage templates…
+              </button>
+            )}
+          </div>
           <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-4">
+            {canManage && (
+              <>
+                <label className="flex flex-col gap-1 text-[10px] uppercase tracking-wide text-faint">
+                  Template
+                  <select value={templateId} onChange={(e) => applyTemplate(e.target.value)} disabled={!templates.length} title={templates.length ? undefined : 'No templates yet — create one via "Manage templates"'} className={`${inputCls} disabled:opacity-50`}>
+                    <option value="">Custom (no template)</option>
+                    {templates.map((t) => (
+                      <option key={t.id} value={t.id}>{t.name}</option>
+                    ))}
+                  </select>
+                </label>
+                <label className="flex flex-col gap-1 text-[10px] uppercase tracking-wide text-faint">
+                  Fill from host
+                  <select value="" onChange={(e) => applyHost(e.target.value)} title="Pick a known device or documented host to pre-fill name + CN" className={inputCls}>
+                    <option value="">— pick a host —</option>
+                    {hostOptions.map((h) => (
+                      <option key={`${h.label}:${h.value}`} value={h.value}>{h.label}</option>
+                    ))}
+                  </select>
+                </label>
+              </>
+            )}
             <label className="flex flex-col gap-1 text-[10px] uppercase tracking-wide text-faint">
               Name *
               <input value={name} onChange={(e) => setName(e.target.value)} placeholder="office-ap-01" className={inputCls} />
@@ -734,6 +819,35 @@ function WifiCertsPanel({ radiusLoaded, onHide }: { radiusLoaded: boolean; onHid
       {/* Install dialog — platform picker + P12 password. */}
       {installRow && <WifiInstallDialog row={installRow} onClose={() => setInstallRow(null)} />}
 
+      {/* Enrollment templates manager (metadata CRUD — not plan-gated). */}
+      {templatesOpen && canManage && (
+        <TemplatesDialog
+          templates={templates}
+          loading={templatesQuery.isLoading}
+          deleteError={deleteTemplateMutation.isError ? (deleteTemplateMutation.error as Error).message : null}
+          onClose={() => setTemplatesOpen(false)}
+          onNew={() => setTemplateDialog({})}
+          onEdit={(t) => setTemplateDialog({ id: t.id })}
+          onDelete={(t) => {
+            if (!window.confirm(`Delete template "${t.name}"? Enrollments already issued are unaffected.`)) return;
+            deleteTemplateMutation.mutate(t.id);
+          }}
+        />
+      )}
+
+      {/* Template create/edit form. */}
+      {templateDialog && canManage && (
+        <TemplateFormDialog
+          template={templateDialog.id ? templates.find((t) => t.id === templateDialog.id) : undefined}
+          existingNames={templates.map((t) => t.name)}
+          onClose={() => setTemplateDialog(null)}
+          onSaved={() => {
+            invalidateTemplates();
+            setTemplateDialog(null);
+          }}
+        />
+      )}
+
       {/* 2FA revalidation for plan-based actions (enroll / revoke). */}
       {reauth && (
         <div onClick={(e) => e.stopPropagation()}>
@@ -749,6 +863,174 @@ function WifiCertsPanel({ radiusLoaded, onHide }: { radiusLoaded: boolean; onHid
         </div>
       )}
     </section>
+  );
+}
+
+/** Enrollment templates manager — list + create/edit/delete. Templates are pure
+ *  metadata (subject fields, SANs, key type, validity), so CRUD is a plain
+ *  mutation; USING a template still enrolls through the plan-gated workflow. */
+function TemplatesDialog({
+  templates, loading, deleteError, onClose, onNew, onEdit, onDelete,
+}: {
+  templates: ClientCertTemplate[];
+  loading: boolean;
+  deleteError: string | null;
+  onClose: () => void;
+  onNew: () => void;
+  onEdit: (t: ClientCertTemplate) => void;
+  onDelete: (t: ClientCertTemplate) => void;
+}) {
+  const inputCls = 'w-full rounded-md border bg-background px-2 py-1.5 text-xs';
+  return (
+    <DialogShell
+      title="Enrollment templates"
+      subtitle="Reusable presets for the enrollment form — pick one to pre-fill CN, O/OU, SANs, key type and validity."
+      icon={<KeyRound className="h-4 w-4" />}
+      onClose={onClose}
+      maxWidth="max-w-xl"
+      footer={
+        <div className="flex items-center justify-end gap-2">
+          <button type="button" onClick={onNew} className="inline-flex items-center gap-1.5 rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-white hover:bg-primary-hover">
+            <Plus className="h-3.5 w-3.5" /> New template
+          </button>
+          <button type="button" onClick={onClose} className="rounded-md border px-3 py-1.5 text-xs font-medium hover:bg-muted/40">Done</button>
+        </div>
+      }
+    >
+      {loading ? (
+        <p className="text-xs text-secondary">Loading templates…</p>
+      ) : templates.length === 0 ? (
+        <p className="text-xs text-secondary">No templates yet — create one to pre-fill the enrollment form.</p>
+      ) : (
+        <div className="space-y-1.5">
+          {templates.map((t) => (
+            <div key={t.id} className="flex items-center gap-2 rounded-md border bg-background px-2.5 py-2">
+              <div className="min-w-0 flex-1">
+                <div className="truncate text-xs font-medium">{t.name}</div>
+                <div className="truncate font-mono text-[10px] text-faint">
+                  {[t.cn && `CN ${t.cn}`, t.organization, t.organizationalUnit && `OU ${t.organizationalUnit}`].filter(Boolean).join(' · ') || 'subject from enrollment name'}
+                  {t.sans.length > 0 && ` · +${t.sans.length} SAN${t.sans.length === 1 ? '' : 's'}`}
+                </div>
+              </div>
+              <span className="shrink-0 font-mono text-[10px] text-secondary">{t.keyType}</span>
+              <span className="shrink-0 font-mono text-[10px] text-faint">{t.days == null ? 'CA default' : `${t.days}d`}</span>
+              <button type="button" onClick={() => onEdit(t)} title={`Edit "${t.name}"`} className="inline-flex shrink-0 items-center gap-1 rounded border px-2 py-1 text-[10px] font-medium hover:bg-muted/40">
+                <Pencil className="h-3 w-3" /> Edit
+              </button>
+              <button type="button" onClick={() => onDelete(t)} title={`Delete "${t.name}"`} className="inline-flex shrink-0 items-center gap-1 rounded border px-2 py-1 text-[10px] font-medium text-danger-fg hover:bg-danger/10">
+                <Trash2 className="h-3 w-3" /> Delete
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+      {deleteError && <p className="mt-2 text-xs text-danger-fg">{deleteError}</p>}
+    </DialogShell>
+  );
+}
+
+/** Create/edit form for one enrollment template. */
+function TemplateFormDialog({
+  template, existingNames, onClose, onSaved,
+}: {
+  /** The template being edited; undefined = creating a new one. */
+  template?: ClientCertTemplate;
+  /** All current template names (for the uniqueness hint). */
+  existingNames: string[];
+  onClose: () => void;
+  onSaved: () => void;
+}) {
+  const [name, setName] = useState(template?.name ?? '');
+  const [cn, setCn] = useState(template?.cn ?? '');
+  const [organization, setOrganization] = useState(template?.organization ?? '');
+  const [organizationalUnit, setOrganizationalUnit] = useState(template?.organizationalUnit ?? '');
+  const [sans, setSans] = useState((template?.sans ?? []).join(', '));
+  const [keyType, setKeyType] = useState<CaKeyType>(template?.keyType ?? 'ec-p256');
+  const [days, setDays] = useState(template?.days == null ? '' : String(template.days));
+
+  const mutation = useMutation({
+    mutationFn: async () => {
+      const body = {
+        name: name.trim(),
+        cn: cn.trim() || undefined,
+        organization: organization.trim() || undefined,
+        organizationalUnit: organizationalUnit.trim() || undefined,
+        sans: sans.split(',').map((s) => s.trim()).filter(Boolean),
+        keyType,
+        days: days.trim() === '' ? null : Number(days),
+      };
+      if (template) return api.updateClientCertTemplate(template.id, body);
+      return api.createClientCertTemplate(body);
+    },
+    onSuccess: onSaved,
+  });
+
+  const inputCls = 'w-full rounded-md border bg-background px-2 py-1.5 text-xs';
+  const nameClash = template ? existingNames.includes(name.trim()) : false;
+
+  return (
+    <DialogShell
+      title={template ? `Edit template "${template.name}"` : 'New enrollment template'}
+      subtitle="Metadata only — enrolling with a template still goes through the plan workflow."
+      icon={<KeyRound className="h-4 w-4" />}
+      onClose={onClose}
+      maxWidth="max-w-md"
+      footer={
+        <div className="flex items-center justify-end gap-2">
+          {mutation.isError && (
+            <span className="mr-auto text-[11px] text-danger-fg">{(mutation.error as Error).message}</span>
+          )}
+          <button type="button" onClick={onClose} className="rounded-md border px-3 py-1.5 text-xs font-medium hover:bg-muted/40">Cancel</button>
+          <button
+            type="button"
+            onClick={() => mutation.mutate()}
+            disabled={!name.trim() || nameClash || mutation.isPending}
+            title={nameClash ? 'A template with this name already exists' : undefined}
+            className="inline-flex items-center gap-1.5 rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-white hover:bg-primary-hover disabled:opacity-50"
+          >
+            {mutation.isPending && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+            {template ? 'Save changes' : 'Create template'}
+          </button>
+        </div>
+      }
+    >
+      <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+        <label className="flex flex-col gap-1 text-[10px] uppercase tracking-wide text-faint">
+          Name *
+          <input value={name} onChange={(e) => setName(e.target.value)} placeholder="office-wifi" className={`${inputCls}${nameClash ? ' border-danger' : ''}`} />
+        </label>
+        <label className="flex flex-col gap-1 text-[10px] uppercase tracking-wide text-faint">
+          CN (empty = enrollment name)
+          <input value={cn} onChange={(e) => setCn(e.target.value)} placeholder="" className={inputCls} />
+        </label>
+        <label className="flex flex-col gap-1 text-[10px] uppercase tracking-wide text-faint">
+          Organization (O)
+          <input value={organization} onChange={(e) => setOrganization(e.target.value)} placeholder="Acme Corp" className={inputCls} />
+        </label>
+        <label className="flex flex-col gap-1 text-[10px] uppercase tracking-wide text-faint">
+          Organizational unit (OU)
+          <input value={organizationalUnit} onChange={(e) => setOrganizationalUnit(e.target.value)} placeholder="IT" className={inputCls} />
+        </label>
+        <label className="flex flex-col gap-1 sm:col-span-2 text-[10px] uppercase tracking-wide text-faint">
+          Extra SANs (comma-separated)
+          <input value={sans} onChange={(e) => setSans(e.target.value)} placeholder="ap01.lan, ap01.example.com" className={inputCls} />
+        </label>
+        <label className="flex flex-col gap-1 text-[10px] uppercase tracking-wide text-faint">
+          Key type
+          <select value={keyType} onChange={(e) => setKeyType(e.target.value as CaKeyType)} className={inputCls}>
+            <option value="ec-p256">ECDSA P-256 (default)</option>
+            <option value="ec-p384">ECDSA P-384</option>
+            <option value="rsa-2048">RSA 2048</option>
+            <option value="rsa-3072">RSA 3072</option>
+            <option value="rsa-4096">RSA 4096</option>
+          </select>
+        </label>
+        <label className="flex flex-col gap-1 text-[10px] uppercase tracking-wide text-faint">
+          Validity (days, empty = CA default)
+          <input value={days} onChange={(e) => setDays(e.target.value)} inputMode="numeric" placeholder="default" className={inputCls} />
+        </label>
+      </div>
+    </DialogShell>
   );
 }
 
