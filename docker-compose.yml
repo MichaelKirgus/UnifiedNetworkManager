@@ -57,6 +57,34 @@ services:
       timeout: 10s
       retries: 3
     image: ${UNM_REGISTRY:-ghcr.io/michaelkirgus/unifiednetworkmanager}/unm-ca:${UNM_IMAGE_TAG:-dev}
+  # RADIUS server (FreeRADIUS 3.x — see radius/Dockerfile) for WiFi EAP-TLS.
+  # Consumes the client certificates issued by unm-ca: the API renders clients/
+  # eap/sql config into the shared cfg volume, and the entrypoint copies it into
+  # the raddb + SIGHUPs radiusd on change (hot-apply). Accounting writes go
+  # straight to Postgres via rlm_sql; revocation is enforced per-auth through
+  # the revoked_serials table (step-ca has no CRL endpoint).
+  unm-radius:
+    environment:
+      - TZ=${TZ:-UTC}
+    volumes:
+      - ${UNM_RADIUS_CONFIG_VOLUME:-unm-radius-cfg}:/data/radius
+      - ${UNM_CA_CONFIG_VOLUME:-unm-ca-cfg}:/data/ca:ro
+    depends_on:
+      - postgres
+      - unm-ca
+    restart: unless-stopped
+    # Process liveness only — a functional auth check needs the rendered client
+    # secret, which does not exist before the API's first render. The E2E suite
+    # (scripts/e2e-radius.ts) exercises real EAP-TLS authentication.
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - pgrep -f 'usr/sbin/freeradius' >/dev/null || exit 1
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+    image: ${UNM_REGISTRY:-ghcr.io/michaelkirgus/unifiednetworkmanager}/unm-radius:${UNM_IMAGE_TAG:-dev}
   api:
     ports:
       - 3000:3000
@@ -87,12 +115,17 @@ services:
       - UNM_DOCKER_UID=${UNM_DOCKER_UID:-}
       # The /data/ca DIR stays group-shared with unm-ca; only the two API-owned
       # files inside it are chowned (legacy root-owned copies from before the
-      # unprivileged switch would otherwise block reads/writes).
-      - UNM_CHOWN_PATHS=/data/backups /data/file-repo /data/tls /data/ca/admin-jwk.pem /data/ca/ca.json
+      # unprivileged switch would otherwise block reads/writes). /data/radius is
+      # the RADIUS config volume shared with unm-radius — chowned too, since it
+      # may be seeded root-owned when the api creates it before unm-radius runs.
+      - UNM_CHOWN_PATHS=/data/backups /data/file-repo /data/tls /data/ca/admin-jwk.pem /data/ca/ca.json /data/radius
     volumes:
       - ${UNM_BACKUP_VOLUME:-unm-backups}:/data/backups
       - filerepo:/data/file-repo
       - ${UNM_CA_CONFIG_VOLUME:-unm-ca-cfg}:/data/ca
+      # RADIUS config volume (shared with unm-radius): the API renders the
+      # FreeRADIUS client/eap/sql/site files here from global settings.
+      - ${UNM_RADIUS_CONFIG_VOLUME:-unm-radius-cfg}:/data/radius
       - ${UNM_API_TLS_VOLUME:-unm-api-tls}:/data/tls
     healthcheck:
       test:
@@ -728,6 +761,38 @@ services:
       - api
     restart: unless-stopped
     image: ${UNM_REGISTRY:-ghcr.io/michaelkirgus/unifiednetworkmanager}/wled-plugin:${UNM_IMAGE_TAG:-dev}
+  # FreeRADIUS management plugin (capability `radius`): advertises RADIUS
+  # support so UNM's Certificates page shows its WiFi EAP-TLS section and the CA
+  # enrollment flow knows a RADIUS server exists. It adds NO control surface —
+  # the sidecar is driven entirely by the API's render + SIGHUP path, and a UDP
+  # liveness probe can't work (radiusd ignores requests from non-allowlisted
+  # source IPs). Sidecar process health comes from its own healthcheck below.
+  freeradius-plugin:
+    ports:
+      - 4026:4080
+    environment:
+      - PORT=4080
+      - ADVERTISED_ENDPOINT=http://freeradius-plugin:4080
+      - UNM_DEFAULT_GATEWAY=${UNM_DEFAULT_GATEWAY:-}
+      - UNM_RUN_AS_ROOT=${UNM_RUN_AS_ROOT:-}
+      - UNM_SKIP_CHOWN=${UNM_SKIP_CHOWN:-}
+      - UNM_DOCKER_GID=${UNM_DOCKER_GID:-}
+      - UNM_DOCKER_UID=${UNM_DOCKER_UID:-}
+      - UNM_API_URL=http://api:3000/v1
+      - UNM_TLS=${UNM_TLS:-}
+      - PLUGIN_API_KEY=${PLUGIN_API_KEY:-dev-plugin-key}
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - node -e 'require("http").get({host:"127.0.0.1",port:4081,path:"/healthz"},function(r){process.exit(r.statusCode===200?0:1)}).on("error",function(){process.exit(1)})'
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+    depends_on:
+      - api
+    restart: unless-stopped
+    image: ${UNM_REGISTRY:-ghcr.io/michaelkirgus/unifiednetworkmanager}/freeradius-plugin:${UNM_IMAGE_TAG:-dev}
   mcp:
     environment:
       - MCP_PORT=3901
@@ -861,6 +926,9 @@ volumes:
   unm-ca-pki: null
   unm-api-tls: null
   unm-ca-cfg: null
+  # RADIUS config volume (shared with unm-radius): clients.conf, eap/sql module
+  # instances + the EAP-TLS site rendered by the API from global settings.
+  unm-radius-cfg: null
   unm-mcp-tls: null
   unm-backups: null
   filerepo: null

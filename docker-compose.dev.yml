@@ -95,6 +95,37 @@ services:
       timeout: 10s
       retries: 3
 
+  # RADIUS server (FreeRADIUS 3.x — see radius/Dockerfile) for WiFi EAP-TLS.
+  # Consumes the client certificates issued by unm-ca: the API renders clients/
+  # eap/sql config into the shared cfg volume, and the entrypoint copies it into
+  # the raddb + SIGHUPs radiusd on change (hot-apply). Accounting writes go
+  # straight to Postgres via rlm_sql; revocation is enforced per-auth through
+  # the revoked_serials table (step-ca has no CRL endpoint).
+  unm-radius:
+    build:
+      context: .
+      dockerfile: radius/Dockerfile
+    environment:
+      - TZ=${TZ:-UTC}
+    volumes:
+      - ${UNM_RADIUS_CONFIG_VOLUME:-unm-radius-cfg}:/data/radius
+      # CA shared volume, READ-ONLY — the entrypoint keeps root_ca.crt in sync
+      # from it into the raddb (EAP-TLS validates client certs against UNM's CA).
+      - ${UNM_CA_CONFIG_VOLUME:-unm-ca-cfg}:/data/ca:ro
+    depends_on:
+      - postgres
+      - unm-ca
+    restart: unless-stopped
+    # Process liveness only — a functional auth check needs the rendered client
+    # secret, which does not exist before the API's first render. The E2E suite
+    # (scripts/e2e-radius.ts) exercises real EAP-TLS authentication.
+    healthcheck:
+      test: ["CMD-SHELL", "pgrep -f 'usr/sbin/freeradius' >/dev/null || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
   api:
     build:
       context: .
@@ -183,7 +214,11 @@ services:
       # is deliberately EXCLUDED — it's shared with unm-ca and group-writable
       # there — but the two API-owned FILES inside it are chowned so legacy
       # root-owned copies (pre-unprivileged switch) don't block reads/writes.
-      - UNM_CHOWN_PATHS=/data/backups /data/file-repo /data/tls /data/ca/admin-jwk.pem /data/ca/ca.json
+      # /data/radius is the RADIUS config volume shared with unm-radius. It may be
+      # seeded root-owned (when the api container creates it before unm-radius has
+      # ever run), so chown it to the dropped app user like the CA files above —
+      # otherwise writeRadiusConfig() gets EACCES on first render.
+      - UNM_CHOWN_PATHS=/data/backups /data/file-repo /data/tls /data/ca/admin-jwk.pem /data/ca/ca.json /data/radius
     volumes:
       # Stored UNM backups (Backups page) — local-destination archives live here.
       # Named volume by default; set UNM_BACKUP_VOLUME to a host path or another
@@ -196,6 +231,9 @@ services:
       # global settings and persists its own admin JWK key. The PKI volume is
       # deliberately NOT mounted — the API never sees CA signing keys.
       - ${UNM_CA_CONFIG_VOLUME:-unm-ca-cfg}:/data/ca
+      # RADIUS config volume (shared with unm-radius): the API renders the
+      # FreeRADIUS client/eap/sql/site files here from global settings + CA state.
+      - ${UNM_RADIUS_CONFIG_VOLUME:-unm-radius-cfg}:/data/radius
       # mTLS (Stage 1): the API's OWN ACME account + leaf keys persist here so a
       # container rebuild does not re-enroll (the old leaf stays valid until its
       # renewal window). Only UNM-owned material — no CA signing keys.
@@ -1293,6 +1331,51 @@ services:
       - api
     restart: unless-stopped
 
+  # FreeRADIUS management plugin (capability `radius`): advertises RADIUS
+  # support so UNM's Certificates page shows its WiFi EAP-TLS section and the CA
+  # enrollment flow knows a RADIUS server exists. It adds NO control surface —
+  # the sidecar is driven entirely by the API's render + SIGHUP path, and a UDP
+  # liveness probe can't work (radiusd ignores requests from non-allowlisted
+  # source IPs). Sidecar process health comes from its own healthcheck below.
+  freeradius-plugin:
+    build:
+      context: .
+      dockerfile: plugins/freeradius/Dockerfile
+    ports:
+      - "4026:4080"
+    environment:
+      - PORT=4080
+      # Endpoint the API (in its own container) uses to reach this plugin.
+      - ADVERTISED_ENDPOINT=http://freeradius-plugin:4080
+      # Optional macvlan default gateway (scripts/docker-entrypoint.sh) — empty = no-op.
+      - UNM_DEFAULT_GATEWAY=${UNM_DEFAULT_GATEWAY:-}
+      # Privilege drop (scripts/docker-entrypoint.sh): the app runs as uid/gid 1001
+      # by default. UNM_RUN_AS_ROOT=1 skips the drop, UNM_SKIP_CHOWN=1 skips the
+      # data-dir chown, UNM_DOCKER_GID/UID join a host group / set the uid.
+      - UNM_RUN_AS_ROOT=${UNM_RUN_AS_ROOT:-}
+      - UNM_SKIP_CHOWN=${UNM_SKIP_CHOWN:-}
+      - UNM_DOCKER_GID=${UNM_DOCKER_GID:-}
+      - UNM_DOCKER_UID=${UNM_DOCKER_UID:-}
+      # Base URL of the API's internal endpoints (plugin -> API) — used for log shipping.
+      - UNM_API_URL=http://api:3000/v1
+      # mTLS (Stage 1): enroll against the CA and serve TLS on :4080.
+      # Off by default — set UNM_TLS=1 to enable fleet-wide.
+      - UNM_TLS=${UNM_TLS:-}
+      - PLUGIN_API_KEY=${PLUGIN_API_KEY:-dev-plugin-key}
+    # Liveness check against the SDK's dedicated plain-HTTP health listener on
+    # :4081 (HEALTH_PORT) — a minimal second server that never goes behind mTLS,
+    # so no client cert is needed. A dead process fails this; a broken TLS swap
+    # or failed enrollment does NOT (the main API plane stays up independently).
+    healthcheck:
+      test: ["CMD-SHELL", 'node -e ''require("http").get({host:"127.0.0.1",port:4081,path:"/healthz"},function(r){process.exit(r.statusCode===200?0:1)}).on("error",function(){process.exit(1)})''']
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+    depends_on:
+      - api
+    restart: unless-stopped
+
   # MCP server for AI agents: exposes the API's OpenAPI operations as MCP tools
   # over Streamable HTTP. Two endpoints:
   #   POST :3901/mcp        — production-safe (OpenAPI tools only; scope the
@@ -1548,6 +1631,10 @@ volumes:
   unm-api-tls:
   # mounted on BOTH unm-ca and api. Override with UNM_CA_CONFIG_VOLUME if needed.
   unm-ca-cfg:
+  # RADIUS config volume — rendered by the API, consumed by unm-radius (which
+  # copies it into its raddb + SIGHUPs radiusd). Mounted on BOTH api and
+  # unm-radius. Override with UNM_RADIUS_CONFIG_VOLUME if needed.
+  unm-radius-cfg:
   # mTLS (Stage 2): the MCP server's own ACME account key + enrolled leaf,
   # persisted across container rebuilds. Same content rules as unm-api-tls —
   # only UNM-owned material, no CA signing keys.

@@ -1,0 +1,27 @@
+{
+  "name": "unm-plugin-freeradius",
+  "version": "0.1.0",
+  "license": "EUPL-1.2",
+  "private": true,
+  "description": "UNM FreeRADIUS management plugin (capability `radius`) — companion to the unm-radius sidecar for WiFi EAP-TLS: advertises RADIUS support so UNM's CA can issue client certificates, and reports sidecar liveness by probing its auth listener over the compose network.",
+  "main": "dist/src/index.js",
+  "scripts": {
+    "dev": "ts-node-dev --respawn src/index.ts",
+    "build": "tsc",
+    "start": "node dist/src/index.js"
+  },
+  "dependencies": {
+    "@unm/plugin-sdk": "file:../../packages/plugin-sdk",
+    "bonjour-service": "^1.2.1",
+    "express": "^5.2.1",
+    "cors": "^2.8.5"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.6",
+    "@types/cors": "^2.8.17",
+    "@types/node": "^20.10.0",
+    "typescript": "^5.3.2",
+    "ts-node-dev": "^2.0.0",
+    "ts-node": "^10.9.2"
+  }
+}
