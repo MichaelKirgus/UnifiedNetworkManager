@@ -1,12 +1,52 @@
 import { useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Activity, Check, Copy, Download, KeyRound, Network, Plus, RefreshCw, Wifi } from 'lucide-react';
+import { Activity, Check, Copy, Download, EyeOff, KeyRound, Loader2, Network, Plus, RefreshCw } from 'lucide-react';
 import { Layout } from '../components/Layout';
 import { DialogShell } from '../components/DialogShell';
 import { DataTable, DataTableColumn } from '../components/DataTable';
-import { api, CaStatus, CaKeyType, RadiusAuthLogRow, RadiusNasClient, RadiusStatus, RadiusUserProfile, Secret, WifiClientCert } from '../api/client';
+import { ReauthDialog } from '../components/ReauthDialog';
+import { api, ApiError, CaStatus, CaKeyType, RadiusAuthLogRow, RadiusNasClient, RadiusStatus, RadiusUserProfile, Secret, WifiClientCert } from '../api/client';
 import { can } from '../auth/permissions';
 import { useTimeFormat } from '../utils/time';
+import { createAndExecuteSystemPlan, stepResultOf, waitForPlan, useExecutionMode } from '../executionMode';
+
+/**
+ * Every mutation on this page (NAS clients, user profiles, EAP-TLS client-cert
+ * enroll / revoke) flows through the 2FA-gated plan workflow as a SYSTEM plan —
+ * there is no direct mutation route left. In Execute mode the plan is created AND run; in
+ * Plan mode it is saved without executing ("saved" notice); in Read-Only mode
+ * nothing happens. A 401 (expired 2FA) opens the revalidation dialog and retries.
+ */
+
+/** Inline "plan saved, not executed" notice for Plan mode. */
+function SavedPlanNotice({ text }: { text: string }) {
+  return (
+    <div className="flex items-start gap-2 rounded-md border border-success-border bg-success px-3 py-2 text-xs text-success-fg">
+      <Check size={14} className="mt-0.5 shrink-0" />
+      {text}
+    </div>
+  );
+}
+
+/** Read-only banner for dialogs/forms when the global mode is readonly. */
+function ReadOnlyNotice() {
+  return (
+    <div className="flex items-start gap-2 rounded border border-warning-border bg-warning px-3 py-2 text-xs text-warning-fg">
+      <EyeOff size={14} className="mt-0.5 shrink-0" />
+      Read-only mode is active — this action cannot be saved or executed. Switch to Plan or Execute in the top bar.
+    </div>
+  );
+}
+
+/** Error box for a failed plan-based action. */
+function ActionError({ message }: { message: string }) {
+  return <div className="rounded border border-danger-border bg-danger px-3 py-2 text-xs text-danger-fg">{message}</div>;
+}
+
+/** True when an error is a 401 (expired 2FA) — callers open the reauth dialog. */
+function isReauthError(err: unknown): boolean {
+  return err instanceof ApiError && err.status === 401;
+}
 
 /** Triggers a browser download of an already-fetched blob under `name`. */
 function saveBlob(blob: Blob, name: string): void {
@@ -90,7 +130,7 @@ const INSTALL_PLATFORMS: Array<{ id: string; label: string; format: 'pem' | 'p12
  * makes the EAP-TLS sections relevant on this instance. */
 const RADIUS_CAPABILITY = 'radius';
 
-/** localStorage key for "show the WiFi section even without a radius plugin". */
+/** localStorage key for "show the EAP-TLS client-cert section even without a radius plugin". */
 const WIFI_FORCE_SHOW_KEY = 'unm.wifiCerts.forceShow';
 
 function readWifiForceShow(): boolean {
@@ -140,7 +180,7 @@ function P12PasswordPanel({ password }: { password: string }) {
 }
 
 /**
- * Install dialog for one WiFi client cert: pick the target platform, download
+ * Install dialog for one EAP-TLS client cert: pick the target platform, download
  * the matching bundle (P12 for Windows/Android/iOS/macOS, PEM otherwise), and
  * get per-platform import steps + the P12 password.
  */
@@ -175,7 +215,7 @@ function WifiInstallDialog({ row, onClose }: { row: WifiClientCert; onClose: () 
     <DialogShell
       title={`Install certificate — ${row.name}`}
       subtitle={`${row.cn} · valid until ${new Date(row.notAfter).toLocaleDateString()}`}
-      icon={<Wifi className="h-4 w-4" />}
+      icon={<KeyRound className="h-4 w-4" />}
       onClose={onClose}
       maxWidth="max-w-md"
     >
@@ -246,9 +286,10 @@ function ChainChip({ label, iso }: { label: string; iso?: string | null }) {
 }
 
 /**
- * WiFi (EAP-TLS) client certificates — UNM's own CA issues long-lived certs for
- * 802.1X supplicants. Shows the CA chain health, an enrollment form (all fields
- * overridable), and the enrolled-certs table with install/revoke actions.
+ * EAP-TLS client certificates — UNM's own CA issues long-lived certs for 802.1X
+ * supplicants: WiFi AND wired clients alike (any EAP-TLS-capable device). Shows
+ * the CA chain health, an enrollment form (all fields overridable), and the
+ * enrolled-certs table with install/revoke actions.
  *
  * VISIBILITY: EAP-TLS only matters when a RADIUS server plugin is loaded on this
  * instance (capability 'radius'). Without one, the section collapses into a slim
@@ -272,9 +313,9 @@ function WifiCertsSection() {
       <section className="mb-6 rounded-lg border bg-card p-3">
         <div className="flex flex-wrap items-center justify-between gap-2">
           <div className="flex items-center gap-2 text-xs text-secondary">
-            <Wifi className="h-4 w-4 shrink-0" />
+            <KeyRound className="h-4 w-4 shrink-0" />
             <span>
-              WiFi client certificates (EAP-TLS) are available when a RADIUS server plugin is loaded — none is currently.
+              EAP-TLS client certificates (WiFi and wired 802.1X) are available when a RADIUS server plugin is loaded — none is currently.
               {pluginsQuery.isLoading ? ' Checking plugins…' : ''}
             </span>
           </div>
@@ -293,7 +334,7 @@ function WifiCertsSection() {
   return <WifiCertsPanel radiusLoaded={radiusLoaded} onHide={() => persistForceShow(false)} />;
 }
 
-/** The full WiFi EAP-TLS section body — CA chain health, enrollment form, table. */
+/** The full EAP-TLS client-cert section body — CA chain health, enrollment form, table. */
 function WifiCertsPanel({ radiusLoaded, onHide }: { radiusLoaded: boolean; onHide: () => void }) {
   const queryClient = useQueryClient();
   const canManage = can('ca:manage');
@@ -312,6 +353,11 @@ function WifiCertsPanel({ radiusLoaded, onHide }: { radiusLoaded: boolean; onHid
     refetchInterval: 60_000,
   });
 
+  // Execution mode — every mutation on this page is a system plan.
+  const { mode } = useExecutionMode();
+  const isPlanMode = mode === 'plan';
+  const isReadOnly = mode === 'readonly';
+
   // Enrollment form state.
   const [name, setName] = useState('');
   const [cn, setCn] = useState('');
@@ -321,37 +367,117 @@ function WifiCertsPanel({ radiusLoaded, onHide }: { radiusLoaded: boolean; onHid
   const [keyType, setKeyType] = useState<CaKeyType>('ec-p256');
   const [days, setDays] = useState('');
 
-  const enrollMutation = useMutation({
-    mutationFn: () =>
-      api.caEnroll({
-        name: name.trim(),
-        cn: cn.trim() || undefined,
-        organization: organization.trim() || undefined,
-        organizationalUnit: organizationalUnit.trim() || undefined,
-        sans: sans.split(',').map((s) => s.trim()).filter(Boolean),
-        keyType,
-        days: days.trim() === '' ? undefined : Number(days),
-      }),
-    onSuccess: (result) => {
+  // Plan-based action state (enroll + revokes share the reauth dialog).
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [savedPlan, setSavedPlan] = useState(false);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [reauth, setReauth] = useState<{ label: string; retry: () => Promise<void> } | null>(null);
+
+  async function submitEnroll() {
+    if (isReadOnly) return; // Read-Only — button disabled; safety net.
+    setBusy(true);
+    setError(null);
+    const input: Record<string, unknown> = {
+      name: name.trim(),
+      cn: cn.trim() || undefined,
+      organization: organization.trim() || undefined,
+      organizationalUnit: organizationalUnit.trim() || undefined,
+      sans: sans.split(',').map((s) => s.trim()).filter(Boolean),
+      keyType,
+      days: days.trim() === '' ? undefined : Number(days),
+    };
+    const attempt = async () => {
+      const planId = await createAndExecuteSystemPlan('ca.client-cert.enroll', input, mode);
+      if (isPlanMode) {
+        setSavedPlan(true);
+        return;
+      }
+      // Execute mode: the executor signs via the CA — poll until done and read
+      // the new serial from the step result.
+      const detail = await waitForPlan(planId);
       void queryClient.invalidateQueries({ queryKey: ['caWifiCerts'] });
       setName(''); setCn(''); setOrganization(''); setOrganizationalUnit(''); setSans(''); setDays('');
+      const r = stepResultOf(detail.steps[0] ?? { result: null }) as { serial?: string; cn?: string; notBefore?: string; notAfter?: string };
+      if (!r.serial) throw new Error('Plan succeeded but no certificate serial was returned');
       // Offer the install dialog immediately — the fresh cert is ready to ship.
       setInstallRow({
-        name: result.cn,
-        cn: result.cn,
+        name: r.cn ?? String(input.name),
+        cn: r.cn ?? String(input.name),
         organization: '',
         organizationalUnit: '',
         sans: [],
         keyType,
-        serial: result.serial,
+        serial: r.serial,
         issuer: 'UNM CA Intermediate CA',
-        notBefore: result.notBefore,
-        notAfter: result.notAfter,
+        notBefore: r.notBefore ?? new Date().toISOString(),
+        notAfter: r.notAfter ?? new Date().toISOString(),
         status: 'issued',
         createdAt: new Date().toISOString(),
       });
-    },
-  });
+    };
+    try {
+      await attempt();
+    } catch (err) {
+      if (isReauthError(err)) setReauth({ label: 'Enroll client certificate', retry: submitEnroll });
+      else setError((err as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  /** Revoke one serial through a system plan (ca.client-cert.revoke). */
+  async function doRevoke(serial: string, label: string) {
+    if (isReadOnly) return; // Read-Only — safety net.
+    setBusy(true);
+    setError(null);
+    const attempt = async () => {
+      const planId = await createAndExecuteSystemPlan('ca.client-cert.revoke', { serial }, mode);
+      if (isPlanMode) {
+        setNotice(`Revoke of ${label} saved as a plan — it was NOT executed. Open the Plans center to run it later (or schedule it).`);
+        return;
+      }
+      await waitForPlan(planId);
+      void queryClient.invalidateQueries({ queryKey: ['caWifiCerts'] });
+    };
+    try {
+      await attempt();
+    } catch (err) {
+      if (isReauthError(err)) setReauth({ label: `Revoke ${label}`, retry: () => doRevoke(serial, label) });
+      else setError((err as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  /** Revoke many serials through ONE system plan (ca.client-cert.bulk-revoke). */
+  async function doRevokeBulk(serials: string[], label: string) {
+    if (isReadOnly) return; // Read-Only — safety net.
+    setBusy(true);
+    setError(null);
+    const attempt = async () => {
+      const planId = await createAndExecuteSystemPlan('ca.client-cert.bulk-revoke', { serials }, mode);
+      if (isPlanMode) {
+        setNotice(`Bulk revoke of ${label} saved as a plan — it was NOT executed. Open the Plans center to run it later (or schedule it).`);
+        return;
+      }
+      await waitForPlan(planId);
+      void queryClient.invalidateQueries({ queryKey: ['caWifiCerts'] });
+    };
+    try {
+      await attempt();
+    } catch (err) {
+      if (isReauthError(err)) setReauth({ label: `Bulk revoke ${label}`, retry: () => doRevokeBulk(serials, label) });
+      else setError((err as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const revokeWifi = async (row: WifiClientCert) => {
+    if (!window.confirm(`Revoke "${row.name}" (${row.cn})? The certificate stops being usable for new EAP-TLS authentications and can no longer be downloaded.`)) return;
+    await doRevoke(row.serial, row.name);
+  };
 
   const renewMutation = useMutation({
     mutationFn: () => api.caRenewIntermediate(),
@@ -359,16 +485,6 @@ function WifiCertsPanel({ radiusLoaded, onHide }: { radiusLoaded: boolean; onHid
       void queryClient.invalidateQueries({ queryKey: ['caStatus'] });
     },
   });
-
-  const revokeWifi = async (row: WifiClientCert) => {
-    if (!window.confirm(`Revoke "${row.name}" (${row.cn})? The certificate stops being usable for new EAP-TLS authentications and can no longer be downloaded.`)) return;
-    try {
-      await api.caRevokeWifi(row.serial);
-      void queryClient.invalidateQueries({ queryKey: ['caWifiCerts'] });
-    } catch (err) {
-      alert((err as Error).message);
-    }
-  };
 
   const downloadRoot = async () => {
     try {
@@ -462,7 +578,7 @@ function WifiCertsPanel({ radiusLoaded, onHide }: { radiusLoaded: boolean; onHid
     <section className="mb-6 space-y-3">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <h2 className="inline-flex items-center gap-2 text-sm font-semibold">
-          <Wifi className="h-4 w-4" /> WiFi client certificates (EAP-TLS)
+          <KeyRound className="h-4 w-4" /> Client certificates (EAP-TLS)
           {!radiusLoaded && (
             <span className="rounded bg-warning/15 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-warning-fg">no RADIUS plugin</span>
           )}
@@ -548,12 +664,13 @@ function WifiCertsPanel({ radiusLoaded, onHide }: { radiusLoaded: boolean; onHid
             <div className="flex items-end justify-end">
               <button
                 type="button"
-                onClick={() => enrollMutation.mutate()}
-                disabled={!name.trim() || enrollMutation.isPending}
+                onClick={() => void submitEnroll()}
+                disabled={!name.trim() || busy || isReadOnly}
+                title={isReadOnly ? 'Read-only mode — switch to Plan or Execute to make changes' : undefined}
                 className="inline-flex items-center gap-1.5 rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-white hover:bg-primary-hover disabled:opacity-50"
               >
-                <KeyRound className="h-3.5 w-3.5" />
-                {enrollMutation.isPending ? 'Enrolling…' : 'Enroll'}
+                {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <KeyRound className="h-3.5 w-3.5" />}
+                {isPlanMode ? 'Save as plan' : busy ? 'Enrolling…' : 'Enroll'}
               </button>
             </div>
           </div>
@@ -561,16 +678,13 @@ function WifiCertsPanel({ radiusLoaded, onHide }: { radiusLoaded: boolean; onHid
             The validity is clamped to the CA chain expiry minus a 7-day safety margin — issued certificates can never outlive their issuer.
             Post-quantum key types (e.g. ML-DSA) are not offered yet: current supplicant/EAP-TLS stacks do not accept them; ECDSA P-256 is the default.
           </p>
-          {enrollMutation.isSuccess && (
-            <div className="mt-2 space-y-1 text-xs">
-              <span className="inline-flex items-center gap-1.5 font-medium text-success-fg">
-                <Check className="h-3.5 w-3.5" /> Enrolled {enrollMutation.data.cn} — valid until {new Date(enrollMutation.data.notAfter).toLocaleDateString()} (serial {enrollMutation.data.serial.slice(0, 16)}…)
-              </span>
-              <div className="text-secondary">The install dialog is open — pick the target platform and download. You can also re-open it from the table below.</div>
-              {enrollMutation.data.clamped && <div className="text-warning-fg">{enrollMutation.data.clampReason}</div>}
+          {isReadOnly && <div className="mt-2"><ReadOnlyNotice /></div>}
+          {savedPlan && (
+            <div className="mt-2">
+              <SavedPlanNotice text={`Enrollment of ${name.trim() || 'the certificate'} saved as a plan — it was NOT executed. Open the Plans center to run it later (or schedule it).`} />
             </div>
           )}
-          {enrollMutation.isError && <div className="mt-2 text-xs text-danger-fg">{(enrollMutation.error as Error).message}</div>}
+          {error && !reauth && <div className="mt-2"><ActionError message={error} /></div>}
         </div>
       )}
 
@@ -580,8 +694,8 @@ function WifiCertsPanel({ radiusLoaded, onHide }: { radiusLoaded: boolean; onHid
         rows={certs}
         rowKey={(row) => row.serial}
         storageKey="radius-wifi-certs"
-        searchPlaceholder="Search WiFi client certificates…"
-        emptyMessage="No WiFi client certificates enrolled yet."
+        searchPlaceholder="Search client certificates…"
+        emptyMessage="No EAP-TLS client certificates enrolled yet."
         autoRefresh={{ intervalMs: 60_000, queries: [wifiQuery] }}
         selectable={canManage}
         bulkActions={
@@ -593,12 +707,7 @@ function WifiCertsPanel({ radiusLoaded, onHide }: { radiusLoaded: boolean; onHid
                   enabled: (rows) => rows.some((r) => r.status !== 'revoked'),
                   onClick: async (selected) => {
                     const serials = selected.filter((r) => r.status !== 'revoked').map((r) => r.serial);
-                    try {
-                      await api.caRevokeWifiBulk(serials);
-                      void queryClient.invalidateQueries({ queryKey: ['caWifiCerts'] });
-                    } catch (err) {
-                      alert((err as Error).message);
-                    }
+                    await doRevokeBulk(serials, `${serials.length} certificate${serials.length === 1 ? '' : 's'}`);
                   },
                 },
               ]
@@ -613,8 +722,32 @@ function WifiCertsPanel({ radiusLoaded, onHide }: { radiusLoaded: boolean; onHid
         <p className="text-xs text-danger-fg">{(renewMutation.error as Error).message}</p>
       )}
 
+      {/* Plan-mode notice for revokes (enroll has its own inline notice). */}
+      {notice && !savedPlan && (
+        <div className="flex items-start gap-2 rounded-md border border-success-border bg-success px-3 py-2 text-xs text-success-fg">
+          <Check size={14} className="mt-0.5 shrink-0" />
+          <span>{notice}</span>
+          <button type="button" onClick={() => setNotice(null)} className="ml-auto shrink-0 font-medium underline-offset-2 hover:underline">Dismiss</button>
+        </div>
+      )}
+
       {/* Install dialog — platform picker + P12 password. */}
       {installRow && <WifiInstallDialog row={installRow} onClose={() => setInstallRow(null)} />}
+
+      {/* 2FA revalidation for plan-based actions (enroll / revoke). */}
+      {reauth && (
+        <div onClick={(e) => e.stopPropagation()}>
+          <ReauthDialog
+            contextLabel={reauth.label}
+            onClose={() => setReauth(null)}
+            onSuccess={async () => {
+              const retry = reauth.retry;
+              setReauth(null);
+              try { await retry(); } catch { /* error state already shown */ }
+            }}
+          />
+        </div>
+      )}
     </section>
   );
 }
@@ -775,17 +908,40 @@ function RadiusStatusSection() {
  *
  * VISIBILITY: hidden entirely until either a RADIUS server plugin is loaded
  * (capability 'radius') or rows already exist — on instances without any of
- * that there is nothing to manage here (the WiFi hint card above explains the
+ * that there is nothing to manage here (the EAP-TLS client-cert hint card above explains the
  * missing plugin).
  */
 function RadiusNasClientsSection() {
   const queryClient = useQueryClient();
   const canRead = can('radius:read');
   const canWrite = can('radius:write');
+  const { mode } = useExecutionMode();
+  const [bulkNotice, setBulkNotice] = useState<string | null>(null);
+  const [bulkReauth, setBulkReauth] = useState<{ ids: string[]; retry: () => Promise<void> } | null>(null);
 
-  // Same capability gate as the WiFi section — a 'radius' plugin makes this relevant.
+  // Same capability gate as the EAP-TLS client-cert section — a 'radius' plugin makes this relevant.
   const pluginsQuery = useQuery({ queryKey: ['plugins'], queryFn: api.plugins, staleTime: 5 * 60_000 });
   const radiusLoaded = (pluginsQuery.data ?? []).some((p) => (p.capabilities ?? []).includes(RADIUS_CAPABILITY));
+
+  /** Bulk removal through ONE system plan (radius.nas-client.bulk-delete). */
+  async function doBulkDelete(ids: string[]) {
+    if (mode === 'readonly') return; // Read-Only — safety net.
+    const attempt = async () => {
+      const planId = await createAndExecuteSystemPlan('radius.nas-client.bulk-delete', { ids }, mode);
+      if (mode === 'plan') {
+        setBulkNotice(`Removal of ${ids.length} NAS client${ids.length === 1 ? '' : 's'} saved as a plan — it was NOT executed. Open the Plans center to run it later (or schedule it).`);
+        return;
+      }
+      await waitForPlan(planId);
+      void queryClient.invalidateQueries({ queryKey: ['radiusNasClients'] });
+    };
+    try {
+      await attempt();
+    } catch (err) {
+      if (isReauthError(err)) setBulkReauth({ ids, retry: () => doBulkDelete(ids) });
+      else alert((err as Error).message);
+    }
+  }
 
   const clientsQuery = useQuery({
     queryKey: ['radiusNasClients'],
@@ -888,18 +1044,21 @@ function RadiusNasClientsSection() {
                   label: 'Remove selected',
                   confirm: (count) => `Remove ${count} NAS client${count === 1 ? '' : 's'}? They will no longer be able to authenticate.`,
                   onClick: async (selected) => {
-                    try {
-                      await api.radiusNasClientBulkDelete(selected.map((r) => r.id));
-                      void queryClient.invalidateQueries({ queryKey: ['radiusNasClients'] });
-                    } catch (err) {
-                      alert((err as Error).message);
-                    }
+                    await doBulkDelete(selected.map((r) => r.id));
                   },
                 },
               ]
             : undefined
         }
       />
+
+      {bulkNotice && (
+        <div className="flex items-start gap-2 rounded-md border border-success-border bg-success px-3 py-2 text-xs text-success-fg">
+          <Check size={14} className="mt-0.5 shrink-0" />
+          <span>{bulkNotice}</span>
+          <button type="button" onClick={() => setBulkNotice(null)} className="ml-auto shrink-0 font-medium underline-offset-2 hover:underline">Dismiss</button>
+        </div>
+      )}
 
       {dialog && (
         <RadiusNasClientDialog
@@ -908,81 +1067,180 @@ function RadiusNasClientsSection() {
           onClose={() => setDialog(null)}
         />
       )}
+
+      {bulkReauth && (
+        <div onClick={(e) => e.stopPropagation()}>
+          <ReauthDialog
+            contextLabel={`Remove ${bulkReauth.ids.length} NAS client${bulkReauth.ids.length === 1 ? '' : 's'}`}
+            onClose={() => setBulkReauth(null)}
+            onSuccess={async () => {
+              const retry = bulkReauth.retry;
+              setBulkReauth(null);
+              try { await retry(); } catch { /* error already surfaced */ }
+            }}
+          />
+        </div>
+      )}
     </section>
   );
 }
 
-/** Delete with confirm — invalidates the list on success. */
+/** Delete with confirm — runs through a system plan (radius.nas-client.delete). */
 function RadiusDeleteButton({ id, label }: { id: string; label: string }) {
   const queryClient = useQueryClient();
-  const mutation = useMutation({
-    mutationFn: () => api.radiusNasClientDelete(id),
-    onSuccess: () => void queryClient.invalidateQueries({ queryKey: ['radiusNasClients'] }),
-  });
+  const { mode } = useExecutionMode();
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [reauth, setReauth] = useState(false);
+
+  async function doDelete() {
+    if (mode === 'readonly') return; // Read-Only — safety net.
+    setBusy(true);
+    setError(null);
+    const attempt = async () => {
+      const planId = await createAndExecuteSystemPlan('radius.nas-client.delete', { id }, mode);
+      if (mode !== 'plan') {
+        await waitForPlan(planId);
+        void queryClient.invalidateQueries({ queryKey: ['radiusNasClients'] });
+      } else {
+        setError(null); // Plan saved — the section-level notice covers it.
+      }
+    };
+    try {
+      await attempt();
+    } catch (err) {
+      if (isReauthError(err)) setReauth(true);
+      else setError((err as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
   return (
-    <button
-      type="button"
-      onClick={() => {
-        if (!window.confirm(`Remove NAS client "${label}"? It will no longer be able to authenticate.`)) return;
-        mutation.mutate();
-      }}
-      disabled={mutation.isPending}
-      title="Remove this NAS client"
-      className="inline-flex items-center gap-1 rounded border px-2 py-1 text-[10px] font-medium text-danger-fg hover:bg-danger/10 disabled:opacity-50"
-    >
-      {mutation.isPending ? 'Removing…' : 'Remove'}
-    </button>
+    <span className="inline-flex items-center gap-1.5">
+      <button
+        type="button"
+        onClick={() => {
+          if (!window.confirm(`Remove NAS client "${label}"? It will no longer be able to authenticate.`)) return;
+          void doDelete();
+        }}
+        disabled={busy || mode === 'readonly'}
+        title={mode === 'readonly' ? 'Read-only mode — switch to Plan or Execute to make changes' : 'Remove this NAS client'}
+        className="inline-flex items-center gap-1 rounded border px-2 py-1 text-[10px] font-medium text-danger-fg hover:bg-danger/10 disabled:opacity-50"
+      >
+        {busy ? <Loader2 size={10} className="animate-spin" /> : null}
+        {mode === 'plan' ? 'Save removal as plan' : busy ? 'Removing…' : 'Remove'}
+      </button>
+      {error && !reauth && (
+        <span className="max-w-[240px] rounded border border-danger-border bg-danger px-2 py-1 text-[10px] text-danger-fg" title={error}>{error}</span>
+      )}
+      {reauth && (
+        <div onClick={(e) => e.stopPropagation()}>
+          <ReauthDialog
+            contextLabel={`Remove NAS client ${label}`}
+            onClose={() => setReauth(false)}
+            onSuccess={async () => {
+              setReauth(false);
+              try { await doDelete(); } catch { /* error state shown */ }
+            }}
+          />
+        </div>
+      )}
+    </span>
   );
 }
 
-/** Add / edit dialog — IP + name + secret picker (same pattern as device forms). */
+/** Add / edit dialog — IP + name + secret picker (same pattern as device forms).
+ *  Submits through a system plan (radius.nas-client.create | .update). */
 function RadiusNasClientDialog({ initial, secrets, onClose }: { initial: RadiusNasClient | null; secrets: Secret[]; onClose: () => void }) {
   const queryClient = useQueryClient();
+  const { mode } = useExecutionMode();
+  const isPlanMode = mode === 'plan';
+  const isReadOnly = mode === 'readonly';
   const [name, setName] = useState(initial?.name ?? '');
   const [ip, setIp] = useState(initial?.ip ?? '');
   const [secretId, setSecretId] = useState(initial?.secretId ?? '');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [saved, setSaved] = useState(false);
+  const [reauth, setReauth] = useState(false);
 
-  const mutation = useMutation({
-    mutationFn: () =>
-      initial
-        ? api.radiusNasClientUpdate(initial.id, { name: name.trim() || null, ip: ip.trim(), secretId: secretId || null })
-        : api.radiusNasClientCreate({ name: name.trim() || null, ip: ip.trim(), secretId: secretId || null }),
-    onSuccess: () => {
+  async function submit() {
+    if (isReadOnly) return; // Read-Only — safety net.
+    setBusy(true);
+    setError(null);
+    const input: Record<string, unknown> = initial
+      ? { id: initial.id, name: name.trim() || null, ip: ip.trim(), secretId: secretId || null }
+      : { name: name.trim() || null, ip: ip.trim(), secretId: secretId || null };
+    const attempt = async () => {
+      const planId = await createAndExecuteSystemPlan(initial ? 'radius.nas-client.update' : 'radius.nas-client.create', input, mode);
+      if (isPlanMode) {
+        setSaved(true);
+        return;
+      }
+      await waitForPlan(planId);
       void queryClient.invalidateQueries({ queryKey: ['radiusNasClients'] });
       onClose();
-    },
-  });
+    };
+    try {
+      await attempt();
+    } catch (err) {
+      if (isReauthError(err)) setReauth(true);
+      else setError((err as Error).message);
+      setBusy(false);
+    }
+  }
 
   const inputCls = 'w-full rounded-md border bg-background px-2 py-1.5 text-xs';
 
-  return (
-    <DialogShell
-      title={initial ? `Edit NAS client ${initial.name || initial.ip}` : 'Add NAS client'}
-      subtitle="Access points / gateways allowed to send RADIUS requests"
-      icon={<KeyRound className="h-4 w-4 text-primary" />}
-      onClose={onClose}
-      maxWidth="max-w-md"
-      footer={
-        <div className="flex items-center justify-end gap-2">
-          <button type="button" onClick={onClose} className="rounded-md border px-3 py-1.5 text-xs font-medium hover:bg-muted/40">Cancel</button>
-          <button
-            type="submit"
-            disabled={!ip.trim() || mutation.isPending}
-            className="inline-flex items-center gap-1.5 rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-white hover:bg-primary-hover disabled:opacity-50"
-          >
-            <Check className="h-3.5 w-3.5" />
-            {mutation.isPending ? 'Saving…' : initial ? 'Save changes' : 'Add client'}
+  // Plan mode: the plan was saved without executing — offer to close.
+  if (saved) {
+    return (
+      <DialogShell
+        title={initial ? `Edit NAS client ${initial.name || initial.ip}` : 'Add NAS client'}
+        onClose={onClose}
+        maxWidth="max-w-md"
+        footer={
+          <button type="button" onClick={onClose} className="rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-fg hover:opacity-90">
+            Close
           </button>
-        </div>
-      }
-    >
-      <form
-        onSubmit={(e) => {
-          e.preventDefault();
-          mutation.mutate();
-        }}
-        className="space-y-3"
+        }
       >
+        <SavedPlanNotice text={`NAS client change saved as a plan — it was NOT executed. Open the Plans center to run it later (or schedule it).`} />
+      </DialogShell>
+    );
+  }
+
+  return (
+    <>
+      <DialogShell
+        title={initial ? `Edit NAS client ${initial.name || initial.ip}` : 'Add NAS client'}
+        subtitle="Access points / gateways allowed to send RADIUS requests"
+        icon={<KeyRound className="h-4 w-4 text-primary" />}
+        onClose={onClose}
+        maxWidth="max-w-md"
+        footer={
+          <div className="flex items-center justify-end gap-2">
+            <button type="button" onClick={onClose} className="rounded-md border px-3 py-1.5 text-xs font-medium hover:bg-muted/40">Cancel</button>
+            <button
+              type="submit"
+              disabled={!ip.trim() || busy || isReadOnly}
+              title={isReadOnly ? 'Read-only mode — switch to Plan or Execute to make changes' : undefined}
+              className="inline-flex items-center gap-1.5 rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-white hover:bg-primary-hover disabled:opacity-50"
+            >
+              {busy ? <Loader2 size={14} className="animate-spin" /> : <Check className="h-3.5 w-3.5" />}
+              {isPlanMode ? 'Save as plan' : busy ? 'Saving…' : initial ? 'Save changes' : 'Add client'}
+            </button>
+          </div>
+        }
+      >
+        <form
+          onSubmit={(e) => {
+            e.preventDefault();
+            void submit();
+          }}
+          className="space-y-3"
+        >
         <label className="flex flex-col gap-1 text-[10px] uppercase tracking-wide text-faint">
           IP address *
           <input value={ip} onChange={(e) => setIp(e.target.value)} placeholder="192.168.1.50" className={`${inputCls} font-mono`} />
@@ -1007,9 +1265,24 @@ function RadiusNasClientDialog({ initial, secrets, onClose }: { initial: RadiusN
           Single-value secrets (API key, PSK) are used directly as the RADIUS shared secret; for multi-field types the password/secret half applies. The
           value is resolved from the credentials provider at render time — it never leaves UNM in plaintext here.
         </p>
-        {mutation.isError && <div className="text-xs text-danger-fg">{(mutation.error as Error).message}</div>}
+        {isReadOnly && <ReadOnlyNotice />}
+        {error && !reauth && <ActionError message={error} />}
       </form>
-    </DialogShell>
+      </DialogShell>
+
+      {reauth && (
+        <div onClick={(e) => e.stopPropagation()}>
+          <ReauthDialog
+            contextLabel={initial ? `Edit NAS client ${initial.name || initial.ip}` : 'Add NAS client'}
+            onClose={() => setReauth(false)}
+            onSuccess={async () => {
+              setReauth(false);
+              try { await submit(); } catch { /* dialog stays open */ }
+            }}
+          />
+        </div>
+      )}
+    </>
   );
 }
 
@@ -1018,10 +1291,33 @@ function RadiusUserProfilesSection() {
   const queryClient = useQueryClient();
   const canRead = can('radius:read');
   const canWrite = can('radius:write');
+  const { mode } = useExecutionMode();
+  const [bulkNotice, setBulkNotice] = useState<string | null>(null);
+  const [bulkReauth, setBulkReauth] = useState<{ ids: string[]; retry: () => Promise<void> } | null>(null);
 
   // Same capability gate as the NAS clients section.
   const pluginsQuery = useQuery({ queryKey: ['plugins'], queryFn: api.plugins, staleTime: 5 * 60_000 });
   const radiusLoaded = (pluginsQuery.data ?? []).some((p) => (p.capabilities ?? []).includes(RADIUS_CAPABILITY));
+
+  /** Bulk removal through ONE system plan (radius.profile.bulk-delete). */
+  async function doBulkDelete(ids: string[]) {
+    if (mode === 'readonly') return; // Read-Only — safety net.
+    const attempt = async () => {
+      const planId = await createAndExecuteSystemPlan('radius.profile.bulk-delete', { ids }, mode);
+      if (mode === 'plan') {
+        setBulkNotice(`Removal of ${ids.length} profile${ids.length === 1 ? '' : 's'} saved as a plan — it was NOT executed. Open the Plans center to run it later (or schedule it).`);
+        return;
+      }
+      await waitForPlan(planId);
+      void queryClient.invalidateQueries({ queryKey: ['radiusUserProfiles'] });
+    };
+    try {
+      await attempt();
+    } catch (err) {
+      if (isReauthError(err)) setBulkReauth({ ids, retry: () => doBulkDelete(ids) });
+      else alert((err as Error).message);
+    }
+  }
 
   const profilesQuery = useQuery({
     queryKey: ['radiusUserProfiles'],
@@ -1029,7 +1325,7 @@ function RadiusUserProfilesSection() {
     enabled: canRead,
     refetchInterval: 60_000,
   });
-  // Issued WiFi certs — the serial picker offers every enrolled client cert.
+  // Issued EAP-TLS client certs — the serial picker offers every enrolled cert.
   const wifiCertsQuery = useQuery({
     queryKey: ['caWifiCerts'],
     queryFn: () => api.caWifiCerts(),
@@ -1129,9 +1425,9 @@ function RadiusUserProfilesSection() {
       </div>
 
       <p className="max-w-4xl text-[11px] text-faint">
-        Per-client RADIUS reply attributes for WiFi EAP-TLS — keyed by the client certificate's serial. A VLAN ID is sent as
-        Tunnel-Type=IEEE-802 + Tunnel-Medium-Type=IEEE-802 + Tunnel-Private-Group-ID; static IPs and session limits are applied to that
-        session only, on top of whatever the NAS would assign otherwise. No profile = plain access.
+        Per-client RADIUS reply attributes for 802.1X / EAP-TLS sessions (WiFi and wired alike) — keyed by the client certificate's serial.
+        A VLAN ID is sent as Tunnel-Type=IEEE-802 + Tunnel-Medium-Type=IEEE-802 + Tunnel-Private-Group-ID; static IPs and session limits are
+        applied to that session only, on top of whatever the NAS would assign otherwise. No profile = plain access.
       </p>
 
       <DataTable
@@ -1150,18 +1446,21 @@ function RadiusUserProfilesSection() {
                   label: 'Remove selected',
                   confirm: (count) => `Remove ${count} profile${count === 1 ? '' : 's'}? The affected clients will get plain access again.`,
                   onClick: async (selected) => {
-                    try {
-                      await api.radiusUserProfileBulkDelete(selected.map((r) => r.id));
-                      void queryClient.invalidateQueries({ queryKey: ['radiusUserProfiles'] });
-                    } catch (err) {
-                      alert((err as Error).message);
-                    }
+                    await doBulkDelete(selected.map((r) => r.id));
                   },
                 },
               ]
             : undefined
         }
       />
+
+      {bulkNotice && (
+        <div className="flex items-start gap-2 rounded-md border border-success-border bg-success px-3 py-2 text-xs text-success-fg">
+          <Check size={14} className="mt-0.5 shrink-0" />
+          <span>{bulkNotice}</span>
+          <button type="button" onClick={() => setBulkNotice(null)} className="ml-auto shrink-0 font-medium underline-offset-2 hover:underline">Dismiss</button>
+        </div>
+      )}
 
       {dialog && (
         <RadiusUserProfileDialog
@@ -1170,36 +1469,94 @@ function RadiusUserProfilesSection() {
           onClose={() => setDialog(null)}
         />
       )}
+
+      {bulkReauth && (
+        <div onClick={(e) => e.stopPropagation()}>
+          <ReauthDialog
+            contextLabel={`Remove ${bulkReauth.ids.length} RADIUS profile${bulkReauth.ids.length === 1 ? '' : 's'}`}
+            onClose={() => setBulkReauth(null)}
+            onSuccess={async () => {
+              const retry = bulkReauth.retry;
+              setBulkReauth(null);
+              try { await retry(); } catch { /* error already surfaced */ }
+            }}
+          />
+        </div>
+      )}
     </section>
   );
 }
 
-/** Delete with confirm — invalidates the list on success. */
+/** Delete with confirm — runs through a system plan (radius.profile.delete). */
 function RadiusProfileDeleteButton({ id, label }: { id: string; label: string }) {
   const queryClient = useQueryClient();
-  const mutation = useMutation({
-    mutationFn: () => api.radiusUserProfileDelete(id),
-    onSuccess: () => void queryClient.invalidateQueries({ queryKey: ['radiusUserProfiles'] }),
-  });
+  const { mode } = useExecutionMode();
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [reauth, setReauth] = useState(false);
+
+  async function doDelete() {
+    if (mode === 'readonly') return; // Read-Only — safety net.
+    setBusy(true);
+    setError(null);
+    const attempt = async () => {
+      const planId = await createAndExecuteSystemPlan('radius.profile.delete', { id }, mode);
+      if (mode !== 'plan') {
+        await waitForPlan(planId);
+        void queryClient.invalidateQueries({ queryKey: ['radiusUserProfiles'] });
+      }
+    };
+    try {
+      await attempt();
+    } catch (err) {
+      if (isReauthError(err)) setReauth(true);
+      else setError((err as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
   return (
-    <button
-      type="button"
-      onClick={() => {
-        if (!window.confirm(`Remove the RADIUS profile for "${label}"? The client will get plain access again.`)) return;
-        mutation.mutate();
-      }}
-      disabled={mutation.isPending}
-      title="Remove this profile"
-      className="inline-flex items-center gap-1 rounded border px-2 py-1 text-[10px] font-medium text-danger-fg hover:bg-danger/10 disabled:opacity-50"
-    >
-      {mutation.isPending ? 'Removing…' : 'Remove'}
-    </button>
+    <span className="inline-flex items-center gap-1.5">
+      <button
+        type="button"
+        onClick={() => {
+          if (!window.confirm(`Remove the RADIUS profile for "${label}"? The client will get plain access again.`)) return;
+          void doDelete();
+        }}
+        disabled={busy || mode === 'readonly'}
+        title={mode === 'readonly' ? 'Read-only mode — switch to Plan or Execute to make changes' : 'Remove this profile'}
+        className="inline-flex items-center gap-1 rounded border px-2 py-1 text-[10px] font-medium text-danger-fg hover:bg-danger/10 disabled:opacity-50"
+      >
+        {busy ? <Loader2 size={10} className="animate-spin" /> : null}
+        {mode === 'plan' ? 'Save removal as plan' : busy ? 'Removing…' : 'Remove'}
+      </button>
+      {error && !reauth && (
+        <span className="max-w-[240px] rounded border border-danger-border bg-danger px-2 py-1 text-[10px] text-danger-fg" title={error}>{error}</span>
+      )}
+      {reauth && (
+        <div onClick={(e) => e.stopPropagation()}>
+          <ReauthDialog
+            contextLabel={`Remove RADIUS profile ${label}`}
+            onClose={() => setReauth(false)}
+            onSuccess={async () => {
+              setReauth(false);
+              try { await doDelete(); } catch { /* error state shown */ }
+            }}
+          />
+        </div>
+      )}
+    </span>
   );
 }
 
-/** Add / edit dialog — cert serial picker + VLAN / static IP / session limits. */
+/** Add / edit dialog — cert serial picker + VLAN / static IP / session limits.
+ *  Submits through a system plan (radius.profile.create | .update). */
 function RadiusUserProfileDialog({ initial, wifiCerts, onClose }: { initial: RadiusUserProfile | null; wifiCerts: WifiClientCert[]; onClose: () => void }) {
   const queryClient = useQueryClient();
+  const { mode } = useExecutionMode();
+  const isPlanMode = mode === 'plan';
+  const isReadOnly = mode === 'readonly';
   const [serial, setSerial] = useState(initial?.serial ?? '');
   const [vlanId, setVlanId] = useState(initial?.vlanId ? String(initial.vlanId) : '');
   const [framedIp, setFramedIp] = useState(initial?.framedIp ?? '');
@@ -1207,38 +1564,75 @@ function RadiusUserProfileDialog({ initial, wifiCerts, onClose }: { initial: Rad
   const [sessionTimeoutSec, setSessionTimeoutSec] = useState(initial?.sessionTimeoutSec ? String(initial.sessionTimeoutSec) : '');
   const [idleTimeoutSec, setIdleTimeoutSec] = useState(initial?.idleTimeoutSec ? String(initial.idleTimeoutSec) : '');
   const [replyMessage, setReplyMessage] = useState(initial?.replyMessage ?? '');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [saved, setSaved] = useState(false);
+  const [reauth, setReauth] = useState(false);
 
   // The picker lists enrolled certs; a freeform serial is also accepted (e.g.
   // for certs issued by another CA that still authenticates here).
   const knownSerials = new Set(wifiCerts.map((c) => c.serial.toLowerCase()));
   const selectedCert = wifiCerts.find((c) => c.serial.toLowerCase() === serial.trim().toLowerCase());
 
-  const mutation = useMutation({
-    mutationFn: () => {
-      const body = {
-        vlanId: vlanId ? Number(vlanId) : null,
-        framedIp: framedIp.trim() || null,
-        framedIpv6: framedIpv6.trim() || null,
-        sessionTimeoutSec: sessionTimeoutSec ? Number(sessionTimeoutSec) : null,
-        idleTimeoutSec: idleTimeoutSec ? Number(idleTimeoutSec) : null,
-        replyMessage: replyMessage.trim() || null,
-      };
-      return initial
-        ? api.radiusUserProfileUpdate(initial.id, body)
-        : api.radiusUserProfileCreate({ serial: serial.trim().toLowerCase(), name: selectedCert?.name ?? null, ...body });
-    },
-    onSuccess: () => {
+  async function submit() {
+    if (isReadOnly) return; // Read-Only — safety net.
+    setBusy(true);
+    setError(null);
+    const body: Record<string, unknown> = {
+      vlanId: vlanId ? Number(vlanId) : null,
+      framedIp: framedIp.trim() || null,
+      framedIpv6: framedIpv6.trim() || null,
+      sessionTimeoutSec: sessionTimeoutSec ? Number(sessionTimeoutSec) : null,
+      idleTimeoutSec: idleTimeoutSec ? Number(idleTimeoutSec) : null,
+      replyMessage: replyMessage.trim() || null,
+    };
+    const input = initial
+      ? { id: initial.id, ...body }
+      : { serial: serial.trim().toLowerCase(), name: selectedCert?.name ?? null, ...body };
+    const attempt = async () => {
+      const planId = await createAndExecuteSystemPlan(initial ? 'radius.profile.update' : 'radius.profile.create', input, mode);
+      if (isPlanMode) {
+        setSaved(true);
+        return;
+      }
+      await waitForPlan(planId);
       void queryClient.invalidateQueries({ queryKey: ['radiusUserProfiles'] });
       onClose();
-    },
-  });
+    };
+    try {
+      await attempt();
+    } catch (err) {
+      if (isReauthError(err)) setReauth(true);
+      else setError((err as Error).message);
+      setBusy(false);
+    }
+  }
 
   const inputCls = 'w-full rounded-md border bg-background px-2 py-1.5 text-xs';
 
+  // Plan mode: the plan was saved without executing — offer to close.
+  if (saved) {
+    return (
+      <DialogShell
+        title={initial ? `Edit profile — ${initial.certName || initial.name || initial.serial.slice(0, 16)}` : 'Add RADIUS user profile'}
+        onClose={onClose}
+        maxWidth="max-w-md"
+        footer={
+          <button type="button" onClick={onClose} className="rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-fg hover:opacity-90">
+            Close
+          </button>
+        }
+      >
+        <SavedPlanNotice text={`Profile change saved as a plan — it was NOT executed. Open the Plans center to run it later (or schedule it).`} />
+      </DialogShell>
+    );
+  }
+
   return (
+    <>
     <DialogShell
       title={initial ? `Edit profile — ${initial.certName || initial.name || initial.serial.slice(0, 16)}` : 'Add RADIUS user profile'}
-      subtitle="Per-client reply attributes for WiFi EAP-TLS sessions"
+      subtitle="Per-client reply attributes for 802.1X / EAP-TLS sessions"
       icon={<Network className="h-4 w-4 text-primary" />}
       onClose={onClose}
       maxWidth="max-w-md"
@@ -1247,11 +1641,12 @@ function RadiusUserProfileDialog({ initial, wifiCerts, onClose }: { initial: Rad
           <button type="button" onClick={onClose} className="rounded-md border px-3 py-1.5 text-xs font-medium hover:bg-muted/40">Cancel</button>
           <button
             type="submit"
-            disabled={!serial.trim() || mutation.isPending}
+            disabled={!serial.trim() || busy || isReadOnly}
+            title={isReadOnly ? 'Read-only mode — switch to Plan or Execute to make changes' : undefined}
             className="inline-flex items-center gap-1.5 rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-white hover:bg-primary-hover disabled:opacity-50"
           >
-            <Check className="h-3.5 w-3.5" />
-            {mutation.isPending ? 'Saving…' : initial ? 'Save changes' : 'Add profile'}
+            {busy ? <Loader2 size={14} className="animate-spin" /> : <Check className="h-3.5 w-3.5" />}
+            {isPlanMode ? 'Save as plan' : busy ? 'Saving…' : initial ? 'Save changes' : 'Add profile'}
           </button>
         </div>
       }
@@ -1259,7 +1654,7 @@ function RadiusUserProfileDialog({ initial, wifiCerts, onClose }: { initial: Rad
       <form
         onSubmit={(e) => {
           e.preventDefault();
-          mutation.mutate();
+          void submit();
         }}
         className="space-y-3"
       >
@@ -1285,7 +1680,7 @@ function RadiusUserProfileDialog({ initial, wifiCerts, onClose }: { initial: Rad
           </div>
         )}
         {wifiCerts.length > 0 && !knownSerials.has(serial.trim().toLowerCase()) && serial.trim() !== '' && (
-          <p className="text-[11px] text-warning-fg">This serial is not an enrolled UNM WiFi cert — make sure it matches the client's certificate.</p>
+          <p className="text-[11px] text-warning-fg">This serial is not an enrolled UNM EAP-TLS cert — make sure it matches the client's certificate.</p>
         )}
 
         <div className="grid grid-cols-2 gap-3">
@@ -1322,9 +1717,24 @@ function RadiusUserProfileDialog({ initial, wifiCerts, onClose }: { initial: Rad
           All fields optional — empty means the NAS default applies. The VLAN is sent as Tunnel-Type=IEEE-802 +
           Tunnel-Medium-Type=IEEE-802 + Tunnel-Private-Group-ID; re-auth adds Termination-Action=RESTART.
         </p>
-        {mutation.isError && <div className="text-xs text-danger-fg">{(mutation.error as Error).message}</div>}
+        {isReadOnly && <ReadOnlyNotice />}
+        {error && !reauth && <ActionError message={error} />}
       </form>
     </DialogShell>
+
+    {reauth && (
+      <div onClick={(e) => e.stopPropagation()}>
+        <ReauthDialog
+          contextLabel={initial ? `Edit RADIUS profile ${initial.certName || initial.name}` : 'Add RADIUS user profile'}
+          onClose={() => setReauth(false)}
+          onSuccess={async () => {
+            setReauth(false);
+            try { await submit(); } catch { /* dialog stays open */ }
+          }}
+        />
+      </div>
+    )}
+    </>
   );
 }
 

@@ -1918,6 +1918,71 @@ paths:
         '502':
           description: Plugin unreachable or secret provisioning failed
 
+  /plans/system:
+    post:
+      tags: [Plans]
+      summary: Create a system plan for one local RADIUS/CA mutation
+      description: >-
+        Requires a 2FA-completed session, permission `configs:apply`, AND the
+        action's domain permission (`radius:write` or `ca:manage`). Unlike POST
+        /plans this needs NO device and NO plugin — the step is executed by the
+        API's own plan executor (local mutation). The plan lands as 'ready' with
+        sentinel plugin/device ids; execution goes through the same 2FA-gated
+        POST /plans/{id}/execute. This makes RADIUS/CA changes auditable,
+        retryable, schedulable and automatable like every other config change.
+
+        Provide EITHER `inputs` (a single step) OR a non-empty `steps` array of
+        `{ input }` objects (bulk: one step per item, same action id). At most
+        500 steps.
+      x-2fa-required: true
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [intentActionId]
+              properties:
+                intentActionId:
+                  type: string
+                  description: >-
+                    One of radius.nas-client.create|update|delete|bulk-delete,
+                    radius.profile.create|update|delete|bulk-delete,
+                    ca.client-cert.enroll|revoke|bulk-revoke. Step input shapes —
+                    create/update/delete: RadiusNasClientCreateRequest /
+                    RadiusNasClientUpdateRequest (+ { id }) for nas-client actions;
+                    RadiusUserProfileCreateRequest / RadiusUserProfileUpdateRequest
+                    (+ { id }) for profile actions; bulk-delete variants take
+                    { ids: string[] } (1..500); ca.client-cert.enroll takes
+                    CaEnrollRequest; ca.client-cert.revoke takes { serial };
+                    ca.client-cert.bulk-revoke takes { serials: string[] }.
+                inputs:
+                  type: object
+                  description: Step input for a single-step plan (mutually exclusive with `steps`).
+                steps:
+                  type: array
+                  maxItems: 500
+                  items:
+                    type: object
+                    required: [input]
+                    properties:
+                      input:
+                        type: object
+                        description: Step input for one item of a bulk plan.
+      responses:
+        '201':
+          description: System plan created (status ready) with its step(s)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PlanDetail'
+        '400':
+          description: Unknown system action, or missing/invalid inputs/steps
+        '401':
+          description: Authentication required (or 2FA-completed session missing)
+        '403':
+          description: Missing configs:apply or the domain permission
+
   /plans/network-check:
     post:
       tags: [Plans]
@@ -7604,40 +7669,11 @@ paths:
         '502':
           description: CA unreachable — revocation NOT applied
 
-  /ca/enroll:
-    post:
-      tags: [Certificate Authority]
-      summary: Enroll a WiFi (EAP-TLS) client certificate
-      description: >-
-        Generates a private key of the requested type, builds an EAP-TLS CSR
-        (SAN + keyUsage digitalSignature + EKU clientAuth/EAP-TLS), signs it via
-        step-ca's /1.0/sign under the unm-admin provisioner and stores the leaf
-        with its ENCRYPTED private key. The validity is clamped to the CA chain
-        expiry minus a 7-day safety margin (clamped/clampReason in the response).
-        Requires permission `ca:manage`.
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/CaEnrollRequest'
-      responses:
-        '201':
-          description: Certificate issued and stored
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/CaEnrollResponse'
-        '400':
-          description: Validation error (bad name/RDN/SAN/keyType/days)
-        '401':
-          description: Authentication required
-        '403':
-          description: Missing ca:manage permission
-        '409':
-          description: A certificate with this name already exists
-        '502':
-          description: CA sign request failed
+  # NOTE: there is deliberately NO POST /ca/enroll route. Enrolling a WiFi
+  # (EAP-TLS) client certificate is plan-gated: create a system plan via
+  # POST /plans/system with intentActionId `ca.client-cert.enroll` and execute it
+  # through the 2FA-gated plan workflow. The new serial lands in the step result
+  # (steps[0].result.serial).
 
   /ca/wifi-certs:
     get:
@@ -7658,94 +7694,12 @@ paths:
         '403':
           description: Missing ca:read permission
 
-  /ca/wifi-certs/{serial}/revoke:
-    post:
-      tags: [Certificate Authority]
-      summary: Revoke a WiFi (EAP-TLS) client certificate by serial
-      description: >-
-        CA-first revocation: step-ca marks the serial revoked in its own DB, then
-        UNM mirrors it into both registries. Idempotent — an already-revoked cert
-        returns 200. Requires permission `ca:manage`.
-      parameters:
-        - name: serial
-          in: path
-          required: true
-          schema: { type: string }
-          description: Hex serial number of the certificate (no 0x prefix)
-      responses:
-        '200':
-          description: Revocation applied (CA + registries)
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  serial: { type: string }
-                  caStatus: { type: integer, description: "HTTP status returned by the CA's /1.0/revoke endpoint" }
-        '400':
-          description: Invalid serial format
-        '401':
-          description: Authentication required
-        '403':
-          description: Missing ca:manage permission
-        '404':
-          description: No WiFi client certificate with this serial
-        '502':
-          description: CA unreachable — revocation NOT applied
-
-  /ca/wifi-certs/bulk-revoke:
-    post:
-      tags: [Certificate Authority]
-      summary: Revoke many WiFi (EAP-TLS) client certificates in one call
-      description: >-
-        Bulk variant of the single-serial revoke. Each serial follows the same
-        CA-first flow (step-ca marks it revoked, then UNM mirrors into both
-        registries + the per-auth revoked_serials list). Already-revoked rows
-        count as no-ops; unknown serials are reported in `missing`, never fatal.
-        At most 500 serials per call. If the CA is unreachable for EVERY serial
-        nothing is applied and the route answers 502; otherwise it answers 200
-        with a per-serial `failed` list so one bad cert does not hide the rest.
-        Requires permission `ca:manage`.
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              required: [serials]
-              properties:
-                serials:
-                  type: array
-                  items: { type: string }
-                  description: Hex certificate serials (no 0x prefix)
-      responses:
-        '200':
-          description: Revocation applied for the resolvable serials
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  revoked: { type: integer, description: Serials newly revoked (CA + registries) }
-                  alreadyRevoked: { type: integer, description: Serials that were already revoked (no-op) }
-                  failed:
-                    type: array
-                    items:
-                      type: object
-                      properties:
-                        serial: { type: string }
-                        error: { type: string }
-                  missing:
-                    type: array
-                    items: { type: string }
-        '400':
-          description: Empty or oversized serial list, or invalid payload
-        '401':
-          description: Authentication required
-        '403':
-          description: Missing ca:manage permission
-        '502':
-          description: CA unreachable for every serial — revocation NOT applied
+  # NOTE: there is deliberately NO direct revoke route (single or bulk) for WiFi
+  # client certs. Revocation is plan-gated: create a system plan via
+  # POST /plans/system with intentActionId `ca.client-cert.revoke` (one serial per
+  # step input) or `ca.client-cert.bulk-revoke` ({ serials } in one step), executed
+  # through the 2FA-gated plan workflow. Per-serial outcomes land in each step's
+  # result.
 
   /ca/wifi-certs/{serial}/download:
     get:
@@ -7867,135 +7821,12 @@ paths:
           description: Authentication required
         '403':
           description: Missing radius:read permission
-    post:
-      tags: [Radius]
-      summary: Add a RADIUS NAS client
-      description: >-
-        Adds one NAS client. `ip` must be a valid IPv4/IPv6 literal and is unique;
-        `secretId` references an existing secret (the shared secret) — 404 when the
-        referenced credentials do not exist, 409 on a duplicate IP. The change
-        re-renders the raddb files so it hot-applies via SIGHUP. Requires permission
-        `radius:write`.
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/RadiusNasClientCreateRequest'
-      responses:
-        '201':
-          description: NAS client created
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/RadiusNasClient'
-        '400':
-          description: Invalid payload (bad IP or secretId)
-        '401':
-          description: Authentication required
-        '403':
-          description: Missing radius:write permission
-        '404':
-          description: Referenced credentials not found
-        '409':
-          description: A NAS client with this IP already exists
 
-  /radius/nas-clients/{id}:
-    patch:
-      tags: [Radius]
-      summary: Update a RADIUS NAS client (name, ip and/or secretId)
-      description: >-
-        Only the provided fields change. `secretId` may be set to null to clear the
-        credential; a new IP must stay unique (409 on collision). The change re-renders
-        the raddb files so it hot-applies via SIGHUP. Requires permission `radius:write`.
-      parameters:
-        - in: path
-          name: id
-          required: true
-          schema: { type: string }
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/RadiusNasClientUpdateRequest'
-      responses:
-        '200':
-          description: Updated NAS client
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/RadiusNasClient'
-        '400':
-          description: No updatable fields provided or a field is invalid
-        '401':
-          description: Authentication required
-        '403':
-          description: Missing radius:write permission
-        '404':
-          description: NAS client not found, or referenced credentials not found
-        '409':
-          description: A NAS client with this IP already exists
-    delete:
-      tags: [Radius]
-      summary: Remove a RADIUS NAS client
-      description: >-
-        Deletes the row and re-renders the raddb files so the change hot-applies via
-        SIGHUP. Requires permission `radius:write`.
-      parameters:
-        - in: path
-          name: id
-          required: true
-          schema: { type: string }
-      responses:
-        '204':
-          description: NAS client deleted
-        '401':
-          description: Authentication required
-        '403':
-          description: Missing radius:write permission
-        '404':
-          description: NAS client not found
-
-  /radius/nas-clients/bulk-delete:
-    post:
-      tags: [Radius]
-      summary: Remove many RADIUS NAS clients in one call
-      description: >-
-        Bulk variant of the single-row delete. Unknown ids are reported in
-        `missing`, never fatal; at most 500 ids per call. A single raddb re-render
-        follows so the whole batch hot-applies with ONE SIGHUP instead of N.
-        Requires permission `radius:write`.
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              required: [ids]
-              properties:
-                ids:
-                  type: array
-                  items: { type: string }
-                  description: NAS client row ids to remove
-      responses:
-        '200':
-          description: Deletion applied
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  deleted: { type: integer, description: Rows actually removed }
-                  missing:
-                    type: array
-                    items: { type: string }
-        '400':
-          description: Empty or oversized id list
-        '401':
-          description: Authentication required
-        '403':
-          description: Missing radius:write permission
+  # NOTE: there are deliberately NO direct mutation routes for NAS clients. All
+  # changes (create / update / delete, incl. bulk) are plan-gated: create a
+  # system plan via POST /plans/system with intentActionId
+  # `radius.nas-client.create` | `.update` | `.delete` | `.bulk-delete`, executed
+  # through the 2FA-gated plan workflow (requires `radius:write`).
 
   /radius/user-profiles:
     get:
@@ -8019,130 +7850,12 @@ paths:
           description: Authentication required
         '403':
           description: Missing radius:read permission
-    post:
-      tags: [Radius]
-      summary: Add a per-user RADIUS reply profile
-      description: >-
-        Adds one profile for a client cert serial (lowercase hex, no 0x prefix —
-        the same value FreeRADIUS puts in TLS-Client-Cert-Serial). All attribute
-        fields are optional; an empty profile means plain access. The change
-        re-renders the raddb files so it hot-applies via SIGHUP. Requires permission
-        `radius:write`.
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/RadiusUserProfileCreateRequest'
-      responses:
-        '201':
-          description: Profile created
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/RadiusUserProfile'
-        '400':
-          description: Invalid payload (bad serial or attribute field)
-        '401':
-          description: Authentication required
-        '403':
-          description: Missing radius:write permission
-        '409':
-          description: A profile for this certificate already exists
 
-  /radius/user-profiles/{id}:
-    patch:
-      tags: [Radius]
-      summary: Update a per-user RADIUS reply profile
-      description: >-
-        Only the provided fields change; null clears a field. The change re-renders
-        the raddb files so it hot-applies via SIGHUP. Requires permission `radius:write`.
-      parameters:
-        - in: path
-          name: id
-          required: true
-          schema: { type: string }
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/RadiusUserProfileUpdateRequest'
-      responses:
-        '200':
-          description: Updated profile
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/RadiusUserProfile'
-        '400':
-          description: No updatable fields provided or a field is invalid
-        '401':
-          description: Authentication required
-        '403':
-          description: Missing radius:write permission
-        '404':
-          description: Profile not found
-    delete:
-      tags: [Radius]
-      summary: Remove a per-user RADIUS reply profile
-      description: >-
-        Deletes the row and re-renders the raddb files so the change hot-applies via
-        SIGHUP. Requires permission `radius:write`.
-      parameters:
-        - in: path
-          name: id
-          required: true
-          schema: { type: string }
-      responses:
-        '204':
-          description: Profile deleted
-        '401':
-          description: Authentication required
-        '403':
-          description: Missing radius:write permission
-        '404':
-          description: Profile not found
-
-  /radius/user-profiles/bulk-delete:
-    post:
-      tags: [Radius]
-      summary: Remove many per-user RADIUS reply profiles in one call
-      description: >-
-        Bulk variant of the single-row delete. Unknown ids are reported in
-        `missing`, never fatal; at most 500 ids per call. A single raddb re-render
-        follows so the whole batch hot-applies with ONE SIGHUP instead of N.
-        Requires permission `radius:write`.
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              required: [ids]
-              properties:
-                ids:
-                  type: array
-                  items: { type: string }
-                  description: Profile row ids to remove
-      responses:
-        '200':
-          description: Deletion applied
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  deleted: { type: integer, description: Rows actually removed }
-                  missing:
-                    type: array
-                    items: { type: string }
-        '400':
-          description: Empty or oversized id list
-        '401':
-          description: Authentication required
-        '403':
-          description: Missing radius:write permission
+  # NOTE: there are deliberately NO direct mutation routes for user profiles. All
+  # changes (create / update / delete, incl. bulk) are plan-gated: create a
+  # system plan via POST /plans/system with intentActionId
+  # `radius.profile.create` | `.update` | `.delete` | `.bulk-delete`, executed
+  # through the 2FA-gated plan workflow (requires `radius:write`).
 
   /radius/status:
     get:

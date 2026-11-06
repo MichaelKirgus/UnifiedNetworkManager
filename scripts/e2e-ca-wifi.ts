@@ -5,19 +5,32 @@
  *   1. CA status sanity — version, root fingerprint, root/intermediate expiry
  *      in the future; root bundle is a parseable PEM certificate.
  *   2. Enrollment defaults — no `days` → configured default (3y), response
- *      shape (serial hex, notBefore/notAfter sane).
+ *      shape (serial hex, notBefore/notAfter sane). Enrolled through a SYSTEM
+ *      plan (ca.client-cert.enroll) executed via the 2FA-gated workflow; the new
+ *      serial is read from the step result.
  *   3. Enrollment overrides — custom name/cn/org/ou/sans + RSA-2048 key type;
  *      the issued PEM really contains an RSA private key of that size.
- *   4. Validation errors — bad names / unknown keyType / days < 1 → 400;
- *      duplicate enrollment name → 409.
+ *   4. Validation errors — bad names / unknown keyType / days < 1 → the plan
+ *      FAILS with a validation error in the step result; duplicate enrollment
+ *      name → the plan fails with "already exists". (There is no direct enroll
+ *      route anymore — every mutation is plan-gated.)
  *   5. Downloads — PEM bundle (chain + PKCS#8 key), P12 bundle (base64 +
  *      password) verified with an INDEPENDENT openssl invocation: MAC check,
  *      leaf+intermediate bags, extracted key SPKI == stored key SPKI, and the
  *      full chain verifies against the root bundle.
- *   6. Revocation — idempotent (second call still 200), both download formats
- *      then answer 409, DB rows mirrored (wifi_client_certs + ca_certificates).
- *   7. Cleanup — test rows are deleted again (revoked leaves stay in the CA's
- *      own DB; that is expected and harmless).
+ *   6. Revocation — idempotent (second plan reports alreadyRevoked), both
+ *      download formats then answer 409, DB rows mirrored (wifi_client_certs +
+ *      ca_certificates). Revoked through a SYSTEM plan (ca.client-cert.revoke).
+ *   7. Cleanup — test cert rows AND the system plans created by this run are
+ *      removed again (revoked leaves stay in the CA's own DB; that is expected
+ *      and harmless).
+ *
+ * AUTH: enrollment/revocation are 2FA-gated, so a long-lived API token (amr
+ * ['token']) can never pass. This script mints a short-lived JWT for admin with
+ * amr:['totp'] + the needed permissions, signed with the stack's JWT_SECRET —
+ * exactly what /auth/2fa/verify would mint after a real TOTP challenge. It does
+ * NOT verify an actual code; require2FA only checks that the session's `amr`
+ * intersects the user's gateAmrs (default ['totp']).
  *
  * Usage (from the repo root, with the stack up):
  *   ./node_modules/.bin/tsx scripts/e2e-ca-wifi.ts
@@ -31,7 +44,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 
 const API = process.env.API_BASE ?? 'http://localhost:3000/v1';
-// pg lives in the API package's node_modules — resolve it from there.
+// pg + jsonwebtoken live in the API package's node_modules — resolve them there.
 const apiRequire = createRequire(path.resolve(process.cwd(), 'api', 'package.json'));
 
 let failures = 0;
@@ -60,46 +73,94 @@ function spkiOf(privPem: string): string {
 
 const DAY_MS = 86_400_000;
 
+/** Read a value from the repo .env (falls back to process.env). */
+function envValue(key: string): string | null {
+  if (process.env[key]) return process.env[key];
+  try {
+    const m = fs.readFileSync(path.resolve(process.cwd(), '.env'), 'utf8').match(new RegExp(`^${key}=(.+)$`, 'm'));
+    return m?.[1]?.trim() ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/** Mint a short-lived admin JWT with amr:['totp'] so it passes require2FA. */
+async function mintAdminJwt(pool: import('pg').Pool): Promise<string> {
+  const jwt = apiRequire('jsonwebtoken');
+  const secret = envValue('JWT_SECRET') ?? 'dev-secret';
+  const row = (await pool.query(`SELECT id FROM users WHERE username = 'admin'`)).rows[0] as { id: string } | undefined;
+  if (!row) throw new Error('no admin user found — cannot mint a 2FA session');
+  return jwt.sign(
+    {
+      sub: row.id,
+      username: 'admin',
+      roles: [],
+      // The plan workflow needs configs:apply + plans:read; CA reads need ca:read,
+      // the CA mutations need ca:manage.
+      permissions: ['configs:apply', 'plans:read', 'ca:read', 'ca:manage', 'radius:write'],
+      amr: ['totp'],
+    },
+    secret,
+    { expiresIn: '1h' } as jwt.SignOptions,
+  );
+}
+
+interface PlanStepView {
+  status: string;
+  /** Stored as { success, result: { verified, ...details } | { error } }. */
+  result?: Record<string, unknown> | null;
+}
+
+/** Unwraps the executor's nested step-result envelope to the inner details. */
+function stepResultOf(step: PlanStepView): Record<string, unknown> {
+  const r = (step.result ?? {}) as Record<string, unknown>;
+  return (r.result && typeof r.result === 'object' ? (r.result as Record<string, unknown>) : r) as Record<string, unknown>;
+}
+interface PlanView {
+  id: string;
+  status: string;
+  error?: string | null;
+  steps: PlanStepView[];
+}
+
 async function main(): Promise<void> {
   const { Pool } = apiRequire('pg');
   const pool = new Pool({ connectionString: process.env.DATABASE_URL ?? 'postgresql://unm:unm@localhost:5432/unm' });
 
   // --- Auth -------------------------------------------------------------------
-  // Preferred: a long-lived API token (UNM_API_TOKEN env or .env) — no 2FA.
-  let token = process.env.UNM_API_TOKEN ?? null;
-  if (!token) {
-    try {
-      const envFile = fs.readFileSync(path.resolve(process.cwd(), '.env'), 'utf8');
-      const m = envFile.match(/^UNM_API_TOKEN=(.+)$/m);
-      if (m?.[1]?.trim()) token = m[1].trim();
-    } catch { /* no .env */ }
-  }
-  if (!token) {
-    const adminRow = (await pool.query(`SELECT "totpSecret" FROM users WHERE username = 'admin'`)).rows[0] as { totpSecret: string | null };
-    if (!adminRow?.totpSecret) {
-      const r = await fetch(`${API}/auth/login`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username: 'admin', password: process.env.UNM_ADMIN_PW ?? 'admin' }) });
-      token = ((await r.json()) as { accessToken?: string }).accessToken ?? null;
-    } else {
-      // otplib@13 dropped the `authenticator` instance — use the functional API.
-      const { generate: otpGenerate } = apiRequire('otplib');
-      const code = await otpGenerate({ strategy: 'totp', secret: adminRow.totpSecret });
-      const r1 = await fetch(`${API}/auth/login`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username: 'admin', password: process.env.UNM_ADMIN_PW ?? 'admin' }) });
-      const challenge = ((await r1.json()) as { challengeToken?: string }).challengeToken ?? '';
-      const r2 = await fetch(`${API}/auth/2fa/verify`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ challengeToken: challenge, totpCode: code }) });
-      token = ((await r2.json()) as { accessToken?: string }).accessToken ?? null;
-    }
-  }
-  check('authenticated (API token / login)', Boolean(token));
-  if (!token) throw new Error('no API token available');
+  // Enrollment/revocation are 2FA-gated → mint a TOTP-AMR admin JWT (see header).
+  const token = await mintAdminJwt(pool);
+  check('minted a 2FA-capable admin session', Boolean(token));
 
   const authed = async (method: string, p: string, body?: unknown): Promise<{ status: number; text: () => Promise<string>; json: () => Promise<unknown> }> => {
     const res = await fetch(`${API}${p}`, { method, headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
     return { status: res.status, text: async () => (await res.text()), json: async () => (await res.json().catch(() => null)) as never };
   };
 
-  const run = (...args: string[]) => execFileSync('openssl', args);
   const workdir = fs.mkdtempSync(path.join(os.tmpdir(), 'unm-e2e-ca-wifi-'));
   const serials: string[] = []; // collected for cleanup
+  const planIds: string[] = []; // system plans created by this run — deleted in cleanup
+
+  /** Create a SYSTEM plan, execute it (2FA-gated), and poll to a terminal status. */
+  async function runSystemPlan(intentActionId: string, input: Record<string, unknown>): Promise<PlanView> {
+    const create = await authed('POST', '/plans/system', { intentActionId, inputs: input });
+    if (create.status !== 201) throw new Error(`plan creation failed (${create.status}): ${await create.text()}`);
+    const created = ((await create.json()) as PlanView);
+    planIds.push(created.id);
+
+    const exec = await authed('POST', `/plans/${created.id}/execute`);
+    if (exec.status !== 202) throw new Error(`plan execution rejected (${exec.status}): ${await exec.text()}`);
+
+    // The executor runs on a ~5s tick — poll until the plan reaches a terminal state.
+    const startedAt = Date.now();
+    for (;;) {
+      const g = await authed('GET', `/plans/${created.id}`);
+      const plan = ((await g.json()) as PlanView);
+      if (['succeeded', 'unverified', 'failed', 'cancelled', 'skipped'].includes(plan.status)) return plan;
+      if (Date.now() - startedAt > 120_000) throw new Error(`plan ${created.id} did not finish in time (status=${plan.status})`);
+      await new Promise((r) => setTimeout(r, 750));
+    }
+  }
 
   try {
     // ---------------------------------------------------------------------------
@@ -125,15 +186,14 @@ async function main(): Promise<void> {
     fs.writeFileSync(path.join(workdir, 'root.pem'), rootBundlePem);
 
     // ---------------------------------------------------------------------------
-    // 2. Enrollment with defaults
+    // 2. Enrollment with defaults (via a system plan)
     // ---------------------------------------------------------------------------
-    console.log('\n— Enrollment (defaults) —');
+    console.log('\n— Enrollment (defaults, via system plan) —');
     const suffix = Date.now().toString(36);
     const nameDefault = `e2e-ca-wifi-${suffix}`;
-    const en1 = await authed('POST', '/ca/enroll', { name: nameDefault });
-    const en1Body = await en1.text(); // read once — the body stream is consumed
-    check('enroll (defaults) returns 201', en1.status === 201, { status: en1.status, body: en1Body.slice(0, 300) });
-    const r1 = ((JSON.parse(en1Body || 'null')) as Record<string, unknown>) ?? {};
+    const p1 = await runSystemPlan('ca.client-cert.enroll', { name: nameDefault });
+    check('enroll (defaults) plan succeeded', p1.status === 'succeeded' || p1.status === 'unverified', { status: p1.status, error: p1.error });
+    const r1 = stepResultOf(p1.steps[0] ?? { status: '', result: null });
     const serial1 = String(r1.serial ?? '');
     check('serial is hex', /^[0-9A-Fa-f]{1,64}$/.test(serial1), serial1);
     if (serial1) serials.push(serial1);
@@ -148,17 +208,16 @@ async function main(): Promise<void> {
     check(`granted validity ≈ min(default ${defaultDays}d, chain ceiling ~${Math.round(chainCeilingDays)}d)`, Math.abs(grantedDays - Math.min(defaultDays, Math.floor(chainCeilingDays))) <= 1, { grantedDays });
 
     // ---------------------------------------------------------------------------
-    // 3. Enrollment with overrides (RSA-2048 + custom RDNs/SANs)
+    // 3. Enrollment with overrides (RSA-2048 + custom RDNs/SANs), via a system plan
     // ---------------------------------------------------------------------------
     console.log('\n— Enrollment (overrides: RSA-2048, org/ou/sans) —');
     const nameRsa = `e2e-ca-wifi-rsa-${suffix}`;
-    const en2 = await authed('POST', '/ca/enroll', {
+    const p2 = await runSystemPlan('ca.client-cert.enroll', {
       name: nameRsa, cn: 'e2e-rsa-client', organization: 'E2E Org', organizationalUnit: 'NetOps',
       sans: ['e2e-rsa-1.lan', 'e2e-rsa-2.lan'], keyType: 'rsa-2048', days: 365,
     });
-    const en2Body = await en2.text(); // read once — the body stream is consumed
-    check('enroll (RSA overrides) returns 201', en2.status === 201, { status: en2.status, body: en2Body.slice(0, 300) });
-    const r2 = ((JSON.parse(en2Body || 'null')) as Record<string, unknown>) ?? {};
+    check('enroll (RSA overrides) plan succeeded', p2.status === 'succeeded' || p2.status === 'unverified', { status: p2.status, error: p2.error });
+    const r2 = stepResultOf(p2.steps[0] ?? { status: '', result: null });
     const serial2 = String(r2.serial ?? '');
     check('serial is hex (rsa)', /^[0-9A-Fa-f]{1,64}$/.test(serial2), serial2);
     if (serial2) serials.push(serial2);
@@ -191,17 +250,17 @@ async function main(): Promise<void> {
     }
 
     // ---------------------------------------------------------------------------
-    // 4. Validation errors + duplicate name
+    // 4. Validation errors + duplicate name — now surfaced as FAILED plans
     // ---------------------------------------------------------------------------
-    console.log('\n— Validation —');
-    const bad1 = await authed('POST', '/ca/enroll', { name: 'bad name with spaces' });
-    check('enroll rejects a bad name (400)', bad1.status === 400, { status: bad1.status });
-    const bad2 = await authed('POST', '/ca/enroll', { name: `e2e-bad-${suffix}`, keyType: 'ml-dsa-65' });
-    check('enroll rejects an unknown keyType (400)', bad2.status === 400, { status: bad2.status });
-    const bad3 = await authed('POST', '/ca/enroll', { name: `e2e-bad-${suffix}`, days: 0 });
-    check('enroll rejects days=0 (400)', bad3.status === 400, { status: bad3.status });
-    const dup = await authed('POST', '/ca/enroll', { name: nameDefault });
-    check('duplicate enrollment name → 409', dup.status === 409, { status: dup.status });
+    console.log('\n— Validation (plan failures) —');
+    const bad1 = await runSystemPlan('ca.client-cert.enroll', { name: 'bad name with spaces' });
+    check('enroll rejects a bad name (plan failed)', bad1.status === 'failed', { status: bad1.status, error: String(stepResultOf(bad1.steps[0] ?? { status: '', result: null }).error ?? '') });
+    const bad2 = await runSystemPlan('ca.client-cert.enroll', { name: `e2e-bad-${suffix}`, keyType: 'ml-dsa-65' });
+    check('enroll rejects an unknown keyType (plan failed)', bad2.status === 'failed' && /keyType/.test(String(stepResultOf(bad2.steps[0] ?? { status: '', result: null }).error ?? '')), { status: bad2.status, error: String(stepResultOf(bad2.steps[0] ?? { status: '', result: null }).error ?? '') });
+    const bad3 = await runSystemPlan('ca.client-cert.enroll', { name: `e2e-bad-${suffix}`, days: 0 });
+    check('enroll rejects days=0 (plan failed)', bad3.status === 'failed' && /days/.test(String(stepResultOf(bad3.steps[0] ?? { status: '', result: null }).error ?? '')), { status: bad3.status, error: String(stepResultOf(bad3.steps[0] ?? { status: '', result: null }).error ?? '') });
+    const dup = await runSystemPlan('ca.client-cert.enroll', { name: nameDefault });
+    check('duplicate enrollment name → plan failed (already exists)', dup.status === 'failed' && /already exists/.test(String(stepResultOf(dup.steps[0] ?? { status: '', result: null }).error ?? '')), { status: dup.status, error: String(stepResultOf(dup.steps[0] ?? { status: '', result: null }).error ?? '') });
 
     // ---------------------------------------------------------------------------
     // 5. Downloads (PEM + P12) of the default cert — verified with openssl
@@ -265,13 +324,18 @@ async function main(): Promise<void> {
     check('unknown download format → 400', badFmt.status === 400, { status: badFmt.status });
 
     // ---------------------------------------------------------------------------
-    // 6. Revocation (idempotent) + post-revoke behavior + DB mirror
+    // 6. Revocation (idempotent) via a system plan + post-revoke behavior + DB mirror
     // ---------------------------------------------------------------------------
-    console.log('\n— Revocation —');
-    const rev1 = await authed('POST', `/ca/wifi-certs/${serial1}/revoke`);
-    check('revoke returns 200 (CA accepted)', rev1.status === 200, { status: rev1.status, body: await rev1.text() });
-    const rev2 = await authed('POST', `/ca/wifi-certs/${serial1}/revoke`);
-    check('second revoke is idempotent (still 200)', rev2.status === 200, { status: rev2.status });
+    console.log('\n— Revocation (via system plan) —');
+    const rev1 = await runSystemPlan('ca.client-cert.revoke', { serial: serial1 });
+    check('revoke plan succeeded', rev1.status === 'succeeded' || rev1.status === 'unverified', { status: rev1.status, error: rev1.error });
+    const rr1 = stepResultOf(rev1.steps[0] ?? { status: '', result: null });
+    check('first revoke reports alreadyRevoked=false + CA 2xx', rr1.alreadyRevoked === false && typeof rr1.caStatus === 'number' && Number(rr1.caStatus) < 300, rr1);
+
+    const rev2 = await runSystemPlan('ca.client-cert.revoke', { serial: serial1 });
+    check('second revoke is idempotent (plan succeeded)', rev2.status === 'succeeded' || rev2.status === 'unverified', { status: rev2.status, error: rev2.error });
+    const rr2 = stepResultOf(rev2.steps[0] ?? { status: '', result: null });
+    check('idempotent revoke reports alreadyRevoked=true', rr2.alreadyRevoked === true, rr2);
 
     const dlAfterPem = await authed('GET', `/ca/wifi-certs/${serial1}/download`);
     check('PEM download after revoke → 409', dlAfterPem.status === 409, { status: dlAfterPem.status });
@@ -291,14 +355,20 @@ async function main(): Promise<void> {
     check('listing shows the revoked cert with status=revoked', listed?.status === 'revoked' && Boolean(listed.revokedAt), listed);
 
     // ---------------------------------------------------------------------------
-    // 7. Cleanup — remove this run's test rows (the CA keeps its own revocation)
+    // 7. Cleanup — remove this run's test cert rows AND system plans
     // ---------------------------------------------------------------------------
     console.log('\n— Cleanup —');
     if (serials.length > 0) {
       const delWifi = await pool.query(`DELETE FROM wifi_client_certs WHERE serial = ANY($1::text[])`, [serials]);
       const delReg = await pool.query(`DELETE FROM ca_certificates WHERE serial = ANY($1::text[]) AND kind = 'wifi'`, [serials]);
-      check('test rows removed from both tables', (delWifi.rowCount ?? 0) >= 1 && (delReg.rowCount ?? 0) >= 1, { wifi: delWifi.rowCount, registry: delReg.rowCount });
+      check('test cert rows removed from both tables', (delWifi.rowCount ?? 0) >= 1 && (delReg.rowCount ?? 0) >= 1, { wifi: delWifi.rowCount, registry: delReg.rowCount });
     }
+    let plansDeleted = 0;
+    for (const pid of planIds) {
+      const d = await authed('DELETE', `/plans/${pid}`);
+      if (d.status === 204 || d.status === 404) plansDeleted++; // 404 = already gone
+    }
+    check(`system plans removed (${planIds.length} created)`, planIds.length === 0 || plansDeleted === planIds.length, { deleted: plansDeleted, total: planIds.length });
   } finally {
     fs.rmSync(workdir, { recursive: true, force: true });
     await pool.end();

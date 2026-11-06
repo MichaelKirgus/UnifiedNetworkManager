@@ -4526,6 +4526,15 @@ export const api = {
     autoAssign?: boolean;
   }) =>
     apiFetch<NetworkCheckResultDto>('/plans/network-check', { method: 'POST', body: JSON.stringify(body) }),
+  /** Create a SYSTEM plan for one local RADIUS/CA mutation — no device, no plugin.
+   *  Requires a 2FA-completed session + configs:apply + the domain permission
+   *  (radius:write / ca:manage). `inputs` = single step; `steps` = bulk (one step
+   *  per item, same action id, max 500). Execution goes through executePlan. */
+  createSystemPlan: (body: {
+    intentActionId: string;
+    inputs?: Record<string, unknown>;
+    steps?: Array<{ input: Record<string, unknown> }>;
+  }) => apiFetch<PlanDetail>('/plans/system', { method: 'POST', body: JSON.stringify(body) }),
   getPlan: (id: string) => apiFetch<PlanDetail>(`/plans/${id}`),
   /** Update plan-level settings (currently: the per-plan retry policy). Draft/ready/scheduled only. */
   updatePlan: (id: string, body: { retryPolicy?: PlanRetryPolicy | null }) =>
@@ -4582,66 +4591,26 @@ export const api = {
   // --- Certificate Authority (unm-ca / step-ca) ------------------------------
   /** CA health + identity — version, root fingerprint/expiry, intermediate expiry. */
   caStatus: () => apiFetch<{ status: CaStatus }>('/ca/status'),
-  /** Enroll a WiFi (EAP-TLS) client certificate (keygen + sign via the CA). */
-  caEnroll: (body: { name: string; cn?: string; organization?: string; organizationalUnit?: string; sans?: string[]; keyType?: CaKeyType; days?: number }) =>
-    apiFetch<CaEnrollResult>('/ca/enroll', { method: 'POST', body: JSON.stringify(body) }),
+  // NOTE: there is deliberately NO direct enroll/revoke method for WiFi client
+  // certs — those mutations are plan-gated (createSystemPlan with intentActionId
+  // 'ca.client-cert.enroll' | 'ca.client-cert.revoke' | 'ca.client-cert.bulk-revoke',
+  // then executePlan). The new serial lands in the executed step's result.
   /** List enrolled WiFi client certs (metadata only — no keys). */
   caWifiCerts: () => apiFetch<{ certificates: WifiClientCert[] }>('/ca/wifi-certs'),
-  /** Revoke a WiFi client cert by serial (CA-first, then registries). Idempotent. */
-  caRevokeWifi: (serial: string) =>
-    apiFetch<{ serial: string; caStatus: number }>(`/ca/wifi-certs/${encodeURIComponent(serial)}/revoke`, { method: 'POST' }),
-  /** Revoke many WiFi client certs in one call. Already-revoked = no-op, unknown
-   *  serials reported in `missing`; per-serial CA failures land in `failed`. */
-  caRevokeWifiBulk: (serials: string[]) =>
-    apiFetch<{ revoked: number; alreadyRevoked: number; failed: Array<{ serial: string; error: string }>; missing: string[] }>('/ca/wifi-certs/bulk-revoke', { method: 'POST', body: JSON.stringify({ serials }) }),
   /** Trigger an intermediate CA renewal now (same key, clamped to root expiry −7d). */
   caRenewIntermediate: () =>
     apiFetch<{ renewed: boolean; intermediateNotAfter?: string }>('/ca/renew-intermediate', { method: 'POST' }),
   // --- RADIUS NAS clients (unm-radius sidecar) -------------------------------
+  // NOTE: there are deliberately NO direct mutation methods for NAS clients or
+  // user profiles — every change is plan-gated (createSystemPlan with an
+  // intentActionId like 'radius.nas-client.create' / 'radius.profile.bulk-delete',
+  // then executePlan). The executor runs the shared functions in api/src/radius/
+  // mutations.ts locally; results land in each step's result.
   /** List NAS clients allowed to send RADIUS requests (+ resolved secret metadata). */
   radiusNasClients: () => apiFetch<RadiusNasClient[]>('/radius/nas-clients'),
-  /** Add a NAS client. `secretId` references an existing secret (the shared secret). */
-  radiusNasClientCreate: (body: { name?: string | null; ip: string; secretId?: string | null }) =>
-    apiFetch<RadiusNasClient>('/radius/nas-clients', { method: 'POST', body: JSON.stringify(body) }),
-  /** Update a NAS client's name / ip and/or its secret reference (null clears it). */
-  radiusNasClientUpdate: (id: string, body: { name?: string | null; ip?: string; secretId?: string | null }) =>
-    apiFetch<RadiusNasClient>(`/radius/nas-clients/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify(body) }),
-  /** Remove a NAS client. */
-  radiusNasClientDelete: (id: string) =>
-    apiFetch<void>(`/radius/nas-clients/${encodeURIComponent(id)}`, { method: 'DELETE' }),
-  /** Remove many NAS clients in one call; unknown ids reported in `missing`. */
-  radiusNasClientBulkDelete: (ids: string[]) =>
-    apiFetch<{ deleted: number; missing: string[] }>('/radius/nas-clients/bulk-delete', { method: 'POST', body: JSON.stringify({ ids }) }),
   // --- RADIUS per-user reply profiles (VLAN / static IP / session limits) ----
   /** List per-user RADIUS reply profiles (+ resolved cert name). */
   radiusUserProfiles: () => apiFetch<RadiusUserProfile[]>('/radius/user-profiles'),
-  /** Add a profile for one client cert serial. All attribute fields optional. */
-  radiusUserProfileCreate: (body: {
-    serial: string;
-    name?: string | null;
-    vlanId?: number | null;
-    framedIp?: string | null;
-    framedIpv6?: string | null;
-    sessionTimeoutSec?: number | null;
-    idleTimeoutSec?: number | null;
-    replyMessage?: string | null;
-  }) => apiFetch<RadiusUserProfile>('/radius/user-profiles', { method: 'POST', body: JSON.stringify(body) }),
-  /** Update a profile's fields (null clears a field). */
-  radiusUserProfileUpdate: (id: string, body: {
-    name?: string | null;
-    vlanId?: number | null;
-    framedIp?: string | null;
-    framedIpv6?: string | null;
-    sessionTimeoutSec?: number | null;
-    idleTimeoutSec?: number | null;
-    replyMessage?: string | null;
-  }) => apiFetch<RadiusUserProfile>(`/radius/user-profiles/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify(body) }),
-  /** Remove a profile. */
-  radiusUserProfileDelete: (id: string) =>
-    apiFetch<void>(`/radius/user-profiles/${encodeURIComponent(id)}`, { method: 'DELETE' }),
-  /** Remove many profiles in one call; unknown ids reported in `missing`. */
-  radiusUserProfileBulkDelete: (ids: string[]) =>
-    apiFetch<{ deleted: number; missing: string[] }>('/radius/user-profiles/bulk-delete', { method: 'POST', body: JSON.stringify({ ids }) }),
   // --- RADIUS self-monitoring + auth log ------------------------------------
   /** Latest probe outcome of the sidecar (+ 24h accept/reject counters). */
   radiusStatus: () => apiFetch<RadiusStatus>('/radius/status'),

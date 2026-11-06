@@ -32,6 +32,9 @@ export default function Plans() {
 /** Id prefix marking a plan's synthetic payload child row (see PlansList expandable). */
 const PAYLOAD_CHILD_PREFIX = '__payload__:';
 
+/** Sentinel plugin/device id for SYSTEM plans (local RADIUS/CA mutations — no real device or plugin). */
+const SYSTEM_SENTINEL_ID = '__unm-system__';
+
 function PlansList({ onCreate }: { onCreate?: () => void }) {
   const { formatDateTime } = useTimeFormat();
   // '—' when absent — the central formatter already renders null/invalid as '—'.
@@ -42,8 +45,8 @@ function PlansList({ onCreate }: { onCreate?: () => void }) {
   // Device names for the affected-devices column — same gate (devices:read).
   const devicesQuery = useQuery({ queryKey: ['devices'], queryFn: api.devices, enabled: can('devices:read') });
 
-  const pluginName = (id: string) => pluginsQuery.data?.find((p) => p.id === id)?.name ?? id;
-  const deviceName = (id: string) => devicesQuery.data?.find((d) => d.id === id)?.name ?? id;
+  const pluginName = (id: string) => (id === SYSTEM_SENTINEL_ID ? 'UNM System' : pluginsQuery.data?.find((p) => p.id === id)?.name ?? id);
+  const deviceName = (id: string) => (id === SYSTEM_SENTINEL_ID ? 'local (no device)' : devicesQuery.data?.find((d) => d.id === id)?.name ?? id);
   const canApply = can('configs:apply');
 
   // Retry duplicates the plan and executes the copy — 2FA-gated server-side,
@@ -425,8 +428,8 @@ function PlanPayloadRow({ plan, ctx }: { plan: Plan; ctx: ExpandChildContext }) 
   const pluginsQuery = useQuery({ queryKey: ['plugins'], queryFn: api.plugins, enabled: can('plugins:read') });
   const devicesQuery = useQuery({ queryKey: ['devices'], queryFn: api.devices, enabled: can('devices:read') });
 
-  const pluginName = (id: string) => pluginsQuery.data?.find((p) => p.id === id)?.name ?? id;
-  const deviceName = (id: string) => devicesQuery.data?.find((d) => d.id === id)?.name ?? id;
+  const pluginName = (id: string) => (id === SYSTEM_SENTINEL_ID ? 'UNM System' : pluginsQuery.data?.find((p) => p.id === id)?.name ?? id);
+  const deviceName = (id: string) => (id === SYSTEM_SENTINEL_ID ? 'local (no device)' : devicesQuery.data?.find((d) => d.id === id)?.name ?? id);
 
   // One full-width cell spanning every column — the payload (intent inputs +
   // per-step payloads) is wide JSON that must not be squeezed into a single

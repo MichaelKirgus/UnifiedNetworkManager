@@ -13,6 +13,7 @@ import { decryptCredentialSlots, withSlots } from '../utils/slotCredentials';
 import { getEffectiveSettingValue } from '../systemSettings';
 import { isSystemStepAction, SYSTEM_STEP_WAIT, SYSTEM_STEP_INVENTORY_REFRESH } from '@unm/plugin-sdk';
 import { forceRefreshDevices } from './telemetry';
+import { SYSTEM_PLUGIN_ID, isLocalMutationAction, runLocalMutationStep } from '../plans/systemActions';
 
 const PROCESS_INTERVAL_MS = 5_000;
 
@@ -208,10 +209,15 @@ async function processPlan(planId: string): Promise<void> {
   })) as PlanRecord | null;
   if (!plan || plan.status !== 'executing') return;
 
+  // SYSTEM plans (RADIUS / CA local mutations) carry the sentinel plugin id —
+  // there is NO plugins row for them and none is expected: every step runs
+  // in-process via runLocalMutationStep. A missing plugin row is only fatal
+  // for real plugin plans.
+  const isSystemPlan = plan.pluginId === SYSTEM_PLUGIN_ID;
   const plugin = await db.query.plugins.findFirst({
     where: (plugins, { eq }) => eq(plugins.id, plan.pluginId),
   });
-  if (!plugin) {
+  if (!plugin && !isSystemPlan) {
     await finishPlan(planId, 'failed', 'Plugin no longer registered');
     await skipRemainingSteps(planId);
     return;
@@ -221,7 +227,7 @@ async function processPlan(planId: string): Promise<void> {
   // are exempt from post-apply verification — a read IS its own confirmation).
   // retryOnDispatchFailure=false is the plugin's flapping guard: power /
   // firmware-flash / config-restore actions that must never be re-dispatched.
-  const catalogRaw = parseJson<unknown>(plugin.actionDescriptors ?? null, []);
+  const catalogRaw = parseJson<unknown>(plugin?.actionDescriptors ?? null, []);
   const catalog: Array<{ id?: string; timeoutMs?: number; riskLevel?: 'read' | 'write' | 'dangerous'; retryOnDispatchFailure?: boolean }> = Array.isArray(catalogRaw)
     ? (catalogRaw as never[])
     : [];
@@ -297,6 +303,43 @@ async function processPlan(planId: string): Promise<void> {
         await markStep(step.id, 'failed', { success: false, result: { error: (err as Error).message } });
       }
       continue;
+    }
+
+    // --- Local mutation steps (RADIUS / CA) ----------------------------------
+    // Reserved action ids that act on UNM's OWN sidecars (FreeRADIUS config
+    // volume, step-ca service) — they have no device. The executor runs them
+    // in-process via the shared mutation functions; nothing is dispatched to a
+    // plugin and no assignment/credentials are needed. Unlike settle/refresh
+    // these are NOT best-effort by default: a failed RADIUS/CA change fails the
+    // plan (unless the step explicitly opts into bestEffort). The result is
+    // verified:true — the mutation either happened or it threw, so there is no
+    // separate device-state verification to run.
+    if (isLocalMutationAction(step.actionId)) {
+      const localInput = parseJson<Record<string, unknown>>(step.input, {});
+      await markStep(step.id, 'running');
+      try {
+        const details = await runLocalMutationStep(step.actionId, localInput);
+        await markStep(step.id, 'succeeded', { success: true, result: { verified: true, ...details } });
+        results.set(step.stepIndex, { success: true, result: { verified: true, ...details } });
+      } catch (err) {
+        const message = (err as Error).message;
+        await markStep(step.id, 'failed', { success: false, result: { error: message } });
+        if (step.bestEffort) continue;
+        await skipRemainingSteps(planId);
+        await finishPlan(planId, 'failed', `Step ${step.stepIndex} (${step.actionId}) failed: ${message}`);
+        return;
+      }
+      continue;
+    }
+
+    // Everything below dispatches to a plugin — system plans never get here
+    // (every one of their steps is a local mutation handled above).
+    if (!plugin) {
+      await markStep(step.id, 'failed', { success: false, result: { error: 'No plugin registered for this plan' } });
+      if (step.bestEffort) continue;
+      await skipRemainingSteps(planId);
+      await finishPlan(planId, 'failed', `Step ${step.stepIndex}: no plugin registered`);
+      return;
     }
 
     const device = await db.query.devices.findFirst({

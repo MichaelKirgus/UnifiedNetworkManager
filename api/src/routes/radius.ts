@@ -1,5 +1,4 @@
 import { Router, Request, Response } from 'express';
-import { v4 as uuidv4 } from 'uuid';
 import { and, asc, desc, eq, ilike, inArray, like, ne } from 'drizzle-orm';
 import { db, pool } from '../db';
 import * as schema from '../db/schema';
@@ -8,21 +7,25 @@ import { getEffectiveSettingValue } from '../systemSettings';
 import { requireAuth, requirePermission } from '../auth/middleware';
 
 /**
- * RADIUS NAS clients (the unm-radius sidecar — FreeRADIUS EAP-TLS).
+ * RADIUS NAS clients + user profiles (the unm-radius sidecar — FreeRADIUS EAP-TLS).
  *
- *   GET    /radius/nas-clients      -> list NAS clients (+ resolved secret metadata)
- *   POST   /radius/nas-clients      -> add one { name?, ip, secretId? }
- *   PATCH  /radius/nas-clients/:id  -> update name / ip / secretId (null clears the secret)
- *   DELETE /radius/nas-clients/:id  -> remove one
- *   POST   /radius/nas-clients/bulk-delete -> remove many { ids: string[] } in one call
+ *   GET /radius/nas-clients      -> list NAS clients (+ resolved secret metadata)
+ *   GET /radius/user-profiles    -> list per-user reply profiles (+ cert name)
+ *   GET /radius/status           -> latest probe outcome + 24h accept/reject counters
+ *   GET /radius/auth-log         -> recent radpostauth rows (the failed-login audit trail)
+ *
+ * All MUTATIONS (NAS-client and profile create/update/delete, incl. bulk) are
+ * plan-gated: the webapp creates a system plan via POST /plans/system with an
+ * intentActionId like radius.nas-client.create or radius.profile.bulk-delete and
+ * executes it through the 2FA-gated plan workflow. The executor runs the shared
+ * functions in api/src/radius/mutations.ts locally (no device, no plugin). This
+ * makes every RADIUS change auditable, retryable, schedulable and automatable —
+ * there is deliberately NO direct mutation route left that bypasses the 2FA gate.
  *
  * The shared secret is NEVER stored here — each row references a secrets.id
  * (same pattern as device_plugins.secretId). At render time api/src/radius/
  * resolves + decrypts it via the owning provider. Reading requires `radius:read`;
- * writes require `radius:write`. Every mutation re-renders the raddb files on the
- * shared volume so the change hot-applies (SIGHUP) without a container restart —
- * best-effort, since the DB write is authoritative and one bad credential must
- * not wedge CRUD.
+ * mutations require `radius:write` (checked on plan creation AND execution).
  */
 
 const router = Router();
@@ -61,37 +64,6 @@ async function toViews(rows: Row[]): Promise<RadiusNasClientView[]> {
   }));
 }
 
-/** Re-renders the raddb files after a mutation. Best-effort — see module doc. */
-async function rerender(): Promise<void> {
-  try {
-    await require('../radius/radiusConfig').writeRadiusConfig();
-  } catch (err) {
-    console.warn('[radius] config re-render after NAS client change failed:', (err as Error).message);
-  }
-}
-
-/** Accepts an IPv4 or IPv6 literal. Rejects empty / whitespace / hostnames. */
-function isValidIp(value: string): boolean {
-  const t = value.trim();
-  if (!t || /\s/.test(t)) return false;
-  // IPv4 dotted quad (each octet 0-255).
-  if (/^\d{1,3}(\.\d{1,3}){3}$/.test(t)) {
-    return t.split('.').every((o) => Number(o) <= 255);
-  }
-  // IPv6 — at least one colon and only hex/colon chars (covers full + compressed).
-  if (t.includes(':')) return /^[0-9a-fA-F:]+$/.test(t);
-  return false;
-}
-
-/** Validates a secretId reference against the secrets table. Returns an error string or null. */
-async function validateSecretRef(secretId: unknown): Promise<string | null> {
-  if (secretId === null || secretId === undefined) return null; // clearing / not set
-  if (typeof secretId !== 'string' || !secretId.trim()) return '"secretId" must be a string or null';
-  const row = await db.query.secrets.findFirst({ where: (s, { eq }) => eq(s.id, secretId.trim()) });
-  if (!row) return `Referenced credentials not found (${secretId})`;
-  return null;
-}
-
 // GET /radius/nas-clients — list all NAS clients with resolved secret metadata.
 router.get(
   '/radius/nas-clients',
@@ -103,174 +75,24 @@ router.get(
   }
 );
 
-// POST /radius/nas-clients — add a NAS client.
-router.post(
-  '/radius/nas-clients',
-  requireAuth,
-  requirePermission('radius:write'),
-  async (req: Request, res: Response) => {
-    const body = (req.body ?? {}) as Record<string, unknown>;
+// NOTE: NAS-client mutations (create/update/delete, incl. bulk) are NOT direct
+// routes anymore — they flow through the plan workflow so every change is
+// 2FA-gated, audited and automatable. The webapp creates a system plan via
+// POST /plans/system with intentActionId radius.nas-client.{create|update|delete}
+// (or .bulk-delete) and executes it; the executor runs the shared functions in
+// radius/mutations.ts locally. See api/src/plans/systemActions.ts.
 
-    if (typeof body.ip !== 'string' || !isValidIp(body.ip)) {
-      res.status(400).json({ error: '"ip" must be a valid IPv4 or IPv6 address' });
-      return;
-    }
-    const ip = body.ip.trim();
-    const name = typeof body.name === 'string' && body.name.trim() ? body.name.trim().slice(0, 128) : null;
-
-    const secretErr = await validateSecretRef(body.secretId);
-    if (secretErr) {
-      res.status(secretErr.startsWith('Referenced') ? 404 : 400).json({ error: secretErr });
-      return;
-    }
-
-    // IP is unique — a NAS has one address.
-    const existing = await db.query.radiusNasClients.findFirst({ where: (r, { eq }) => eq(r.ip, ip) });
-    if (existing) {
-      res.status(409).json({ error: `A NAS client with IP ${ip} already exists` });
-      return;
-    }
-
-    const id = uuidv4();
-    const createdAt = new Date().toISOString();
-    await db.insert(schema.radiusNasClients).values({
-      id,
-      name,
-      ip,
-      secretId: typeof body.secretId === 'string' ? body.secretId.trim() : null,
-      createdAt,
-    });
-
-    await rerender();
-    const [row] = await db.query.radiusNasClients.findMany({ where: (r, { eq }) => eq(r.id, id) });
-    res.status(201).json((await toViews([row]))[0]);
-  }
-);
-
-// PATCH /radius/nas-clients/:id — update name / ip and/or the secret reference.
-router.patch(
-  '/radius/nas-clients/:id',
-  requireAuth,
-  requirePermission('radius:write'),
-  async (req: Request, res: Response) => {
-    const id = String(req.params.id ?? '');
-    const current = await db.query.radiusNasClients.findFirst({ where: (r, { eq }) => eq(r.id, id) });
-    if (!current) {
-      res.status(404).json({ error: 'NAS client not found' });
-      return;
-    }
-
-    const body = (req.body ?? {}) as Record<string, unknown>;
-    const patch: Partial<Row> = {};
-
-    // name — present in body means "set it" (empty string clears to null).
-    if ('name' in body) {
-      if (body.name === null || (typeof body.name === 'string' && !body.name.trim())) patch.name = null;
-      else if (typeof body.name !== 'string') {
-        res.status(400).json({ error: '"name" must be a string or null' });
-        return;
-      } else patch.name = body.name.trim().slice(0, 128);
-    }
-
-    // ip — optional change; must stay unique.
-    if ('ip' in body) {
-      if (typeof body.ip !== 'string' || !isValidIp(body.ip)) {
-        res.status(400).json({ error: '"ip" must be a valid IPv4 or IPv6 address' });
-        return;
-      }
-      const ip = body.ip.trim();
-      if (ip !== current.ip) {
-        const clash = await db.query.radiusNasClients.findFirst({ where: (r, { eq }) => eq(r.ip, ip) });
-        if (clash && clash.id !== id) {
-          res.status(409).json({ error: `A NAS client with IP ${ip} already exists` });
-          return;
-        }
-      }
-      patch.ip = ip;
-    }
-
-    // secretId — present in body means "set it" (null clears the credential).
-    if ('secretId' in body) {
-      const secretErr = await validateSecretRef(body.secretId);
-      if (secretErr) {
-        res.status(secretErr.startsWith('Referenced') ? 404 : 400).json({ error: secretErr });
-        return;
-      }
-      patch.secretId = typeof body.secretId === 'string' ? body.secretId.trim() : null;
-    }
-
-    if (Object.keys(patch).length === 0) {
-      res.status(400).json({ error: 'No updatable fields provided' });
-      return;
-    }
-
-    await db.update(schema.radiusNasClients).set(patch).where(eq(schema.radiusNasClients.id, id));
-    await rerender();
-    const [row] = await db.query.radiusNasClients.findMany({ where: (r, { eq }) => eq(r.id, id) });
-    res.status(200).json((await toViews([row]))[0]);
-  }
-);
-
-// DELETE /radius/nas-clients/:id — remove a NAS client.
-router.delete(
-  '/radius/nas-clients/:id',
-  requireAuth,
-  requirePermission('radius:write'),
-  async (req: Request, res: Response) => {
-    const id = String(req.params.id ?? '');
-    const current = await db.query.radiusNasClients.findFirst({ where: (r, { eq }) => eq(r.id, id) });
-    if (!current) {
-      res.status(404).json({ error: 'NAS client not found' });
-      return;
-    }
-    await db.delete(schema.radiusNasClients).where(eq(schema.radiusNasClients.id, id));
-    await rerender();
-    res.status(204).send();
-  }
-);
-// POST /radius/nas-clients/bulk-delete — remove many NAS clients in one call.
-// Body: { ids: string[] }. The webapp selection bar sends the current selection;
-// unknown ids are reported (never fatal), at most 500 per call. A single raddb
-// re-render follows so the whole batch hot-applies with ONE SIGHUP instead of N.
-router.post(
-  '/radius/nas-clients/bulk-delete',
-  requireAuth,
-  requirePermission('radius:write'),
-  async (req: Request, res: Response) => {
-    const body = (req.body ?? {}) as Record<string, unknown>;
-    const ids = Array.isArray(body.ids)
-      ? (body.ids as unknown[]).filter((x): x is string => typeof x === 'string' && !!x.trim())
-      : [];
-    if (ids.length === 0) {
-      res.status(400).json({ error: '"ids" must be a non-empty array of NAS client ids' });
-      return;
-    }
-    if (ids.length > 500) {
-      res.status(400).json({ error: 'At most 500 ids per bulk delete' });
-      return;
-    }
-
-    const unique = Array.from(new Set(ids.map((s) => s.trim())));
-    const existing = await db.query.radiusNasClients.findMany({ where: inArray(schema.radiusNasClients.id, unique) });
-    const foundIds = new Set(existing.map((r) => r.id));
-    const missing = ids.filter((id) => !foundIds.has(id.trim()));
-
-    if (existing.length > 0) {
-      await db.delete(schema.radiusNasClients).where(inArray(schema.radiusNasClients.id, Array.from(foundIds)));
-      await rerender();
-    }
-    res.status(200).json({ deleted: existing.length, missing });
-  }
-);/**
+/**
  * Per-user RADIUS reply profiles (VLAN / static IP / session limits) keyed by
  * client cert serial. The exec script reads this table at auth time and prints
  * the set fields as reply attributes — see radiusConfig.renderUserProfileScript.
  *
  *   GET    /radius/user-profiles      -> list all (+ resolved cert name)
- *   POST   /radius/user-profiles      -> add one { serial, ...fields }
- *   PATCH  /radius/user-profiles/:id  -> update fields (null clears a field)
- *   DELETE /radius/user-profiles/:id  -> remove one
- *   POST   /radius/user-profiles/bulk-delete -> remove many { ids: string[] } in one call
+ *
+ * Mutations (create/update/delete, incl. bulk) flow through the plan workflow
+ * like NAS clients: POST /plans/system with intentActionId
+ * radius.profile.{create|update|delete} (or .bulk-delete), executed by the
+ * executor via radius/mutations.ts. See api/src/plans/systemActions.ts.
  */
 export interface RadiusUserProfileView {
   id: string;
@@ -312,56 +134,6 @@ async function toProfileViews(rows: ProfileRow[]): Promise<RadiusUserProfileView
   }));
 }
 
-/** Accepts an IPv4 or IPv6 literal (same rules as NAS clients). */
-function isValidProfileIp(value: string): boolean {
-  const t = value.trim();
-  if (!t || /\s/.test(t)) return false;
-  if (/^\d{1,3}(\.\d{1,3}){3}$/.test(t)) return t.split('.').every((o) => Number(o) <= 255);
-  if (t.includes(':')) return /^[0-9a-fA-F:]+$/.test(t);
-  return false;
-}
-
-/** Parses + validates one profile field set from a request body. */
-function parseProfileFields(body: Record<string, unknown>): { patch: Partial<ProfileRow>; error: string | null } {
-  const patch: Partial<ProfileRow> = {};
-  if ('vlanId' in body) {
-    if (body.vlanId === null || body.vlanId === undefined) patch.vlanId = null;
-    else if (!Number.isInteger(body.vlanId as number) || (body.vlanId as number) < 1 || (body.vlanId as number) > 4094)
-      return { patch, error: '"vlanId" must be an integer between 1 and 4094 or null' };
-    else patch.vlanId = body.vlanId as number;
-  }
-  if ('framedIp' in body) {
-    if (body.framedIp === null || body.framedIp === undefined) patch.framedIp = null;
-    else if (typeof body.framedIp !== 'string' || !isValidProfileIp(body.framedIp))
-      return { patch, error: '"framedIp" must be a valid IPv4 or IPv6 address or null' };
-    else patch.framedIp = body.framedIp.trim();
-  }
-  if ('framedIpv6' in body) {
-    if (body.framedIpv6 === null || body.framedIpv6 === undefined) patch.framedIpv6 = null;
-    else if (typeof body.framedIpv6 !== 'string' || !isValidProfileIp(body.framedIpv6))
-      return { patch, error: '"framedIpv6" must be a valid IPv4 or IPv6 address or null' };
-    else patch.framedIpv6 = body.framedIpv6.trim();
-  }
-  for (const key of ['sessionTimeoutSec', 'idleTimeoutSec'] as const) {
-    if (key in body) {
-      if (body[key] === null || body[key] === undefined) patch[key] = null;
-      else if (!Number.isInteger(body[key] as number) || (body[key] as number) < 60)
-        return { patch, error: `"${key}" must be an integer ≥ 60 or null` };
-      else patch[key] = body[key] as number;
-    }
-  }
-  if ('replyMessage' in body) {
-    if (body.replyMessage === null || body.replyMessage === undefined) patch.replyMessage = null;
-    else if (typeof body.replyMessage !== 'string') return { patch, error: '"replyMessage" must be a string or null' };
-    // SECURITY: this value is printed verbatim by the per-auth exec script and
-    // parsed back line-by-line into RADIUS attributes. Strip CR/LF/tabs so a
-    // crafted message can't inject extra "Attr = value" lines, then trim + cap
-    // length (RADIUS Reply-Message is 253 octets; keep headroom).
-    else patch.replyMessage = body.replyMessage.replace(/[\r\n\t]/g, ' ').trim().slice(0, 256);
-  }
-  return { patch, error: null };
-}
-
 // GET /radius/user-profiles — list all profiles with resolved cert names.
 router.get(
   '/radius/user-profiles',
@@ -373,141 +145,8 @@ router.get(
   }
 );
 
-// POST /radius/user-profiles — add a profile for one client cert serial.
-router.post(
-  '/radius/user-profiles',
-  requireAuth,
-  requirePermission('radius:write'),
-  async (req: Request, res: Response) => {
-    const body = (req.body ?? {}) as Record<string, unknown>;
+// NOTE: profile mutations are plan-gated like NAS clients — see the note above.
 
-    if (typeof body.serial !== 'string' || !/^[0-9a-fA-F]{2,64}$/.test(body.serial.trim())) {
-      res.status(400).json({ error: '"serial" must be a hex certificate serial (no 0x prefix)' });
-      return;
-    }
-    const serial = body.serial.trim().toLowerCase();
-
-    const { patch, error } = parseProfileFields(body);
-    if (error) {
-      res.status(400).json({ error });
-      return;
-    }
-
-    // Serial is unique — one profile per client cert.
-    const existing = await db.query.radiusUserProfiles.findFirst({ where: (r, { eq }) => eq(r.serial, serial) });
-    if (existing) {
-      res.status(409).json({ error: `A RADIUS profile for this certificate already exists` });
-      return;
-    }
-
-    const id = uuidv4();
-    await db.insert(schema.radiusUserProfiles).values({
-      id,
-      serial,
-      name: typeof body.name === 'string' && body.name.trim() ? body.name.trim().slice(0, 128) : null,
-      ...patch,
-      createdAt: new Date().toISOString(),
-    });
-
-    await rerender();
-    const [row] = await db.query.radiusUserProfiles.findMany({ where: (r, { eq }) => eq(r.id, id) });
-    res.status(201).json((await toProfileViews([row]))[0]);
-  }
-);
-
-// PATCH /radius/user-profiles/:id — update fields (null clears a field).
-router.patch(
-  '/radius/user-profiles/:id',
-  requireAuth,
-  requirePermission('radius:write'),
-  async (req: Request, res: Response) => {
-    const id = String(req.params.id ?? '');
-    const current = await db.query.radiusUserProfiles.findFirst({ where: (r, { eq }) => eq(r.id, id) });
-    if (!current) {
-      res.status(404).json({ error: 'RADIUS profile not found' });
-      return;
-    }
-
-    const body = (req.body ?? {}) as Record<string, unknown>;
-    const patch: Partial<ProfileRow> = {};
-
-    if ('name' in body) {
-      if (body.name === null || (typeof body.name === 'string' && !body.name.trim())) patch.name = null;
-      else if (typeof body.name !== 'string') {
-        res.status(400).json({ error: '"name" must be a string or null' });
-        return;
-      } else patch.name = body.name.trim().slice(0, 128);
-    }
-
-    const { patch: fields, error } = parseProfileFields(body);
-    if (error) {
-      res.status(400).json({ error });
-      return;
-    }
-    Object.assign(patch, fields);
-
-    if (Object.keys(patch).length === 0) {
-      res.status(400).json({ error: 'No updatable fields provided' });
-      return;
-    }
-
-    await db.update(schema.radiusUserProfiles).set(patch).where(eq(schema.radiusUserProfiles.id, id));
-    await rerender();
-    const [row] = await db.query.radiusUserProfiles.findMany({ where: (r, { eq }) => eq(r.id, id) });
-    res.status(200).json((await toProfileViews([row]))[0]);
-  }
-);
-
-// DELETE /radius/user-profiles/:id — remove a profile.
-router.delete(
-  '/radius/user-profiles/:id',
-  requireAuth,
-  requirePermission('radius:write'),
-  async (req: Request, res: Response) => {
-    const id = String(req.params.id ?? '');
-    const current = await db.query.radiusUserProfiles.findFirst({ where: (r, { eq }) => eq(r.id, id) });
-    if (!current) {
-      res.status(404).json({ error: 'RADIUS profile not found' });
-      return;
-    }
-    await db.delete(schema.radiusUserProfiles).where(eq(schema.radiusUserProfiles.id, id));
-    await rerender();
-    res.status(204).send();
-  }
-);
-// POST /radius/user-profiles/bulk-delete — remove many profiles in one call.
-// Body: { ids: string[] }. Same contract as the NAS-client bulk delete: unknown
-// ids reported (never fatal), at most 500 per call, ONE raddb re-render after.
-router.post(
-  '/radius/user-profiles/bulk-delete',
-  requireAuth,
-  requirePermission('radius:write'),
-  async (req: Request, res: Response) => {
-    const body = (req.body ?? {}) as Record<string, unknown>;
-    const ids = Array.isArray(body.ids)
-      ? (body.ids as unknown[]).filter((x): x is string => typeof x === 'string' && !!x.trim())
-      : [];
-    if (ids.length === 0) {
-      res.status(400).json({ error: '"ids" must be a non-empty array of profile ids' });
-      return;
-    }
-    if (ids.length > 500) {
-      res.status(400).json({ error: 'At most 500 ids per bulk delete' });
-      return;
-    }
-
-    const unique = Array.from(new Set(ids.map((s) => s.trim())));
-    const existing = await db.query.radiusUserProfiles.findMany({ where: inArray(schema.radiusUserProfiles.id, unique) });
-    const foundIds = new Set(existing.map((r) => r.id));
-    const missing = ids.filter((id) => !foundIds.has(id.trim()));
-
-    if (existing.length > 0) {
-      await db.delete(schema.radiusUserProfiles).where(inArray(schema.radiusUserProfiles.id, Array.from(foundIds)));
-      await rerender();
-    }
-    res.status(200).json({ deleted: existing.length, missing });
-  }
-);
 /**
  * RADIUS self-monitoring + auth log (unsuccessful-login audit trail).
  *

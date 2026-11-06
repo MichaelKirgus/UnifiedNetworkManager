@@ -11,6 +11,12 @@ import { settingsHeaders } from '../pluginSettings';
 import { decryptCredentialSlots, withSlots } from '../utils/slotCredentials';
 import { parseExtraCredentials } from '../types/credentialSlots';
 import { enqueuePlanExecution } from '../workers/planExecutor';
+import {
+  SYSTEM_PLUGIN_ID,
+  SYSTEM_DEVICE_ID,
+  isLocalMutationAction,
+  requiredDomainPermission,
+} from '../plans/systemActions';
 import { isCanonicalIntent, type CatalogEntry as SdkCatalogEntry } from '@unm/plugin-sdk';
 import { validateInput, type InputSchema } from '../utils/inputSchema';
 import { networkChecksForDevices, networkCheck, assertRolloutAllowed } from '../utils/networkCheck';
@@ -328,6 +334,9 @@ async function planVisibleTo(req: Request, planId: string): Promise<boolean> {
   const allowed = await allowedDeviceIds(req);
   if (allowed === null) return true;
   for (const step of await loadSteps(planId)) {
+    // System steps carry the sentinel device id — they act on UNM's own
+    // sidecars, not a scoped device, so they never hide a plan from a caller.
+    if (step.deviceId === SYSTEM_DEVICE_ID) continue;
     if (!allowed.has(step.deviceId)) return false;
   }
   return true;
@@ -338,6 +347,25 @@ async function assertPlanAccess(req: Request, res: Response, planId: string): Pr
   if (await planVisibleTo(req, planId)) return true;
   res.status(404).json({ error: 'Plan not found' });
   return false;
+}
+
+/**
+ * System plans (local RADIUS/CA mutations) re-check the action's DOMAIN
+ * permission at execute/retry time — a user who had radius:write / ca:manage
+ * when creating the plan must still hold it to run or retry it. Device plans
+ * carry no local-mutation steps, so this is a no-op for them.
+ */
+async function assertSystemPlanDomainPermission(req: Request, res: Response, planId: string): Promise<boolean> {
+  const permissions = req.user?.permissions ?? [];
+  for (const step of await loadSteps(planId)) {
+    if (!isLocalMutationAction(step.actionId)) continue;
+    const perm = requiredDomainPermission(step.actionId);
+    if (perm && !permissions.includes(perm)) {
+      res.status(403).json({ error: `Missing required permission: ${perm}` });
+      return false;
+    }
+  }
+  return true;
 }
 
 // --- Routes -----------------------------------------------------------------
@@ -647,6 +675,97 @@ router.post(
       const e = err as { status?: number; message?: string };
       res.status(e.status ?? 500).json({ error: e.message ?? 'Failed to create plan' });
     }
+  }
+);
+
+// POST /plans/system — create a SYSTEM plan for one local mutation (RADIUS / CA).
+// Unlike POST /plans this needs NO device and NO plugin: the step is executed by
+// the API's own plan executor via api/src/plans/systemActions.ts. The plan lands
+// as 'ready' with the sentinel plugin/device ids; execution goes through the
+// SAME 2FA-gated POST /plans/:id/execute (plus the action's domain permission,
+// re-checked there). This is what makes RADIUS/CA changes auditable, retryable,
+// schedulable and automatable like every other config change.
+router.post(
+  '/plans/system',
+  requireAuth,
+  require2FA,
+  requirePermission('configs:apply'),
+  async (req, res) => {
+    const body = req.body ?? {};
+    const intentActionId = typeof body.intentActionId === 'string' ? body.intentActionId : '';
+    if (!isLocalMutationAction(intentActionId)) {
+      res.status(400).json({ error: `Unknown system action "${intentActionId}"` });
+      return;
+    }
+
+    // Domain gate on top of configs:apply — a RADIUS/CA plan requires the
+    // matching write permission (radius:write / ca:manage).
+    const domainPermission = requiredDomainPermission(intentActionId);
+    if (domainPermission && !(req.user?.permissions ?? []).includes(domainPermission)) {
+      res.status(403).json({ error: `Missing required permission: ${domainPermission}` });
+      return;
+    }
+
+    // Step inputs — EITHER a single `inputs` object (one step) OR a `steps`
+    // array of { input } objects (bulk: one step per item, same action id). The
+    // bulk form is how the webapp's selection-bar actions become plans.
+    const stepInputs: Array<Record<string, unknown>> = [];
+    if (Array.isArray(body.steps)) {
+      for (const s of body.steps as unknown[]) {
+        const input = isPlainObject(s) && isPlainObject((s as Record<string, unknown>).input)
+          ? ((s as Record<string, unknown>).input as Record<string, unknown>)
+          : null;
+        if (!input) {
+          res.status(400).json({ error: 'Each step must be { input: object }' });
+          return;
+        }
+        stepInputs.push(input);
+      }
+    } else if (isPlainObject(body.inputs)) {
+      stepInputs.push(body.inputs as Record<string, unknown>);
+    }
+    if (stepInputs.length === 0) {
+      res.status(400).json({ error: 'Provide "inputs" (single step) or a non-empty "steps" array' });
+      return;
+    }
+    if (stepInputs.length > 500) {
+      res.status(400).json({ error: 'At most 500 steps per system plan' });
+      return;
+    }
+
+    const now = new Date().toISOString();
+    const planId = uuidv4();
+    await db.insert(schema.plans).values({
+      id: planId,
+      pluginId: SYSTEM_PLUGIN_ID,
+      intentActionId,
+      // For a single step the raw inputs; for bulk, the whole steps array so the
+      // payload view shows every item that will be applied.
+      intentInputs: JSON.stringify(stepInputs.length === 1 ? stepInputs[0] : { steps: stepInputs }),
+      status: 'ready',
+      provisionedSecrets: '{}',
+      error: null,
+      createdBy: req.user?.sub ?? '',
+      executedBy: null,
+      cancelledAt: null,
+      createdAt: now,
+      updatedAt: now,
+    });
+    for (let i = 0; i < stepInputs.length; i++) {
+      await db.insert(schema.planSteps).values({
+        id: uuidv4(),
+        planId,
+        stepIndex: i,
+        deviceId: SYSTEM_DEVICE_ID,
+        actionId: intentActionId,
+        input: JSON.stringify(stepInputs[i]),
+        dependsOn: '[]',
+        secretRefs: '[]',
+        bestEffort: false,
+      });
+    }
+
+    res.status(201).json(await serializePlan(planId, true));
   }
 );
 
@@ -1191,6 +1310,8 @@ router.post(
     }
     // Device-level access control — executing applies changes to every step's device.
     if (!(await assertPlanAccess(req, res, String(req.params.id ?? '')))) return;
+    // System plans additionally need the action's domain permission (radius:write / ca:manage).
+    if (!(await assertSystemPlanDomainPermission(req, res, plan.id))) return;
 
     await enqueuePlanExecution(plan.id, req.user?.sub ?? null);
     res.status(202).json((await serializePlan(plan.id, true))!);
@@ -1218,6 +1339,8 @@ router.post(
     }
     // Device-level access control — a retry re-applies every step's device.
     if (!(await assertPlanAccess(req, res, String(req.params.id ?? '')))) return;
+    // System plans additionally need the action's domain permission (radius:write / ca:manage).
+    if (!(await assertSystemPlanDomainPermission(req, res, plan.id))) return;
 
     const steps = await loadSteps(plan.id);
     if (steps.length === 0) {

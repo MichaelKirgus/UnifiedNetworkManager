@@ -151,3 +151,50 @@ export async function createAndExecutePlan(
   };
   return runAction(create, (id) => api.executePlan(id), mode);
 }
+
+/** Creates a SYSTEM plan for one local RADIUS/CA mutation — no device, no plugin.
+ * Same execution-mode contract as {@link createAndExecutePlan}: in Execute mode
+ * the plan is created AND executed through the 2FA-gated workflow; in Plan mode
+ * it is saved without executing (callers surface a "saved" notice); in Read-Only
+ * mode nothing happens. Throws on failure — callers catch ApiError 401 to offer
+ * two-factor revalidation and then retry from scratch. */
+export async function createAndExecuteSystemPlan(
+  intentActionId: string,
+  inputsOrSteps: Record<string, unknown> | Array<{ input: Record<string, unknown> }>,
+  mode: ExecutionMode,
+): Promise<string> {
+  const body = Array.isArray(inputsOrSteps) ? { intentActionId, steps: inputsOrSteps } : { intentActionId, inputs: inputsOrSteps };
+  return runAction(() => api.createSystemPlan(body), (id) => api.executePlan(id), mode);
+}
+
+/** The per-step outcome details of a step result. The executor stores
+ * `{ success, result: { verified, ...details } | { error } }` — this unwraps the
+ * inner `result` object so callers can read e.g. an enrolled cert's serial or a
+ * failed step's error message directly. */
+export function stepResultOf(step: { result?: Record<string, unknown> | null }): Record<string, unknown> {
+  const r = (step.result ?? {}) as Record<string, unknown>;
+  return (r.result && typeof r.result === 'object' ? (r.result as Record<string, unknown>) : r) as Record<string, unknown>;
+}
+
+/** Polls a plan until it reaches a terminal status. Returns the final detail —
+ * callers read `steps[].result` for per-step outcomes via {@link stepResultOf}
+ * (e.g. the new serial of an enrolled EAP-TLS client cert). Throws on timeout or
+ * when the plan ends failed/cancelled, with the first step error as the message. */
+export async function waitForPlan(
+  planId: string,
+  opts?: { timeoutMs?: number; intervalMs?: number },
+): Promise<import('./api/client').PlanDetail> {
+  const timeout = opts?.timeoutMs ?? 120_000;
+  const interval = opts?.intervalMs ?? 750;
+  const startedAt = Date.now();
+  for (;;) {
+    const plan = await api.getPlan(planId);
+    if (plan.status === 'succeeded' || plan.status === 'unverified') return plan;
+    if (plan.status === 'failed' || plan.status === 'cancelled' || plan.status === 'skipped') {
+      const firstError = plan.steps.map((s) => stepResultOf(s).error ?? s.result?.error).find((e): e is string => typeof e === 'string' && e.length > 0) ?? plan.error ?? `Plan ${plan.status}`;
+      throw new Error(String(firstError));
+    }
+    if (Date.now() - startedAt > timeout) throw new Error('Timed out waiting for the plan to finish');
+    await new Promise((r) => setTimeout(r, interval));
+  }
+}

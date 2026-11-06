@@ -1,16 +1,14 @@
 import { Router, Response } from 'express';
 import * as fs from 'fs';
-import * as crypto from 'crypto';
-import { db, pool } from '../db';
+import { db } from '../db';
 import { caCertificates, wifiClientCerts } from '../db/schema';
-import { eq, inArray } from 'drizzle-orm';
+import { eq } from 'drizzle-orm';
 import { requireAuth, requirePermission } from '../auth/middleware';
 import { getCaStatus, revokeCertificate } from '../ca/stepCaAdmin';
 import { renewApiMtls } from '../ca/apiMtls';
-import { enrollEapTlsClient, EnrollValidationError } from '../ca/enroll';
-import { encryptKeyPem, decryptKeyPem } from '../ca/keyVault';
+import { decryptKeyPem } from '../ca/keyVault';
 import { buildPkcs12 } from '../ca/pkcs12';
-import { registerLeaf } from '../ca/registry';
+import { recordRevokedSerial } from '../ca/mutations';
 
 /**
  * Certificate Authority management (the unm-ca service — step-ca).
@@ -22,41 +20,26 @@ import { registerLeaf } from '../ca/registry';
  *
  * WiFi (EAP-TLS) client certificates — long-lived certs for 802.1X supplicants:
  *
- *   POST /ca/enroll                  -> issue one EAP-TLS client cert (keygen + sign via CA)
  *   GET  /ca/wifi-certs              -> list enrolled WiFi client certs (no keys)
- *   POST /ca/wifi-certs/:serial/revoke -> revoke one by serial (CA-first, then registry)
- *   POST /ca/wifi-certs/bulk-revoke  -> revoke many { serials: string[] } in one call
  *   GET  /ca/wifi-certs/:serial/download -> install bundle: PEM (default) or P12 (?format=p12)
  *   GET  /ca/root-bundle             -> the CA root PEM for client trust stores
  *   POST /ca/renew-intermediate      -> trigger an intermediate renewal in the CA container
  *
- * Reading requires `ca:read`; enrolling/revoking/downloading/renewing requires
- * `ca:manage`. The CA's signing keys live on a volume only the CA container
- * mounts — these routes never touch them; they read public endpoints and UNM's
- * own registry. WiFi private keys are stored AES-256-GCM encrypted (keyVault)
- * and decrypted ONLY for the download route.
+ * Enrolling and revoking WiFi certs is PLAN-GATED (no direct mutation routes):
+ * the webapp creates system plans via POST /plans/system with intentActionId
+ * ca.client-cert.enroll / ca.client-cert.revoke / ca.client-cert.bulk-revoke, executed
+ * through the 2FA-gated plan workflow. The executor runs the shared functions in
+ * api/src/ca/mutations.ts locally — every cert change is auditable, retryable,
+ * schedulable and automatable.
+ *
+ * Reading requires `ca:read`; downloading/renewing (and creating/executing the
+ * WiFi-cert plans) require `ca:manage`. The CA's signing keys live on a volume
+ * only the CA container mounts — these routes never touch them; they read public
+ * endpoints and UNM's own registry. WiFi private keys are stored AES-256-GCM
+ * encrypted (keyVault) and decrypted ONLY for the download route.
  */
 
 const ROOT_PEM_PATH = '/data/ca/root_ca.crt';
-
-/**
- * Mirrors a successful CA revocation into revoked_serials — the per-auth
- * enforcement list FreeRADIUS checks (radius-user-profile.sh, see api/src/radius/).
- * step-ca has no CRL endpoint, so without this row a revoked WiFi client cert
- * would keep authenticating until it expires. Best-effort: a failure here logs
- * but never fails the revocation itself (the CA is already authoritative).
- */
-async function recordRevokedSerial(serial: string, subject = ''): Promise<void> {
-  try {
-    await pool.query(
-      `INSERT INTO revoked_serials (serial, subject, "revokedAt") VALUES ($1, $2, $3)
-       ON CONFLICT (serial) DO UPDATE SET subject = EXCLUDED.subject`,
-      [serial.toLowerCase(), subject, new Date().toISOString()]
-    );
-  } catch (err) {
-    console.warn(`[ca] failed to record revoked serial ${serial} in revoked_serials:`, (err as Error).message);
-  }
-}
 
 const router = Router();
 
@@ -181,117 +164,13 @@ router.post(
   }
 );
 
-// POST /ca/enroll - issue ONE WiFi (EAP-TLS) client certificate. Body:
-// { name, cn?, organization?, organizationalUnit?, sans?: string[], keyType?, days? }.
-// The private key is generated here, stored ENCRYPTED in wifi_client_certs and
-// returned to the caller ONCE in the response (the UI offers an immediate
-// download); afterwards it is only reachable via GET /ca/wifi-certs/:serial/
-// download. Validation errors → 400; CA failures → 502; duplicate name → 409.
-router.post(
-  '/ca/enroll',
-  requireAuth,
-  requirePermission('ca:manage'),
-  async (req, res: Response) => {
-    const body = (req.body ?? {}) as Record<string, unknown>;
-
-    // Duplicate-name check BEFORE signing — otherwise a duplicate request would
-    // burn a CA signature and leave an untracked leaf in the CA's own DB.
-    try {
-      const existing = await db.query.wifiClientCerts.findMany({ where: eq(wifiClientCerts.name, String(body.name)) });
-      if (existing.length > 0) {
-        res.status(409).json({ error: `A WiFi client certificate named "${String(body.name)}" already exists` });
-        return;
-      }
-    } catch (e) {
-      const err = e as { message?: string };
-      console.warn('[ca] duplicate-name precheck failed:', err.message);
-      res.status(500).json({ error: 'Failed to check for an existing certificate with that name' });
-      return;
-    }
-
-    try {
-      const enrolled = await enrollEapTlsClient({
-        name: body.name as string,
-        cn: typeof body.cn === 'string' ? body.cn : undefined,
-        organization: typeof body.organization === 'string' ? body.organization : undefined,
-        organizationalUnit: typeof body.organizationalUnit === 'string' ? body.organizationalUnit : undefined,
-        sans: Array.isArray(body.sans) ? (body.sans as string[]) : undefined,
-        keyType: typeof body.keyType === 'string' ? (body.keyType as never) : undefined,
-        days: typeof body.days === 'number' ? body.days : undefined,
-      });
-
-      const now = new Date().toISOString();
-      try {
-        await db.insert(wifiClientCerts).values({
-          id: crypto.randomUUID(),
-          name: String(body.name), // unique enrollment label (CN defaults to it but may differ)
-          cn: enrolled.subject,
-          organization: typeof body.organization === 'string' ? body.organization.trim() : '',
-          organizationalUnit: typeof body.organizationalUnit === 'string' ? body.organizationalUnit.trim() : '',
-          sansJson: JSON.stringify(Array.isArray(body.sans) ? (body.sans as string[]) : []),
-          keyType: typeof body.keyType === 'string' ? body.keyType : 'ec-p256',
-          serial: enrolled.serial,
-          issuer: 'UNM CA Intermediate CA',
-          notBefore: enrolled.notBefore,
-          notAfter: enrolled.notAfter,
-          status: 'issued',
-          keyEncrypted: encryptKeyPem(enrolled.keyPem),
-          certPem: enrolled.chainPem,
-          createdAt: now,
-        });
-      } catch (e) {
-        const err = e as { code?: string; message?: string };
-        if (err.code === '23505') {
-          // Lost a race with a concurrent enrollment of the same name — the CA
-          // already signed a leaf we cannot track. Revoke it so nothing
-          // untracked stays valid, then report the conflict.
-          console.warn(`[ca] duplicate-name race for "${String(body.name)}" (serial ${enrolled.serial}) — revoking the orphaned leaf`);
-          try { await revokeCertificate(enrolled.serial); } catch { /* CA may be unreachable; log only */ }
-          res.status(409).json({ error: `A WiFi client certificate named "${String(body.name)}" already exists` });
-          return;
-        }
-        // Never echo the raw DB error — it embeds every SQL parameter, i.e.
-        // the encrypted private key and the full cert chain.
-        console.error('[ca] failed to store the enrolled WiFi certificate:', err.message);
-        res.status(500).json({ error: 'The certificate was issued but could not be stored — check the API logs' });
-        return;
-      }
-
-      // Mirror into the unified leaf registry (kind='wifi') so revocation +
-      // expiry tooling see it alongside mTLS leaves.
-      await registerLeaf({
-        serial: enrolled.serial,
-        sans: [enrolled.subject],
-        issuer: 'UNM CA Intermediate CA',
-        notBefore: enrolled.notBefore,
-        notAfter: enrolled.notAfter,
-        subject: enrolled.subject,
-        source: 'plugin',
-        kind: 'wifi',
-      });
-
-      res.status(201).json({
-        serial: enrolled.serial,
-        cn: enrolled.subject,
-        notBefore: enrolled.notBefore,
-        notAfter: enrolled.notAfter,
-        ...(enrolled.clamped !== undefined ? { clamped: enrolled.clamped } : {}),
-        ...(enrolled.clampReason !== undefined ? { clampReason: enrolled.clampReason } : {}),
-      });
-    } catch (err) {
-      if (err instanceof EnrollValidationError) {
-        res.status(400).json({ error: err.message });
-        return;
-      }
-      const e = err as { message?: string };
-      console.warn('[ca] EAP-TLS enrollment failed:', e.message);
-      // Only CA HTTP errors ("CA /1.0/…") are safe to surface verbatim — DB and
-      // internal errors embed SQL parameters (key material) in their messages.
-      const detail = /^CA \//.test(e.message ?? '') ? `: ${e.message}` : '';
-      res.status(502).json({ error: `Certificate authority sign request failed${detail}` });
-    }
-  }
-);
+// NOTE: there is deliberately NO direct POST /ca/enroll route. Enrolling a WiFi
+// (EAP-TLS) client certificate is plan-gated like every other RADIUS/CA mutation:
+// the webapp creates a system plan via POST /plans/system with intentActionId
+// ca.client-cert.enroll and executes it through the 2FA-gated plan workflow. The
+// executor runs enrollWifiCert() from api/src/ca/mutations.ts locally; the new
+// serial lands in the step result (steps[0].result.serial) for the UI to pick up
+// and offer the install download.
 
 // GET /ca/wifi-certs - list enrolled WiFi client certs (metadata only — the
 // private key is NEVER returned here; use the download route for that).
@@ -325,126 +204,13 @@ router.get(
   }
 );
 
-// POST /ca/wifi-certs/:serial/revoke - revoke one WiFi client cert by serial.
-// CA-first (step-ca marks it revoked in its own DB), then mirror into both the
-// unified registry and wifi_client_certs. Idempotent: an already-revoked row is
-// a no-op 200; unknown serial → 404; CA unreachable → 502 (NOT applied).
-router.post(
-  '/ca/wifi-certs/:serial/revoke',
-  requireAuth,
-  requirePermission('ca:manage'),
-  async (req, res: Response) => {
-    const serial = String(req.params.serial ?? '').trim();
-    if (!/^[0-9a-fA-F]{1,64}$/.test(serial)) {
-      res.status(400).json({ error: 'serial must be a hex string' });
-      return;
-    }
-
-    const rows = await db.query.wifiClientCerts.findMany({ where: eq(wifiClientCerts.serial, serial) });
-    if (rows.length === 0) {
-      res.status(404).json({ error: `No WiFi client certificate with serial ${serial}` });
-      return;
-    }
-
-    let caResult: { status: number; body: unknown } | null = null;
-    try {
-      caResult = await revokeCertificate(serial);
-    } catch (err) {
-      const e = err as { message?: string };
-      res.status(502).json({ error: `CA unreachable — revocation NOT applied: ${e.message ?? 'unknown error'}` });
-      return;
-    }
-
-    const now = new Date().toISOString();
-    for (const row of rows) {
-      if (row.status !== 'revoked') {
-        await db.update(wifiClientCerts).set({ status: 'revoked', revokedAt: now }).where(eq(wifiClientCerts.id, row.id));
-      }
-    }
-    const regRows = await db.query.caCertificates.findMany({ where: eq(caCertificates.serial, serial) });
-    for (const row of regRows) {
-      if (row.status !== 'revoked') {
-        await db.update(caCertificates).set({ status: 'revoked', revokedAt: now }).where(eq(caCertificates.id, row.id));
-      }
-    }
-
-    // Per-auth enforcement: FreeRADIUS rejects this serial on the next EAP-TLS auth.
-    const subject = rows[0] ? `CN=${rows[0].cn}` : '';
-    await recordRevokedSerial(serial, subject);
-
-    res.status(200).json({ serial, caStatus: caResult.status });
-  }
-);
-
-// POST /ca/wifi-certs/bulk-revoke - revoke many WiFi client certs in one call.
-// Body: { serials: string[] }. The webapp selection bar sends the current
-// selection; unknown serials are reported (never fatal), at most 500 per call.
-// Each serial follows the single-revoke flow (CA-first, then registry mirror +
-// revoked_serials). Already-revoked rows count as no-ops. If the CA is
-// unreachable for EVERY serial nothing is applied and the route answers 502;
-// otherwise it answers 200 with a per-serial failure list so one bad cert does
-// not hide the rest. Requires permission `ca:manage`.
-router.post(
-  '/ca/wifi-certs/bulk-revoke',
-  requireAuth,
-  requirePermission('ca:manage'),
-  async (req, res: Response) => {
-    const body = req.body ?? {};
-    const serials = Array.isArray(body.serials)
-      ? (body.serials as unknown[]).filter((x): x is string => typeof x === 'string' && !!x.trim())
-      : [];
-    if (serials.length === 0) {
-      res.status(400).json({ error: '"serials" must be a non-empty array of hex certificate serials' });
-      return;
-    }
-    const unique = Array.from(new Set(serials.map((s) => s.trim().toLowerCase())));
-    if (unique.length > 500) {
-      res.status(400).json({ error: 'At most 500 serials per bulk revoke' });
-      return;
-    }
-
-    const rows = await db.query.wifiClientCerts.findMany({ where: inArray(wifiClientCerts.serial, unique) });
-    const bySerial = new Map(rows.map((r) => [r.serial.toLowerCase(), r]));
-    const missing = serials.filter((s) => !bySerial.has(s.trim().toLowerCase()));
-
-    const now = new Date().toISOString();
-    let revoked = 0;
-    let alreadyRevoked = 0;
-    const failed: Array<{ serial: string; error: string }> = [];
-
-    for (const serial of unique) {
-      const row = bySerial.get(serial);
-      if (!row) continue; // reported in `missing`
-      if (row.status === 'revoked') {
-        alreadyRevoked++;
-        continue;
-      }
-      try {
-        await revokeCertificate(serial);
-      } catch (err) {
-        failed.push({ serial, error: (err as Error).message ?? 'CA unreachable' });
-        continue; // CA-first: NOT mirrored into the registries
-      }
-
-      await db.update(wifiClientCerts).set({ status: 'revoked', revokedAt: now }).where(eq(wifiClientCerts.id, row.id));
-      const regRows = await db.query.caCertificates.findMany({ where: eq(caCertificates.serial, serial) });
-      for (const r of regRows) {
-        if (r.status !== 'revoked') {
-          await db.update(caCertificates).set({ status: 'revoked', revokedAt: now }).where(eq(caCertificates.id, r.id));
-        }
-      }
-      // Per-auth enforcement: FreeRADIUS rejects this serial on the next EAP-TLS auth.
-      await recordRevokedSerial(serial, `CN=${row.cn}`);
-      revoked++;
-    }
-
-    if (revoked === 0 && alreadyRevoked === 0 && failed.length > 0) {
-      res.status(502).json({ error: 'CA unreachable — revocation NOT applied', failed });
-      return;
-    }
-    res.status(200).json({ revoked, alreadyRevoked, failed, missing });
-  }
-);
+// NOTE: there is deliberately NO direct revoke route (single or bulk) for WiFi
+// client certs. Revocation is plan-gated like every other RADIUS/CA mutation:
+// the webapp creates a system plan via POST /plans/system with intentActionId
+// ca.client-cert.revoke (one serial per step input) or ca.client-cert.bulk-revoke
+// ({ serials } in one step), executed through the 2FA-gated plan workflow. The
+// executor runs revokeWifiCert()/revokeWifiCerts() from api/src/ca/mutations.ts
+// locally; per-serial outcomes land in each step's result.
 
 // GET /ca/wifi-certs/:serial/download - the full install bundle for a supplicant.
 // Default (or ?format=pem): cert chain + private key as one PEM file.
