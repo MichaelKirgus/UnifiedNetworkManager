@@ -160,13 +160,33 @@ signature() {
 }
 
 LAST=$(signature)
+PENDING=""   # signature seen but not yet reloaded (debounce window)
+LAST_HUP=0   # epoch of the last SIGHUP sent to radiusd
 while kill -0 "$FR_PID" 2>/dev/null; do
   sleep 2
   SIG=$(signature) || continue
   if [ "$SIG" != "$LAST" ]; then
     LAST=$SIG
+    PENDING=$SIG
+    # Debounce: a render burst (e.g. the API re-rendering several files in one
+    # mutation) must produce ONE reload, not one per file — and only after the
+    # last file has landed, so the reload always sees the FINAL state.
+    continue
+  fi
+  if [ -n "$PENDING" ] && [ "$SIG" = "$PENDING" ]; then
+    PENDING=""
     log "rendered config changed — re-syncing + SIGHUP freeradius"
     sync_config
+    # FreeRADIUS silently DROPS any HUP arriving less than 5s after the previous
+    # one ("Ignoring HUP (less than 5s since last one)" in radius.log). A burst of
+    # renders whose final reload lands inside that window leaves radiusd running a
+    # STALE config forever — observed live: clients.conf re-rendered at :20/:27/:47,
+    # the final copy's HUP dropped at :51, probes rejected as "unknown client" for
+    # hours. Space sends >=6s apart so every reload is guaranteed to be accepted.
+    NOW=$(date +%s)
+    WAIT=$((LAST_HUP + 6 - NOW))
+    if [ "$WAIT" -gt 0 ]; then sleep "$WAIT"; fi
     kill -HUP "$FR_PID" 2>/dev/null || true
+    LAST_HUP=$(date +%s)
   fi
 done
