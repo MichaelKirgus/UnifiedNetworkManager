@@ -1150,7 +1150,7 @@ function RadiusStatusSection() {
       </div>
 
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <p className="max-w-3xl text-[11px] text-faint">
+        <p className="text-[11px] text-faint">
           Authentication log — one row per completed EAP-TLS attempt (accept and reject). Failed logins raise a notification; rows are kept for the
           configured retention period.
         </p>
@@ -1305,7 +1305,7 @@ function RadiusNasClientsSection() {
         )}
       </div>
 
-      <p className="max-w-4xl text-[11px] text-faint">
+      <p className="text-[11px] text-faint">
         Access points and gateways allowed to send RADIUS requests (EAP-TLS) to the UNM RADIUS server. The shared secret is picked from your installed
         credentials — single-value secrets (API key, PSK) are used directly; for multi-field types the password/secret half applies. Changes apply live
         without a restart. A localhost entry with a stable dev secret is always present for testing.
@@ -1709,7 +1709,7 @@ function RadiusUserProfilesSection() {
         )}
       </div>
 
-      <p className="max-w-4xl text-[11px] text-faint">
+      <p className="text-[11px] text-faint">
         Per-client RADIUS reply attributes for 802.1X / EAP-TLS sessions (WiFi and wired alike) — keyed by the client certificate's serial.
         A VLAN ID is sent as Tunnel-Type=IEEE-802 + Tunnel-Medium-Type=IEEE-802 + Tunnel-Private-Group-ID; static IPs and session limits are
         applied to that session only, on top of whatever the NAS would assign otherwise. No profile = plain access.
@@ -2037,7 +2037,7 @@ function RadiusUserProfileDialog({ initial, wifiCerts, onClose }: { initial: Rad
 export default function Radius() {
   return (
     <Layout title="RADIUS">
-      <p className="mb-4 max-w-4xl text-xs text-muted-foreground">
+      <p className="mb-4 text-xs text-muted-foreground">
         The UNM RADIUS server authenticates 802.1X supplicants — WiFi EAP-TLS and wired clients alike — against client certificates issued by the UNM CA.
         This page covers the server's self-monitoring probe, the unsuccessful-login audit trail (failed logins raise notifications), the NAS allowlist,
         per-user reply profiles and the enrolled client certificates. Device TLS endpoints and SSH host keys live on the{' '}
