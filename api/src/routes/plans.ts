@@ -1598,4 +1598,196 @@ router.delete('/plans/:id', requireAuth, requirePermission('configs:apply'), asy
   res.status(204).send();
 });
 
+// POST /plans/bulk-execute — start execution of MANY plans in one round-trip
+// (the page's "Execute selected"). Body: { ids }. 2FA-gated like execute and
+// subject to the SAME per-plan rules as POST /plans/:id/execute; plans that
+// cannot be executed are reported, never fatal. Out-of-scope plans are reported
+// as not found (same visibility contract as the single route).
+router.post(
+  '/plans/bulk-execute',
+  requireAuth,
+  require2FA,
+  requirePermission('configs:apply'),
+  async (req, res) => {
+    const body = req.body ?? {};
+    const ids = Array.isArray(body.ids) ? (body.ids as unknown[]).filter((x): x is string => typeof x === 'string' && !!x) : [];
+    if (ids.length === 0) {
+      res.status(400).json({ error: '"ids" must be a non-empty array of plan ids' });
+      return;
+    }
+    if (ids.length > 5000) {
+      res.status(400).json({ error: 'At most 5000 ids per bulk execute' });
+      return;
+    }
+
+    const started: string[] = [];
+    const skipped: Array<{ id: string; status: string }> = [];
+    const errors: Array<{ id: string; error: string }> = [];
+    for (const id of Array.from(new Set(ids))) {
+      try {
+        const plan = await loadPlan(id);
+        if (!plan) {
+          errors.push({ id, error: 'Plan not found' });
+          continue;
+        }
+        // Device-level access control — executing applies changes to every step's device.
+        if (!(await planVisibleTo(req, id))) {
+          errors.push({ id, error: 'Plan not found' });
+          continue;
+        }
+        if (!EDITABLE_STATUSES.includes(plan.status)) {
+          skipped.push({ id, status: plan.status });
+          continue;
+        }
+        // System plans additionally need the action's domain permission (radius:write / ca:manage).
+        const permissions = req.user?.permissions ?? [];
+        let missingPerm: string | null = null;
+        for (const step of await loadSteps(id)) {
+          if (!isLocalMutationAction(step.actionId)) continue;
+          const perm = requiredDomainPermission(step.actionId);
+          if (perm && !permissions.includes(perm)) {
+            missingPerm = perm;
+            break;
+          }
+        }
+        if (missingPerm) {
+          errors.push({ id, error: `Missing required permission: ${missingPerm}` });
+          continue;
+        }
+
+        await enqueuePlanExecution(id, req.user?.sub ?? null);
+        started.push(id);
+      } catch (err) {
+        const e = err as { status?: number; message?: string };
+        errors.push({ id, error: e.message ?? 'Internal server error' });
+      }
+    }
+    res.status(200).json({ started, skipped, errors });
+  }
+);
+
+// POST /plans/bulk-unschedule — remove the schedule from MANY plans in one
+// round-trip (the page's "Unschedule selected"). Body: { ids }. Same per-plan
+// rules as DELETE /plans/:id/schedule; non-scheduled plans are reported, never
+// fatal. Out-of-scope plans are reported as not found.
+router.post(
+  '/plans/bulk-unschedule',
+  requireAuth,
+  requirePermission('configs:apply'),
+  async (req, res) => {
+    const body = req.body ?? {};
+    const ids = Array.isArray(body.ids) ? (body.ids as unknown[]).filter((x): x is string => typeof x === 'string' && !!x) : [];
+    if (ids.length === 0) {
+      res.status(400).json({ error: '"ids" must be a non-empty array of plan ids' });
+      return;
+    }
+    if (ids.length > 5000) {
+      res.status(400).json({ error: 'At most 5000 ids per bulk unschedule' });
+      return;
+    }
+
+    const unscheduled: string[] = [];
+    const skipped: Array<{ id: string; status: string }> = [];
+    const errors: Array<{ id: string; error: string }> = [];
+    for (const id of Array.from(new Set(ids))) {
+      try {
+        const plan = await loadPlan(id);
+        if (!plan) {
+          errors.push({ id, error: 'Plan not found' });
+          continue;
+        }
+        if (!(await planVisibleTo(req, id))) {
+          errors.push({ id, error: 'Plan not found' });
+          continue;
+        }
+        if (plan.status !== 'scheduled') {
+          skipped.push({ id, status: plan.status });
+          continue;
+        }
+
+        const restore = SCHEDULABLE_STATUSES.includes(plan.preScheduleStatus ?? '') ? plan.preScheduleStatus! : 'ready';
+        const now = new Date().toISOString();
+        await db.update(schema.plans)
+          .set({
+            status: restore,
+            scheduledAt: null,
+            schedulePolicy: null,
+            preScheduleStatus: null,
+            scheduleAttempts: 0,
+            updatedAt: now,
+          })
+          .where(eq(schema.plans.id, id));
+        unscheduled.push(id);
+      } catch (err) {
+        const e = err as { status?: number; message?: string };
+        errors.push({ id, error: e.message ?? 'Internal server error' });
+      }
+    }
+    res.status(200).json({ unscheduled, skipped, errors });
+  }
+);
+
+// POST /plans/bulk-delete — delete MANY non-executing plans (+ steps +
+// provisioned secrets) in one round-trip (the page's "Delete selected"). Body:
+// { ids }. Same per-plan rules as DELETE /plans/:id; executing or unknown plans
+// are reported, never fatal. Out-of-scope plans are reported as not found.
+router.post(
+  '/plans/bulk-delete',
+  requireAuth,
+  requirePermission('configs:apply'),
+  async (req, res) => {
+    const body = req.body ?? {};
+    const ids = Array.isArray(body.ids) ? (body.ids as unknown[]).filter((x): x is string => typeof x === 'string' && !!x) : [];
+    if (ids.length === 0) {
+      res.status(400).json({ error: '"ids" must be a non-empty array of plan ids' });
+      return;
+    }
+    if (ids.length > 5000) {
+      res.status(400).json({ error: 'At most 5000 ids per bulk delete' });
+      return;
+    }
+
+    const deleted: string[] = [];
+    const errors: Array<{ id: string; error: string }> = [];
+    for (const id of Array.from(new Set(ids))) {
+      try {
+        const plan = await loadPlan(id);
+        if (!plan) {
+          errors.push({ id, error: 'Plan not found' });
+          continue;
+        }
+        if (!(await planVisibleTo(req, id))) {
+          errors.push({ id, error: 'Plan not found' });
+          continue;
+        }
+        if (plan.status === 'executing') {
+          errors.push({ id, error: 'Cancel the plan before deleting it' });
+          continue;
+        }
+
+        const provisioned = parseJson<Record<string, string>>(plan.provisionedSecrets ?? '{}', {});
+        for (const secretId of Object.values(provisioned)) {
+          // Retried plans share the original's secrets — never delete one that
+          // another plan row still references.
+          const others = await db.query.plans.findMany({
+            where: and(ne(schema.plans.id, id), like(schema.plans.provisionedSecrets, `%${secretId}%`)),
+          });
+          if (others.length > 0) continue;
+          await deleteSecret(secretId).catch((err) => {
+            // eslint-disable-next-line no-console
+            console.warn(`[plans] failed to delete provisioned secret ${secretId}:`, (err as Error).message);
+          });
+        }
+        await db.delete(schema.planSteps).where(eq(schema.planSteps.planId, id));
+        await db.delete(schema.plans).where(eq(schema.plans.id, id));
+        deleted.push(id);
+      } catch (err) {
+        const e = err as { status?: number; message?: string };
+        errors.push({ id, error: e.message ?? 'Internal server error' });
+      }
+    }
+    res.status(200).json({ deleted, errors });
+  }
+);
+
 export default router;

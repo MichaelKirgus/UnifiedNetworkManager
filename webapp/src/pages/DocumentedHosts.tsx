@@ -1547,16 +1547,9 @@ export default function DocumentedHosts() {
                     label: 'Delete selected',
                     confirm: (count) => `Delete ${count} documented host${count === 1 ? '' : 's'}? This cannot be undone.`,
                     onClick: async (selected: DocumentedHost[]) => {
-                      const errors: string[] = [];
-                      for (const h of selected) {
-                        try {
-                          await api.deleteDocumentedHost(h.id);
-                        } catch (err) {
-                          errors.push(`${h.dnsNames[0]}: ${(err as Error).message}`);
-                        }
-                      }
+                      const res = await api.bulkDeleteDocumentedHosts(selected.map((h) => h.id));
                       queryClient.invalidateQueries({ queryKey: ['documentedHosts'] });
-                      if (errors.length > 0) alert(`Deleted ${selected.length - errors.length} of ${selected.length}. ${errors.join(' | ')}`);
+                      if (res.missing.length > 0) alert(`Deleted ${res.deleted} of ${selected.length}. ${res.missing.length} id(s) no longer exist.`);
                     },
                   },
                 ]

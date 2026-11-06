@@ -1,6 +1,6 @@
 import { Router, Request, Response } from 'express';
 import { v4 as uuidv4 } from 'uuid';
-import { eq } from 'drizzle-orm';
+import { eq, inArray } from 'drizzle-orm';
 import { db, pool } from '../db';
 import * as schema from '../db/schema';
 import { requireAuth, requirePermission } from '../auth/middleware';
@@ -241,6 +241,58 @@ router.delete('/sites/:id', requireAuth, requirePermission('sites:write'), async
 
   await db.delete(schema.sites).where(eq(schema.sites.id, existing.id));
   res.status(204).send();
+});
+
+// POST /sites/bulk — delete many sites in one round-trip. Body: { ids: string[] }.
+// Same per-site rules as DELETE /sites/:id (refused while devices or documented
+// hosts still reference it), but the batch is all-or-nothing: if ANY site is
+// blocked, NOTHING is deleted and every blocker is reported — so a bulk delete
+// can never leave a half-deleted selection behind. Unknown ids are reported too.
+router.post('/sites/bulk', requireAuth, requirePermission('sites:write'), async (req: Request, res: Response) => {
+  const body = req.body ?? {};
+  const ids = Array.isArray(body.ids) ? (body.ids as unknown[]).filter((x): x is string => typeof x === 'string' && !!x) : [];
+  if (ids.length === 0) {
+    res.status(400).json({ error: '"ids" must be a non-empty array of site ids' });
+    return;
+  }
+  if (ids.length > 5000) {
+    res.status(400).json({ error: 'At most 5000 ids per bulk delete' });
+    return;
+  }
+
+  const unique = Array.from(new Set(ids));
+  const existing = await db.query.sites.findMany({ where: inArray(schema.sites.id, unique) });
+  const foundIds = new Set(existing.map((s) => s.id));
+  const missing = ids.filter((id) => !foundIds.has(id));
+
+  // One query per referencing table — collect every blocker before deleting anything.
+  const blockers: string[] = [];
+  if (existing.length > 0) {
+    const { rows } = await pool.query(
+      'SELECT "siteId", COUNT(*)::int AS n FROM devices WHERE "siteId" = ANY($1) GROUP BY "siteId"',
+      [unique]
+    );
+    for (const r of rows as Array<{ siteId: string; n: number }>) {
+      const name = existing.find((s) => s.id === r.siteId)?.name ?? r.siteId;
+      blockers.push(`"${name}": ${r.n} device(s) still reference it`);
+    }
+    const { rows: docRows } = await pool.query(
+      'SELECT "siteId", COUNT(*)::int AS n FROM documented_hosts WHERE "siteId" = ANY($1) GROUP BY "siteId"',
+      [unique]
+    );
+    for (const r of docRows as Array<{ siteId: string; n: number }>) {
+      const name = existing.find((s) => s.id === r.siteId)?.name ?? r.siteId;
+      blockers.push(`"${name}": ${r.n} documented host(s) are placed at it`);
+    }
+  }
+
+  if (blockers.length > 0) {
+    res.status(409).json({ error: `Cannot delete site(s): unassign the references first.`, blockers });
+    return;
+  }
+
+  await db.delete(schema.sites).where(inArray(schema.sites.id, unique));
+  res.status(200).json({ deleted: existing.length, missing });
 });
 
 export default router;

@@ -347,4 +347,81 @@ router.delete('/:id', requireAuth, async (req, res) => {
   }
 });
 
+// POST /secrets/bulk-regenerate - re-roll the key material of MANY generatable
+// secrets in one round-trip (the Secrets page's "Regenerate selected"). Body:
+// { ids: string[] }. Same per-secret rules as POST /secrets/:id/regenerate;
+// non-generatable or unknown ids are reported, never fatal. Requires
+// secrets:write (global writers only — personal-area users have no bulk view).
+router.post('/bulk-regenerate', requireAuth, requirePermission('secrets:write'), async (req, res) => {
+  const body = req.body ?? {};
+  const ids = Array.isArray(body.ids) ? (body.ids as unknown[]).filter((x): x is string => typeof x === 'string' && !!x) : [];
+  if (ids.length === 0) {
+    res.status(400).json({ error: '"ids" must be a non-empty array of secret ids' });
+    return;
+  }
+  if (ids.length > 5000) {
+    res.status(400).json({ error: 'At most 5000 ids per bulk regenerate' });
+    return;
+  }
+
+  const regenerated: string[] = [];
+  const errors: Array<{ id: string; error: string }> = [];
+  for (const id of Array.from(new Set(ids))) {
+    try {
+      await regenerateSecret(id);
+      invalidateSecretCache(id); // rotated key material must not be served from cache
+      regenerated.push(id);
+    } catch (err) {
+      const e = err as { status?: number; message?: string };
+      errors.push({ id, error: e.message ?? 'Internal server error' });
+    }
+  }
+  res.status(200).json({ regenerated, errors });
+});
+
+// POST /secrets/bulk-delete - remove MANY secrets in one round-trip (the Secrets
+// page's "Delete selected"). Body: { ids: string[] }. Same per-secret rules as
+// DELETE /secrets/:id — global deleters (`secrets:delete`) may remove any,
+// personal-area users only their own; unknown or undeletable ids are reported,
+// never fatal.
+router.post('/bulk-delete', requireAuth, async (req, res) => {
+  const perms = permsOf(req);
+  if (!perms.has('secrets:delete') && !perms.has('secrets:self-write')) {
+    res.status(403).json({ error: 'Missing required permission: secrets:delete or secrets:self-write' });
+    return;
+  }
+
+  const body = req.body ?? {};
+  const ids = Array.isArray(body.ids) ? (body.ids as unknown[]).filter((x): x is string => typeof x === 'string' && !!x) : [];
+  if (ids.length === 0) {
+    res.status(400).json({ error: '"ids" must be a non-empty array of secret ids' });
+    return;
+  }
+  if (ids.length > 5000) {
+    res.status(400).json({ error: 'At most 5000 ids per bulk delete' });
+    return;
+  }
+
+  const deleted: string[] = [];
+  const errors: Array<{ id: string; error: string }> = [];
+  for (const id of Array.from(new Set(ids))) {
+    try {
+      if (!perms.has('secrets:delete')) {
+        const row = await db.query.secrets.findFirst({ where: eq(schema.secrets.id, id) });
+        if (!row || !mayManageSecret(perms, req.user?.sub ?? '', row.userId)) {
+          errors.push({ id, error: 'Not allowed to delete this secret' });
+          continue;
+        }
+      }
+      await deleteSecret(id);
+      invalidateSecretCache(id); // deleted secret must not be served from cache
+      deleted.push(id);
+    } catch (err) {
+      const e = err as { status?: number; message?: string };
+      errors.push({ id, error: e.message ?? 'Internal server error' });
+    }
+  }
+  res.status(200).json({ deleted, errors });
+});
+
 export default router;

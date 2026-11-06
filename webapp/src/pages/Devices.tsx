@@ -215,27 +215,25 @@ export default function Devices() {
     cloneDevice.mutate(row.id);
   }
 
-  // Bulk delete (selection bar). Devices referenced by plans fail with 409 —
-  // the rest still go through, so report per-device outcomes.
+  // Bulk delete (selection bar) — one server-side round-trip. The batch is
+  // all-or-nothing: if ANY device is still referenced by plan steps, nothing is
+  // deleted and every blocker is reported (409).
   const bulkDeleteDevices = useMutation({
     mutationFn: async (rows: Device[]) => {
-      const blockedByPlans: string[] = [];
-      const otherErrors: string[] = [];
-      for (const row of rows) {
-        try {
-          await api.deleteDevice(row.id);
-        } catch (err) {
-          if ((err as { status?: number }).status === 409) blockedByPlans.push(row.name);
-          else otherErrors.push(`${row.name}: ${(err as Error).message}`);
-        }
+      try {
+        const out = await api.bulkDeleteDevices(rows.map((r) => r.id));
+        return { total: rows.length, deleted: out.deleted, blockedByPlans: [] as string[], otherErrors: [] as string[] };
+      } catch (err) {
+        const e = err as { status?: number; blockers?: string[]; message?: string };
+        if (e.status === 409 && Array.isArray(e.blockers)) return { total: rows.length, deleted: 0, blockedByPlans: e.blockers, otherErrors: [] as string[] };
+        return { total: rows.length, deleted: 0, blockedByPlans: [] as string[], otherErrors: [e.message ?? 'Internal server error'] };
       }
-      return { total: rows.length, blockedByPlans, otherErrors };
     },
-    onSuccess: ({ total, blockedByPlans, otherErrors }) => {
+    onSuccess: ({ total, deleted, blockedByPlans, otherErrors }) => {
       queryClient.invalidateQueries({ queryKey: ['devices'] });
       if (blockedByPlans.length > 0 || otherErrors.length > 0) {
         const parts = [
-          `Deleted ${total - blockedByPlans.length - otherErrors.length} of ${total} device(s).`,
+          `Deleted ${deleted} of ${total} device(s).`,
           ...blockedByPlans.length > 0 ? [`Not deleted — still referenced by plans (delete those plans first):\n${blockedByPlans.join(', ')}`] : [],
           ...otherErrors.length > 0 ? [`Other errors:\n${otherErrors.join('\n')}`] : [],
         ];
@@ -1079,18 +1077,18 @@ export default function Devices() {
               confirm: (count) =>
                 `Stop polling ${count} device(s)?\nTheir historical data and last metrics are preserved — re-enable any time to resume polling.`,
               onClick: async (rows) => {
-                const { errors } = await api.setDevicesEnabled(rows.map((r) => r.id), false);
+                const out = await api.setDevicesEnabled(rows.map((r) => r.id), false);
                 queryClient.invalidateQueries({ queryKey: ['devices'] });
-                if (errors.length > 0) window.alert(`Some devices could not be disabled:\n${errors.join('\n')}`);
+                if (out.missing.length > 0) window.alert(`Skipped — no such device(s):\n${out.missing.join('\n')}`);
               },
             },
             {
               label: 'Enable selected',
               confirm: (count) => `Resume polling ${count} device(s)?`,
               onClick: async (rows) => {
-                const { errors } = await api.setDevicesEnabled(rows.map((r) => r.id), true);
+                const out = await api.setDevicesEnabled(rows.map((r) => r.id), true);
                 queryClient.invalidateQueries({ queryKey: ['devices'] });
-                if (errors.length > 0) window.alert(`Some devices could not be enabled:\n${errors.join('\n')}`);
+                if (out.missing.length > 0) window.alert(`Skipped — no such device(s):\n${out.missing.join('\n')}`);
               },
             },
             {

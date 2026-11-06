@@ -769,6 +769,39 @@ router.delete('/documented-networks/:id', requireAuth, requirePermission('docume
   }
 });
 
+// POST /documented-networks/bulk-delete — remove many documented networks in
+// one round-trip (the page's "Delete selected"). Body: { ids }. Same per-row
+// rules as DELETE /documented-networks/:id; unknown ids are reported, never
+// fatal. At most 5000 ids per call (same contract as the update bulk).
+router.post('/documented-networks/bulk-delete', requireAuth, requirePermission('documented-networks:write'), async (req: Request, res: Response) => {
+  try {
+    const body = req.body ?? {};
+    const ids = Array.isArray(body.ids) ? (body.ids as unknown[]).filter((x): x is string => typeof x === 'string' && !!x) : [];
+    if (ids.length === 0) {
+      res.status(400).json({ error: '"ids" must be a non-empty array of documented network ids' });
+      return;
+    }
+    if (ids.length > 5000) {
+      res.status(400).json({ error: 'At most 5000 ids per bulk delete' });
+      return;
+    }
+
+    const unique = Array.from(new Set(ids));
+    const existing = await db.query.documentedNetworks.findMany({ where: inArray(schema.documentedNetworks.id, unique) });
+    if (existing.length === 0) {
+      res.status(404).json({ error: 'No matching documented networks found' });
+      return;
+    }
+
+    await db.delete(schema.documentedNetworks).where(inArray(schema.documentedNetworks.id, unique));
+
+    res.status(200).json({ deleted: existing.length, missing: ids.filter((id) => !existing.some((n) => n.id === id)) });
+  } catch (err) {
+    const e = err as { status?: number; message?: string };
+    res.status(e.status ?? 500).json({ error: e.message ?? 'Internal server error' });
+  }
+});
+
 // POST /documented-networks/bulk — batch updates. Body:
 // { ids: string[], isActive?: boolean, siteId?: string|null, layerId?: string|null }
 // Marks every existing id active/stale and/or sets its site/layer placement in

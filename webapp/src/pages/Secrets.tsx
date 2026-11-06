@@ -303,32 +303,24 @@ export default function Secrets() {
     const msg = `Re-generate the key material for ${targets.length} secret${targets.length === 1 ? '' : 's'}?\nThe secrets keep their IDs (assignments stay valid), but devices still holding the OLD keys will stop authenticating.` +
       (skipped > 0 ? `\n\n(${skipped} non-generatable selection${skipped === 1 ? '' : 's'} skipped.)` : '');
     if (!confirm(msg)) return;
-    const errors: string[] = [];
-    for (const s of targets) {
-      try {
-        await api.regenerateSecret(s.id);
-      } catch (err) {
-        errors.push(`${s.label ?? s.id}: ${(err as Error).message}`);
-      }
-    }
+    const out = await api.bulkRegenerateSecrets(targets.map((s) => s.id));
     await loadSecrets();
-    if (errors.length > 0) alert(`Regenerated ${targets.length - errors.length} of ${targets.length}.\n${errors.join('\n')}`);
+    if (out.errors.length > 0) {
+      const labelOf = new Map(selected.map((s) => [s.id, s.label ?? s.id]));
+      alert(`Regenerated ${out.regenerated.length} of ${targets.length}.\n${out.errors.map((e) => `${labelOf.get(e.id) ?? e.id}: ${e.error}`).join('\n')}`);
+    }
   }
 
   /** Bulk: delete every selected secret. No FK cascade — devices still bound to
    *  a deleted secret will fail authentication on their next poll, so the
    *  confirm warns to unbind/reassign first. */
   async function handleBulkDelete(selected: Secret[]) {
-    const errors: string[] = [];
-    for (const s of selected) {
-      try {
-        await api.deleteSecret(s.id);
-      } catch (err) {
-        errors.push(`${s.label ?? s.id}: ${(err as Error).message}`);
-      }
-    }
+    const out = await api.bulkDeleteSecrets(selected.map((s) => s.id));
     await loadSecrets();
-    if (errors.length > 0) alert(`Deleted ${selected.length - errors.length} of ${selected.length}.\n${errors.join('\n')}`);
+    if (out.errors.length > 0) {
+      const labelOf = new Map(selected.map((s) => [s.id, s.label ?? s.id]));
+      alert(`Deleted ${out.deleted.length} of ${selected.length}.\n${out.errors.map((e) => `${labelOf.get(e.id) ?? e.id}: ${e.error}`).join('\n')}`);
+    }
   }
 
   async function copyText(text: string): Promise<boolean> {

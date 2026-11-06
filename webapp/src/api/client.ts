@@ -3737,18 +3737,13 @@ export const api = {
   /** Delete a device and everything that hangs off it. 409 while plans reference it. */
   deleteDevice: (deviceId: string) =>
     apiFetch<void>(`/devices/${deviceId}`, { method: 'DELETE' }),
-  /** Toggle telemetry polling for one or more devices (bulk = sequential PATCHes). */
-  setDevicesEnabled: async (deviceIds: string[], enabled: boolean): Promise<{ total: number; errors: string[] }> => {
-    const errors: string[] = [];
-    for (const id of deviceIds) {
-      try {
-        await api.updateDevice(id, { enabled });
-      } catch (err) {
-        errors.push(`${id}: ${(err as Error).message}`);
-      }
-    }
-    return { total: deviceIds.length, errors };
-  },
+  /** Delete MANY devices in one round-trip. All-or-nothing — 409 with the
+   *  blocking plan references when ANY device is still referenced by a plan. */
+  bulkDeleteDevices: (ids: string[]) =>
+    apiFetch<{ deleted: number; missing: string[] }>('/devices/bulk-delete', { method: 'POST', body: JSON.stringify({ ids }) }),
+  /** Toggle telemetry polling for one or more devices — single server-side UPDATE. */
+  setDevicesEnabled: (deviceIds: string[], enabled: boolean) =>
+    apiFetch<{ updated: number; missing: string[] }>('/devices/bulk-set-enabled', { method: 'POST', body: JSON.stringify({ deviceIds, enabled }) }),
   /** Force an immediate re-poll of one or more devices — bypasses the
    * staggered windows and refreshes BOTH live metrics and inventory now.
    * Requires devices:write. Returns per-device outcomes (reachability +
@@ -3862,6 +3857,9 @@ export const api = {
   /** Re-roll a generatable secret's key material in place — same id, references keep working. */
   regenerateSecret: (id: string) =>
     apiFetch<Secret>(`/secrets/${id}/regenerate`, { method: 'POST' }),
+  /** Re-roll MANY generatable secrets in one round-trip; per-id errors reported, never fatal. */
+  bulkRegenerateSecrets: (ids: string[]) =>
+    apiFetch<{ regenerated: string[]; errors: Array<{ id: string; error: string }> }>('/secrets/bulk-regenerate', { method: 'POST', body: JSON.stringify({ ids }) }),
   /** Fetch a secret's decrypted fields for editing (works for all types). */
   getSecret: (id: string) =>
     apiFetch<{ type: string; fields: Record<string, string> }>(`/secrets/${id}`),
@@ -3871,6 +3869,9 @@ export const api = {
     apiFetch<{ id: string }>(`/secrets/${id}`, { method: 'PATCH', body: JSON.stringify(body) }),
   deleteSecret: (id: string) =>
     apiFetch<void>(`/secrets/${id}`, { method: 'DELETE' }),
+  /** Delete MANY secrets in one round-trip; per-id errors reported, never fatal. */
+  bulkDeleteSecrets: (ids: string[]) =>
+    apiFetch<{ deleted: string[]; errors: Array<{ id: string; error: string }> }>('/secrets/bulk-delete', { method: 'POST', body: JSON.stringify({ ids }) }),
   // Sites.
   sites: () => apiFetch<Site[]>('/sites'),
   createSite: (body: SiteCreateRequest) =>
@@ -3878,6 +3879,10 @@ export const api = {
   updateSite: (id: string, body: Partial<SiteCreateRequest>) =>
     apiFetch<Site>(`/sites/${id}`, { method: 'PATCH', body: JSON.stringify(body) }),
   deleteSite: (id: string) => apiFetch<void>(`/sites/${id}`, { method: 'DELETE' }),
+  /** Delete MANY sites in one round-trip. All-or-nothing — 409 with the
+   *  blocking device/host references when ANY site is still in use. */
+  bulkDeleteSites: (ids: string[]) =>
+    apiFetch<{ deleted: number; missing: string[] }>('/sites/bulk', { method: 'POST', body: JSON.stringify({ ids }) }),
   // Network layer registry (topology bands). Read is open; write needs layers:write.
   layers: () => apiFetch<NetworkLayer[]>('/layers'),
   createLayer: (body: LayerCreateRequest) =>
@@ -3926,6 +3931,9 @@ export const api = {
     apiFetch<DocumentedHost>(`/documented-hosts/${id}`, { method: 'PATCH', body: JSON.stringify(body) }),
   deleteDocumentedHost: (id: string) =>
     apiFetch<void>(`/documented-hosts/${id}`, { method: 'DELETE' }),
+  /** Delete MANY documented hosts (+ their addresses) in one round-trip; unknown ids reported, never fatal. */
+  bulkDeleteDocumentedHosts: (ids: string[]) =>
+    apiFetch<{ deleted: number; missing: string[] }>('/documented-hosts/bulk-delete', { method: 'POST', body: JSON.stringify({ ids }) }),
   /** Batch lifecycle update — marks the given hosts active or stale in one call. */
   bulkUpdateDocumentedHosts: (ids: string[], isActive: boolean) =>
     apiFetch<DocumentedHostBulkResult>('/documented-hosts/bulk', { method: 'POST', body: JSON.stringify({ ids, isActive }) }),
@@ -3956,6 +3964,9 @@ export const api = {
     apiFetch<DocumentedNetwork>(`/documented-networks/${id}`, { method: 'PATCH', body: JSON.stringify(body) }),
   deleteDocumentedNetwork: (id: string) =>
     apiFetch<void>(`/documented-networks/${id}`, { method: 'DELETE' }),
+  /** Delete MANY documented networks in one round-trip; unknown ids reported, never fatal. */
+  bulkDeleteDocumentedNetworks: (ids: string[]) =>
+    apiFetch<{ deleted: number; missing: string[] }>('/documented-networks/bulk-delete', { method: 'POST', body: JSON.stringify({ ids }) }),
   /** Batch lifecycle update — marks the given networks active or stale in one call. */
   bulkUpdateDocumentedNetworks: (ids: string[], isActive: boolean) =>
     apiFetch<DocumentedNetworkBulkResult>('/documented-networks/bulk', { method: 'POST', body: JSON.stringify({ ids, isActive }) }),
@@ -4568,6 +4579,10 @@ export const api = {
     apiFetch<PlanDetail>(`/plans/${id}`, { method: 'PATCH', body: JSON.stringify(body) }),
   deletePlan: (id: string) => apiFetch<void>(`/plans/${id}`, { method: 'DELETE' }),
   executePlan: (id: string) => apiFetch<PlanDetail>(`/plans/${id}/execute`, { method: 'POST' }),
+  /** Start execution of MANY plans in one round-trip (2FA-gated). Per-plan
+   *  outcomes reported — non-executable plans are skipped, errors never fatal. */
+  bulkExecutePlans: (ids: string[]) =>
+    apiFetch<{ started: string[]; skipped: Array<{ id: string; status: string }>; errors: Array<{ id: string; error: string }> }>('/plans/bulk-execute', { method: 'POST', body: JSON.stringify({ ids }) }),
   /** Resolve a kind:'url' quick action into the device's management web-UI URL. */
   resolveQuickAction: (deviceId: string, actionId: string, pluginId?: string) =>
     apiFetch<{ deviceId: string; url: string }>(`/devices/${deviceId}/quick-action`, {
@@ -4581,6 +4596,12 @@ export const api = {
     apiFetch<PlanDetail>(`/plans/${id}/schedule`, { method: 'POST', body: JSON.stringify(body) }),
   /** Remove the schedule — the plan returns to its pre-schedule status. */
   unschedulePlan: (id: string) => apiFetch<PlanDetail>(`/plans/${id}/schedule`, { method: 'DELETE' }),
+  /** Remove the schedule from MANY plans in one round-trip; non-scheduled plans skipped, never fatal. */
+  bulkUnschedulePlans: (ids: string[]) =>
+    apiFetch<{ unscheduled: string[]; skipped: Array<{ id: string; status: string }>; errors: Array<{ id: string; error: string }> }>('/plans/bulk-unschedule', { method: 'POST', body: JSON.stringify({ ids }) }),
+  /** Delete MANY non-executing plans in one round-trip; executing/unknown plans reported, never fatal. */
+  bulkDeletePlans: (ids: string[]) =>
+    apiFetch<{ deleted: string[]; errors: Array<{ id: string; error: string }> }>('/plans/bulk-delete', { method: 'POST', body: JSON.stringify({ ids }) }),
   cancelPlan: (id: string) => apiFetch<PlanDetail>(`/plans/${id}/cancel`, { method: 'POST' }),
   addPlanStep: (planId: string, body: {
     deviceId: string;

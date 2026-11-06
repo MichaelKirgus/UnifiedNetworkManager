@@ -827,6 +827,111 @@ router.delete('/devices/:id', requireAuth, requirePermission('devices:write'), a
   }
 });
 
+// POST /devices/bulk-delete — delete many devices in one round-trip. Body:
+// { ids: string[] }. Same per-device rules as DELETE /devices/:id (plans that
+// reference a device block it), but the batch is all-or-nothing: if ANY device
+// is still referenced by plan steps, NOTHING is deleted and every blocker is
+// reported — so a bulk delete can never leave a half-deleted selection behind.
+router.post('/devices/bulk-delete', requireAuth, requirePermission('devices:write'), async (req, res) => {
+  const body = req.body ?? {};
+  const ids = Array.isArray(body.ids) ? (body.ids as unknown[]).filter((x): x is string => typeof x === 'string' && !!x) : [];
+  if (ids.length === 0) {
+    res.status(400).json({ error: '"ids" must be a non-empty array of device ids' });
+    return;
+  }
+  if (ids.length > 5000) {
+    res.status(400).json({ error: 'At most 5000 ids per bulk delete' });
+    return;
+  }
+
+  try {
+    const unique = Array.from(new Set(ids));
+    const existing = await db.query.devices.findMany({ where: inArray(schema.devices.id, unique) });
+    if (existing.length === 0) {
+      res.status(404).json({ error: 'No matching devices found' });
+      return;
+    }
+
+    // Plans referencing ANY of these devices block the whole batch (plan_steps
+    // .deviceId has no FK — checked explicitly, one query for all ids).
+    const refs = await db.query.planSteps.findMany({ where: inArray(schema.planSteps.deviceId, unique) });
+    if (refs.length > 0) {
+      const blockedIds = new Set(refs.map((r) => r.deviceId));
+      const names = existing.filter((d) => blockedIds.has(d.id)).map((d) => d.name);
+      res.status(409).json({ error: `Device(s) still referenced by plan steps — delete those plans first.`, blockers: names });
+      return;
+    }
+
+    // No FK constraints in this schema — cascade manually, children first (same
+    // table list + order as the single-device route above).
+    for (const d of existing) {
+      await db.delete(schema.telemetry).where(eq(schema.telemetry.deviceId, d.id));
+      await db.delete(schema.configJobs).where(eq(schema.configJobs.deviceId, d.id));
+      await db.delete(schema.pluginSettings).where(eq(schema.pluginSettings.deviceId, d.id));
+      await db.delete(schema.networks).where(eq(schema.networks.deviceId, d.id));
+      await db.delete(schema.hosts).where(eq(schema.hosts.deviceId, d.id));
+      await db.delete(schema.deviceTimes).where(eq(schema.deviceTimes.deviceId, d.id));
+      await db.delete(schema.devicePorts).where(eq(schema.devicePorts.deviceId, d.id));
+      // Cross-device inventory rows (Containers/Storage pages) — without these a
+      // deleted device leaves orphaned rows behind (they only carry deviceId +
+      // pluginId, no FK to devices).
+      await db.delete(schema.containers).where(eq(schema.containers.deviceId, d.id));
+      await db.delete(schema.dockerImages).where(eq(schema.dockerImages.deviceId, d.id));
+      await db.delete(schema.vms).where(eq(schema.vms.deviceId, d.id));
+      await db.delete(schema.deviceUpdates).where(eq(schema.deviceUpdates.deviceId, d.id));
+      await db.delete(schema.deviceSecurityChecks).where(eq(schema.deviceSecurityChecks.deviceId, d.id));
+      // Generic plugin state scoped to this device (file-integrity baselines, …) —
+      // rows carry a nullable deviceId; only the device-scoped ones cascade.
+      await db.delete(schema.pluginState).where(eq(schema.pluginState.deviceId, d.id));
+      await db.delete(schema.certificates).where(eq(schema.certificates.deviceId, d.id));
+      await db.delete(schema.certificateHistory).where(eq(schema.certificateHistory.deviceId, d.id));
+      await db.delete(schema.storageFilesystems).where(eq(schema.storageFilesystems.deviceId, d.id));
+      await db.delete(schema.storageDisks).where(eq(schema.storageDisks.deviceId, d.id));
+      await db.delete(schema.deviceIps).where(eq(schema.deviceIps.deviceId, d.id));
+      await db.delete(schema.devicePlugins).where(eq(schema.devicePlugins.deviceId, d.id));
+      await db.delete(schema.devices).where(eq(schema.devices.id, d.id));
+    }
+
+    // The device set changed — drop the in-memory snapshot + per-user allowed-id
+    // caches so tag/site-scoped callers see the change immediately.
+    invalidateDeviceAccessCache();
+    res.status(200).json({ deleted: existing.length, missing: ids.filter((id) => !existing.some((d) => d.id === id)) });
+  } catch (err) {
+    const e = err as { status?: number; message?: string };
+    res.status(e.status ?? 500).json({ error: e.message ?? 'Internal server error' });
+  }
+});
+
+// POST /devices/bulk-set-enabled — toggle telemetry polling for many devices in
+// one round-trip. Body: { deviceIds: string[], enabled: boolean }. One UPDATE
+// (WHERE id = ANY(…)) instead of N sequential PATCHes; unknown ids are reported,
+// never fatal. Requires devices:write like the single-device update.
+router.post('/devices/bulk-set-enabled', requireAuth, requirePermission('devices:write'), async (req, res) => {
+  const body = (req.body ?? {}) as Record<string, unknown>;
+  const deviceIds = Array.isArray(body.deviceIds) ? (body.deviceIds as unknown[]).filter((x): x is string => typeof x === 'string' && !!x) : [];
+  if (deviceIds.length === 0) {
+    res.status(400).json({ error: '"deviceIds" must be a non-empty array of device ids' });
+    return;
+  }
+  const enabled = body.enabled;
+  if (typeof enabled !== 'boolean') {
+    res.status(400).json({ error: '"enabled" must be a boolean' });
+    return;
+  }
+
+  try {
+    const unique = Array.from(new Set(deviceIds));
+    const result = await db.update(schema.devices)
+      .set({ enabled })
+      .where(inArray(schema.devices.id, unique))
+      .returning({ id: schema.devices.id });
+    res.status(200).json({ updated: result.length, missing: deviceIds.filter((id) => !result.some((r) => r.id === id)) });
+  } catch (err) {
+    const e = err as { status?: number; message?: string };
+    res.status(e.status ?? 500).json({ error: e.message ?? 'Internal server error' });
+  }
+});
+
 // --- Device IP addresses (primary = managementAddress, secondaries here) --
 
 // GET /devices/:id/ips - primary address first, then secondary IPs.

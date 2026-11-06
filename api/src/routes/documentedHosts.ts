@@ -679,6 +679,41 @@ router.delete('/documented-hosts/:id', requireAuth, requirePermission('documente
   }
 });
 
+// POST /documented-hosts/bulk-delete — remove many documented hosts + their
+// addresses in one round-trip (the page's "Delete selected"). Body: { ids }.
+// Same per-row rules as DELETE /documented-hosts/:id; unknown ids are reported,
+// never fatal. At most 5000 ids per call (same contract as the update bulk).
+router.post('/documented-hosts/bulk-delete', requireAuth, requirePermission('documented-hosts:write'), async (req: Request, res: Response) => {
+  try {
+    const body = req.body ?? {};
+    const ids = Array.isArray(body.ids) ? (body.ids as unknown[]).filter((x): x is string => typeof x === 'string' && !!x) : [];
+    if (ids.length === 0) {
+      res.status(400).json({ error: '"ids" must be a non-empty array of documented host ids' });
+      return;
+    }
+    if (ids.length > 5000) {
+      res.status(400).json({ error: 'At most 5000 ids per bulk delete' });
+      return;
+    }
+
+    const unique = Array.from(new Set(ids));
+    const existing = await db.query.documentedHosts.findMany({ where: inArray(schema.documentedHosts.id, unique) });
+    if (existing.length === 0) {
+      res.status(404).json({ error: 'No matching documented hosts found' });
+      return;
+    }
+
+    // Addresses first (children), then the host rows — same order as single delete.
+    await db.delete(schema.documentedHostIps).where(inArray(schema.documentedHostIps.hostId, unique));
+    await db.delete(schema.documentedHosts).where(inArray(schema.documentedHosts.id, unique));
+
+    res.status(200).json({ deleted: existing.length, missing: ids.filter((id) => !existing.some((h) => h.id === id)) });
+  } catch (err) {
+    const e = err as { status?: number; message?: string };
+    res.status(e.status ?? 500).json({ error: e.message ?? 'Internal server error' });
+  }
+});
+
 // ---------------------------------------------------------------------------
 // CSV import (flexible header mapping — the webapp maps columns client-side and
 // sends already-structured rows; this endpoint only validates + upserts)

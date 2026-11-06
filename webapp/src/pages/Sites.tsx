@@ -346,16 +346,18 @@ export default function Sites() {
                     label: 'Delete selected',
                     confirm: (count) => `Delete ${count} site${count === 1 ? '' : 's'}? Devices referencing them must be unassigned first.`,
                     onClick: async (selected: Site[]) => {
-                      const errors: string[] = [];
-                      for (const s of selected) {
-                        try {
-                          await api.deleteSite(s.id);
-                        } catch (err) {
-                          errors.push(`${s.name}: ${(err as Error).message}`);
+                      try {
+                        await api.bulkDeleteSites(selected.map((s) => s.id));
+                      } catch (err) {
+                        const e = err as { status?: number; blockers?: string[] };
+                        if (e.status === 409 && Array.isArray(e.blockers)) {
+                          setFormError(`Not deleted — still in use:\n${e.blockers.join('\n')}`);
+                          return;
                         }
+                        setFormError((err as Error).message);
+                        return;
                       }
                       queryClient.invalidateQueries({ queryKey: ['sites'] });
-                      if (errors.length > 0) setFormError(`Deleted ${selected.length - errors.length} of ${selected.length}. ${errors.join(' | ')}`);
                     },
                   },
                 ]

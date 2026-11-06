@@ -994,6 +994,99 @@ paths:
         '403':
           description: Missing devices:write permission
 
+  /devices/bulk-delete:
+    post:
+      tags: [Devices]
+      summary: Delete many devices in one round-trip (all-or-nothing)
+      description: >-
+        Requires permission `devices:write`. Same per-device rules as DELETE
+        `/devices/{id}` — but the batch is ALL-OR-NOTHING: if ANY device is
+        still referenced by plan steps, nothing is deleted and every blocker
+        (device name) is reported in 409. Unknown ids are reported in `missing`,
+        never fatal. At most 5000 ids per request.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [ids]
+              properties:
+                ids:
+                  type: array
+                  minItems: 1
+                  maxItems: 5000
+                  items: { type: string }
+                  description: "Device ids to delete"
+      responses:
+        '200':
+          description: Delete summary
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [deleted, missing]
+                properties:
+                  deleted: { type: integer, description: "Devices deleted" }
+                  missing:
+                    type: array
+                    items: { type: string }
+                    description: "Submitted ids that do not exist"
+        '400':
+          description: Empty batch or more than 5000 ids
+        '401':
+          description: Authentication required
+        '403':
+          description: Missing devices:write permission
+        '409':
+          description: One or more devices are still referenced by plan steps (blockers listed)
+
+  /devices/bulk-set-enabled:
+    post:
+      tags: [Devices]
+      summary: Toggle telemetry polling for many devices in one round-trip
+      description: >-
+        Requires permission `devices:write`. One server-side UPDATE instead of
+        N sequential PATCHes. Unknown ids are reported in `missing`, never
+        fatal. At most 5000 ids per request.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [deviceIds, enabled]
+              properties:
+                deviceIds:
+                  type: array
+                  minItems: 1
+                  maxItems: 5000
+                  items: { type: string }
+                  description: "Device ids to update"
+                enabled:
+                  type: boolean
+                  description: "true = resume polling, false = stop polling"
+      responses:
+        '200':
+          description: Update summary
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [updated, missing]
+                properties:
+                  updated: { type: integer, description: "Devices whose enabled flag was set" }
+                  missing:
+                    type: array
+                    items: { type: string }
+                    description: "Submitted ids that do not exist"
+        '400':
+          description: Empty batch, more than 5000 ids, or non-boolean enabled
+        '401':
+          description: Authentication required
+        '403':
+          description: Missing devices:write permission
+
   /devices/{id}/plugins:
     get:
       tags: [Devices]
@@ -2208,6 +2301,176 @@ paths:
         '409':
           description: Plan is not in a startable state
 
+  /plans/bulk-execute:
+    post:
+      tags: [Plans]
+      summary: Start execution of many plans in one round-trip
+      description: >-
+        Requires 2FA-completed session and permission `configs:apply`. Same
+        per-plan rules as POST `/plans/{id}/execute` — non-executable plans are
+        reported in `skipped`, access/permission failures in `errors`; nothing
+        is aborted. Out-of-scope plans are reported as not found (same
+        visibility contract). At most 5000 ids per request.
+      x-2fa-required: true
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [ids]
+              properties:
+                ids:
+                  type: array
+                  minItems: 1
+                  maxItems: 5000
+                  items: { type: string }
+                  description: "Plan ids to execute"
+      responses:
+        '200':
+          description: Per-plan outcomes
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [started, skipped, errors]
+                properties:
+                  started:
+                    type: array
+                    items: { type: string }
+                    description: "Plan ids queued for execution"
+                  skipped:
+                    type: array
+                    items:
+                      type: object
+                      required: [id, status]
+                      properties:
+                        id: { type: string }
+                        status: { type: string, description: "Current plan status (not startable)" }
+                  errors:
+                    type: array
+                    items:
+                      type: object
+                      required: [id, error]
+                      properties:
+                        id: { type: string }
+                        error: { type: string }
+        '400':
+          description: Empty batch or more than 5000 ids
+        '401':
+          description: Authentication required (or 2FA-completed session missing)
+        '403':
+          description: Missing configs:apply permission
+
+  /plans/bulk-unschedule:
+    post:
+      tags: [Plans]
+      summary: Remove the schedule from many plans in one round-trip
+      description: >-
+        Requires permission `configs:apply`. Same per-plan rules as DELETE
+        `/plans/{id}/schedule` — non-scheduled plans are reported in `skipped`,
+        failures in `errors`; nothing is aborted. At most 5000 ids per request.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [ids]
+              properties:
+                ids:
+                  type: array
+                  minItems: 1
+                  maxItems: 5000
+                  items: { type: string }
+                  description: "Plan ids to unschedule"
+      responses:
+        '200':
+          description: Per-plan outcomes
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [unscheduled, skipped, errors]
+                properties:
+                  unscheduled:
+                    type: array
+                    items: { type: string }
+                    description: "Plan ids whose schedule was removed"
+                  skipped:
+                    type: array
+                    items:
+                      type: object
+                      required: [id, status]
+                      properties:
+                        id: { type: string }
+                        status: { type: string, description: "Current plan status (not scheduled)" }
+                  errors:
+                    type: array
+                    items:
+                      type: object
+                      required: [id, error]
+                      properties:
+                        id: { type: string }
+                        error: { type: string }
+        '400':
+          description: Empty batch or more than 5000 ids
+        '401':
+          description: Authentication required
+        '403':
+          description: Missing configs:apply permission
+
+  /plans/bulk-delete:
+    post:
+      tags: [Plans]
+      summary: Delete many non-executing plans in one round-trip
+      description: >-
+        Requires permission `configs:apply`. Same per-plan rules as DELETE
+        `/plans/{id}` — executing or unknown plans are reported in `errors`,
+        never fatal; provisioned secrets shared with other plans (retries) are
+        preserved. At most 5000 ids per request.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [ids]
+              properties:
+                ids:
+                  type: array
+                  minItems: 1
+                  maxItems: 5000
+                  items: { type: string }
+                  description: "Plan ids to delete"
+      responses:
+        '200':
+          description: Per-plan outcomes
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [deleted, errors]
+                properties:
+                  deleted:
+                    type: array
+                    items: { type: string }
+                    description: "Plan ids that were deleted"
+                  errors:
+                    type: array
+                    items:
+                      type: object
+                      required: [id, error]
+                      properties:
+                        id: { type: string }
+                        error: { type: string }
+        '400':
+          description: Empty batch or more than 5000 ids
+        '401':
+          description: Authentication required
+        '403':
+          description: Missing configs:apply permission
+
   /plans/{id}/retry:
     post:
       tags: [Plans]
@@ -3164,6 +3427,107 @@ paths:
         '404':
           description: Device not found
 
+  /secrets/bulk-regenerate:
+    post:
+      tags: [Secrets]
+      summary: Re-roll key material for many generatable secrets in one round-trip
+      description: >-
+        Requires permission `secrets:write`. Same per-secret rules as POST
+        `/secrets/{id}/regenerate` — non-generatable or unknown ids are
+        reported in `errors`, never fatal. At most 5000 ids per request.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [ids]
+              properties:
+                ids:
+                  type: array
+                  minItems: 1
+                  maxItems: 5000
+                  items: { type: string }
+                  description: "Secret ids to regenerate"
+      responses:
+        '200':
+          description: Per-secret outcomes
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [regenerated, errors]
+                properties:
+                  regenerated:
+                    type: array
+                    items: { type: string }
+                    description: "Secret ids whose key material was re-rolled"
+                  errors:
+                    type: array
+                    items:
+                      type: object
+                      required: [id, error]
+                      properties:
+                        id: { type: string }
+                        error: { type: string }
+        '400':
+          description: Empty batch or more than 5000 ids
+        '401':
+          description: Authentication required
+        '403':
+          description: Missing secrets:write permission
+
+  /secrets/bulk-delete:
+    post:
+      tags: [Secrets]
+      summary: Delete many secrets in one round-trip
+      description: >-
+        Same per-secret rules as DELETE `/secrets/{id}` — global deleters
+        (`secrets:delete`) may remove any, personal-area users only their own;
+        unknown or undeletable ids are reported in `errors`, never fatal. At
+        most 5000 ids per request.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [ids]
+              properties:
+                ids:
+                  type: array
+                  minItems: 1
+                  maxItems: 5000
+                  items: { type: string }
+                  description: "Secret ids to delete"
+      responses:
+        '200':
+          description: Per-secret outcomes
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [deleted, errors]
+                properties:
+                  deleted:
+                    type: array
+                    items: { type: string }
+                    description: "Secret ids that were deleted"
+                  errors:
+                    type: array
+                    items:
+                      type: object
+                      required: [id, error]
+                      properties:
+                        id: { type: string }
+                        error: { type: string }
+        '400':
+          description: Empty batch or more than 5000 ids
+        '401':
+          description: Authentication required
+        '403':
+          description: Missing secrets:delete / secrets:self-write permission
+
   /secrets/{id}:
     get:
       tags: [Secrets]
@@ -3356,6 +3720,53 @@ paths:
           description: Site not found
         '409':
           description: Devices still reference this site
+
+  /sites/bulk:
+    post:
+      tags: [Sites]
+      summary: Delete many sites in one round-trip (all-or-nothing)
+      description: >-
+        Requires permission `sites:write`. Same per-site rules as DELETE
+        `/sites/{id}` — but the batch is ALL-OR-NOTHING: if ANY site is still
+        referenced by devices or documented hosts, nothing is deleted and every
+        blocker is reported in 409. Unknown ids are reported in `missing`,
+        never fatal. At most 5000 ids per request.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [ids]
+              properties:
+                ids:
+                  type: array
+                  minItems: 1
+                  maxItems: 5000
+                  items: { type: string }
+                  description: "Site ids to delete"
+      responses:
+        '200':
+          description: Delete summary
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [deleted, missing]
+                properties:
+                  deleted: { type: integer, description: "Sites deleted" }
+                  missing:
+                    type: array
+                    items: { type: string }
+                    description: "Submitted ids that do not exist"
+        '400':
+          description: Empty batch or more than 5000 ids
+        '401':
+          description: Authentication required
+        '403':
+          description: Missing sites:write permission
+        '409':
+          description: One or more sites are still in use (blockers listed)
 
   /files:
     get:
@@ -4984,6 +5395,52 @@ paths:
         '403':
           description: Missing documented-hosts:write permission
 
+  /documented-hosts/bulk-delete:
+    post:
+      tags: [Inventory]
+      summary: Delete many documented hosts (+ their addresses) in one round-trip
+      description: >-
+        Requires permission `documented-hosts:write`. Same per-row rules as
+        DELETE `/documented-hosts/{id}` — unknown ids are reported in `missing`,
+        never fatal. At most 5000 ids per request (same contract as the update
+        bulk).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [ids]
+              properties:
+                ids:
+                  type: array
+                  minItems: 1
+                  maxItems: 5000
+                  items: { type: string }
+                  description: "Documented host ids to delete"
+      responses:
+        '200':
+          description: Delete summary
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [deleted, missing]
+                properties:
+                  deleted: { type: integer, description: "Hosts (and their addresses) deleted" }
+                  missing:
+                    type: array
+                    items: { type: string }
+                    description: "Submitted ids that do not exist"
+        '400':
+          description: Empty batch or more than 5000 ids
+        '401':
+          description: Authentication required
+        '403':
+          description: Missing documented-hosts:write permission
+        '404':
+          description: No matching documented hosts found
+
   /documented-hosts/sync-macs:
     post:
       tags: [Inventory]
@@ -5326,6 +5783,52 @@ paths:
           description: Authentication required
         '403':
           description: Missing documented-networks:write permission
+
+  /documented-networks/bulk-delete:
+    post:
+      tags: [Inventory]
+      summary: Delete many documented networks in one round-trip
+      description: >-
+        Requires permission `documented-networks:write`. Same per-row rules as
+        DELETE `/documented-networks/{id}` — unknown ids are reported in
+        `missing`, never fatal. At most 5000 ids per request (same contract as
+        the update bulk).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [ids]
+              properties:
+                ids:
+                  type: array
+                  minItems: 1
+                  maxItems: 5000
+                  items: { type: string }
+                  description: "Documented network ids to delete"
+      responses:
+        '200':
+          description: Delete summary
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [deleted, missing]
+                properties:
+                  deleted: { type: integer, description: "Networks deleted" }
+                  missing:
+                    type: array
+                    items: { type: string }
+                    description: "Submitted ids that do not exist"
+        '400':
+          description: Empty batch or more than 5000 ids
+        '401':
+          description: Authentication required
+        '403':
+          description: Missing documented-networks:write permission
+        '404':
+          description: No matching documented networks found
 
   /documented-networks/merge:
     post:

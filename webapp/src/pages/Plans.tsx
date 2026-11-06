@@ -99,12 +99,11 @@ function PlansList({ onCreate }: { onCreate?: () => void }) {
       return;
     }
     const attempt = async () => {
-      let ok = 0;
-      for (const p of targets) {
-        await api.executePlan(p.id);
-        ok += 1;
-      }
-      setNotice(`Execution started for ${ok} plan${ok === 1 ? '' : 's'}.`);
+      const out = await api.bulkExecutePlans(targets.map((p) => p.id));
+      const parts = [`Execution started for ${out.started.length} plan${out.started.length === 1 ? '' : 's'}.`];
+      if (out.skipped.length > 0) parts.push(`Skipped (${out.skipped.length}): ` + out.skipped.map((s) => `${s.id.slice(0, 8)}… is ${s.status}`).join(', '));
+      if (out.errors.length > 0) parts.push(out.errors.map((e) => `${e.id.slice(0, 8)}…: ${e.error}`).join('\n'));
+      setNotice(parts.join('\n\n'));
     };
     try {
       await attempt();
@@ -121,12 +120,10 @@ function PlansList({ onCreate }: { onCreate?: () => void }) {
       return;
     }
     try {
-      let ok = 0;
-      for (const p of targets) {
-        await api.unschedulePlan(p.id);
-        ok += 1;
-      }
-      setNotice(`Schedule removed from ${ok} plan${ok === 1 ? '' : 's'}.`);
+      const out = await api.bulkUnschedulePlans(targets.map((p) => p.id));
+      const parts = [`Schedule removed from ${out.unscheduled.length} plan${out.unscheduled.length === 1 ? '' : 's'}.`];
+      if (out.errors.length > 0) parts.push(out.errors.map((e) => `${e.id.slice(0, 8)}…: ${e.error}`).join('\n'));
+      setNotice(parts.join('\n\n'));
     } catch (err) {
       setNotice(`Unschedule failed: ${err instanceof Error ? err.message : String(err)}`);
     }
@@ -139,12 +136,10 @@ function PlansList({ onCreate }: { onCreate?: () => void }) {
       return;
     }
     try {
-      let ok = 0;
-      for (const p of targets) {
-        await api.deletePlan(p.id);
-        ok += 1;
-      }
-      setNotice(`Deleted ${ok} plan${ok === 1 ? '' : 's'}.`);
+      const out = await api.bulkDeletePlans(targets.map((p) => p.id));
+      const parts = [`Deleted ${out.deleted.length} plan${out.deleted.length === 1 ? '' : 's'}.`];
+      if (out.errors.length > 0) parts.push(out.errors.map((e) => `${e.id.slice(0, 8)}…: ${e.error}`).join('\n'));
+      setNotice(parts.join('\n\n'));
     } catch (err) {
       setNotice(`Bulk delete failed: ${err instanceof Error ? err.message : String(err)}`);
     }

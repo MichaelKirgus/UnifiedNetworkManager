@@ -1577,16 +1577,9 @@ export default function DocumentedNetworks() {
                     label: 'Delete selected',
                     confirm: (count) => `Delete ${count} documented network${count === 1 ? '' : 's'}? This cannot be undone.`,
                     onClick: async (selected: DocumentedNetwork[]) => {
-                      const errors: string[] = [];
-                      for (const n of selected) {
-                        try {
-                          await api.deleteDocumentedNetwork(n.id);
-                        } catch (err) {
-                          errors.push(`${n.name}: ${(err as Error).message}`);
-                        }
-                      }
+                      const res = await api.bulkDeleteDocumentedNetworks(selected.map((n) => n.id));
                       queryClient.invalidateQueries({ queryKey: ['documentedNetworks'] });
-                      if (errors.length > 0) alert(`Deleted ${selected.length - errors.length} of ${selected.length}. ${errors.join(' | ')}`);
+                      if (res.missing.length > 0) alert(`Deleted ${res.deleted} of ${selected.length}. ${res.missing.length} id(s) no longer exist.`);
                     },
                   },
                 ]
