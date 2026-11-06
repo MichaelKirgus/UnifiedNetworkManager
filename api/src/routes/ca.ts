@@ -3,7 +3,7 @@ import * as fs from 'fs';
 import * as crypto from 'crypto';
 import { db, pool } from '../db';
 import { caCertificates, wifiClientCerts } from '../db/schema';
-import { eq } from 'drizzle-orm';
+import { eq, inArray } from 'drizzle-orm';
 import { requireAuth, requirePermission } from '../auth/middleware';
 import { getCaStatus, revokeCertificate } from '../ca/stepCaAdmin';
 import { renewApiMtls } from '../ca/apiMtls';
@@ -25,6 +25,7 @@ import { registerLeaf } from '../ca/registry';
  *   POST /ca/enroll                  -> issue one EAP-TLS client cert (keygen + sign via CA)
  *   GET  /ca/wifi-certs              -> list enrolled WiFi client certs (no keys)
  *   POST /ca/wifi-certs/:serial/revoke -> revoke one by serial (CA-first, then registry)
+ *   POST /ca/wifi-certs/bulk-revoke  -> revoke many { serials: string[] } in one call
  *   GET  /ca/wifi-certs/:serial/download -> install bundle: PEM (default) or P12 (?format=p12)
  *   GET  /ca/root-bundle             -> the CA root PEM for client trust stores
  *   POST /ca/renew-intermediate      -> trigger an intermediate renewal in the CA container
@@ -372,6 +373,76 @@ router.post(
     await recordRevokedSerial(serial, subject);
 
     res.status(200).json({ serial, caStatus: caResult.status });
+  }
+);
+
+// POST /ca/wifi-certs/bulk-revoke - revoke many WiFi client certs in one call.
+// Body: { serials: string[] }. The webapp selection bar sends the current
+// selection; unknown serials are reported (never fatal), at most 500 per call.
+// Each serial follows the single-revoke flow (CA-first, then registry mirror +
+// revoked_serials). Already-revoked rows count as no-ops. If the CA is
+// unreachable for EVERY serial nothing is applied and the route answers 502;
+// otherwise it answers 200 with a per-serial failure list so one bad cert does
+// not hide the rest. Requires permission `ca:manage`.
+router.post(
+  '/ca/wifi-certs/bulk-revoke',
+  requireAuth,
+  requirePermission('ca:manage'),
+  async (req, res: Response) => {
+    const body = req.body ?? {};
+    const serials = Array.isArray(body.serials)
+      ? (body.serials as unknown[]).filter((x): x is string => typeof x === 'string' && !!x.trim())
+      : [];
+    if (serials.length === 0) {
+      res.status(400).json({ error: '"serials" must be a non-empty array of hex certificate serials' });
+      return;
+    }
+    const unique = Array.from(new Set(serials.map((s) => s.trim().toLowerCase())));
+    if (unique.length > 500) {
+      res.status(400).json({ error: 'At most 500 serials per bulk revoke' });
+      return;
+    }
+
+    const rows = await db.query.wifiClientCerts.findMany({ where: inArray(wifiClientCerts.serial, unique) });
+    const bySerial = new Map(rows.map((r) => [r.serial.toLowerCase(), r]));
+    const missing = serials.filter((s) => !bySerial.has(s.trim().toLowerCase()));
+
+    const now = new Date().toISOString();
+    let revoked = 0;
+    let alreadyRevoked = 0;
+    const failed: Array<{ serial: string; error: string }> = [];
+
+    for (const serial of unique) {
+      const row = bySerial.get(serial);
+      if (!row) continue; // reported in `missing`
+      if (row.status === 'revoked') {
+        alreadyRevoked++;
+        continue;
+      }
+      try {
+        await revokeCertificate(serial);
+      } catch (err) {
+        failed.push({ serial, error: (err as Error).message ?? 'CA unreachable' });
+        continue; // CA-first: NOT mirrored into the registries
+      }
+
+      await db.update(wifiClientCerts).set({ status: 'revoked', revokedAt: now }).where(eq(wifiClientCerts.id, row.id));
+      const regRows = await db.query.caCertificates.findMany({ where: eq(caCertificates.serial, serial) });
+      for (const r of regRows) {
+        if (r.status !== 'revoked') {
+          await db.update(caCertificates).set({ status: 'revoked', revokedAt: now }).where(eq(caCertificates.id, r.id));
+        }
+      }
+      // Per-auth enforcement: FreeRADIUS rejects this serial on the next EAP-TLS auth.
+      await recordRevokedSerial(serial, `CN=${row.cn}`);
+      revoked++;
+    }
+
+    if (revoked === 0 && alreadyRevoked === 0 && failed.length > 0) {
+      res.status(502).json({ error: 'CA unreachable — revocation NOT applied', failed });
+      return;
+    }
+    res.status(200).json({ revoked, alreadyRevoked, failed, missing });
   }
 );
 

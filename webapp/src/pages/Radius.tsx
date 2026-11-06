@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Activity, Check, Copy, Download, KeyRound, Network, Plus, RefreshCw, Wifi } from 'lucide-react';
 import { Layout } from '../components/Layout';
 import { DialogShell } from '../components/DialogShell';
+import { DataTable, DataTableColumn } from '../components/DataTable';
 import { api, CaStatus, CaKeyType, RadiusAuthLogRow, RadiusNasClient, RadiusStatus, RadiusUserProfile, Secret, WifiClientCert } from '../api/client';
 import { can } from '../auth/permissions';
 import { useTimeFormat } from '../utils/time';
@@ -381,6 +382,82 @@ function WifiCertsPanel({ radiusLoaded, onHide }: { radiusLoaded: boolean; onHid
   const certs = wifiQuery.data?.certificates ?? [];
   const inputCls = 'w-full rounded-md border bg-background px-2 py-1.5 text-xs';
 
+  const certColumns: DataTableColumn<WifiClientCert>[] = [
+    {
+      header: 'Name / CN',
+      key: 'name',
+      width: 200,
+      exportValue: (row) => row.name,
+      render: (row) => (
+        <div>
+          <div className="font-medium">{row.name}</div>
+          {row.cn !== row.name && <div className="font-mono text-[10px] text-secondary">CN: {row.cn}</div>}
+          {(row.organization || row.organizationalUnit) && (
+            <div className="text-[10px] text-faint">{[row.organization, row.organizationalUnit].filter(Boolean).join(' / ')}</div>
+          )}
+        </div>
+      ),
+    },
+    { header: 'Key', key: 'keyType', width: 120, render: (row) => <span className="font-mono text-[11px]">{row.keyType}</span> },
+    {
+      header: 'Serial',
+      key: 'serial',
+      width: 160,
+      exportValue: (row) => row.serial,
+      render: (row) => <span className="font-mono text-[10px]" title={row.serial}>{row.serial.length > 16 ? `${row.serial.slice(0, 13)}…` : row.serial}</span>,
+    },
+    {
+      header: 'Validity',
+      key: 'notAfter',
+      width: 140,
+      sortAccessor: (row) => daysUntil(row.notAfter) ?? Number.MAX_SAFE_INTEGER,
+      exportValue: (row) => row.notAfter,
+      render: (row) => {
+        const d = daysUntil(row.notAfter);
+        const validCls = row.status === 'revoked' ? 'text-faint' : d !== null && d < 0 ? 'bg-danger/15 text-danger-fg' : d !== null && d <= 30 ? 'bg-warning/15 text-warning-fg' : 'bg-success/15 text-success-fg';
+        return (
+          <span className={`rounded px-1.5 py-0.5 font-mono text-[10px] font-semibold ${validCls}`}>
+            {row.status === 'revoked' ? 'revoked' : d !== null && d < 0 ? `expired ${-d}d ago` : `${d}d left`}
+          </span>
+        );
+      },
+    },
+    {
+      header: 'Status',
+      key: 'status',
+      width: 100,
+      render: (row) =>
+        row.status === 'revoked' ? (
+          <span className="rounded bg-danger/15 px-1.5 py-0.5 text-[10px] font-semibold uppercase text-danger-fg">revoked</span>
+        ) : (
+          <span className="rounded bg-success/15 px-1.5 py-0.5 text-[10px] font-semibold uppercase text-success-fg">issued</span>
+        ),
+    },
+    ...(canManage
+      ? [
+          {
+            header: 'Actions',
+            key: 'actions',
+            width: 180,
+            sortable: false,
+            filterable: false,
+            excludeFromExport: true,
+            render: (row: WifiClientCert) =>
+              row.status !== 'revoked' ? (
+                <div className="flex items-center justify-end gap-2">
+                  <button type="button" onClick={() => setInstallRow(row)} title="Download for Windows / Android / iOS / macOS (.p12) or PEM bundle" className="inline-flex items-center gap-1 rounded border px-2 py-1 text-[10px] font-medium hover:bg-muted/40">
+                    <Download className="h-3 w-3" /> Download
+                  </button>
+                  <button type="button" onClick={() => void revokeWifi(row)} title="Revoke this certificate" className="inline-flex items-center gap-1 rounded border px-2 py-1 text-[10px] font-medium text-danger-fg hover:bg-danger/10">
+                    Revoke
+                  </button>
+                </div>
+              ) : null,
+          },
+        ]
+      : []),
+  ];
+
   return (
     <section className="mb-6 space-y-3">
       <div className="flex flex-wrap items-center justify-between gap-2">
@@ -498,68 +575,36 @@ function WifiCertsPanel({ radiusLoaded, onHide }: { radiusLoaded: boolean; onHid
       )}
 
       {/* Enrolled certs table. */}
-      <div className="overflow-x-auto rounded-lg border">
-        <table className="w-full text-left text-xs">
-          <thead className="bg-background/60 text-[10px] uppercase tracking-wide text-faint">
-            <tr>
-              <th className="px-2 py-1.5 font-medium">Name / CN</th>
-              <th className="px-2 py-1.5 font-medium">Key</th>
-              <th className="px-2 py-1.5 font-medium">Serial</th>
-              <th className="px-2 py-1.5 font-medium">Validity</th>
-              <th className="px-2 py-1.5 font-medium">Status</th>
-              {canManage && <th className="px-2 py-1.5 font-medium text-right">Actions</th>}
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-border">
-            {certs.length === 0 && (
-              <tr><td colSpan={canManage ? 6 : 5} className="px-2 py-3 text-faint">No WiFi client certificates enrolled yet.</td></tr>
-            )}
-            {certs.map((row) => {
-              const d = daysUntil(row.notAfter);
-              const validCls = row.status === 'revoked' ? 'text-faint' : d !== null && d < 0 ? 'bg-danger/15 text-danger-fg' : d !== null && d <= 30 ? 'bg-warning/15 text-warning-fg' : 'bg-success/15 text-success-fg';
-              return (
-                <tr key={row.serial}>
-                  <td className="px-2 py-1.5">
-                    <div className="font-medium">{row.name}</div>
-                    {row.cn !== row.name && <div className="font-mono text-[10px] text-secondary">CN: {row.cn}</div>}
-                    {(row.organization || row.organizationalUnit) && (
-                      <div className="text-[10px] text-faint">{[row.organization, row.organizationalUnit].filter(Boolean).join(' / ')}</div>
-                    )}
-                  </td>
-                  <td className="whitespace-nowrap px-2 py-1.5 font-mono text-[11px]">{row.keyType}</td>
-                  <td className="px-2 py-1.5 font-mono text-[10px]" title={row.serial}>{row.serial.length > 16 ? `${row.serial.slice(0, 13)}…` : row.serial}</td>
-                  <td className="whitespace-nowrap px-2 py-1.5">
-                    <span className={`rounded px-1.5 py-0.5 font-mono text-[10px] font-semibold ${validCls}`}>
-                      {row.status === 'revoked' ? 'revoked' : d !== null && d < 0 ? `expired ${-d}d ago` : `${d}d left`}
-                    </span>
-                  </td>
-                  <td className="px-2 py-1.5">
-                    {row.status === 'revoked' ? (
-                      <span className="rounded bg-danger/15 px-1.5 py-0.5 text-[10px] font-semibold uppercase text-danger-fg">revoked</span>
-                    ) : (
-                      <span className="rounded bg-success/15 px-1.5 py-0.5 text-[10px] font-semibold uppercase text-success-fg">issued</span>
-                    )}
-                  </td>
-                  {canManage && (
-                    <td className="whitespace-nowrap px-2 py-1.5 text-right">
-                      {row.status !== 'revoked' && (
-                        <>
-                          <button type="button" onClick={() => setInstallRow(row)} title="Download for Windows / Android / iOS / macOS (.p12) or PEM bundle" className="mr-2 inline-flex items-center gap-1 rounded border px-2 py-1 text-[10px] font-medium hover:bg-muted/40">
-                            <Download className="h-3 w-3" /> Download
-                          </button>
-                          <button type="button" onClick={() => void revokeWifi(row)} title="Revoke this certificate" className="inline-flex items-center gap-1 rounded border px-2 py-1 text-[10px] font-medium text-danger-fg hover:bg-danger/10">
-                            Revoke
-                          </button>
-                        </>
-                      )}
-                    </td>
-                  )}
-                </tr>
-              );
-            })}
-          </tbody>
-        </table>
-      </div>
+      <DataTable
+        columns={certColumns}
+        rows={certs}
+        rowKey={(row) => row.serial}
+        storageKey="radius-wifi-certs"
+        searchPlaceholder="Search WiFi client certificates…"
+        emptyMessage="No WiFi client certificates enrolled yet."
+        autoRefresh={{ intervalMs: 60_000, queries: [wifiQuery] }}
+        selectable={canManage}
+        bulkActions={
+          canManage
+            ? [
+                {
+                  label: 'Revoke selected',
+                  confirm: (count) => `Revoke ${count} certificate${count === 1 ? '' : 's'}? They stop working for new EAP-TLS authentications immediately and can no longer be downloaded.`,
+                  enabled: (rows) => rows.some((r) => r.status !== 'revoked'),
+                  onClick: async (selected) => {
+                    const serials = selected.filter((r) => r.status !== 'revoked').map((r) => r.serial);
+                    try {
+                      await api.caRevokeWifiBulk(serials);
+                      void queryClient.invalidateQueries({ queryKey: ['caWifiCerts'] });
+                    } catch (err) {
+                      alert((err as Error).message);
+                    }
+                  },
+                },
+              ]
+            : undefined
+        }
+      />
 
       {renewMutation.isSuccess && (
         <p className="text-xs text-success-fg">Intermediate renewed — now valid until {renewMutation.data.intermediateNotAfter ? new Date(renewMutation.data.intermediateNotAfter).toLocaleDateString() : 'a later date'}.</p>
@@ -611,6 +656,37 @@ function RadiusStatusSection() {
   const status: RadiusStatus | undefined = statusQuery.data;
   const probe = status?.probe ?? null;
   const logRows: RadiusAuthLogRow[] = logQuery.data ?? [];
+
+  const logColumns: DataTableColumn<RadiusAuthLogRow>[] = [
+    {
+      header: 'Time',
+      key: 'authdate',
+      width: 170,
+      sortAccessor: (row) => new Date(row.authdate).getTime(),
+      render: (row) => <span className="text-secondary">{formatDateTime(row.authdate)}</span>,
+    },
+    { header: 'User (cert CN)', key: 'username', width: 200, render: (row) => <span className="font-medium">{row.username}</span> },
+    {
+      header: 'Result',
+      key: 'result',
+      width: 110,
+      render: (row) =>
+        row.result === 'reject' ? (
+          <span className="rounded bg-danger/15 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-danger-fg">rejected</span>
+        ) : row.result === 'accept' ? (
+          <span className="rounded bg-success/15 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-success-fg">accepted</span>
+        ) : (
+          <span className="text-faint">{row.result ?? '—'}</span>
+        ),
+    },
+    {
+      header: 'NAS / client',
+      key: 'calledStationId',
+      width: 240,
+      exportValue: (row) => [row.calledStationId, row.callingStationId].filter(Boolean).join(' / '),
+      render: (row) => <span className="font-mono text-[10px] text-secondary">{[row.calledStationId, row.callingStationId].filter(Boolean).join(' / ') || '—'}</span>,
+    },
+  ];
 
   // Probe chip — ok is the expected steady state (Access-Reject IS healthy).
   const probeChip = !probe ? (
@@ -677,45 +753,15 @@ function RadiusStatusSection() {
         </div>
       </div>
 
-      <div className="overflow-x-auto rounded-lg border">
-        <table className="w-full text-left text-xs">
-          <thead className="bg-background/60 text-[10px] uppercase tracking-wide text-faint">
-            <tr>
-              <th className="px-2 py-1.5 font-medium">Time</th>
-              <th className="px-2 py-1.5 font-medium">User (cert CN)</th>
-              <th className="px-2 py-1.5 font-medium">Result</th>
-              <th className="px-2 py-1.5 font-medium">NAS / client</th>
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-border">
-            {logRows.length === 0 && (
-              <tr>
-                <td colSpan={4} className="px-2 py-3 text-faint">
-                  No auth attempts logged yet{filter !== 'all' ? ` for this filter` : ''}.
-                </td>
-              </tr>
-            )}
-            {logRows.map((row) => (
-              <tr key={row.id}>
-                <td className="whitespace-nowrap px-2 py-1.5 text-secondary">{formatDateTime(row.authdate)}</td>
-                <td className="px-2 py-1.5 font-medium">{row.username}</td>
-                <td className="px-2 py-1.5">
-                  {row.result === 'reject' ? (
-                    <span className="rounded bg-danger/15 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-danger-fg">rejected</span>
-                  ) : row.result === 'accept' ? (
-                    <span className="rounded bg-success/15 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-success-fg">accepted</span>
-                  ) : (
-                    <span className="text-faint">{row.result ?? '—'}</span>
-                  )}
-                </td>
-                <td className="whitespace-nowrap px-2 py-1.5 font-mono text-[10px] text-secondary">
-                  {[row.calledStationId, row.callingStationId].filter(Boolean).join(' / ') || '—'}
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
+      <DataTable
+        columns={logColumns}
+        rows={logRows}
+        rowKey={(row) => String(row.id)}
+        storageKey="radius-auth-log"
+        searchPlaceholder="Search auth attempts…"
+        emptyMessage={`No auth attempts logged yet${filter !== 'all' ? ` for this filter` : ''}.`}
+        autoRefresh={{ intervalMs: 30_000, queries: [logQuery] }}
+      />
     </section>
   );
 }
@@ -733,6 +779,7 @@ function RadiusStatusSection() {
  * missing plugin).
  */
 function RadiusNasClientsSection() {
+  const queryClient = useQueryClient();
   const canRead = can('radius:read');
   const canWrite = can('radius:write');
 
@@ -762,6 +809,47 @@ function RadiusNasClientsSection() {
   const clients = clientsQuery.data ?? [];
   const secrets: Secret[] = secretsQuery.data ?? [];
 
+  const clientColumns: DataTableColumn<RadiusNasClient>[] = [
+    { header: 'Name', key: 'name', width: 180, exportValue: (row) => row.name ?? '', render: (row) => <span className="font-medium">{row.name || <span className="text-faint">—</span>}</span> },
+    { header: 'IP address', key: 'ip', width: 160, render: (row) => <span className="font-mono text-[11px]">{row.ip}</span> },
+    {
+      header: 'Shared secret',
+      key: 'secretLabel',
+      width: 220,
+      exportValue: (row) => row.secretLabel ?? '',
+      render: (row) =>
+        row.secretId ? (
+          <span className="inline-flex items-center gap-1.5" title={row.secretType ?? undefined}>
+            <KeyRound className="h-3 w-3 text-faint" />
+            <span>{row.secretLabel || row.secretId}</span>
+            {row.secretType && <span className="rounded bg-muted px-1 py-0.5 font-mono text-[9px] uppercase tracking-wide text-secondary">{row.secretType}</span>}
+          </span>
+        ) : (
+          <span className="rounded bg-warning/15 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-warning-fg">no secret</span>
+        ),
+    },
+    ...(canWrite
+      ? [
+          {
+            header: 'Actions',
+            key: 'actions',
+            width: 160,
+            sortable: false,
+            filterable: false,
+            excludeFromExport: true,
+            render: (row: RadiusNasClient) => (
+              <div className="flex items-center justify-end gap-2">
+                <button type="button" onClick={() => setDialog({ mode: 'edit', row })} title="Edit this NAS client" className="rounded border px-2 py-1 text-[10px] font-medium hover:bg-muted/40">
+                  Edit
+                </button>
+                <RadiusDeleteButton id={row.id} label={`${row.name || row.ip}`} />
+              </div>
+            ),
+          },
+        ]
+      : []),
+  ];
+
   return (
     <section className="mb-6 space-y-3">
       <div className="flex flex-wrap items-center justify-between gap-2">
@@ -784,48 +872,34 @@ function RadiusNasClientsSection() {
         without a restart. A localhost entry with a stable dev secret is always present for testing.
       </p>
 
-      <div className="overflow-x-auto rounded-lg border">
-        <table className="w-full text-left text-xs">
-          <thead className="bg-background/60 text-[10px] uppercase tracking-wide text-faint">
-            <tr>
-              <th className="px-2 py-1.5 font-medium">Name</th>
-              <th className="px-2 py-1.5 font-medium">IP address</th>
-              <th className="px-2 py-1.5 font-medium">Shared secret</th>
-              {canWrite && <th className="px-2 py-1.5 font-medium text-right">Actions</th>}
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-border">
-            {clients.length === 0 && (
-              <tr><td colSpan={canWrite ? 4 : 3} className="px-2 py-3 text-faint">No NAS clients configured yet.</td></tr>
-            )}
-            {clients.map((row) => (
-              <tr key={row.id}>
-                <td className="px-2 py-1.5 font-medium">{row.name || <span className="text-faint">—</span>}</td>
-                <td className="whitespace-nowrap px-2 py-1.5 font-mono text-[11px]">{row.ip}</td>
-                <td className="px-2 py-1.5">
-                  {row.secretId ? (
-                    <span className="inline-flex items-center gap-1.5" title={row.secretType ?? undefined}>
-                      <KeyRound className="h-3 w-3 text-faint" />
-                      <span>{row.secretLabel || row.secretId}</span>
-                      {row.secretType && <span className="rounded bg-muted px-1 py-0.5 font-mono text-[9px] uppercase tracking-wide text-secondary">{row.secretType}</span>}
-                    </span>
-                  ) : (
-                    <span className="rounded bg-warning/15 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-warning-fg">no secret</span>
-                  )}
-                </td>
-                {canWrite && (
-                  <td className="whitespace-nowrap px-2 py-1.5 text-right">
-                    <button type="button" onClick={() => setDialog({ mode: 'edit', row })} title="Edit this NAS client" className="mr-2 rounded border px-2 py-1 text-[10px] font-medium hover:bg-muted/40">
-                      Edit
-                    </button>
-                    <RadiusDeleteButton id={row.id} label={`${row.name || row.ip}`} />
-                  </td>
-                )}
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
+      <DataTable
+        columns={clientColumns}
+        rows={clients}
+        rowKey={(row) => row.id}
+        storageKey="radius-nas-clients"
+        searchPlaceholder="Search NAS clients…"
+        emptyMessage="No NAS clients configured yet."
+        autoRefresh={{ intervalMs: 60_000, queries: [clientsQuery] }}
+        selectable={canWrite}
+        bulkActions={
+          canWrite
+            ? [
+                {
+                  label: 'Remove selected',
+                  confirm: (count) => `Remove ${count} NAS client${count === 1 ? '' : 's'}? They will no longer be able to authenticate.`,
+                  onClick: async (selected) => {
+                    try {
+                      await api.radiusNasClientBulkDelete(selected.map((r) => r.id));
+                      void queryClient.invalidateQueries({ queryKey: ['radiusNasClients'] });
+                    } catch (err) {
+                      alert((err as Error).message);
+                    }
+                  },
+                },
+              ]
+            : undefined
+        }
+      />
 
       {dialog && (
         <RadiusNasClientDialog
@@ -941,6 +1015,7 @@ function RadiusNasClientDialog({ initial, secrets, onClose }: { initial: RadiusN
 
 /** Per-user RADIUS reply profiles (VLAN / static IP / session limits) — keyed by client cert serial. */
 function RadiusUserProfilesSection() {
+  const queryClient = useQueryClient();
   const canRead = can('radius:read');
   const canWrite = can('radius:write');
 
@@ -970,6 +1045,73 @@ function RadiusUserProfilesSection() {
   const profiles = profilesQuery.data ?? [];
   const wifiCerts: WifiClientCert[] = (wifiCertsQuery.data?.certificates ?? []).filter((c) => c.status === 'issued');
 
+  const profileColumns: DataTableColumn<RadiusUserProfile>[] = [
+    {
+      header: 'Certificate',
+      key: 'certName',
+      width: 200,
+      exportValue: (row) => row.certName ?? row.name ?? row.serial,
+      render: (row) => (
+        <div>
+          <div className="font-medium">{row.certName || row.name || 'unknown cert'}</div>
+          <div className="font-mono text-[10px] text-faint" title={`serial ${row.serial}`}>{row.serial.slice(0, 24)}…</div>
+        </div>
+      ),
+    },
+    {
+      header: 'VLAN',
+      key: 'vlanId',
+      width: 90,
+      render: (row) =>
+        row.vlanId ? (
+          <span className="rounded bg-primary/10 px-1.5 py-0.5 font-mono text-[10px] font-semibold text-primary">{row.vlanId}</span>
+        ) : (
+          <span className="text-faint">—</span>
+        ),
+    },
+    {
+      header: 'Static IP',
+      key: 'framedIp',
+      width: 180,
+      exportValue: (row) => [row.framedIp, row.framedIpv6].filter(Boolean).join(' / '),
+      render: (row) => <span className="font-mono text-[11px]">{[row.framedIp, row.framedIpv6].filter(Boolean).join(' / ') || <span className="text-faint">—</span>}</span>,
+    },
+    {
+      header: 'Session limits',
+      key: 'sessionTimeoutSec',
+      width: 170,
+      exportValue: (row) => [row.sessionTimeoutSec ? `re-auth ${Math.round(row.sessionTimeoutSec / 60)}m` : null, row.idleTimeoutSec ? `idle ${Math.round(row.idleTimeoutSec / 60)}m` : null].filter(Boolean).join(' · '),
+      render: (row) => (
+        <span className="text-[11px]">
+          {row.sessionTimeoutSec ? `re-auth ${Math.round(row.sessionTimeoutSec / 60)}m` : null}
+          {row.sessionTimeoutSec && row.idleTimeoutSec ? ' · ' : ''}
+          {row.idleTimeoutSec ? `idle ${Math.round(row.idleTimeoutSec / 60)}m` : null}
+          {!row.sessionTimeoutSec && !row.idleTimeoutSec ? <span className="text-faint">—</span> : null}
+        </span>
+      ),
+    },
+    ...(canWrite
+      ? [
+          {
+            header: 'Actions',
+            key: 'actions',
+            width: 160,
+            sortable: false,
+            filterable: false,
+            excludeFromExport: true,
+            render: (row: RadiusUserProfile) => (
+              <div className="flex items-center justify-end gap-2">
+                <button type="button" onClick={() => setDialog({ mode: 'edit', row })} title="Edit this profile" className="rounded border px-2 py-1 text-[10px] font-medium hover:bg-muted/40">
+                  Edit
+                </button>
+                <RadiusProfileDeleteButton id={row.id} label={row.certName || row.name || row.serial.slice(0, 16)} />
+              </div>
+            ),
+          },
+        ]
+      : []),
+  ];
+
   return (
     <section className="mb-6 space-y-3">
       <div className="flex flex-wrap items-center justify-between gap-2">
@@ -992,56 +1134,34 @@ function RadiusUserProfilesSection() {
         session only, on top of whatever the NAS would assign otherwise. No profile = plain access.
       </p>
 
-      <div className="overflow-x-auto rounded-lg border">
-        <table className="w-full text-left text-xs">
-          <thead className="bg-background/60 text-[10px] uppercase tracking-wide text-faint">
-            <tr>
-              <th className="px-2 py-1.5 font-medium">Certificate</th>
-              <th className="px-2 py-1.5 font-medium">VLAN</th>
-              <th className="px-2 py-1.5 font-medium">Static IP</th>
-              <th className="px-2 py-1.5 font-medium">Session limits</th>
-              {canWrite && <th className="px-2 py-1.5 font-medium text-right">Actions</th>}
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-border">
-            {profiles.length === 0 && (
-              <tr><td colSpan={canWrite ? 5 : 4} className="px-2 py-3 text-faint">No user profiles configured — all clients get plain access.</td></tr>
-            )}
-            {profiles.map((row) => (
-              <tr key={row.id}>
-                <td className="px-2 py-1.5">
-                  <div className="font-medium">{row.certName || row.name || 'unknown cert'}</div>
-                  <div className="font-mono text-[10px] text-faint" title={`serial ${row.serial}`}>{row.serial.slice(0, 24)}…</div>
-                </td>
-                <td className="whitespace-nowrap px-2 py-1.5">
-                  {row.vlanId ? (
-                    <span className="rounded bg-primary/10 px-1.5 py-0.5 font-mono text-[10px] font-semibold text-primary">{row.vlanId}</span>
-                  ) : (
-                    <span className="text-faint">—</span>
-                  )}
-                </td>
-                <td className="whitespace-nowrap px-2 py-1.5 font-mono text-[11px]">
-                  {[row.framedIp, row.framedIpv6].filter(Boolean).join(' / ') || <span className="text-faint">—</span>}
-                </td>
-                <td className="whitespace-nowrap px-2 py-1.5 text-[11px]">
-                  {row.sessionTimeoutSec ? `re-auth ${Math.round(row.sessionTimeoutSec / 60)}m` : null}
-                  {row.sessionTimeoutSec && row.idleTimeoutSec ? ' · ' : ''}
-                  {row.idleTimeoutSec ? `idle ${Math.round(row.idleTimeoutSec / 60)}m` : null}
-                  {!row.sessionTimeoutSec && !row.idleTimeoutSec ? <span className="text-faint">—</span> : null}
-                </td>
-                {canWrite && (
-                  <td className="whitespace-nowrap px-2 py-1.5 text-right">
-                    <button type="button" onClick={() => setDialog({ mode: 'edit', row })} title="Edit this profile" className="mr-2 rounded border px-2 py-1 text-[10px] font-medium hover:bg-muted/40">
-                      Edit
-                    </button>
-                    <RadiusProfileDeleteButton id={row.id} label={row.certName || row.name || row.serial.slice(0, 16)} />
-                  </td>
-                )}
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
+      <DataTable
+        columns={profileColumns}
+        rows={profiles}
+        rowKey={(row) => row.id}
+        storageKey="radius-user-profiles"
+        searchPlaceholder="Search user profiles…"
+        emptyMessage="No user profiles configured — all clients get plain access."
+        autoRefresh={{ intervalMs: 60_000, queries: [profilesQuery] }}
+        selectable={canWrite}
+        bulkActions={
+          canWrite
+            ? [
+                {
+                  label: 'Remove selected',
+                  confirm: (count) => `Remove ${count} profile${count === 1 ? '' : 's'}? The affected clients will get plain access again.`,
+                  onClick: async (selected) => {
+                    try {
+                      await api.radiusUserProfileBulkDelete(selected.map((r) => r.id));
+                      void queryClient.invalidateQueries({ queryKey: ['radiusUserProfiles'] });
+                    } catch (err) {
+                      alert((err as Error).message);
+                    }
+                  },
+                },
+              ]
+            : undefined
+        }
+      />
 
       {dialog && (
         <RadiusUserProfileDialog

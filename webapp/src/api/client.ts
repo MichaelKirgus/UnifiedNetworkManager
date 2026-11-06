@@ -4590,6 +4590,10 @@ export const api = {
   /** Revoke a WiFi client cert by serial (CA-first, then registries). Idempotent. */
   caRevokeWifi: (serial: string) =>
     apiFetch<{ serial: string; caStatus: number }>(`/ca/wifi-certs/${encodeURIComponent(serial)}/revoke`, { method: 'POST' }),
+  /** Revoke many WiFi client certs in one call. Already-revoked = no-op, unknown
+   *  serials reported in `missing`; per-serial CA failures land in `failed`. */
+  caRevokeWifiBulk: (serials: string[]) =>
+    apiFetch<{ revoked: number; alreadyRevoked: number; failed: Array<{ serial: string; error: string }>; missing: string[] }>('/ca/wifi-certs/bulk-revoke', { method: 'POST', body: JSON.stringify({ serials }) }),
   /** Trigger an intermediate CA renewal now (same key, clamped to root expiry −7d). */
   caRenewIntermediate: () =>
     apiFetch<{ renewed: boolean; intermediateNotAfter?: string }>('/ca/renew-intermediate', { method: 'POST' }),
@@ -4605,6 +4609,9 @@ export const api = {
   /** Remove a NAS client. */
   radiusNasClientDelete: (id: string) =>
     apiFetch<void>(`/radius/nas-clients/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+  /** Remove many NAS clients in one call; unknown ids reported in `missing`. */
+  radiusNasClientBulkDelete: (ids: string[]) =>
+    apiFetch<{ deleted: number; missing: string[] }>('/radius/nas-clients/bulk-delete', { method: 'POST', body: JSON.stringify({ ids }) }),
   // --- RADIUS per-user reply profiles (VLAN / static IP / session limits) ----
   /** List per-user RADIUS reply profiles (+ resolved cert name). */
   radiusUserProfiles: () => apiFetch<RadiusUserProfile[]>('/radius/user-profiles'),
@@ -4632,6 +4639,9 @@ export const api = {
   /** Remove a profile. */
   radiusUserProfileDelete: (id: string) =>
     apiFetch<void>(`/radius/user-profiles/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+  /** Remove many profiles in one call; unknown ids reported in `missing`. */
+  radiusUserProfileBulkDelete: (ids: string[]) =>
+    apiFetch<{ deleted: number; missing: string[] }>('/radius/user-profiles/bulk-delete', { method: 'POST', body: JSON.stringify({ ids }) }),
   // --- RADIUS self-monitoring + auth log ------------------------------------
   /** Latest probe outcome of the sidecar (+ 24h accept/reject counters). */
   radiusStatus: () => apiFetch<RadiusStatus>('/radius/status'),

@@ -14,6 +14,7 @@ import { requireAuth, requirePermission } from '../auth/middleware';
  *   POST   /radius/nas-clients      -> add one { name?, ip, secretId? }
  *   PATCH  /radius/nas-clients/:id  -> update name / ip / secretId (null clears the secret)
  *   DELETE /radius/nas-clients/:id  -> remove one
+ *   POST   /radius/nas-clients/bulk-delete -> remove many { ids: string[] } in one call
  *
  * The shared secret is NEVER stored here — each row references a secrets.id
  * (same pattern as device_plugins.secretId). At render time api/src/radius/
@@ -227,7 +228,40 @@ router.delete(
     res.status(204).send();
   }
 );
-/**
+// POST /radius/nas-clients/bulk-delete — remove many NAS clients in one call.
+// Body: { ids: string[] }. The webapp selection bar sends the current selection;
+// unknown ids are reported (never fatal), at most 500 per call. A single raddb
+// re-render follows so the whole batch hot-applies with ONE SIGHUP instead of N.
+router.post(
+  '/radius/nas-clients/bulk-delete',
+  requireAuth,
+  requirePermission('radius:write'),
+  async (req: Request, res: Response) => {
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    const ids = Array.isArray(body.ids)
+      ? (body.ids as unknown[]).filter((x): x is string => typeof x === 'string' && !!x.trim())
+      : [];
+    if (ids.length === 0) {
+      res.status(400).json({ error: '"ids" must be a non-empty array of NAS client ids' });
+      return;
+    }
+    if (ids.length > 500) {
+      res.status(400).json({ error: 'At most 500 ids per bulk delete' });
+      return;
+    }
+
+    const unique = Array.from(new Set(ids.map((s) => s.trim())));
+    const existing = await db.query.radiusNasClients.findMany({ where: inArray(schema.radiusNasClients.id, unique) });
+    const foundIds = new Set(existing.map((r) => r.id));
+    const missing = ids.filter((id) => !foundIds.has(id.trim()));
+
+    if (existing.length > 0) {
+      await db.delete(schema.radiusNasClients).where(inArray(schema.radiusNasClients.id, Array.from(foundIds)));
+      await rerender();
+    }
+    res.status(200).json({ deleted: existing.length, missing });
+  }
+);/**
  * Per-user RADIUS reply profiles (VLAN / static IP / session limits) keyed by
  * client cert serial. The exec script reads this table at auth time and prints
  * the set fields as reply attributes — see radiusConfig.renderUserProfileScript.
@@ -236,6 +270,7 @@ router.delete(
  *   POST   /radius/user-profiles      -> add one { serial, ...fields }
  *   PATCH  /radius/user-profiles/:id  -> update fields (null clears a field)
  *   DELETE /radius/user-profiles/:id  -> remove one
+ *   POST   /radius/user-profiles/bulk-delete -> remove many { ids: string[] } in one call
  */
 export interface RadiusUserProfileView {
   id: string;
@@ -440,7 +475,39 @@ router.delete(
     res.status(204).send();
   }
 );
+// POST /radius/user-profiles/bulk-delete — remove many profiles in one call.
+// Body: { ids: string[] }. Same contract as the NAS-client bulk delete: unknown
+// ids reported (never fatal), at most 500 per call, ONE raddb re-render after.
+router.post(
+  '/radius/user-profiles/bulk-delete',
+  requireAuth,
+  requirePermission('radius:write'),
+  async (req: Request, res: Response) => {
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    const ids = Array.isArray(body.ids)
+      ? (body.ids as unknown[]).filter((x): x is string => typeof x === 'string' && !!x.trim())
+      : [];
+    if (ids.length === 0) {
+      res.status(400).json({ error: '"ids" must be a non-empty array of profile ids' });
+      return;
+    }
+    if (ids.length > 500) {
+      res.status(400).json({ error: 'At most 500 ids per bulk delete' });
+      return;
+    }
 
+    const unique = Array.from(new Set(ids.map((s) => s.trim())));
+    const existing = await db.query.radiusUserProfiles.findMany({ where: inArray(schema.radiusUserProfiles.id, unique) });
+    const foundIds = new Set(existing.map((r) => r.id));
+    const missing = ids.filter((id) => !foundIds.has(id.trim()));
+
+    if (existing.length > 0) {
+      await db.delete(schema.radiusUserProfiles).where(inArray(schema.radiusUserProfiles.id, Array.from(foundIds)));
+      await rerender();
+    }
+    res.status(200).json({ deleted: existing.length, missing });
+  }
+);
 /**
  * RADIUS self-monitoring + auth log (unsuccessful-login audit trail).
  *

@@ -7693,6 +7693,60 @@ paths:
         '502':
           description: CA unreachable — revocation NOT applied
 
+  /ca/wifi-certs/bulk-revoke:
+    post:
+      tags: [Certificate Authority]
+      summary: Revoke many WiFi (EAP-TLS) client certificates in one call
+      description: >-
+        Bulk variant of the single-serial revoke. Each serial follows the same
+        CA-first flow (step-ca marks it revoked, then UNM mirrors into both
+        registries + the per-auth revoked_serials list). Already-revoked rows
+        count as no-ops; unknown serials are reported in `missing`, never fatal.
+        At most 500 serials per call. If the CA is unreachable for EVERY serial
+        nothing is applied and the route answers 502; otherwise it answers 200
+        with a per-serial `failed` list so one bad cert does not hide the rest.
+        Requires permission `ca:manage`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [serials]
+              properties:
+                serials:
+                  type: array
+                  items: { type: string }
+                  description: Hex certificate serials (no 0x prefix)
+      responses:
+        '200':
+          description: Revocation applied for the resolvable serials
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  revoked: { type: integer, description: Serials newly revoked (CA + registries) }
+                  alreadyRevoked: { type: integer, description: Serials that were already revoked (no-op) }
+                  failed:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        serial: { type: string }
+                        error: { type: string }
+                  missing:
+                    type: array
+                    items: { type: string }
+        '400':
+          description: Empty or oversized serial list, or invalid payload
+        '401':
+          description: Authentication required
+        '403':
+          description: Missing ca:manage permission
+        '502':
+          description: CA unreachable for every serial — revocation NOT applied
+
   /ca/wifi-certs/{serial}/download:
     get:
       tags: [Certificate Authority]
@@ -7903,6 +7957,46 @@ paths:
         '404':
           description: NAS client not found
 
+  /radius/nas-clients/bulk-delete:
+    post:
+      tags: [Radius]
+      summary: Remove many RADIUS NAS clients in one call
+      description: >-
+        Bulk variant of the single-row delete. Unknown ids are reported in
+        `missing`, never fatal; at most 500 ids per call. A single raddb re-render
+        follows so the whole batch hot-applies with ONE SIGHUP instead of N.
+        Requires permission `radius:write`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [ids]
+              properties:
+                ids:
+                  type: array
+                  items: { type: string }
+                  description: NAS client row ids to remove
+      responses:
+        '200':
+          description: Deletion applied
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  deleted: { type: integer, description: Rows actually removed }
+                  missing:
+                    type: array
+                    items: { type: string }
+        '400':
+          description: Empty or oversized id list
+        '401':
+          description: Authentication required
+        '403':
+          description: Missing radius:write permission
+
   /radius/user-profiles:
     get:
       tags: [Radius]
@@ -8009,6 +8103,46 @@ paths:
           description: Missing radius:write permission
         '404':
           description: Profile not found
+
+  /radius/user-profiles/bulk-delete:
+    post:
+      tags: [Radius]
+      summary: Remove many per-user RADIUS reply profiles in one call
+      description: >-
+        Bulk variant of the single-row delete. Unknown ids are reported in
+        `missing`, never fatal; at most 500 ids per call. A single raddb re-render
+        follows so the whole batch hot-applies with ONE SIGHUP instead of N.
+        Requires permission `radius:write`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [ids]
+              properties:
+                ids:
+                  type: array
+                  items: { type: string }
+                  description: Profile row ids to remove
+      responses:
+        '200':
+          description: Deletion applied
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  deleted: { type: integer, description: Rows actually removed }
+                  missing:
+                    type: array
+                    items: { type: string }
+        '400':
+          description: Empty or oversized id list
+        '401':
+          description: Authentication required
+        '403':
+          description: Missing radius:write permission
 
   /radius/status:
     get:
