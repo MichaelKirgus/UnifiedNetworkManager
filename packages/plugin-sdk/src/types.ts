@@ -124,6 +124,15 @@ export const CAPABILITIES = [
   // the GeoIP worker to pull database files into the file repository (and available
   // to any future web-data feature).
   'webFetch',
+  // Manages a RADIUS server (FreeRADIUS) for WiFi EAP-TLS authentication — the
+  // consumer of UNM's CA-issued client certificates (POST /ca/enroll). The
+  // Certificates page gates its "WiFi (EAP-TLS) client certificates" section on
+  // at least one plugin advertising this capability. The plugin owns config
+  // management (reload/restart/test-auth actions), monitoring (auth counters,
+  // active sessions) and accounting visibility; the API renders the server's
+  // config from settings + CA state into a shared volume. Advertise when /discover
+  // carries radius-management actions in `actions`.
+  'radius',
 ] as const;
 export type PluginCapability = (typeof CAPABILITIES)[number];
 
