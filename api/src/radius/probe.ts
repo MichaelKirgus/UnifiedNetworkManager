@@ -62,7 +62,9 @@ const RADIUS_CODE_ACCESS_REJECT = 3;
  * a plain PAP request is processed deterministically: no local user matches,
  * so it always ends in Access-Reject — which is exactly what we want to see.
  */
-function buildAccessRequest(identifier: number, secret: string, username: string): Buffer {
+// Exported for unit tests (probe.test.ts) — the packet layout is verified there
+// against an independent re-implementation of RFC 2865 §5.1/§5.3.
+export function buildAccessRequest(identifier: number, secret: string, username: string): Buffer {
   const auth1 = crypto.randomBytes(16);
   // Attributes: type(1) length(1) value(n). User-Name=1, User-Password=2.
   const userAttr = Buffer.concat([Buffer.from([1, username.length + 2]), Buffer.from(username, 'utf8')]);
@@ -99,7 +101,9 @@ function buildAccessRequest(identifier: number, secret: string, username: string
  * drift still surfaces as `timeout` — radiusd drops requests whose Request
  * Authenticator fails verification and sends no reply at all.
  */
-function verifyResponse(packet: Buffer): number | null {
+// Exported for unit tests (probe.test.ts) — including the RFC 2865 §5.1
+// zeroed-Authenticator regression (a spec-compliant reject must classify ok).
+export function verifyResponse(packet: Buffer): number | null {
   if (packet.length < 20) return null;
   // The Length field must match the actual datagram size (RFC 2865 §5.1).
   if (packet.readUInt16BE(2) !== packet.length) return null;
