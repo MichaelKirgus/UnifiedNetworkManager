@@ -40,6 +40,7 @@ import {
   runTargetSync,
   upsertTarget,
 } from '../replication';
+import { rerenderRadiusConfig } from '../radius/mutations';
 
 /**
  * Backup / restore routes (Backups page).
@@ -344,18 +345,35 @@ backupsRouter.delete('/backups/restore/pending/:pendingId', requireAuth, require
 // Replication — peer-facing endpoints + target management
 // ---------------------------------------------------------------------------
 
-// POST /replication/inbound — receive a push from a peer instance. Body: { manifest, data }.
-// Applies the SAME safe merge as restore; only portable sections are accepted (400 otherwise).
+// POST /replication/inbound — receive a push from a peer instance.
+// Body: { manifest, data, caRootPem?, secretsPassphrase? }. Applies the SAME safe
+// merge as restore; only portable sections are accepted (400 otherwise) — except
+// `secrets`, which is allowed when the sender provides the envelope passphrase
+// (RADIUS failover slaves need the NAS shared secrets to authenticate identically).
 backupsRouter.post('/replication/inbound', requireAuth, requirePermission('instance:backup'), async (req: Request, res: Response) => {
-  const body = (req.body ?? {}) as { manifest?: unknown; data?: Record<string, Record<string, unknown[]>> };
+  const body = (req.body ?? {}) as { manifest?: unknown; data?: Record<string, Record<string, unknown[]>>; caRootPem?: unknown; secretsPassphrase?: unknown };
   if (!body.manifest || typeof body.manifest !== 'object' || !body.data || typeof body.data !== 'object') {
     res.status(400).json({ error: 'Body must be a backup archive { manifest, data } (see GET /replication/export)' });
     return;
   }
   try {
     const sections = Object.keys(body.data);
-    assertPortableSections(sections); // liveInventory & co. are rejected with 400
-    const reports = await applyArchive({ manifest: body.manifest as BackupArchive['manifest'], data: body.data });
+    assertPortableSections(sections.filter((s) => s !== 'secrets')); // liveInventory & co. are rejected with 400
+    const passphrase = typeof body.secretsPassphrase === 'string' ? body.secretsPassphrase : '';
+    if (sections.includes('secrets') && !passphrase) {
+      res.status(400).json({ error: 'The "secrets" section requires secretsPassphrase in the request body' });
+      return;
+    }
+    const reports = await applyArchive(
+      { manifest: body.manifest as BackupArchive['manifest'], data: body.data, ...(typeof body.caRootPem === 'string' ? { caRootPem: body.caRootPem } : {}) },
+      { passphrase: passphrase || undefined },
+    );
+    // RADIUS failover: merged NAS clients / profiles / revocations (and an adopted
+    // CA root) only take effect once the raddb files are re-rendered — do it now,
+    // not on the next local mutation. The sidecar watches mtimes and SIGHUPs radiusd.
+    if (sections.includes('radius') || sections.includes('secrets')) {
+      void rerenderRadiusConfig();
+    }
     res.status(200).json({ report: reports, receivedAt: new Date().toISOString() });
   } catch (err) {
     return sendError(res, err);
@@ -384,8 +402,8 @@ backupsRouter.get('/replication/targets', requireAuth, requirePermission('instan
   }
 });
 
-// POST /replication/targets — create a target. Body: { name, baseUrl, token, direction?, enabled?, intervalMinutes?, excludeKeys? }.
-backupsRouter.post('/replication/targets', requireAuth, requirePermission('instance:backup'), async (req: Request, res: Response) => {
+// POST /replication/targets — create a target. Body: { name, baseUrl, token, direction?, enabled?, intervalMinutes?, excludeKeys?, sections?, includeSecrets?, secretsPassphrase? }.
+backupsRouter.post('/replication/targets', requireAuth, requirePermission('instance:backup'), async (req, res) => {
   try {
     const body = (req.body ?? {}) as Record<string, unknown>;
     const target = await upsertTarget({
@@ -396,6 +414,9 @@ backupsRouter.post('/replication/targets', requireAuth, requirePermission('insta
       enabled: typeof body.enabled === 'boolean' ? body.enabled : undefined,
       intervalMinutes: body.intervalMinutes == null ? null : Number(body.intervalMinutes),
       excludeKeys: Array.isArray(body.excludeKeys) ? (body.excludeKeys as unknown[]).filter((k): k is string => typeof k === 'string') : undefined,
+      sections: Array.isArray(body.sections) ? (body.sections as unknown[]).filter((s): s is string => typeof s === 'string') : null,
+      includeSecrets: typeof body.includeSecrets === 'boolean' ? body.includeSecrets : undefined,
+      secretsPassphrase: typeof body.secretsPassphrase === 'string' || body.secretsPassphrase === null ? (body.secretsPassphrase as string | null) : undefined,
     });
     res.status(201).json({ target });
   } catch (err) {
@@ -421,6 +442,9 @@ backupsRouter.patch('/replication/targets/:id', requireAuth, requirePermission('
         enabled: typeof body.enabled === 'boolean' ? body.enabled : undefined,
         intervalMinutes: body.intervalMinutes == null ? null : Number(body.intervalMinutes),
         excludeKeys: Array.isArray(body.excludeKeys) ? (body.excludeKeys as unknown[]).filter((k): k is string => typeof k === 'string') : undefined,
+        sections: Array.isArray(body.sections) ? (body.sections as unknown[]).filter((s): s is string => typeof s === 'string') : null,
+        includeSecrets: typeof body.includeSecrets === 'boolean' ? body.includeSecrets : undefined,
+        secretsPassphrase: typeof body.secretsPassphrase === 'string' || body.secretsPassphrase === null ? (body.secretsPassphrase as string | null) : undefined,
       },
       id,
     );

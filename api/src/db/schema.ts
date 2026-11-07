@@ -295,6 +295,17 @@ export const radiusProbeClient = pgTable('radius_probe_client', {
   createdAt: text('createdAt').notNull(),
 });
 
+// Revoked WiFi client cert serials — the per-auth revocation list FreeRADIUS
+// checks via radius-user-profile.sh (step-ca has no CRL endpoint). Dual-defined
+// with the raw DDL in db.ts initDb (schema-bootstrap pattern): existing DBs get
+// it from initDb before drizzle-kit push runs, so push never sees a "created"
+// diff. Replicated to RADIUS failover slaves via the portable `radius` section.
+export const revokedSerials = pgTable('revoked_serials', {
+  serial: text('serial').primaryKey(),
+  subject: text('subject').notNull().default(''),
+  revokedAt: text('revokedAt').notNull(),
+});
+
 // RADIUS authentication log — one row per completed auth attempt (ACCEPT and
 // REJECT), written by rlm_sql's postauth_query from the EAP-TLS site. This is
 // the unsuccessful-login audit trail; the radiusMonitor worker turns fresh
@@ -2618,6 +2629,18 @@ export const replicationTargets = pgTable(
     // section during sync — stack-dependent values that must stay per-instance
     // (instanceName, updateFeedUrl, …). Defaults are applied at creation time.
     excludeKeys: text('excludeKeys').notNull().default('[]'),
+    // JSON string array of backup sections to sync; NULL/empty = all portable
+    // sections. Lets a target carry only what it needs — e.g. a RADIUS failover
+    // slave uses ["radius"] (+ the secrets envelope when includeSecrets is on).
+    sections: text('sections'),
+    // Ship the passphrase-encrypted `secrets` section too (NAS shared secrets,
+    // device credentials, …). Push direction only — wrapping needs a passphrase
+    // that lives on THIS instance's target row. Requires secretsPassphrase.
+    includeSecrets: boolean('includeSecrets').notNull().default(false),
+    // Passphrase for the secrets envelope (plaintext in DB like `token` — peer
+    // trust already implies admin; never returned by list responses). Used to
+    // wrap on push and passed to the peer's /replication/inbound for unwrapping.
+    secretsPassphrase: text('secretsPassphrase'),
     lastSyncAt: text('lastSyncAt'),
     // 'ok' | 'error' — plus the human-readable failure in `lastError`.
     lastSyncStatus: text('lastSyncStatus'),

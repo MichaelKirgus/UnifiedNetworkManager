@@ -2088,9 +2088,23 @@ await pool.query(`ALTER TABLE flow_micro ADD COLUMN IF NOT EXISTS "agentCount" I
       "lastSyncStatus" TEXT,
       "lastError" TEXT,
       "lastReport" TEXT NOT NULL DEFAULT '{}',
-      "createdAt" TEXT NOT NULL
+      "createdAt" TEXT NOT NULL,
+      -- RADIUS-failover replication (see docs/RADIUS-FAILOVER.md): which backup
+      -- sections this target syncs (NULL/empty = all portable), whether the
+      -- passphrase-encrypted secrets envelope is included (push-only), and the
+      -- wrapping passphrase itself (never returned by list endpoints).
+      "sections" TEXT,
+      "includeSecrets" BOOLEAN NOT NULL DEFAULT FALSE,
+      "secretsPassphrase" TEXT
     )`);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_replication_targets_enabled ON replication_targets (enabled)`);
+  // Additive columns for pre-existing databases (drizzle push is not a reliable
+  // migration path on live DBs — see the schema-bootstrap notes).
+  await pool.query(`ALTER TABLE replication_targets ADD COLUMN IF NOT EXISTS "sections" TEXT`);
+  await pool.query(
+    `ALTER TABLE replication_targets ADD COLUMN IF NOT EXISTS "includeSecrets" BOOLEAN NOT NULL DEFAULT FALSE`
+  );
+  await pool.query(`ALTER TABLE replication_targets ADD COLUMN IF NOT EXISTS "secretsPassphrase" TEXT`);
 
   // Actions & Schedules (automation engine) — see schema.automations /
   // automationRuns / automationState. Trigger and action blocks are opaque JSON

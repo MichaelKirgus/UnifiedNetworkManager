@@ -71,7 +71,7 @@ const PENDING_DIR = path.join(BACKUP_DIR, '.pending');
 // Sections & presets
 // ---------------------------------------------------------------------------
 
-export const SECTION_KEYS = ['identity', 'settings', 'devices', 'documented', 'plans', 'automations', 'secrets', 'liveInventory'] as const;
+export const SECTION_KEYS = ['identity', 'settings', 'devices', 'documented', 'plans', 'automations', 'radius', 'secrets', 'liveInventory'] as const;
 export type SectionKey = (typeof SECTION_KEYS)[number];
 
 /** Presets are just bundles of sections. `secrets` is deliberately in NO preset —
@@ -82,9 +82,11 @@ export const PRESETS: Record<string, readonly string[]> = {
   all: [...SECTION_KEYS],
 };
 
-/** Sections that may cross instance boundaries via replication (no live inventory,
- *  no secrets — credentials only travel in an explicit, passphrase-encrypted backup). */
-export const PORTABLE_SECTIONS: readonly SectionKey[] = ['identity', 'settings', 'devices', 'documented', 'plans', 'automations'];
+/** Sections that may cross instance boundaries via replication (no live inventory.
+ *  `radius` carries the RADIUS failover state — NAS allowlist, per-user reply
+ *  profiles and the revocation list; shared secrets still travel only in the
+ *  explicit passphrase-encrypted envelope). */
+export const PORTABLE_SECTIONS: readonly SectionKey[] = ['identity', 'settings', 'devices', 'documented', 'plans', 'automations', 'radius'];
 
 // ---------------------------------------------------------------------------
 // Exclusion lists — the ONLY place data is kept out of backups.
@@ -112,6 +114,12 @@ export const EXCLUDED_TABLES: ReadonlySet<string> = new Set([
   'certificate_history',
   'repo_files',
   'repo_file_uses',
+  // High-volume per-instance RADIUS audit trail (each server logs its own attempts)
+  'radpostauth',
+  // Instance-local RADIUS credentials — machine-generated per instance; a
+  // failover slave must use ITS OWN probe client + DB role, never the peer's.
+  'radius_db_credentials',
+  'radius_probe_client',
   // This feature's own bookkeeping (instance-local; bytes live elsewhere)
   'backups',
   'replication_targets',
@@ -160,10 +168,21 @@ const AUTOMATION_TABLES: ReadonlySet<string> = new Set([
 /** The `secrets` section is virtual — no raw table rows, only the envelope. */
 const SECRET_TABLES: ReadonlySet<string> = new Set(['secrets']);
 
+/** RADIUS failover state (unm-radius sidecar) — portable so a slave instance
+ *  can authenticate EAP-TLS clients identically to the primary. The NAS shared
+ *  secrets themselves live in the `secrets` section (envelope); this section
+ *  carries only the allowlist rows that REFERENCE them by id. */
+const RADIUS_TABLES: ReadonlySet<string> = new Set([
+  'radius_nas_clients',
+  'radius_user_profiles',
+  'revoked_serials',
+]);
+
 function sectionForTable(name: string): SectionKey {
   if (IDENTITY_TABLES.has(name)) return 'identity';
   if (name === 'system_settings') return 'settings';
   if (SECRET_TABLES.has(name)) return 'secrets';
+  if (RADIUS_TABLES.has(name)) return 'radius';
   if (name.startsWith('documented_')) return 'documented';
   if (name === 'plans' || name === 'plan_steps') return 'plans';
   if (DEVICE_TABLES.has(name)) return 'devices';
@@ -211,12 +230,31 @@ export interface TableMeta {
   section: SectionKey;
   /** Primary-key column names — house convention: JS key === DB column name. */
   pkColumns: string[];
+  /** Natural conflict key for mergeTable (see NATURAL_CONFLICT_KEYS) — when set,
+   *  upserts use ON CONFLICT on these columns instead of the surrogate PK. */
+  conflictColumns?: string[];
   /** All exported column JS keys (exclusions already removed), in select order. */
   columns: string[];
   /** JS key → DB column name (they differ for e.g. isBuiltin/is_builtin). */
   columnDbNames: Record<string, string>;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   tableRef: any;
+}
+
+/** Tables whose rows are identified by a natural key for replication purposes.
+ *  mergeTable upserts them with ON CONFLICT (natural key) instead of the surrogate PK,
+ *  so a row deleted+recreated on the source (new UUID, same natural key) converges on
+ *  the target — adopting the source's id — instead of violating the table's unique
+ *  constraint. Only tables where that mirroring is desired may be listed here; every
+ *  listed column must carry a UNIQUE constraint in the DDL. */
+const NATURAL_CONFLICT_KEYS: Record<string, string[]> = {
+  radius_nas_clients: ['ip'],
+  radius_user_profiles: ['serial'],
+};
+
+/** The columns that identify a row for merge purposes (natural conflict key when configured, else the PK). */
+function mergeKeyColumns(meta: TableMeta): string[] {
+  return meta.conflictColumns ?? meta.pkColumns;
 }
 
 let discoveredTables: Map<string, TableMeta> | null = null;
@@ -266,7 +304,16 @@ export function discoverTables(): Map<string, TableMeta> {
     const columnNames = Object.keys(columns).filter((k) => !dropped.has(k)) as any[];
     const columnDbNames: Record<string, string> = {};
     for (const [jsKey, col] of Object.entries(columns)) columnDbNames[jsKey] = String(col.name);
-    out.set(name, { name, section: sectionForTable(name), pkColumns, columns: columnNames, columnDbNames, tableRef: t });
+    // Natural conflict key (NATURAL_CONFLICT_KEYS) — validated against the actual
+    // columns; a stale entry must never break discovery, so fall back to PK merge.
+    const wantedKeys = NATURAL_CONFLICT_KEYS[name];
+    let conflictColumns: string[] | undefined;
+    if (wantedKeys) {
+      const valid = wantedKeys.filter((c) => columnNames.includes(c));
+      if (valid.length === wantedKeys.length) conflictColumns = valid;
+      else console.warn(`[backup] table "${name}" natural conflict key references missing columns — falling back to PK merge`);
+    }
+    out.set(name, { name, section: sectionForTable(name), pkColumns, conflictColumns, columns: columnNames, columnDbNames, tableRef: t });
   }
   discoveredTables = out;
   return out;
@@ -330,6 +377,11 @@ export interface BackupArchive {
   // `envelope` → [SecretEnvelope] and carries a numeric `rowCount` instead.
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   data: Record<string, Record<string, any>>;
+  /** Public CA root PEM (PEM text) — set when the archive includes the `radius`
+   *  section and this instance has a bootstrapped CA. A RADIUS failover slave
+   *  applies it to its `radiusTrustedCaPem` setting so EAP-TLS validates client
+   *  certs issued by the primary's CA (the slave runs no step-ca of its own). */
+  caRootPem?: string | null;
 }
 
 /** Loads the rows of every requested section (exclusions applied).
@@ -393,6 +445,21 @@ export async function buildBackup(sections: string[], passphrase?: string): Prom
 }
 
 /** Builds a full archive (manifest + data) for the given sections. */
+/** Path of the local CA root (read-only mount of the CA volume) — public cert only. */
+const LOCAL_CA_ROOT_PATH = '/data/ca/root_ca.crt';
+
+/** Reads the local CA root PEM for archives that carry the `radius` section.
+ *  Returns null when no CA has bootstrapped yet (fresh install) — a slave then
+ *  simply has nothing to trust until the primary's next sync. */
+function readLocalCaRootPem(): string | null {
+  try {
+    const pem = fs.readFileSync(LOCAL_CA_ROOT_PATH, 'utf8').trim();
+    return pem.includes('BEGIN CERTIFICATE') ? pem : null;
+  } catch {
+    return null; // no CA volume / not bootstrapped — fine
+  }
+}
+
 export async function buildArchive(sections: string[], opts: { passphrase?: string } = {}): Promise<BackupArchive> {
   const [instanceName, data] = await Promise.all([getEffectiveSettingValue('instanceName'), buildBackup(sections, opts.passphrase)]);
   const manifestSections: BackupManifest['sections'] = {};
@@ -422,6 +489,9 @@ export async function buildArchive(sections: string[], opts: { passphrase?: stri
       sections: manifestSections,
     },
     data,
+    // RADIUS failover: ship the CA trust anchor alongside the radius section so
+    // a slave (no local step-ca) can validate client certs issued by this CA.
+    ...(sections.includes('radius') ? { caRootPem: readLocalCaRootPem() } : {}),
   };
 }
 
@@ -591,18 +661,19 @@ export interface SectionMergeReport {
 }
 
 function pkKey(meta: TableMeta, row: Record<string, unknown>): string {
-  return meta.pkColumns.map((c) => String(row[c] ?? '')).join('\u0001');
+  return mergeKeyColumns(meta).map((c) => String(row[c] ?? '')).join('\u0001');
 }
 
-/** Existing PK tuples for the given rows (single query for single-col PKs, chunked OR-of-ANDs otherwise). */
+/** Existing key tuples for the given rows (single query for single-col keys, chunked OR-of-ANDs otherwise). */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 async function existingPkSet(tx: any, meta: TableMeta, rows: Record<string, unknown>[]): Promise<Set<string>> {
   const found = new Set<string>();
   if (rows.length === 0) return found;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const t = meta.tableRef as any;
-  if (meta.pkColumns.length === 1) {
-    const col = meta.pkColumns[0];
+  const keyCols = mergeKeyColumns(meta);
+  if (keyCols.length === 1) {
+    const col = keyCols[0];
     const values = [...new Set(rows.map((r) => r[col]))];
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     for (let i = 0; i < values.length; i += 500) {
@@ -611,13 +682,13 @@ async function existingPkSet(tx: any, meta: TableMeta, rows: Record<string, unkn
       const existing = await tx.select({ [col]: t[col] }).from(t).where(inArray(t[col], chunk as any[]));
       for (const r of existing) found.add(String(r[col]));
     }
-    return found; // single-col PK: the key IS the value
+    return found; // single-col key: the key IS the value
   }
-  const selectObj = Object.fromEntries(meta.pkColumns.map((c) => [c, t[c]]));
+  const selectObj = Object.fromEntries(keyCols.map((c) => [c, t[c]]));
   for (let i = 0; i < rows.length; i += 200) {
     const chunk = rows.slice(i, i + 200);
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const conds: any[] = chunk.map((r) => and(...meta.pkColumns.map((c) => eq(t[c], r[c]))));
+    const conds: any[] = chunk.map((r) => and(...keyCols.map((c) => eq(t[c], r[c]))));
     const whereClause = conds.length === 1 ? conds[0] : or(...conds);
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const existing: any[] = await tx.select(selectObj).from(t).where(whereClause);
@@ -626,7 +697,10 @@ async function existingPkSet(tx: any, meta: TableMeta, rows: Record<string, unkn
   return found;
 }
 
-/** Upserts rows on the table's PK. Returns created/updated counts. */
+/** Upserts rows on the table's merge key (natural conflict key when configured, else its PK).
+ *  Returns created/updated counts. With a natural key, an existing row under a DIFFERENT
+ *  surrogate id is updated in place — including adopting the source's id — so the target
+ *  converges exactly on the source's rows. */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 async function mergeTable(tx: any, meta: TableMeta, rows: Record<string, unknown>[]): Promise<TableMergeResult> {
   if (rows.length === 0) return { table: meta.name, created: 0, updated: 0 };
@@ -637,10 +711,14 @@ async function mergeTable(tx: any, meta: TableMeta, rows: Record<string, unknown
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const t = meta.tableRef as any;
   // Column names come from our own schema introspection — safe to splice as identifiers.
-  const pkSet = new Set(meta.pkColumns);
+  // The conflict-target columns are excluded from the SET clause (they already match by
+  // definition of the conflict); everything else — including a surrogate PK when the
+  // natural key differs — is taken from the incoming row.
+  const targetCols = mergeKeyColumns(meta);
+  const targetSet = new Set(targetCols);
   const setObj: Record<string, unknown> = {};
-  for (const c of meta.columns) if (!pkSet.has(c)) setObj[c] = sql.raw(`excluded."${meta.columnDbNames[c]}"`);
-  const target = meta.pkColumns.map((c) => t[c]);
+  for (const c of meta.columns) if (!targetSet.has(c)) setObj[c] = sql.raw(`excluded."${meta.columnDbNames[c]}"`);
+  const target = targetCols.map((c) => t[c]);
 
   for (let i = 0; i < rows.length; i += 500) {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -759,6 +837,17 @@ export async function applyArchive(archive: BackupArchive, opts: ApplyOptions = 
           report.tables.push(await mergeTable(tx, meta, rows));
         }
       });
+      // RADIUS failover: adopt the peer's CA root as a trusted anchor so EAP-TLS
+      // validates client certs issued by the primary's CA (this instance may run
+      // no step-ca of its own). Only written when it actually changed — the PEM
+      // is public, and keeping it in lockstep also follows a primary CA re-key.
+      if (section === 'radius' && typeof archive.caRootPem === 'string' && archive.caRootPem.includes('BEGIN CERTIFICATE')) {
+        const current = String(await getEffectiveSettingValue('radiusTrustedCaPem') ?? '');
+        if (current !== archive.caRootPem) {
+          await updateSetting('radiusTrustedCaPem', archive.caRootPem);
+          report.warnings.push('CA root PEM adopted from the peer — RADIUS now trusts client certs issued by its CA');
+        }
+      }
     } catch (err) {
       if (!opts.continueOnSectionError) throw new BackupError(`Section "${section}" failed to apply: ${(err as Error).message}`, 409);
       report.error = (err as Error).message;

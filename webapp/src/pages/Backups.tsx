@@ -67,7 +67,16 @@ function TargetDialog({ existing, onClose }: { existing: ReplicationTarget | nul
   const [enabled, setEnabled] = useState(existing?.enabled ?? true);
   const [intervalText, setIntervalText] = useState(existing?.intervalMinutes != null ? String(existing.intervalMinutes) : '');
   const [excludeText, setExcludeText] = useState((existing?.excludeKeys ?? []).join('\n'));
+  const [sectionsText, setSectionsText] = useState((existing?.sections ?? []).join(', '));
+  const [includeSecrets, setIncludeSecrets] = useState(false);
+  const [passphrase, setPassphrase] = useState('');
   const [error, setError] = useState<string | null>(null);
+
+  /** RADIUS failover slave preset — sync only the radius section + its shared secrets. */
+  const applyRadiusSlavePreset = () => {
+    setSectionsText('radius');
+    setIncludeSecrets(true);
+  };
 
   const save = useMutation({
     mutationFn: () => {
@@ -79,6 +88,9 @@ function TargetDialog({ existing, onClose }: { existing: ReplicationTarget | nul
         enabled,
         intervalMinutes: intervalText.trim() === '' ? null : Number(intervalText),
         excludeKeys: excludeText.split(/[\n,]+/).map((s) => s.trim()).filter(Boolean),
+        sections: sectionsText.split(/[,\n]+/).map((s) => s.trim()).filter(Boolean),
+        includeSecrets,
+        secretsPassphrase: passphrase || null,
       };
       return existing ? api.updateReplicationTarget(existing.id, body) : api.createReplicationTarget(body);
     },
@@ -101,7 +113,7 @@ function TargetDialog({ existing, onClose }: { existing: ReplicationTarget | nul
           <button type="button" onClick={onClose} className="rounded-md px-3 py-1.5 text-sm text-secondary hover:bg-muted">Cancel</button>
           <button
             type="button"
-            disabled={save.isPending || !name.trim() || !baseUrl.trim() || !token.trim()}
+            disabled={save.isPending || !name.trim() || !baseUrl.trim() || !token.trim() || (includeSecrets && !passphrase.trim())}
             onClick={() => save.mutate()}
             className="inline-flex items-center gap-2 rounded-md bg-primary px-4 py-1.5 text-sm font-medium text-white hover:bg-primary-hover disabled:opacity-50"
           >
@@ -141,8 +153,25 @@ function TargetDialog({ existing, onClose }: { existing: ReplicationTarget | nul
         <label className="flex items-center gap-2">
           <input type="checkbox" checked={enabled} onChange={(e) => setEnabled(e.target.checked)} />
           <span className="text-secondary">Enabled (scheduler runs due targets)</span>
+        </label>        <div>
+          <div className="mb-1 flex items-center justify-between">
+            <span className="block text-xs font-medium uppercase tracking-wide text-faint" title="Comma-separated backup sections to sync. Empty = all portable sections.">Sections</span>
+            <button type="button" onClick={applyRadiusSlavePreset} className="text-[10px] font-medium text-primary underline-offset-2 hover:underline">
+              RADIUS failover slave preset
+            </button>
+          </div>
+          <input className="w-full rounded-md border border-border bg-background px-2 py-1.5 font-mono text-xs" value={sectionsText} onChange={(e) => setSectionsText(e.target.value)} placeholder="empty = all portable · e.g. radius, settings" />
+        </div>
+        <label className="flex items-center gap-2" title="Ships the passphrase-encrypted secrets section (NAS shared secrets, device credentials). Push direction only — a RADIUS failover slave needs it to authenticate identically.">
+          <input type="checkbox" checked={includeSecrets} onChange={(e) => setIncludeSecrets(e.target.checked)} />
+          <span className="text-secondary">Also sync secrets (passphrase-encrypted)</span>
         </label>
-        <label className="block" title="Setting keys stripped before sending/applying — one per line. Defaults cover identity-bound settings (instance name, update feed, provider bindings…).">
+        {includeSecrets && (
+          <label className="block">
+            <span className="mb-1 block text-xs font-medium uppercase tracking-wide text-faint">Secrets passphrase</span>
+            <input type="password" className="w-full rounded-md border border-border bg-background px-2 py-1.5 font-mono" value={passphrase} onChange={(e) => setPassphrase(e.target.value)} placeholder="encrypts the envelope on push; sent to the peer for unwrapping" />
+          </label>
+        )}        <label className="block" title="Setting keys stripped before sending/applying — one per line. Defaults cover identity-bound settings (instance name, update feed, provider bindings…).">
           <span className="mb-1 block text-xs font-medium uppercase tracking-wide text-faint">Excluded setting keys</span>
           <textarea rows={4} className="w-full rounded-md border border-border bg-background px-2 py-1.5 font-mono text-xs" value={excludeText} onChange={(e) => setExcludeText(e.target.value)} placeholder={'instanceName\nupdateFeedUrl'} />
         </label>

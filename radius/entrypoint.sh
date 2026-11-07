@@ -20,6 +20,9 @@
 #                                                       check + per-user reply attributes)
 #        radius-auth-log.sh     -> raddb/radius-auth-log.sh      (post-auth audit:
 #                                                       one radpostauth row per attempt)
+#        trusted-ca.pem         -> merged into raddb/ca/bundle.pem with the local
+#                                   root (RADIUS failover slaves trust their
+#                                   replication source's CA — see sync_config)
 #      Files are COPIED (not symlinked) so freerad's ownership stays correct no
 #      matter who wrote the source. A fresh volume still boots: missing files are
 #      skipped and the package defaults remain in place.
@@ -31,6 +34,9 @@
 #   4. Watch the rendered files' mtimes and SIGHUP radiusd to hot-apply changes
 #      without a container restart (verified: FR3's HUP handler re-reads every
 #      config file whose mtime changed — "HUP - Re-reading configuration files").
+#      Every reload is VERIFIED against radius.log; if the re-read fails, the
+#      supervisor gracefully RESTARTS radiusd instead of leaving it stale (see
+#      the watch loop below for why a failed HUP must never be left unhandled).
 #   5. Forward SIGTERM/SIGINT for graceful shutdown.
 set -eu
 
@@ -63,15 +69,28 @@ chmod 644 "$CERTDIR/server.crt"
 
 # --- 2. Sync rendered config into the raddb ----------------------------------
 sync_config() {
-  # CA root bundle (public cert only — no keys ever leave /pki). The stock raddb
-  # has no ca/ dir (it uses certs/) — create it so the eap instance's ca_file
-  # target exists.
+  # CA trust for EAP-TLS client validation (public certs only — no keys ever
+  # leave /pki). The eap instance's ca_file points at a BUNDLE: the local UNM
+  # root (when bootstrapped) + the replicated/trusted roots the API renders into
+  # $CFG/trusted-ca.pem from its radiusTrustedCaPem setting — that is what makes
+  # a RADIUS failover slave trust client certs issued by its replication source's
+  # CA. The stock raddb has no ca/ dir (it uses certs/) — create it so the
+  # bundle target exists. root_ca.crt is kept in sync too (legacy path, harmless).
   mkdir -p "$RADD/ca"
   if [ -f "$CA_CFG/root_ca.crt" ]; then
     cp "$CA_CFG/root_ca.crt" "$RADD/ca/root_ca.crt"
     chmod 644 "$RADD/ca/root_ca.crt"
+  fi
+  local bundle_tmp="$RADD/ca/bundle.pem.tmp"
+  : > "$bundle_tmp"
+  if [ -f "$CA_CFG/root_ca.crt" ]; then cat "$CA_CFG/root_ca.crt" >> "$bundle_tmp"; fi
+  if [ -f "$CFG/trusted-ca.pem" ]; then cat "$CFG/trusted-ca.pem" >> "$bundle_tmp"; fi
+  if [ -s "$bundle_tmp" ]; then
+    mv "$bundle_tmp" "$RADD/ca/bundle.pem"
+    chmod 644 "$RADD/ca/bundle.pem"
   else
-    log "WARN: no root_ca.crt in $CA_CFG yet — EAP-TLS cannot validate clients until the CA has bootstrapped"
+    rm -f "$bundle_tmp" "$RADD/ca/bundle.pem"
+    log "WARN: no CA root (local or trusted) — EAP-TLS cannot validate clients until a CA exists"
   fi
 
   # Rendered files -> their exact raddb destinations (see header). FreeRADIUS 3.x
@@ -152,11 +171,27 @@ trap shutdown TERM INT
 last_sig=""
 signature() {
   local out="" f
-  for f in clients.conf eap.conf exec-unm.conf sql-unm.conf radius-user-profile.sh radius-auth-log.sh site-eaptls.conf; do
+  for f in clients.conf eap.conf exec-unm.conf sql-unm.conf radius-user-profile.sh radius-auth-log.sh site-eaptls.conf trusted-ca.pem; do
     [ -f "$CFG/$f" ] && out="$out $(stat -c %Y "$CFG/$f")"
   done
   [ -f "$CA_CFG/root_ca.crt" ] && out="$out $(stat -c %Y "$CA_CFG/root_ca.crt")"
   echo "$out"
+}
+
+# Graceful in-place restart of radiusd — the fallback when a hot reload fails.
+# A fresh full load re-reads every file and re-instantiates every module from
+# scratch, which sidesteps whatever in-process state made the HUP re-read fail
+# (a fresh load of the same on-disk config is verified to succeed: `freeradius -C`
+# at boot + observed live). TERM+wait keeps it graceful; LAST_HUP resets because
+# a fresh process has no 5s HUP window to respect.
+restart_radiusd() {
+  log "restarting freeradius (pid $FR_PID) to apply config…"
+  kill -TERM "$FR_PID" 2>/dev/null || true
+  wait "$FR_PID" 2>/dev/null || true
+  "$BIN" -f &
+  FR_PID=$!
+  LAST_HUP=0
+  log "freeradius restarted (pid $FR_PID)"
 }
 
 LAST=$(signature)
@@ -186,7 +221,39 @@ while kill -0 "$FR_PID" 2>/dev/null; do
     NOW=$(date +%s)
     WAIT=$((LAST_HUP + 6 - NOW))
     if [ "$WAIT" -gt 0 ]; then sleep "$WAIT"; fi
+    # Line count BEFORE the HUP so we only inspect log lines written by THIS reload.
+    RLOG=/var/log/freeradius/radius.log
+    MARK=$(wc -l < "$RLOG" 2>/dev/null || echo 0)
     kill -HUP "$FR_PID" 2>/dev/null || true
     LAST_HUP=$(date +%s)
+    # VERIFY the reload actually happened. On success FR3 logs one "Loaded virtual
+    # server …" line per site; on a failed re-read it logs "Cannot read
+    # configuration files. Ignoring". A single failed re-read must never be left
+    # unhandled: observed live (FR 3.2.x), after ONE failed HUP the process keeps
+    # rejecting EVERY later HUP with the same error — even once all files are
+    # valid again — until it is restarted, so an unverified failure leaves radiusd
+    # serving a STALE config indefinitely (probes then time out / reject as
+    # "unknown client"). Fallback: graceful restart = fresh full load of the
+    # current on-disk config.
+    if kill -0 "$FR_PID" 2>/dev/null; then
+      sleep 4
+      NEW=$(tail -n +"$((MARK + 1))" "$RLOG" 2>/dev/null || true)
+      case "$NEW" in
+        *"Cannot read configuration files"*|*"Ignoring HUP (less than 5s"*)
+          log "WARN: hot reload FAILED — falling back to a graceful restart"
+          restart_radiusd ;;
+        *"Loaded virtual server"*)
+          :   # reloaded cleanly
+          ;;
+        *)
+          log "WARN: no reload confirmation in radius.log — restarting to be safe"
+          restart_radiusd ;;
+      esac
+    fi
   fi
 done
+# Reaching here means radiusd died on its own (a broken config makes it exit
+# immediately after a failed restart). Exit NON-ZERO so the container's restart
+# policy recycles it and the boot-time `freeradius -C` surfaces the real error.
+log "freeradius exited unexpectedly — exiting so the container is restarted"
+exit 1

@@ -2516,7 +2516,7 @@ export interface SectionMergeReport {
   error?: string;
 }
 
-/** A replication target row — the peer token is never returned. */
+/** A replication target row — the peer token and secrets passphrase are never returned. */
 export interface ReplicationTarget {
   id: string;
   name: string;
@@ -2525,6 +2525,8 @@ export interface ReplicationTarget {
   enabled: boolean;
   intervalMinutes: number | null;
   excludeKeys: string[];
+  /** Sections to sync; empty = all portable sections (e.g. ["radius"] for a failover slave). */
+  sections: string[];
   lastSyncAt: string | null;
   lastSyncStatus: 'ok' | 'error' | null;
   lastError: string | null;
@@ -2541,6 +2543,12 @@ export interface ReplicationTargetInput {
   enabled?: boolean;
   intervalMinutes?: number | null;
   excludeKeys?: string[];
+  /** Sections to sync; empty/omitted = all portable sections. */
+  sections?: string[] | null;
+  /** Ship the passphrase-encrypted secrets section too (push direction only). */
+  includeSecrets?: boolean;
+  /** Passphrase for the secrets envelope — required when includeSecrets is set. */
+  secretsPassphrase?: string | null;
 }
 
 /** Outcome of one replication sync (manual or scheduled). */

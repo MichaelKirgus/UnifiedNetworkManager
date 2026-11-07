@@ -2,7 +2,7 @@ import { randomUUID } from 'crypto';
 import { eq } from 'drizzle-orm';
 import { db } from './db';
 import * as schema from './db/schema';
-import { BackupArchive, SectionMergeReport, applyArchive, assertPortableSections, buildArchive, PORTABLE_SECTIONS } from './backup';
+import { BackupArchive, SectionMergeReport, applyArchive, assertPortableSections, buildArchive, PORTABLE_SECTIONS, SECTION_KEYS } from './backup';
 
 /**
  * One-way replication between UNM instances (e.g. dev → prod).
@@ -68,14 +68,21 @@ export async function buildPortableExport(sections?: string[]): Promise<BackupAr
 
 export type ReplicationTargetRow = typeof schema.replicationTargets.$inferSelect;
 
-function toView(row: ReplicationTargetRow): Record<string, unknown> {
-  let excludeKeys: string[] = [];
+/** Parses a JSON string-array column (sections / excludeKeys) — corrupt values degrade to []. */
+function parseStringArray(raw: string | null): string[] {
+  if (!raw) return [];
   try {
-    const parsed = JSON.parse(row.excludeKeys);
-    if (Array.isArray(parsed)) excludeKeys = parsed.filter((k): k is string => typeof k === 'string');
+    const parsed = JSON.parse(raw);
+    if (Array.isArray(parsed)) return parsed.filter((k): k is string => typeof k === 'string');
   } catch {
     /* keep [] */
   }
+  return [];
+}
+
+function toView(row: ReplicationTargetRow): Record<string, unknown> {
+  const excludeKeys = parseStringArray(row.excludeKeys);
+  const sections = parseStringArray(row.sections);
   let lastReport: Record<string, unknown> = {};
   try {
     const parsed = JSON.parse(row.lastReport);
@@ -83,9 +90,9 @@ function toView(row: ReplicationTargetRow): Record<string, unknown> {
   } catch {
     /* keep {} */
   }
-  // Never leak the peer token in API responses.
-  const { token: _token, ...rest } = row;
-  return { ...rest, excludeKeys, lastReport };
+  // Never leak the peer token or the secrets passphrase in API responses.
+  const { token: _token, secretsPassphrase: _pp, ...rest } = row;
+  return { ...rest, excludeKeys, sections, lastReport };
 }
 
 export async function listTargets(): Promise<Record<string, unknown>[]> {
@@ -101,6 +108,35 @@ export interface TargetInput {
   enabled?: boolean;
   intervalMinutes?: number | null;
   excludeKeys?: string[];
+  /** Sections to sync; empty/omitted = all portable sections. A RADIUS failover
+   *  slave uses ['radius'] (+ the secrets envelope via includeSecrets). */
+  sections?: string[] | null;
+  /** Ship the passphrase-encrypted `secrets` section too (push direction only —
+   *  wrapping needs a passphrase that lives on THIS instance's target row). */
+  includeSecrets?: boolean;
+  /** Passphrase for the secrets envelope; required when includeSecrets is set. */
+  secretsPassphrase?: string | null;
+}
+
+/** Validates + normalizes the section list (portable sections, `secrets` only with a passphrase). */
+function normalizeSections(input: TargetInput): { sections: string[] | null; includeSecrets: boolean; passphrase: string } {
+  const direction = input.direction === 'pull' ? 'pull' : 'push';
+  const includeSecrets = input.includeSecrets === true;
+  const passphrase = typeof input.secretsPassphrase === 'string' ? input.secretsPassphrase.trim() : '';
+  if (includeSecrets && direction !== 'push') {
+    throw new Error('includeSecrets is only supported for push targets — the wrapping passphrase lives on this instance, so a pull peer cannot export an envelope');
+  }
+  if (includeSecrets && !passphrase) {
+    throw new Error('includeSecrets requires secretsPassphrase');
+  }
+  const raw = Array.isArray(input.sections) ? input.sections.filter((k): k is string => typeof k === 'string' && k.length > 0) : [];
+  for (const s of raw) {
+    if (!SECTION_KEYS.includes(s as (typeof SECTION_KEYS)[number])) throw new Error(`Unknown section "${s}"`);
+    if (s !== 'secrets' && !PORTABLE_SECTIONS.includes(s as (typeof PORTABLE_SECTIONS)[number])) {
+      throw new Error(`Section "${s}" is not portable across instances`);
+    }
+  }
+  return { sections: raw.length > 0 ? [...new Set(raw)] : null, includeSecrets, passphrase };
 }
 
 /** Creates or updates a target (upsert by id when provided). */
@@ -122,12 +158,13 @@ export async function upsertTarget(input: TargetInput, id?: string): Promise<Rec
     intervalMinutes = Math.floor(n);
   }
   const excludeKeys = Array.isArray(input.excludeKeys) ? input.excludeKeys.filter((k): k is string => typeof k === 'string') : DEFAULT_REPLICATION_EXCLUDES;
+  const { sections: targetSections, includeSecrets, passphrase } = normalizeSections(input);
 
   if (id) {
     const rows = await db.select().from(schema.replicationTargets).where(eq(schema.replicationTargets.id, id));
     if (rows.length === 0) throw Object.assign(new Error('Target not found'), { status: 404 });
     await db.update(schema.replicationTargets)
-      .set({ name, baseUrl, token, direction, enabled, intervalMinutes, excludeKeys: JSON.stringify(excludeKeys) })
+      .set({ name, baseUrl, token, direction, enabled, intervalMinutes, excludeKeys: JSON.stringify(excludeKeys), sections: targetSections ? JSON.stringify(targetSections) : null, includeSecrets, secretsPassphrase: passphrase || null })
       .where(eq(schema.replicationTargets.id, id));
     const updated = (await db.select().from(schema.replicationTargets).where(eq(schema.replicationTargets.id, id)))[0];
     return toView(updated);
@@ -144,6 +181,9 @@ export async function upsertTarget(input: TargetInput, id?: string): Promise<Rec
       enabled,
       intervalMinutes,
       excludeKeys: JSON.stringify(excludeKeys),
+      sections: targetSections ? JSON.stringify(targetSections) : null,
+      includeSecrets,
+      secretsPassphrase: passphrase || null,
       lastReport: '{}',
       createdAt: new Date().toISOString(),
     })
@@ -199,13 +239,27 @@ export async function runTargetSync(targetId: string): Promise<SyncReport> {
     }
 
     if (target.direction === 'push') {
-      let archive = await buildPortableExport();
+      // Sections to sync: the target's explicit list, or ALL portable sections.
+      // The secrets envelope is appended LAST — applyArchive imports it after the
+      // tables that reference it by id (radius_nas_clients.secretId & co).
+      const wanted = parseStringArray(target.sections);
+      let sections = wanted.length > 0 ? [...wanted] : [...PORTABLE_SECTIONS];
+      if (target.includeSecrets === true) {
+        if (!target.secretsPassphrase) throw new Error('Target has includeSecrets enabled but no passphrase is stored');
+        if (!sections.includes('secrets')) sections.push('secrets');
+      }
+      const archive = await buildArchive(sections, target.includeSecrets ? { passphrase: target.secretsPassphrase ?? '' } : undefined);
       const dropped = filterExcludedSettings(archive, new Set(excludeKeys));
       report.sections = Object.keys(archive.data);
+      // caRootPem rides along for RADIUS failover slaves (public cert — the peer
+      // adopts it into its radiusTrustedCaPem setting when applying `radius`).
+      const body: Record<string, unknown> = { manifest: archive.manifest, data: archive.data };
+      if (typeof archive.caRootPem === 'string') body.caRootPem = archive.caRootPem;
+      if (target.includeSecrets) body.secretsPassphrase = target.secretsPassphrase;
       const res = await fetch(`${target.baseUrl}/v1/replication/inbound`, {
         method: 'POST',
         headers: { authorization: `Bearer ${target.token}`, 'content-type': 'application/json' },
-        body: JSON.stringify({ manifest: archive.manifest, data: archive.data }),
+        body: JSON.stringify(body),
         signal: AbortSignal.timeout(SYNC_TIMEOUT_MS),
       });
       if (!res.ok) throw new Error(normalizePeerError(res.status, await res.text().catch(() => '')));
@@ -214,7 +268,11 @@ export async function runTargetSync(targetId: string): Promise<SyncReport> {
       report.tables = Array.isArray(applied?.report) ? applied.report.flatMap((r) => r.tables ?? []) : [];
       if (dropped > 0) report.warnings = [`${dropped} excluded setting key(s) filtered before sending`];
     } else {
-      const res = await fetch(`${target.baseUrl}/v1/replication/export`, {
+      // Pull mode carries portable sections only (no secrets envelope — the peer
+      // has no passphrase to wrap with; includeSecrets is push-only by design).
+      const wanted = parseStringArray(target.sections);
+      const qs = wanted.length > 0 ? `?sections=${wanted.map((s) => encodeURIComponent(s)).join(',')}` : '';
+      const res = await fetch(`${target.baseUrl}/v1/replication/export${qs}`, {
         headers: { authorization: `Bearer ${target.token}` },
         signal: AbortSignal.timeout(SYNC_TIMEOUT_MS),
       });

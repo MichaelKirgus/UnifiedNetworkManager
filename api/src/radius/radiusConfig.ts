@@ -8,7 +8,7 @@ import { getSecretFresh } from '../secretsProvider';
 import { getEffectiveValues } from '../systemSettings';
 // Pure renderers (no db/pg/uuid imports) — kept in radiusRender.ts so the
 // security-critical sanitizers are unit-testable without a live database.
-import { renderAuthLogScript, type ParsedDbUrl } from './radiusRender';
+import { buildCaBundle, renderAuthLogScript, type ParsedDbUrl } from './radiusRender';
 
 /**
  * Renders the FreeRADIUS config for the unm-radius sidecar (WiFi EAP-TLS) and
@@ -49,8 +49,13 @@ import { renderAuthLogScript, type ParsedDbUrl } from './radiusRender';
 
 export const RADIUS_CONFIG_PATH = process.env.UNM_RADIUS_CONFIG_PATH ?? '/data/radius';
 
-/** The raddb path the eap instance validates client certs against (entrypoint-synced). */
-const CA_ROOT_IN_RADD = '/etc/freeradius/3.0/ca/root_ca.crt';
+/** The raddb path the eap instance validates client certs against (entrypoint-synced).
+ *  A BUNDLE: local UNM CA root + replicated trusted roots (RADIUS failover slaves
+ *  trust their replication source's CA — see buildCaBundle in radiusRender.ts). */
+const CA_BUNDLE_IN_RADD = '/etc/freeradius/3.0/ca/bundle.pem';
+/** Rendered file carrying the extra/trusted CA roots from the `radiusTrustedCaPem`
+ *  setting; the entrypoint merges it with the local root into CA_BUNDLE_IN_RADD. */
+const TRUSTED_CA_FILE = 'trusted-ca.pem';
 /** Where the entrypoint persists the self-signed RADIUS server cert/key. */
 const SERVER_CERT = '/var/lib/unm-radius/server.crt';
 const SERVER_KEY = '/var/lib/unm-radius/server.key';
@@ -217,7 +222,10 @@ function renderEapConf(): string {
     '    tls {',
     `        certificate_file = ${SERVER_CERT}`,
     `        private_key_file = ${SERVER_KEY}`,
-    `        ca_file = ${CA_ROOT_IN_RADD}`,
+    // Bundle (local root + replicated trusted roots) — the entrypoint assembles
+    // it from /data/ca/root_ca.crt + rendered trusted-ca.pem. A missing file is
+    // tolerated by radiusd (fresh install before CA bootstrap), same as before.
+    `        ca_file = ${CA_BUNDLE_IN_RADD}`,
     '        verify_depth = 2',
     '        check_crl = no',
     '    }',
@@ -565,7 +573,7 @@ export async function renderRadiusConfig(): Promise<Record<string, string>> {
     clients.push({ ...probe, options: { limit_proxy_state: 'no', require_message_authenticator: 'no' } });
   }
 
-  return {
+  const files: Record<string, string> = {
     'clients.conf': renderClientsConf(clients),
     // `eap.conf` — the entrypoint copies it to mods-enabled/eap, REPLACING the
     // stock instance (see renderEapConf for why a custom name is impossible).
@@ -576,6 +584,14 @@ export async function renderRadiusConfig(): Promise<Record<string, string>> {
     'radius-user-profile.sh': renderUserProfileScript(db, creds),
     'radius-auth-log.sh': renderAuthLogScript(db, creds),
   };
+  // Extra/trusted CA roots (RADIUS failover: a slave gets its replication
+  // source's root via the radius section). Public cert only — no keys ever.
+  const trustedPem = String(v.radiusTrustedCaPem ?? '').trim();
+  if (trustedPem.includes('BEGIN CERTIFICATE')) {
+    files[TRUSTED_CA_FILE] =
+      '# Rendered by the UNM API from the radiusTrustedCaPem setting — do not edit.\n' + trustedPem + '\n';
+  }
+  return files;
 }
 
 /**
@@ -599,6 +615,14 @@ export async function writeRadiusConfig(): Promise<{ changed: boolean }> {
     // The entrypoint re-chowns everything on sync, but keep the script readable
     // by freerad even before the first reload.
     if (name === 'radius-user-profile.sh') fs.chmodSync(dest, 0o750);
+    changed = true;
+  }
+  // A cleared radiusTrustedCaPem must remove the rendered file so the entrypoint
+  // rebuilds the bundle from what remains (only while a render is active — an
+  // empty render above returns early and leaves everything in place).
+  const trustedDest = path.join(RADIUS_CONFIG_PATH, TRUSTED_CA_FILE);
+  if (!files[TRUSTED_CA_FILE] && fs.existsSync(trustedDest)) {
+    fs.rmSync(trustedDest);
     changed = true;
   }
   return { changed };

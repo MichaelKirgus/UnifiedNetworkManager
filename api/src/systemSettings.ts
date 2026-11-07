@@ -714,6 +714,17 @@ export const SETTING_DESCRIPTORS: SettingDescriptor[] = [
     help:
       "How long rows in the RADIUS authentication log (radpostauth — one row per completed EAP-TLS auth attempt, accept and reject) are kept. The radiusMonitor worker prunes older rows; failed logins also raise notifications while they happen.",
   },
+  {
+    key: 'radiusTrustedCaPem',
+    label: 'RADIUS trusted CA roots (PEM)',
+    type: 'string',
+    category: 'RADIUS',
+    default: '',
+    envVar: 'UNM_RADIUS_TRUSTED_CA_PEM',
+    onChange: () => require('./radius/radiusConfig').writeRadiusConfig(),
+    help:
+      "Extra CA root certificates (PEM, one or more) the RADIUS server trusts for EAP-TLS client validation — on top of UNM's own CA. A RADIUS failover slave receives this automatically from its replication source (the primary's root); you can also paste a PEM here manually. Public certificate data only — no keys.",
+  },
 
   // Fleet rollout safety net (network.create plans).
   {
