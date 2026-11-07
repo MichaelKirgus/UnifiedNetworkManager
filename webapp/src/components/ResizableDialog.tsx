@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from 'react';
+import { type ReactNode } from 'react';
 import { ExternalLink, X } from 'lucide-react';
 import { RESIZE_HANDLES, useDragResize } from '../hooks/useDragResize';
 
@@ -49,16 +49,18 @@ export function ResizableDialog({
   children,
   footer,
 }: ResizableDialogProps) {
-  // Draggable + resizable geometry (centered by default).
-  const [geom] = useState(() => {
-    const vw = window.innerWidth;
-    const vh = window.innerHeight;
-    const w = Math.min(defaultSize.w, vw - 48);
-    const h = Math.min(defaultSize.h, vh - 96);
-    return { x: (vw - w) / 2, y: Math.max(16, (vh - h) / 2), w, h };
-  });
-  const { startDrag, onDragMove, endDrag, startResize, onResizeMove, endResize } = useDragResize({
-    initialGeom: () => geom,
+  // Draggable + resizable geometry (centered by default). The hook OWNS this state —
+  // its drag/resize handlers update it on every pointer move and the panel style
+  // below is bound to it. (A local useState here would be dead: the setters live
+  // inside the hook, so the panel could never follow the cursor.)
+  const { geom, startDrag, onDragMove, endDrag, startResize, onResizeMove, endResize } = useDragResize({
+    initialGeom: () => {
+      const vw = window.innerWidth;
+      const vh = window.innerHeight;
+      const w = Math.min(defaultSize.w, vw - 48);
+      const h = Math.min(defaultSize.h, vh - 96);
+      return { x: (vw - w) / 2, y: Math.max(16, (vh - h) / 2), w, h };
+    },
     minW: MIN_W,
     minH: MIN_H,
   });
