@@ -191,6 +191,20 @@ signature() {
   echo "$out"
 }
 
+# Prove radiusd is actually PROCESSING requests — not just "reloaded". A HUP
+# whose log lines say success can still leave the server broken: observed live
+# on FR 3.2.x, a logged-clean reconfiguration left the eap-tls virtual server's
+# client table stale/partial (the probe IP was dropped as "unknown client" for
+# an hour while every reload line said success; only a fresh full load recovered).
+# The API ALWAYS renders a 127.0.0.1 client with this stable secret, so any
+# RADIUS reply — even Access-Reject — proves the whole request path works; no
+# reply within the timeout means broken → graceful restart by the caller.
+radius_selftest() {
+  printf 'User-Name=unm-selftest, User-Password=selftest\n' \
+    | timeout 8 radclient -t 5 127.0.0.1:1812 auth unm-radius-local 2>/dev/null \
+    | grep -q '^Received'
+}
+
 # Graceful in-place restart of radiusd — the fallback when a hot reload fails.
 # A fresh full load re-reads every file and re-instantiates every module from
 # scratch, which sidesteps whatever in-process state made the HUP re-read fail
@@ -205,13 +219,30 @@ restart_radiusd() {
   FR_PID=$!
   LAST_HUP=0
   log "freeradius restarted (pid $FR_PID)"
+  # Confirm the fresh load is actually processing requests before moving on —
+  # if it still fails, say so now instead of waiting for the probe to re-escalate.
+  sleep 1
+  radius_selftest || log "WARN: self-test still failing after restart — probe will keep escalating until recovery"
 }
 
 LAST=$(signature)
 PENDING=""   # signature seen but not yet reloaded (debounce window)
 LAST_HUP=0   # epoch of the last SIGHUP sent to radiusd
+MARKER="$CFG/.unm-restart-radius"
 while kill -0 "$FR_PID" 2>/dev/null; do
   sleep 2
+  # API-requested restart (auto-recovery channel): when its own probe has been
+  # timing out at critical streak, the radiusMonitor worker writes this marker
+  # into the shared render dir — the only channel between the two containers.
+  # A timeout means radiusd is dropping UNM's requests entirely (stale client
+  # table after a bad reload, wedged process …); the on-disk config is correct,
+  # so a fresh full load fixes it. Consumed once per marker; the worker only
+  # re-writes ~6 min later if the problem persists → no restart flapping.
+  if [ -f "$MARKER" ]; then
+    log "restart requested by API ($(cat "$MARKER" 2>/dev/null || echo '?')) — restarting freeradius"
+    rm -f "$MARKER"
+    restart_radiusd
+  fi
   SIG=$(signature) || continue
   if [ "$SIG" != "$LAST" ]; then
     LAST=$SIG
@@ -256,8 +287,12 @@ while kill -0 "$FR_PID" 2>/dev/null; do
           log "WARN: hot reload FAILED — falling back to a graceful restart"
           restart_radiusd ;;
         *"Loaded virtual server"*)
-          :   # reloaded cleanly
-          ;;
+          # Reload logged clean — but PROVE it took effect (see radius_selftest:
+          # a logged-successful HUP can still leave the client table stale).
+          if ! radius_selftest; then
+            log "WARN: reload succeeded on paper but radiusd is not processing requests — restarting"
+            restart_radiusd
+          fi ;;
         *)
           log "WARN: no reload confirmation in radius.log — restarting to be safe"
           restart_radiusd ;;

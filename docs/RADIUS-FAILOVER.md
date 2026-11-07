@@ -297,7 +297,13 @@ every replication target that carries the `radius` section:
   restarts; the supervisor handles this automatically.)
 - **Health** — `GET /v1/radius/status` on each instance gives the probe
   outcome (`ok` / `bad-auth` / `timeout`) and last-24h counters. A slave whose
-  probe is not `ok` should be treated as out of rotation.
+  probe is not `ok` should be treated as out of rotation. The sidecar is
+  self-healing: after every hot reload (and restart) it verifies radiusd with a
+  loopback RADIUS request and restarts radiusd if it stopped processing
+  requests; additionally, when the API's own probe times out repeatedly it
+  writes a marker file that makes the sidecar gracefully restart radiusd — so
+  a corrupted in-memory state (e.g. a stale client table left by a bad HUP)
+  recovers on its own within a few minutes without manual intervention.
 - **CA re-key** — when the primary's CA root changes, the next sync adopts it
   (the setting follows in lockstep) and the slave's bundle rebuilds on its next
   config sync.

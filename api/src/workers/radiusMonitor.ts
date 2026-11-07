@@ -1,7 +1,10 @@
+import * as fs from 'fs';
+import * as path from 'path';
 import { pool } from '../db';
 import { getEffectiveSettingValue } from '../systemSettings';
 import { emitNotification, resolveNotificationsByDedupeKeys } from '../notifications';
 import { PROBE_USERNAME, probeRadius } from '../radius/probe';
+import { RADIUS_CONFIG_PATH } from '../radius/radiusConfig';
 import { LEADER_KEYS } from './leader';
 import { initWorker, trackBeat } from './stats';
 
@@ -17,8 +20,12 @@ import { initWorker, trackBeat } from './stats';
  *      1812, has loaded its config, and recognizes UNM's source IP (FreeRADIUS
  *      silently drops requests from unknown clients). Consecutive failures
  *      escalate to a notification (warning after WARN_STREAK, critical after
- *      CRIT_STREAK); recovery resolves it. The latest outcome is stored in
- *      radius_monitor_state for GET /radius/status + the webapp.
+ *      CRIT_STREAK); recovery resolves it. On the transition INTO critical with
+ *      a TIMEOUT (requests dropped entirely — e.g. a stale client table left by
+ *      a bad HUP), the worker also writes a restart marker into the shared
+ *      render dir; the sidecar's entrypoint consumes it and gracefully restarts
+ *      radiusd, which re-loads the correct on-disk config (auto-recovery).
+ *      The latest outcome is stored in radius_monitor_state for GET /radius/status + the webapp.
  *   2. AUTH-FAIL AUDIT — rlm_sql writes one radpostauth row per completed auth
  *      attempt (ACCEPT and REJECT). This worker scans NEW rows past its cursor:
  *      a reject emits a warning notification deduped per username (re-fires only
@@ -44,6 +51,8 @@ const PROBE_TIMEOUT_MS = 5_000;
 /** Consecutive failed probes before the condition escalates (warning / critical). */
 const WARN_STREAK = 3;
 const CRIT_STREAK = 6;
+/** Marker file consumed by the sidecar entrypoint → graceful radiusd restart. */
+const RADIUS_RESTART_MARKER = '.unm-restart-radius';
 /** A reject re-notifies only after this long — dedupe in between. */
 const AUTH_FAIL_REFIRE_MS = 15 * 60_000;
 /** Max radpostauth rows fetched per scan (a burst of failures must not stall the beat). */
@@ -373,6 +382,21 @@ async function runProbe(): Promise<void> {
     dedupeKey,
     context: { outcome: result.outcome, host, port, failStreak },
   });
+
+  // Auto-recovery channel (sidecar entrypoint): a TIMEOUT means radiusd is
+  // dropping UNM's requests entirely — most often a stale/corrupt in-memory
+  // client table left behind by a bad HUP reconfiguration (observed live). The
+  // on-disk config is correct, so a fresh full load fixes it. Written only on
+  // the transition INTO critical streak → at most one forced restart per ~6 min.
+  if (failStreak === CRIT_STREAK && result.outcome === 'timeout') {
+    try {
+      fs.writeFileSync(path.join(RADIUS_CONFIG_PATH, RADIUS_RESTART_MARKER), new Date().toISOString());
+      console.log('[radius-monitor] probe critical — requested sidecar restart via marker file');
+    } catch (err) {
+      // Non-docker layout without the shared render dir — the notification above still fired.
+      console.warn('[radius-monitor] could not write radius restart marker:', (err as Error).message);
+    }
+  }
 }
 
 /** Job 2 — scan new radpostauth rows → notifications + retention. */

@@ -321,6 +321,17 @@ function renderSiteConf(accountingEnabled: boolean): string {
   const lines = [
     '# Rendered by the UNM API — do not edit (re-rendered on every change).',
     'server eap-tls {',
+    // EXPLICIT per-VS client list. A site without a `clients` section relies on
+    // FR3's implicit fallback to raddb/clients.conf, and that fallback is NOT
+    // reliably refreshed by HUP reconfiguration — observed live on 3.2.7: after
+    // one logged-SUCCESSFUL HUP the VS kept serving a stale/partial client table
+    // (the probe IP was dropped as "unknown client" for an hour while every
+    // reload log line said success; only a fresh full load recovered). An
+    // explicit $INCLUDE routes client loading through the standard per-VS path,
+    // which HUP does refresh (verified live: hot reload kept all clients known).
+    '    clients {',
+    '        $INCLUDE /etc/freeradius/3.0/clients.conf',
+    '    }',
     '    listen {',
     '        type = auth',
     '        ipaddr = *',
