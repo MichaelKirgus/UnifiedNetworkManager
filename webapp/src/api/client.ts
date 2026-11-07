@@ -2438,6 +2438,37 @@ export interface RadiusAuthLogRow {
   authdate: string;
 }
 
+/** Latest poll snapshot of ONE RADIUS failover slave (radius_slave_monitor row). */
+export interface RadiusSlaveMonitorSnapshot {
+  lastCheckAt: string | null;
+  /** Whether the last poll reached the peer API (false = down/unreachable). */
+  reachable: boolean;
+  /** Whether RADIUS is enabled ON THE SLAVE (null = unknown yet). */
+  radiusEnabled?: boolean | null;
+  probeOutcome: 'ok' | 'bad-auth' | 'timeout' | null;
+  packetType: string | null;
+  latencyMs: number | null;
+  detail: string | null;
+  accepts24h: number;
+  rejects24h: number;
+  lastAttemptAt: string | null;
+  /** Set when the peer was unreachable / answered an error. */
+  error?: string | null;
+}
+
+/** One RADIUS failover slave = a push replication target carrying `radius` (GET /radius/slaves). */
+export interface RadiusSlaveStatus {
+  targetId: string;
+  name: string;
+  baseUrl: string;
+  intervalMinutes: number | null;
+  lastSyncAt: string | null;
+  /** Outcome of the last config sync (null = never synced yet). */
+  lastSyncStatus: 'ok' | 'error' | null;
+  /** Latest poll snapshot; null until the monitor worker has polled once. */
+  monitor: RadiusSlaveMonitorSnapshot | null;
+}
+
 /** Per-user RADIUS reply profile — keyed by client cert serial (EAP-TLS). */
 export interface RadiusUserProfile {
   id: string;
@@ -4690,6 +4721,17 @@ export const api = {
     if (params?.limit) q.set('limit', String(params.limit));
     const qs = q.toString();
     return apiFetch<RadiusAuthLogRow[]>(`/radius/auth-log${qs ? `?${qs}` : ''}`);
+  },
+  // --- RADIUS failover slaves (monitored from the primary) -------------------
+  /** Every push replication target carrying `radius`, with its monitor snapshot. */
+  radiusSlaves: () => apiFetch<{ slaves: RadiusSlaveStatus[] }>('/radius/slaves'),
+  /** Auth attempts MIRRORED from one slave (best-effort copy of its radpostauth). */
+  radiusSlaveEvents: (targetId: string, params?: { result?: 'reject' | 'accept'; limit?: number }) => {
+    const q = new URLSearchParams();
+    if (params?.result) q.set('result', params.result);
+    if (params?.limit) q.set('limit', String(params.limit));
+    const qs = q.toString();
+    return apiFetch<{ targetId: string; events: RadiusAuthLogRow[] }>(`/radius/slaves/${encodeURIComponent(targetId)}/events${qs ? `?${qs}` : ''}`);
   },
   /** Download a WiFi client cert bundle + private key as one PEM file. */
   caWifiDownload: async (serial: string): Promise<Blob> => {

@@ -501,6 +501,43 @@ export async function initDb(): Promise<void> {
       "lastAuthLogId" BIGINT DEFAULT 0
     )`);
 
+  // RADIUS failover — per-SLAVE monitoring snapshot (one row per replication
+  // target carrying the `radius` section; id = the target's id). Owned by the
+  // radiusMonitor worker's slave-poll job, which fetches each peer's
+  // GET /replication/slave-status and stores probe outcome + 24h counters.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS radius_slave_monitor (
+      id TEXT PRIMARY KEY,
+      "lastCheckAt" TEXT,
+      "reachable" BOOLEAN,
+      "radiusEnabled" BOOLEAN,
+      "probeOutcome" TEXT,
+      "packetType" TEXT,
+      "latencyMs" INTEGER,
+      "detail" TEXT,
+      "accepts24h" INTEGER,
+      "rejects24h" INTEGER,
+      "lastAttemptAt" TEXT,
+      "eventsCursor" TEXT,
+      "error" TEXT
+    )`);
+
+  // RADIUS failover — mirrored auth attempts from SLAVES (best-effort mirror of
+  // each slave's radpostauth; the slave stays the system of record). Feeds the
+  // primary's webapp panel + notifications for failed logins on a failover slave.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS radius_slave_auth_events (
+      id BIGSERIAL PRIMARY KEY,
+      "targetId" TEXT NOT NULL,
+      "username" TEXT NOT NULL,
+      "result" TEXT,
+      "calledStationId" TEXT,
+      "callingStationId" TEXT,
+      "authdate" TIMESTAMP WITH TIME ZONE NOT NULL
+    )`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS radius_slave_auth_events_target_idx ON radius_slave_auth_events ("targetId", id)`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS radius_slave_auth_events_date_idx ON radius_slave_auth_events ("authdate")`);
+
   // Revoked WiFi client cert serials — the per-auth revocation list FreeRADIUS
   // checks via the exec module (radius-user-profile.sh). step-ca has no CRL endpoint,
   // so this table is the enforcement point: both revoke routes insert here after

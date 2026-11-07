@@ -329,6 +329,51 @@ export const radpostauth = pgTable(
   (t) => [index('radpostauth_username_idx').on(t.username), index('radpostauth_authdate_idx').on(t.id, t.authdate)]
 );
 
+// RADIUS failover — per-SLAVE monitoring snapshot. ONE row per replication
+// target that carries the `radius` section (id = the target's id). Owned by the
+// radiusMonitor worker's slave-poll job: it fetches GET /replication/slave-status
+// from each peer and stores the latest probe outcome + 24h counters here, so
+// the primary's webapp shows every failover slave's health without the user
+// having to log into the slave. `eventsCursor` is the authdate of the newest
+// radpostauth row already ingested into radius_slave_auth_events (strict >).
+export const radiusSlaveMonitor = pgTable('radius_slave_monitor', {
+  id: text('id').primaryKey(), // replication_targets.id
+  lastCheckAt: text('lastCheckAt'),
+  reachable: boolean('reachable'),
+  /** Whether RADIUS is enabled ON THE SLAVE (false → probe/counters are null, not a fault). */
+  radiusEnabled: boolean('radiusEnabled'),
+  probeOutcome: text('probeOutcome'), // ok | bad-auth | timeout (null when the peer has no data yet)
+  packetType: text('packetType'),
+  latencyMs: integer('latencyMs'),
+  detail: text('detail'),
+  accepts24h: integer('accepts24h'),
+  rejects24h: integer('rejects24h'),
+  lastAttemptAt: text('lastAttemptAt'),
+  eventsCursor: text('eventsCursor'), // ISO authdate of the newest ingested event (strict >)
+  error: text('error'), // set when the peer was unreachable / answered an error
+});
+
+// RADIUS failover — mirrored auth attempts from SLAVES. The primary's
+// radiusMonitor worker polls each slave's radpostauth (via
+// GET /replication/slave-status?since=…) and mirrors NEW rows here, so failed
+// logins on a failover slave are visible + alertable on the PRIMARY without any
+// shared storage. Best-effort mirror: the slave's own radpostauth stays the
+// system of record; this table feeds the webapp panel + notifications.
+export const radiusSlaveAuthEvents = pgTable(
+  'radius_slave_auth_events',
+  {
+    // BIGSERIAL — assigned by Postgres on INSERT (the worker inserts via raw SQL).
+    id: bigint('id', { mode: 'number' }).primaryKey(),
+    targetId: text('targetId').notNull(), // replication_targets.id the row came from
+    username: text('username').notNull(),
+    result: text('result'), // accept | reject (derived from the peer's `reply`)
+    calledStationId: text('calledStationId'),
+    callingStationId: text('callingStationId'),
+    authdate: timestamp('authdate', { withTimezone: true }).notNull(),
+  },
+  (t) => [index('radius_slave_auth_events_target_idx').on(t.targetId, t.id), index('radius_slave_auth_events_date_idx').on(t.authdate)]
+);
+
 // Per-user, per-device session-credential defaults (SSH console / SFTP). Lets a
 // user rank WHICH of their eligible secrets is used when an interactive session
 // opens on a device — without prompting. `secretIds` is an ORDERED list: the

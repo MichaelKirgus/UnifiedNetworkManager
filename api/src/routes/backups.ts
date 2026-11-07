@@ -3,8 +3,10 @@ import { randomUUID } from 'crypto';
 import fs from 'fs';
 import { desc, eq } from 'drizzle-orm';
 import { requireAuth, requirePermission } from '../auth/middleware';
-import { db } from '../db';
+import { db, pool } from '../db';
 import * as schema from '../db/schema';
+import { PROBE_USERNAME } from '../radius/probe';
+import { getEffectiveSettingValue } from '../systemSettings';
 import { listFileRepoProviders } from '../fileRepoBroker';
 import {
   BACKUP_FILE_EXT,
@@ -494,3 +496,135 @@ backupsRouter.get('/replication/due', requireAuth, requirePermission('instance:b
     return sendError(res, err);
   }
 });
+
+/** One mirrored radpostauth row as served to the primary's monitor worker. */
+interface SlaveAuthEventView {
+  /** The SLAVE's local radpostauth id (stable within that instance). */
+  id: number;
+  username: string;
+  result: 'accept' | 'reject' | null;
+  calledStationId: string | null;
+  callingStationId: string | null;
+  authdate: string; // ISO
+}
+
+function toSlaveEvent(row: Record<string, unknown>): SlaveAuthEventView {
+  const reply = typeof row.reply === 'string' ? row.reply : '';
+  return {
+    id: Number(row.id),
+    username: String(row.username ?? ''),
+    result: reply.startsWith('Access-Reject') ? 'reject' : reply.startsWith('Access-Accept') ? 'accept' : null,
+    calledStationId: (row.calledStationId as string | null) ?? null,
+    callingStationId: (row.callingStationId as string | null) ?? null,
+    authdate: row.authdate instanceof Date ? row.authdate.toISOString() : String(row.authdate),
+  };
+}
+
+/**
+ * GET /replication/slave-status — RADIUS failover monitoring endpoint.
+ *
+ * The PRIMARY's radiusMonitor worker polls this on every replication target
+ * that carries the `radius` section (same credential as inbound sync: a peer
+ * token with `instance:backup`). It returns the slave's own self-monitoring
+ * state (probe outcome + 24h counters — identical shape to GET /radius/status)
+ * plus NEW auth attempts since the caller's cursor, so failed logins on a
+ * failover slave are visible and alertable on the primary without shared storage.
+ *
+ *   ?cursorId=<n> — only rows with id > n (the SLAVE's local radpostauth id).
+ *                   The id is a monotonically increasing bigserial, so this is
+ *                   exact: no duplicates, no misses, and immune to timestamp
+ *                   precision loss (Postgres keeps microseconds; JS Dates do not —
+ *                   an authdate-based cursor would re-serve its own last row forever).
+ *   no cursorId   — bootstrap: the NEWEST `limit` rows (oldest first). A fresh
+ *                   primary therefore mirrors recent history but not the full past.
+ *
+ * The response also carries `latestEvent` (the newest non-probe row) so the
+ * caller can detect a RESET of this table (ids restarted below its cursor while
+ * authdates moved far forward) and re-bootstrap instead of missing new events.
+ */
+backupsRouter.get(
+  '/replication/slave-status',
+  requireAuth,
+  requirePermission('instance:backup'),
+  async (req: Request, res: Response) => {
+    try {
+      // NOTE: the OpenAPI validator (express-openapi-validator v5 forces coerceTypes)
+      // converts declared integer query params to NUMBERS before this handler runs —
+      // accept both string and number, never rely on `typeof === 'string'` here.
+      const rawCursor = req.query.cursorId;
+      const cursorIdRaw = typeof rawCursor === 'string' || typeof rawCursor === 'number' ? Number(rawCursor) : NaN;
+      const cursorId = Number.isFinite(cursorIdRaw) ? Math.max(0, Math.floor(cursorIdRaw)) : null;
+      const limit = Math.min(500, Math.max(1, Number(req.query.limit ?? 200) || 200));
+
+      // Latest self-monitoring state (same shape as GET /radius/status).
+      const stateRes = await pool.query(`SELECT * FROM radius_monitor_state WHERE id = $1`, ['unm']);
+      const s = stateRes.rows[0];
+
+      // 24h counters — the probe's heartbeat rows are excluded (not real logins).
+      const counts = await pool.query(
+        `SELECT count(*) FILTER (WHERE reply LIKE 'Access-Reject%') AS rejects,
+                count(*) FILTER (WHERE reply LIKE 'Access-Accept%') AS accepts,
+                max(authdate) AS "lastAttemptAt"
+         FROM radpostauth
+         WHERE authdate > now() - interval '24 hours' AND username <> $1`,
+        [PROBE_USERNAME]
+      );
+      const c = counts.rows[0];
+
+      // New events past the cursor (strict id comparison — exact, no precision loss).
+      let eventRows: Array<Record<string, unknown>>;
+      if (cursorId != null) {
+        const evRes = await pool.query(
+          `SELECT id, username, reply, calledstationid AS "calledStationId", callingstationid AS "callingStationId", authdate
+           FROM radpostauth
+           WHERE username <> $1 AND id > $2
+           ORDER BY id ASC
+           LIMIT $3`,
+          [PROBE_USERNAME, cursorId, limit]
+        );
+        eventRows = evRes.rows;
+      } else {
+        // Bootstrap (no cursor yet): newest N rows, returned oldest-first.
+        const evRes = await pool.query(
+          `SELECT id, username, reply, calledstationid AS "calledStationId", callingstationid AS "callingStationId", authdate
+           FROM radpostauth
+           WHERE username <> $1
+           ORDER BY id DESC
+           LIMIT $2`,
+          [PROBE_USERNAME, limit]
+        );
+        eventRows = evRes.rows.reverse();
+      }
+
+      // Newest non-probe row — lets the caller detect a table reset (see above).
+      const latestRes = await pool.query(
+        `SELECT id, authdate FROM radpostauth WHERE username <> $1 ORDER BY id DESC LIMIT 1`,
+        [PROBE_USERNAME]
+      );
+      const le = latestRes.rows[0];
+
+      const enabled = String(await getEffectiveSettingValue('radiusEnabled')) !== 'false';
+      res.status(200).json({
+        enabled,
+        probe: s
+          ? {
+              lastProbeAt: (s['lastProbeAt'] as string | null) ?? null,
+              outcome: (s['probeOutcome'] as string | null) ?? null, // ok | bad-auth | timeout
+              packetType: (s['packetType'] as string | null) ?? null,
+              latencyMs: s['latencyMs'] != null ? Number(s['latencyMs']) : null,
+              detail: (s['detail'] as string | null) ?? null,
+            }
+          : null,
+        last24h: {
+          rejects: Number(c?.rejects ?? 0),
+          accepts: Number(c?.accepts ?? 0),
+          lastAttemptAt: c?.lastAttemptAt ? new Date(c.lastAttemptAt).toISOString() : null,
+        },
+        events: eventRows.map(toSlaveEvent),
+        latestEvent: le ? { id: Number(le.id), authdate: le.authdate instanceof Date ? le.authdate.toISOString() : String(le.authdate) } : null,
+      });
+    } catch (err) {
+      return sendError(res, err);
+    }
+  }
+);

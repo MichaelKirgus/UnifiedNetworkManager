@@ -175,7 +175,7 @@ router.get(
     const counts = await pool.query(
       `SELECT count(*) FILTER (WHERE reply LIKE 'Access-Reject%') AS rejects,
               count(*) FILTER (WHERE reply LIKE 'Access-Accept%') AS accepts,
-              max(authdate) AS lastAttemptAt
+              max(authdate) AS "lastAttemptAt"
        FROM radpostauth
        WHERE authdate > now() - interval '24 hours' AND username <> $1`,
       [PROBE_USERNAME]
@@ -233,6 +233,124 @@ router.get(
         authdate: r.authdate instanceof Date ? r.authdate.toISOString() : String(r.authdate),
       }))
     );
+  }
+);
+
+/**
+ * RADIUS failover — slave monitoring (read-only).
+ *
+ *   GET /radius/slaves            -> every enabled PUSH replication target that
+ *                                    carries the `radius` section, with its last
+ *                                    sync state + the radiusMonitor worker's
+ *                                    latest poll snapshot (probe outcome, 24h
+ *                                    counters) from radius_slave_monitor.
+ *   GET /radius/slaves/:id/events -> auth attempts MIRRORED from that slave
+ *                                    (best-effort copy of its radpostauth),
+ *                                    newest first — the failed-login audit trail
+ *                                    for a failover slave, visible on the primary.
+ *
+ * Both require `radius:read`. Peer tokens / passphrases are never returned.
+ */
+
+// GET /radius/slaves — monitoring snapshot per failover slave (replication target).
+router.get(
+  '/radius/slaves',
+  requireAuth,
+  requirePermission('radius:read'),
+  async (_req: Request, res: Response) => {
+    // NOTE: quoted camelCase — unquoted identifiers fold to lowercase.
+    const targets = await pool.query(
+      `SELECT id, name, "baseUrl", direction, "intervalMinutes", "lastSyncAt", "lastSyncStatus", sections
+       FROM replication_targets WHERE enabled = true AND direction = 'push'`
+    );
+    const monitors = await pool.query(`SELECT * FROM radius_slave_monitor`);
+    const byId = new Map(monitors.rows.map((m) => [String(m.id), m]));
+
+    res.status(200).json({
+      slaves: targets.rows
+        .filter((t) => {
+          // NULL/empty sections = all portable sections (incl. radius); else explicit list.
+          const raw = t.sections as string | null;
+          if (raw == null || raw === '') return true;
+          try {
+            const list = JSON.parse(raw);
+            return Array.isArray(list) && (list.length === 0 || list.includes('radius'));
+          } catch {
+            return false;
+          }
+        })
+        .map((t) => {
+          const m = byId.get(String(t.id));
+          return {
+            targetId: String(t.id),
+            name: String(t.name),
+            baseUrl: String(t.baseUrl),
+            intervalMinutes: t['intervalMinutes'] != null ? Number(t['intervalMinutes']) : null,
+            lastSyncAt: (t.lastSyncAt as string | null) ?? null,
+            lastSyncStatus: (t.lastSyncStatus as string | null) ?? null, // ok | error | null (never synced yet)
+            monitor: m
+              ? {
+                  lastCheckAt: (m['lastCheckAt'] as string | null) ?? null,
+                  reachable: Boolean(m['reachable']),
+                  radiusEnabled: m['radiusEnabled'] != null ? Boolean(m['radiusEnabled']) : null,
+                  probeOutcome: (m['probeOutcome'] as string | null) ?? null, // ok | bad-auth | timeout | null
+                  packetType: (m['packetType'] as string | null) ?? null,
+                  latencyMs: m['latencyMs'] != null ? Number(m['latencyMs']) : null,
+                  detail: (m['detail'] as string | null) ?? null,
+                  accepts24h: m['accepts24h'] != null ? Number(m['accepts24h']) : 0,
+                  rejects24h: m['rejects24h'] != null ? Number(m['rejects24h']) : 0,
+                  lastAttemptAt: (m['lastAttemptAt'] as string | null) ?? null,
+                  error: (m['error'] as string | null) ?? null,
+                }
+              : null, // worker has not polled this target yet
+          };
+        }),
+    });
+  }
+);
+
+// GET /radius/slaves/:id/events — mirrored auth attempts from one slave.
+router.get(
+  '/radius/slaves/:id/events',
+  requireAuth,
+  requirePermission('radius:read'),
+  async (req: Request, res: Response) => {
+    const targetId = String(req.params.id ?? '');
+    const limit = Math.min(500, Math.max(1, Number(req.query.limit ?? 100) || 100));
+    const result = String(req.query.result ?? ''); // '' | 'reject' | 'accept'
+
+    // Verify the target exists (and is a push target — only those are slaves).
+    const tRes = await pool.query(`SELECT id FROM replication_targets WHERE id = $1 AND direction = 'push'`, [targetId]);
+    if (tRes.rows.length === 0) {
+      res.status(404).json({ error: `No such RADIUS slave target "${targetId}"` });
+      return;
+    }
+
+    const clauses: string[] = [`"targetId" = $1`];
+    const params: unknown[] = [targetId];
+    if (result === 'reject' || result === 'accept') {
+      params.push(result);
+      clauses.push(`"result" = $${params.length}`);
+    }
+    params.push(limit);
+
+    const rows = await pool.query(
+      `SELECT id, "targetId", username, "result", "calledStationId", "callingStationId", authdate
+       FROM radius_slave_auth_events WHERE ${clauses.join(' AND ')}
+       ORDER BY authdate DESC, id DESC LIMIT $${params.length}`,
+      params
+    );
+    res.status(200).json({
+      targetId,
+      events: rows.rows.map((r) => ({
+        id: Number(r.id),
+        username: String(r.username),
+        result: (r['result'] as string | null) ?? null,
+        calledStationId: (r['calledStationId'] as string | null) ?? null,
+        callingStationId: (r['callingStationId'] as string | null) ?? null,
+        authdate: r.authdate instanceof Date ? r.authdate.toISOString() : String(r.authdate),
+      })),
+    });
   }
 );
 

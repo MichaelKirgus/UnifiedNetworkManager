@@ -4426,6 +4426,71 @@ paths:
         '401':
           description: Authentication required (requires instance:backup)
 
+  /replication/slave-status:
+    get:
+      tags: [Replication]
+      summary: RADIUS failover monitoring status for the primary to poll
+      description: >-
+        Requires permission `instance:backup` — the SAME credential as inbound
+        sync, so a replication target's peer token can call it. The PRIMARY's
+        radiusMonitor worker polls this on every push target carrying the
+        `radius` section. Returns this instance's own self-monitoring state
+        (probe outcome + 24h counters, same shape as GET /radius/status) plus
+        NEW auth attempts since the caller's cursor — so failed logins on a
+        failover slave are visible and alertable on the primary without shared
+        storage. With `cursorId`, only rows with id > cursorId (the local
+        radpostauth bigserial — exact, no timestamp-precision loss) are
+        returned, oldest first; without it, the newest `limit` rows are
+        returned (bootstrap for a fresh primary). The probe's heartbeat rows
+        are never included. `latestEvent` carries the newest non-probe row so
+        the caller can detect a table RESET and re-bootstrap.
+      parameters:
+        - name: cursorId
+          in: query
+          required: false
+          description: radpostauth id of the newest already-ingested row — only rows with a higher id are returned
+          schema: { type: integer, minimum: 0 }
+        - name: limit
+          in: query
+          required: false
+          description: Max events returned (default 200, max 500)
+          schema: { type: integer, minimum: 1, maximum: 500 }
+      responses:
+        '200':
+          description: Slave status + new auth events
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [enabled, last24h, events]
+                properties:
+                  enabled: { type: boolean, description: Whether RADIUS is enabled on this instance }
+                  probe:
+                    oneOf:
+                      - type: 'null'
+                      - $ref: '#/components/schemas/RadiusProbeState'
+                  last24h:
+                    type: object
+                    required: [rejects, accepts]
+                    properties:
+                      rejects: { type: integer }
+                      accepts: { type: integer }
+                      lastAttemptAt: { type: string, format: date-time, nullable: true }
+                  events:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/RadiusAuthLogRow'
+                  latestEvent:
+                    oneOf:
+                      - type: 'null'
+                      - type: object
+                        required: [id, authdate]
+                        properties:
+                          id: { type: integer }
+                          authdate: { type: string, format: date-time }
+        '401':
+          description: Authentication required (requires instance:backup)
+
   /layers:
     get:
       tags: [Layers]
@@ -8524,6 +8589,79 @@ paths:
           description: Authentication required
         '403':
           description: Missing radius:read permission
+
+  /radius/slaves:
+    get:
+      tags: [Radius]
+      summary: RADIUS failover slaves — monitoring snapshot per replication target
+      description: >-
+        Every enabled PUSH replication target that carries the `radius` section,
+        with its last sync state and the radiusMonitor worker's latest poll
+        snapshot (reachability, probe outcome, 24h accept/reject counters) from
+        radius_slave_monitor. This is how the primary watches its failover
+        slaves — no shared storage involved. Peer tokens are never returned.
+        Requires permission `radius:read`.
+      responses:
+        '200':
+          description: One entry per RADIUS failover slave
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [slaves]
+                properties:
+                  slaves:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/RadiusSlaveStatus'
+        '401':
+          description: Authentication required
+        '403':
+          description: Missing radius:read permission
+
+  /radius/slaves/{id}/events:
+    get:
+      tags: [Radius]
+      summary: Auth attempts mirrored from one RADIUS failover slave
+      description: >-
+        Best-effort mirror of the named slave's radpostauth (ingested by the
+        radiusMonitor worker via GET /replication/slave-status), newest first —
+        the failed-login audit trail for a failover slave, visible on the
+        primary. The slave's own radpostauth remains authoritative. Requires
+        permission `radius:read`.
+      parameters:
+        - in: path
+          name: id
+          required: true
+          description: replication_targets.id of the slave
+          schema: { type: string }
+        - in: query
+          name: result
+          schema: { type: string, enum: [reject, accept] }
+          description: "Filter by outcome (default: all)"
+        - in: query
+          name: limit
+          schema: { type: integer, minimum: 1, maximum: 500, default: 100 }
+      responses:
+        '200':
+          description: Mirrored auth attempts, newest first
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [targetId, events]
+                properties:
+                  targetId: { type: string }
+                  events:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/RadiusAuthLogRow'
+        '401':
+          description: Authentication required
+        '403':
+          description: Missing radius:read permission
+        '404':
+          description: No such RADIUS slave target
 
   # ── Actions & Schedules (automation engine) ────────────────────────────────
   /automations:
@@ -13106,22 +13244,26 @@ components:
         idleTimeoutSec: { type: integer, nullable: true, minimum: 60, description: "null clears the limit" }
         replyMessage: { type: string, nullable: true, maxLength: 256, description: "null clears the note" }
 
+    RadiusProbeState:
+      type: object
+      required: [lastProbeAt]
+      properties:
+        lastProbeAt: { type: string, format: date-time, nullable: true }
+        outcome: { type: string, enum: [ok, bad-auth, timeout], nullable: true, description: "ok = well-formed reply (Access-Reject is expected for the EAP-only site); bad-auth = shared secret out of sync; timeout = no reply" }
+        packetType: { type: string, nullable: true, description: "\"Access-Accept\" / \"Access-Reject\"" }
+        latencyMs: { type: integer, nullable: true }
+        detail: { type: string, nullable: true }
+
     RadiusStatus:
       type: object
       required: [enabled]
       properties:
         enabled: { type: boolean, description: "Whether the RADIUS server is switched on (radiusEnabled setting)" }
         probe:
-          type: object
-          nullable: true
+          oneOf:
+            - type: 'null'
+            - $ref: '#/components/schemas/RadiusProbeState'
           description: "Latest self-monitoring probe; null until the monitor worker has run once"
-          required: [lastProbeAt]
-          properties:
-            lastProbeAt: { type: string, format: date-time, nullable: true }
-            outcome: { type: string, enum: [ok, bad-auth, timeout], nullable: true, description: "ok = well-formed reply (Access-Reject is expected for the EAP-only site); bad-auth = shared secret out of sync; timeout = no reply" }
-            packetType: { type: string, nullable: true, description: "\"Access-Accept\" / \"Access-Reject\"" }
-            latencyMs: { type: integer, nullable: true }
-            detail: { type: string, nullable: true }
         last24h:
           type: object
           required: [rejects, accepts]
@@ -13140,6 +13282,38 @@ components:
         calledStationId: { type: string, nullable: true, description: "NAS identifier (Called-Station-Id)" }
         callingStationId: { type: string, nullable: true, description: "Client MAC / Calling-Station-Id" }
         authdate: { type: string, format: date-time }
+
+    RadiusSlaveMonitorSnapshot:
+      type: object
+      required: [lastCheckAt, reachable]
+      properties:
+        lastCheckAt: { type: string, format: date-time, nullable: true, description: "When the primary's monitor worker last polled this slave" }
+        reachable: { type: boolean, description: "Whether the last poll reached the peer API (false = down/unreachable)" }
+        radiusEnabled: { type: boolean, nullable: true, description: "Whether RADIUS is enabled ON THE SLAVE (null = unknown yet)" }
+        probeOutcome: { type: string, enum: [ok, bad-auth, timeout], nullable: true, description: "The slave's own liveness-probe outcome; null when the slave has no data or RADIUS is off there" }
+        packetType: { type: string, nullable: true }
+        latencyMs: { type: integer, nullable: true }
+        detail: { type: string, nullable: true }
+        accepts24h: { type: integer, description: "Accepted auth attempts on the slave in the last 24h" }
+        rejects24h: { type: integer, description: "Rejected auth attempts on the slave in the last 24h (probe heartbeat excluded)" }
+        lastAttemptAt: { type: string, format: date-time, nullable: true }
+        error: { type: string, nullable: true, description: "Set when the peer was unreachable / answered an error" }
+
+    RadiusSlaveStatus:
+      type: object
+      required: [targetId, name, baseUrl]
+      properties:
+        targetId: { type: string, description: "replication_targets.id of this slave" }
+        name: { type: string }
+        baseUrl: { type: string, description: "Peer API base URL (without the /v1 prefix)" }
+        intervalMinutes: { type: integer, nullable: true, description: "Scheduled sync cadence; null = manual-only" }
+        lastSyncAt: { type: string, format: date-time, nullable: true }
+        lastSyncStatus: { type: string, enum: [ok, error], nullable: true, description: "Outcome of the last config sync (null = never synced)" }
+        monitor:
+          oneOf:
+            - type: 'null'
+            - $ref: '#/components/schemas/RadiusSlaveMonitorSnapshot'
+          description: "Latest poll snapshot; null until the monitor worker has polled this target once"
 
     CaStatus:
       type: object

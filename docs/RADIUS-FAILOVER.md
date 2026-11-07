@@ -246,6 +246,46 @@ slave can live on different hardware, in another rack, or at another site:
   without `includeSecrets` and provision the NAS shared secrets on the slave
   manually (they must match byte-for-byte).
 
+## Monitoring from the primary
+
+Login attempts on a failover slave are security-critical (a rejected client is
+either an attack or a broken deployment — and if the PRIMARY goes down, the
+slave keeps serving auth with nobody watching). The primary therefore monitors
+every replication target that carries the `radius` section:
+
+- **Polling** — the primary's radius monitor worker polls each slave's
+  `GET /v1/replication/slave-status` every 60 s (leader-gated, same worker as
+  the local probe). It uses the SAME peer token as inbound sync — no extra
+  credential to mint. The response carries the slave's own self-monitoring
+  state (probe outcome + last-24h accept/reject counters) plus NEW auth
+  attempts since the primary's cursor.
+- **Mirrored login events** — new rows from the slave's `radpostauth` are
+  mirrored into the primary's `radius_slave_auth_events` table, so failed
+  logins on a slave show up in the primary exactly like local ones. The cursor
+  is the slave-local row id (a monotonic bigserial), which makes ingestion
+  exact: no duplicates, no gaps, immune to timestamp-precision loss. A fresh
+  primary bootstraps with the newest rows only; if the slave's table is ever
+  reset (ids restart while authdates move far forward) the worker detects it
+  and re-bootstraps automatically. The mirror is best-effort — the slave's own
+  `radpostauth` stays authoritative, and mirroring stops (with a notification,
+  see below) if the slave becomes unreachable.
+- **Notifications** —
+  - *Failed login on a slave*: one warning per user (`radius:slave-auth-fail:<target>:<user>`),
+    re-fired at most every 15 min while rejects continue; an accept for that
+    user resolves it.
+  - *Slave unreachable / not serving RADIUS*: after 3 consecutive failed polls
+    a warning fires ("degraded"), escalating to critical after 6 — the message
+    notes that the slave may be serving authentication unmonitored if the
+    primary is down. Recovery resolves both.
+- **Webapp** — the RADIUS page has a **"Failover slaves"** panel: per-slave
+  reachability, radiusd probe outcome + latency, last-24h accept/reject
+  counters, sync status, and an expandable list of mirrored login events
+  (filterable by result). A slave with no `radius` section in its target is not
+  shown.
+- **API** — `GET /v1/radius/slaves` (list + monitor snapshots) and
+  `GET /v1/radius/slaves/:id/events?result=reject|accept&limit=N` (mirrored
+  events, newest first). Both require `radius:read`.
+
 ## Operations
 
 - **Sync cadence** — manual (`POST /replication/sync`) or scheduled via the

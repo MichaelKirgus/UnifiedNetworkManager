@@ -8,7 +8,7 @@ import { initWorker, trackBeat } from './stats';
 /**
  * RADIUS self-monitoring worker (leader-gated).
  *
- * Two jobs on one coarse beat:
+ * Three jobs on one coarse beat:
  *   1. PROBE — UNM checks its own FreeRADIUS sidecar the same way a device is
  *      checked: every cycle it sends ONE test Access-Request from the internal
  *      probe client (radius_probe_client, rendered into clients.conf by the API)
@@ -25,6 +25,16 @@ import { initWorker, trackBeat } from './stats';
  *      after the re-fire window, so a chatty attacker doesn't flood the bell);
  *      an accept for that username resolves it. Rows older than the retention
  *      setting are pruned in batches.
+ *   3. SLAVE MONITORING (RADIUS failover) — every enabled PUSH replication
+ *      target that carries the `radius` section is a potential failover slave.
+ *      This job polls each one's GET /replication/slave-status with the same
+ *      peer token used for inbound sync, stores probe outcome + 24h counters in
+ *      radius_slave_monitor (for GET /radius/slaves + the webapp), and mirrors
+ *      NEW auth attempts into radius_slave_auth_events — so a failed login on a
+ *      failover slave alerts on the PRIMARY without any shared storage. The
+ *      mirror is best-effort: the slave's own radpostauth stays authoritative.
+ *      Consecutive poll failures escalate like the local probe; recovery
+ *      resolves. Mirrored rows are pruned with the same retention setting.
  *
  * The worker is a no-op while `radiusEnabled` is off — nothing to monitor.
  */
@@ -38,11 +48,274 @@ const CRIT_STREAK = 6;
 const AUTH_FAIL_REFIRE_MS = 15 * 60_000;
 /** Max radpostauth rows fetched per scan (a burst of failures must not stall the beat). */
 const SCAN_LIMIT = 200;
+/** Per-slave poll timeout — a hung peer must not stall the whole beat. */
+const SLAVE_POLL_TIMEOUT_MS = 15_000;
+/** Max mirrored events ingested per slave per beat (backlogs drain over beats). */
+const SLAVE_EVENT_LIMIT = 500;
 
 let failStreak = 0;
 let probeConditionOpen = false;
 /** username → last time a reject notification was emitted/refreshed. */
 const lastFailNotifyAt = new Map<string, number>();
+/** targetId → consecutive failed slave polls (in-memory, like failStreak). */
+const slaveFailStreak = new Map<string, number>();
+/** targetIds with an open "slave down" notification. */
+const slaveDownOpen = new Set<string>();
+/** `${targetId}:${username}` → last time a SLAVE reject was notified/refreshed. */
+const lastSlaveFailNotifyAt = new Map<string, number>();
+
+/** Shape of GET /replication/slave-status (served by the peer's API). */
+interface SlaveStatusResponse {
+  enabled?: boolean;
+  probe?: {
+    lastProbeAt: string | null;
+    outcome: string | null; // ok | bad-auth | timeout
+    packetType: string | null;
+    latencyMs: number | null;
+    detail: string | null;
+  } | null;
+  last24h?: { rejects: number; accepts: number; lastAttemptAt: string | null };
+  events?: Array<{
+    id: number;
+    username: string;
+    result: 'accept' | 'reject' | null;
+    calledStationId: string | null;
+    callingStationId: string | null;
+    authdate: string; // ISO
+  }>;
+  /** Newest non-probe row on the peer — used to detect a radpostauth RESET. */
+  latestEvent?: { id: number; authdate: string } | null;
+}
+
+/** If the peer's newest event is this far AHEAD of our cursor yet its id did not grow, the table was reset (ids restarted) → re-bootstrap. */
+const SLAVE_RESET_MARGIN_MS = 10 * 60_000;
+
+/** JSON string array → string[] (replication_targets.sections / excludeKeys). */
+function parseStringArray(raw: unknown): string[] {
+  if (typeof raw !== 'string' || !raw) return [];
+  try {
+    const v = JSON.parse(raw);
+    return Array.isArray(v) ? v.filter((s): s is string => typeof s === 'string') : [];
+  } catch {
+    return [];
+  }
+}
+
+/** A replication target that carries the `radius` section (explicitly, or via all-portable). */
+function carriesRadiusSection(sections: unknown): boolean {
+  if (sections == null) return true; // NULL/empty = ALL portable sections (incl. radius)
+  const list = parseStringArray(sections);
+  return list.length === 0 || list.includes('radius');
+}
+
+async function upsertSlaveMonitor(id: string, patch: Record<string, unknown>): Promise<void> {
+  const keys = Object.keys(patch);
+  await pool.query(
+    `INSERT INTO radius_slave_monitor (id, ${keys.map((k) => `"${k}"`).join(', ')})
+     VALUES ($1, ${keys.map((_, i) => `$${i + 2}`).join(', ')})
+     ON CONFLICT (id) DO UPDATE SET ${keys.map((k, i) => `"${k}" = $${i + 2}`).join(', ')}`,
+    [id, ...Object.values(patch)]
+  );
+}
+
+/** Record a failed slave poll; escalate after WARN_STREAK / CRIT_STREAK. Never throws. */
+async function recordSlavePollFailure(target: { id: string; name: string }, detail: string): Promise<void> {
+  const streak = (slaveFailStreak.get(target.id) ?? 0) + 1;
+  slaveFailStreak.set(target.id, streak);
+  await upsertSlaveMonitor(target.id, { lastCheckAt: new Date().toISOString(), reachable: false, error: detail });
+  if (streak < WARN_STREAK) return; // grace period across restarts / transient blips
+  const severity = streak >= CRIT_STREAK ? 'critical' : 'warning';
+  slaveDownOpen.add(target.id);
+  await emitNotification({
+    severity,
+    source: 'system',
+    title: `RADIUS failover slave "${target.name}" ${streak >= CRIT_STREAK ? 'unreachable' : 'degraded'} (${streak} failed polls)`,
+    message: `${detail}. If the primary is down this slave may be serving authentication WITHOUT monitoring — check it directly.`,
+    dedupeKey: `radius:slave-down:${target.id}`,
+    context: { targetId: target.id, name: target.name, streak },
+  });
+}
+
+/** Poll ONE failover slave: status + counters → monitor row; new events → mirror table + alerts. */
+async function pollOneSlave(target: { id: string; name: string; baseUrl: string; token: string }): Promise<void> {
+  // Cursor = newest ingested event (authdate + the SLAVE's local radpostauth id,
+  // for a same-second tie-break). Corrupt/missing cursor → bootstrap (newest N).
+  let cursor: { authdate: string; id: number } | null = null;
+  const curRes = await pool.query(`SELECT "eventsCursor" FROM radius_slave_monitor WHERE id = $1`, [target.id]);
+  const rawCursor = curRes.rows[0]?.['eventsCursor'];
+  if (typeof rawCursor === 'string' && rawCursor) {
+    try {
+      const parsed = JSON.parse(rawCursor) as Record<string, unknown>;
+      if (typeof parsed.authdate === 'string' && Number.isFinite(Number(parsed.id))) {
+        cursor = { authdate: parsed.authdate, id: Number(parsed.id) };
+      }
+    } catch {
+      /* corrupt cursor — fall through to bootstrap */
+    }
+  }
+
+  // Cursor = the SLAVE's local radpostauth id (monotonic bigserial) — an exact,
+  // precision-proof "newer than this" marker. authdate rides along ONLY for
+  // reset detection below. No cursor → bootstrap (peer returns its newest N).
+  const qs = new URLSearchParams();
+  if (cursor) qs.set('cursorId', String(cursor.id));
+  qs.set('limit', String(SLAVE_EVENT_LIMIT));
+
+  let res: Response;
+  try {
+    res = await fetch(`${target.baseUrl}/v1/replication/slave-status?${qs.toString()}`, {
+      headers: { authorization: `Bearer ${target.token}` },
+      signal: AbortSignal.timeout(SLAVE_POLL_TIMEOUT_MS),
+    });
+  } catch (err) {
+    const e = err as Error & { name?: string };
+    await recordSlavePollFailure(target, e.name === 'TimeoutError' ? `Peer did not answer within ${SLAVE_POLL_TIMEOUT_MS / 1000}s` : e.message);
+    return;
+  }
+
+  if (!res.ok) {
+    const text = (await res.text().catch(() => '')).slice(0, 200);
+    await recordSlavePollFailure(target, `Peer answered HTTP ${res.status}${text ? `: ${text}` : ''}`);
+    return;
+  }
+
+  let body: SlaveStatusResponse;
+  try {
+    body = (await res.json()) as SlaveStatusResponse;
+  } catch {
+    await recordSlavePollFailure(target, 'Peer returned a non-JSON response');
+    return;
+  }
+
+  // Success — clear any open down condition.
+  slaveFailStreak.set(target.id, 0);
+  if (slaveDownOpen.has(target.id)) {
+    slaveDownOpen.delete(target.id);
+    await resolveNotificationsByDedupeKeys([`radius:slave-down:${target.id}`]);
+    console.log(`[radius-monitor] failover slave "${target.name}" recovered — notification resolved`);
+  }
+
+  const probe = body.probe ?? null;
+  await upsertSlaveMonitor(target.id, {
+    lastCheckAt: new Date().toISOString(),
+    reachable: true,
+    radiusEnabled: body.enabled === true,
+    error: null,
+    probeOutcome: probe?.outcome ?? null,
+    packetType: probe?.packetType ?? null,
+    latencyMs: probe?.latencyMs ?? null,
+    detail: probe?.detail ?? null,
+    accepts24h: Number(body.last24h?.accepts ?? 0),
+    rejects24h: Number(body.last24h?.rejects ?? 0),
+    lastAttemptAt: body.last24h?.lastAttemptAt ?? null,
+  });
+
+  const events = Array.isArray(body.events) ? body.events : [];
+  if (events.length === 0) {
+    // RESET detection: no new rows, yet the peer's newest event is far AHEAD of
+    // our cursor in time while its id did not grow → the peer's radpostauth was
+    // wiped and ids restarted. Clear the cursor so we re-bootstrap next beat
+    // instead of silently missing every new event until ids overtake ours.
+    const latest = body.latestEvent ?? null;
+    if (cursor && latest && latest.id <= cursor.id) {
+      const latestAt = Date.parse(latest.authdate);
+      const cursorAt = Date.parse(cursor.authdate);
+      if (Number.isFinite(latestAt) && Number.isFinite(cursorAt) && latestAt > cursorAt + SLAVE_RESET_MARGIN_MS) {
+        console.log(
+          `[radius-monitor] failover slave "${target.name}" appears to have RESET its auth log ` +
+            `(newest id ${latest.id} <= cursor ${cursor.id}, but ~${Math.round((latestAt - cursorAt) / 60_000)}min newer) — re-bootstrapping next beat`,
+        );
+        await upsertSlaveMonitor(target.id, { eventsCursor: null });
+      }
+    }
+    return;
+  }
+
+  // Mirror the new rows — one parameterized multi-row INSERT (id is a BIGSERIAL).
+  const values: unknown[] = [];
+  const rowSql = events
+    .map((e, i) => {
+      values.push(
+        target.id,
+        String(e.username ?? ''),
+        e.result === 'accept' || e.result === 'reject' ? e.result : null,
+        e.calledStationId ?? null,
+        e.callingStationId ?? null,
+        new Date(e.authdate),
+      );
+      const b = i * 6;
+      return `($${b + 1}, $${b + 2}, $${b + 3}, $${b + 4}, $${b + 5}, $${b + 6})`;
+    })
+    .join(', ');
+  await pool.query(
+    `INSERT INTO radius_slave_auth_events ("targetId", "username", "result", "calledStationId", "callingStationId", "authdate") VALUES ${rowSql}`,
+    values,
+  );
+
+  // Advance the cursor past the newest ingested row (events arrive oldest-first).
+  const last = events[events.length - 1];
+  await upsertSlaveMonitor(target.id, {
+    eventsCursor: JSON.stringify({ authdate: String(last.authdate), id: Number(last.id) }),
+  });
+
+  // Security-critical: a REJECT on the slave is a failed login attempt against
+  // this network — alert on the primary (deduped per target+username, same
+  // re-fire window as local rejects). An accept clears that user's condition.
+  for (const e of events) {
+    const username = String(e.username ?? '');
+    if (!username || username === PROBE_USERNAME) continue; // heartbeat rows never alert
+    const dedupeKey = `radius:slave-auth-fail:${target.id}:${username}`;
+    if (e.result === 'reject') {
+      const now = Date.now();
+      const lastAt = lastSlaveFailNotifyAt.get(dedupeKey) ?? 0;
+      if (now - lastAt < AUTH_FAIL_REFIRE_MS) continue;
+      lastSlaveFailNotifyAt.set(dedupeKey, now);
+      await emitNotification({
+        severity: 'warning',
+        source: 'system',
+        title: `Failed RADIUS login on slave "${target.name}": ${username}`,
+        message: `EAP-TLS authentication was REJECTED${e.calledStationId ? ` from NAS ${e.calledStationId}` : ''}${e.callingStationId ? ` (client ${e.callingStationId})` : ''} at ${String(e.authdate)} on failover slave "${target.name}". Repeated rejects for the same user are deduplicated.`,
+        dedupeKey,
+        context: { targetId: target.id, username, calledStationId: e.calledStationId ?? null, callingStationId: e.callingStationId ?? null },
+      });
+    } else if (e.result === 'accept') {
+      lastSlaveFailNotifyAt.delete(dedupeKey);
+      await resolveNotificationsByDedupeKeys([dedupeKey]);
+    }
+  }
+}
+
+/** Job 3 — poll every RADIUS failover slave + prune mirrored events. */
+async function pollSlaveTargets(): Promise<void> {
+  // NOTE: quoted camelCase — unquoted identifiers fold to lowercase and the
+  // query fails with "column does not exist".
+  const res = await pool.query(
+    `SELECT id, name, "baseUrl", token, sections FROM replication_targets WHERE enabled = true AND direction = 'push'`
+  );
+  for (const t of res.rows) {
+    if (!carriesRadiusSection(t.sections)) continue;
+    try {
+      await pollOneSlave({ id: String(t.id), name: String(t.name), baseUrl: String(t.baseUrl), token: String(t.token) });
+    } catch (err) {
+      // One bad slave must not stop the others.
+      console.error(`[radius-monitor] slave poll failed for target ${t.id}:`, err);
+    }
+  }
+
+  // Retention — mirror rows are pruned with the same window as local radpostauth.
+  const retentionDays = Math.max(1, Number(await getEffectiveSettingValue('radiusAuthLogRetentionDays')) || 30);
+  const cutoff = new Date(Date.now() - retentionDays * 24 * 60 * 60 * 1000).toISOString();
+  let deletedTotal = 0;
+  for (let i = 0; i < 50; i++) {
+    const del = await pool.query(
+      `DELETE FROM radius_slave_auth_events WHERE id IN (SELECT id FROM radius_slave_auth_events WHERE "authdate" < $1 ORDER BY id ASC LIMIT 10000)`,
+      [cutoff],
+    );
+    deletedTotal += del.rowCount ?? 0;
+    if ((del.rowCount ?? 0) < 10000) break;
+  }
+  if (deletedTotal > 0) console.log(`[radius-monitor] pruned ${deletedTotal} mirrored slave auth event(s) older than ${retentionDays}d`);
+}
 
 async function upsertState(patch: Record<string, unknown>): Promise<void> {
   // $1 = the fixed row id; $2..$N are the patch values (the DO UPDATE SET must
@@ -163,7 +436,11 @@ async function scanAuthLog(): Promise<void> {
   const cutoff = new Date(Date.now() - retentionDays * 24 * 60 * 60 * 1000).toISOString();
   let deletedTotal = 0;
   for (let i = 0; i < 50; i++) {
-    const del = await pool.query(`DELETE FROM radpostauth WHERE authdate < $1 LIMIT 10000`, [cutoff]);
+    // Postgres has no DELETE … LIMIT — delete via a bounded id subquery instead.
+    const del = await pool.query(
+      `DELETE FROM radpostauth WHERE id IN (SELECT id FROM radpostauth WHERE authdate < $1 ORDER BY id ASC LIMIT 10000)`,
+      [cutoff],
+    );
     deletedTotal += del.rowCount ?? 0;
     if ((del.rowCount ?? 0) < 10000) break;
   }
@@ -173,7 +450,7 @@ async function scanAuthLog(): Promise<void> {
 export function startRadiusMonitorWorker(): () => void {
   initWorker('radiusMonitor', LEADER_KEYS.radiusMonitor);
   // eslint-disable-next-line no-console
-  console.log('[radius-monitor] worker started (probe + auth-fail audit every 60s, leader-gated)');
+  console.log('[radius-monitor] worker started (probe + auth-fail audit + slave monitoring every 60s, leader-gated)');
 
   let stopped = false;
   const timer = setInterval(() => {
@@ -190,6 +467,12 @@ export function startRadiusMonitorWorker(): () => void {
       } catch (err) {
         // A DB hiccup in the audit job must not kill the probe cadence.
         console.error('[radius-monitor] auth-log scan failed:', err);
+      }
+      try {
+        await pollSlaveTargets();
+      } catch (err) {
+        // Slave monitoring is best-effort — it must never kill the probe cadence.
+        console.error('[radius-monitor] slave polling failed:', err);
       }
     }).catch((err) => {
       // eslint-disable-next-line no-console

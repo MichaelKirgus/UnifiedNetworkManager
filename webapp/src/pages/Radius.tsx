@@ -1,11 +1,11 @@
 import { useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Activity, Check, Copy, Download, EyeOff, KeyRound, Loader2, Network, Pencil, Plus, RefreshCw, ShieldOff, Trash2 } from 'lucide-react';
+import { Activity, Check, ChevronDown, ChevronRight, Copy, Download, EyeOff, KeyRound, Loader2, Network, Pencil, Plus, RefreshCw, Server, ShieldOff, Trash2 } from 'lucide-react';
 import { Layout } from '../components/Layout';
 import { DialogShell } from '../components/DialogShell';
 import { DataTable, DataTableColumn } from '../components/DataTable';
 import { ReauthDialog } from '../components/ReauthDialog';
-import { api, ApiError, CaStatus, CaKeyType, ClientCertTemplate, RadiusAuthLogRow, RadiusNasClient, RadiusStatus, RadiusUserProfile, Secret, WifiClientCert } from '../api/client';
+import { api, ApiError, CaStatus, CaKeyType, ClientCertTemplate, RadiusAuthLogRow, RadiusNasClient, RadiusSlaveMonitorSnapshot, RadiusSlaveStatus, RadiusStatus, RadiusUserProfile, Secret, WifiClientCert } from '../api/client';
 import { can } from '../auth/permissions';
 import { useTimeFormat } from '../utils/time';
 import { createAndExecuteSystemPlan, stepResultOf, waitForPlan, useExecutionMode } from '../executionMode';
@@ -1182,6 +1182,185 @@ function RadiusStatusSection() {
 }
 
 /**
+ * RADIUS failover slaves — monitored from the PRIMARY. Every enabled push
+ * replication target that carries the `radius` section is a potential failover
+ * slave; the radiusMonitor worker polls each one's /replication/slave-status
+ * every minute and stores probe outcome + 24h counters (radius_slave_monitor)
+ * plus a best-effort mirror of its auth attempts (radius_slave_auth_events).
+ * This panel shows that state per slave — reachability, the slave's own probe,
+ * sync health, accept/reject counts — with an expandable recent-attempts table.
+ * Read-only; requires radius:read + a loaded 'radius' capability.
+ */
+function RadiusSlavesSection() {
+  const canRead = can('radius:read');
+  const { formatDateTime } = useTimeFormat();
+
+  // Same capability gate as the other RADIUS sections.
+  const pluginsQuery = useQuery({ queryKey: ['plugins'], queryFn: api.plugins, staleTime: 5 * 60_000 });
+  const radiusLoaded = (pluginsQuery.data ?? []).some((p) => (p.capabilities ?? []).includes(RADIUS_CAPABILITY));
+
+  const slavesQuery = useQuery({
+    queryKey: ['radiusSlaves'],
+    queryFn: () => api.radiusSlaves(),
+    enabled: canRead && radiusLoaded,
+    refetchInterval: 30_000,
+  });
+
+  // One expanded slave at a time — its mirrored auth attempts load on demand.
+  const [openTargetId, setOpenTargetId] = useState<string | null>(null);
+  const openSlave = (slavesQuery.data?.slaves ?? []).find((s) => s.targetId === openTargetId) ?? null;
+  const eventsQuery = useQuery({
+    queryKey: ['radiusSlaveEvents', openTargetId],
+    queryFn: () => api.radiusSlaveEvents(openTargetId as string, { limit: 50 }),
+    enabled: canRead && radiusLoaded && openTargetId != null,
+    refetchInterval: 30_000,
+  });
+
+  if (!canRead) return null;
+  if (!radiusLoaded) return null;
+
+  const slaves: RadiusSlaveStatus[] = slavesQuery.data?.slaves ?? [];
+
+  // Sync pill — config replication health (from the target row itself).
+  const syncPill = (s: RadiusSlaveStatus) => {
+    if (s.lastSyncStatus === 'ok')
+      return (
+        <span className="rounded bg-success/15 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-success-fg" title={s.lastSyncAt ? `Last sync ${formatDateTime(s.lastSyncAt)}` : undefined}>
+          synced{s.intervalMinutes != null ? ` every ${s.intervalMinutes}m` : ''}
+        </span>
+      );
+    if (s.lastSyncStatus === 'error')
+      return <span className="rounded bg-danger/15 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-danger-fg" title={s.lastSyncAt ? `Last sync ${formatDateTime(s.lastSyncAt)}` : undefined}>sync failed</span>;
+    return <span className="rounded bg-muted px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-secondary">never synced</span>;
+  };
+
+  // Status chip — the monitor worker's latest poll of this slave.
+  const statusChip = (m: RadiusSlaveMonitorSnapshot | null) => {
+    if (!m) return <span className="rounded bg-muted px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-secondary">no data yet</span>;
+    if (!m.reachable)
+      return (
+        <span className="inline-flex items-center gap-1 rounded bg-danger/15 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-danger-fg" title={m.error ?? undefined}>
+          <Server className="h-3 w-3" /> unreachable
+        </span>
+      );
+    if (m.radiusEnabled === false) return <span className="rounded bg-warning/15 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-warning-fg">RADIUS off on slave</span>;
+    if (m.probeOutcome === 'ok')
+      return (
+        <span className="inline-flex items-center gap-1 rounded bg-success/15 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-success-fg" title={m.detail ?? undefined}>
+          <Activity className="h-3 w-3" /> radiusd alive{m.latencyMs != null ? ` · ${m.latencyMs}ms` : ''}
+        </span>
+      );
+    if (m.probeOutcome === 'bad-auth') return <span className="rounded bg-danger/15 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-danger-fg" title={m.detail ?? undefined}>secret out of sync</span>;
+    if (m.probeOutcome === 'timeout') return <span className="rounded bg-danger/15 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-danger-fg" title={m.detail ?? undefined}>radiusd unreachable</span>;
+    return <span className="rounded bg-muted px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-secondary">no probe data</span>;
+  };
+
+  const eventColumns: DataTableColumn<RadiusAuthLogRow>[] = [
+    {
+      header: 'Time',
+      key: 'authdate',
+      width: 170,
+      sortAccessor: (row) => new Date(row.authdate).getTime(),
+      render: (row) => <span className="text-secondary">{formatDateTime(row.authdate)}</span>,
+    },
+    { header: 'User (cert CN)', key: 'username', width: 200, render: (row) => <span className="font-medium">{row.username}</span> },
+    {
+      header: 'Result',
+      key: 'result',
+      width: 110,
+      render: (row) =>
+        row.result === 'reject' ? (
+          <span className="rounded bg-danger/15 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-danger-fg">rejected</span>
+        ) : row.result === 'accept' ? (
+          <span className="rounded bg-success/15 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-success-fg">accepted</span>
+        ) : (
+          <span className="text-faint">{row.result ?? '—'}</span>
+        ),
+    },
+    {
+      header: 'NAS / client',
+      key: 'calledStationId',
+      width: 240,
+      exportValue: (row) => [row.calledStationId, row.callingStationId].filter(Boolean).join(' / '),
+      render: (row) => <span className="font-mono text-[10px] text-secondary">{[row.calledStationId, row.callingStationId].filter(Boolean).join(' / ') || '—'}</span>,
+    },
+  ];
+
+  return (
+    <section className="mb-6 space-y-3">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <h2 className="inline-flex items-center gap-2 text-sm font-semibold">
+          <Server className="h-4 w-4" /> Failover slaves
+        </h2>
+        {slavesQuery.data && (
+          <span className="text-[10px] text-faint">
+            polled every 60s by the monitor worker · mirror of each slave's auth log (best-effort)
+          </span>
+        )}
+      </div>
+
+      {slaves.length === 0 ? (
+        <div className="rounded-lg border p-3 text-[11px] text-secondary">
+          No failover slaves configured. A slave is a replication target on the{' '}
+          <a href="/backups" className="font-medium text-primary underline-offset-2 hover:underline">Backups</a> page (push direction) whose sections include{' '}
+          <code className="rounded bg-muted px-1 font-mono text-[10px]">radius</code> — it receives the NAS allowlist, user profiles and CA trust automatically.
+        </div>
+      ) : (
+        <div className="space-y-2">
+          {slaves.map((s) => {
+            const m = s.monitor;
+            const isOpen = openTargetId === s.targetId;
+            return (
+              <div key={s.targetId} className="rounded-lg border p-3">
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="text-xs font-semibold">{s.name}</span>
+                  <span className="font-mono text-[10px] text-faint" title={s.baseUrl}>
+                    {s.baseUrl}
+                  </span>
+                  {syncPill(s)}
+                  {statusChip(m)}
+                  <span className="ml-auto flex items-center gap-2 text-[10px] text-faint">
+                    last 24h: <span className="font-medium text-secondary">{m?.accepts24h ?? 0} accepted</span> ·{' '}
+                    <span className={m && m.rejects24h > 0 ? 'font-medium text-warning-fg' : 'text-secondary'}>{m?.rejects24h ?? 0} rejected</span>
+                  </span>
+                </div>
+                {m && !m.reachable && m.error && <p className="mt-1.5 text-[10px] text-danger-fg">{m.error}</p>}
+                {m?.lastCheckAt && (
+                  <p className="mt-1.5 text-[10px] text-faint">
+                    last checked {formatDateTime(m.lastCheckAt)}
+                    {m.radiusEnabled === false ? ' — RADIUS is disabled on this slave, so no probe or counters are collected there.' : ''}
+                  </p>
+                )}
+                <button
+                  type="button"
+                  onClick={() => setOpenTargetId(isOpen ? null : s.targetId)}
+                  className="mt-2 inline-flex items-center gap-1 rounded-md border px-2 py-1 text-[10px] font-medium hover:bg-muted/40"
+                >
+                  {isOpen ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />} Recent attempts on this slave
+                </button>
+                {isOpen && (
+                  <div className="mt-2">
+                    <DataTable
+                      columns={eventColumns}
+                      rows={eventsQuery.data?.events ?? []}
+                      rowKey={(row) => String(row.id)}
+                      storageKey={`radius-slave-events-${s.targetId}`}
+                      searchPlaceholder="Search attempts…"
+                      emptyMessage="No mirrored auth attempts yet — new logins on this slave appear here within a minute."
+                      autoRefresh={{ intervalMs: 30_000, queries: [eventsQuery] }}
+                    />
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </section>
+  );
+}
+
+/**
  * RADIUS NAS clients — the allowlist of access points / gateways permitted to
  * send RADIUS requests to the unm-radius sidecar. Each row is an IP plus a
  * reference to a secret from the installed credentials providers (same pattern
@@ -2039,11 +2218,13 @@ export default function Radius() {
     <Layout title="RADIUS">
       <p className="mb-4 text-xs text-muted-foreground">
         The UNM RADIUS server authenticates 802.1X supplicants — WiFi EAP-TLS and wired clients alike — against client certificates issued by the UNM CA.
-        This page covers the server's self-monitoring probe, the unsuccessful-login audit trail (failed logins raise notifications), the NAS allowlist,
-        per-user reply profiles and the enrolled client certificates. Device TLS endpoints and SSH host keys live on the{' '}
+        This page covers the server's self-monitoring probe, monitoring of replicated failover slaves (their health + mirrored login attempts), the
+        unsuccessful-login audit trail (failed logins raise notifications), the NAS allowlist, per-user reply profiles and the enrolled client
+        certificates. Device TLS endpoints and SSH host keys live on the{' '}
         <a href="/certificates" className="font-medium text-primary underline-offset-2 hover:underline">Certificates</a> page.
       </p>
       <RadiusStatusSection />
+      <RadiusSlavesSection />
       <RadiusNasClientsSection />
       <RadiusUserProfilesSection />
       <WifiCertsSection />
