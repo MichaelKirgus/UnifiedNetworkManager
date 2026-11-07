@@ -200,6 +200,52 @@ There is **no single-slave limit** — the topology scales to N slaves by design
 Verified live: one primary → two independent slaves in parallel, both
 converging to identical rendered config with a green self-monitoring probe.
 
+### Cross-site / no shared storage
+
+The topology needs **no shared volumes or storage of any kind** — replication is
+a plain HTTP push (JSON payload to the slave's `/v1/replication/inbound`), so a
+slave can live on different hardware, in another rack, or at another site:
+
+- Every instance keeps fully local state: its own Postgres, its own rendered
+  raddb, its own CA volume. The slave's `ca` volume is intentionally EMPTY —
+  the trust anchor arrives inside the sync payload (`caRootPem`), not via a
+  shared mount.
+- After a sync the slave has **zero runtime dependency on the primary**: each
+  EAP-TLS auth checks the client cert against its local CA bundle, looks the
+  serial up in its own `revoked_serials`, and reads reply attributes (VLAN /
+  static IP / session limits) from its own `radius_user_profiles`. Accounting
+  writes to its own DB. The primary can be completely down — that is exactly
+  the failover scenario this exists for.
+- What a slave does NOT get: the certificate *inventory* (`wifi_client_certs`).
+  It lives in the non-portable live-inventory section, and its private-key
+  column is ciphertext under the SOURCE instance's key — undecryptable on any
+  other instance by design. That is fine for failover: authenticating a client
+  never needs the leaf cert or its key (the supplicant presents both during the
+  TLS handshake); it only needs the CA root, the revocation list and the
+  per-serial profile — all replicated. The slave's webapp simply won't show the
+  issued-certificate list.
+
+### Propagation delay & network direction
+
+- Everything propagates on **sync cadence** (manual or `intervalMinutes`). For
+  a failover pair set a short interval (e.g. 5–15 min): that bounds how long a
+  revoked cert can still authenticate on the slave, and how long after a CA
+  re-key the slave keeps trusting the old root (see below).
+- **CA renewal is fully automatic — no manual action.** Every sync exports the
+  primary's *current* root (`/data/ca/root_ca.crt` at export time); when it
+  differs from what the slave has, the inbound apply adopts it into the
+  `radiusTrustedCaPem` setting (logged as a warning: "CA root PEM adopted from
+  the peer") and the sidecar rebuilds its bundle on the next config sync. The
+  adoption REPLACES the old root rather than adding to it — exactly mirroring
+  what happens on the primary itself, so both servers switch trust at the same
+  logical moment (one sync apart).
+- **Network direction:** with *Include secrets* enabled the sync is push-only
+  (the wrapping passphrase lives in the primary's target row), so the PRIMARY
+  must be able to reach the slave's API. If site-to-site firewalling only
+  allows outbound from the slave, put a tunnel/VPN in place — or run the target
+  without `includeSecrets` and provision the NAS shared secrets on the slave
+  manually (they must match byte-for-byte).
+
 ## Operations
 
 - **Sync cadence** — manual (`POST /replication/sync`) or scheduled via the
