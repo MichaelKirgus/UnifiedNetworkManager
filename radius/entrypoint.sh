@@ -85,12 +85,25 @@ sync_config() {
   : > "$bundle_tmp"
   if [ -f "$CA_CFG/root_ca.crt" ]; then cat "$CA_CFG/root_ca.crt" >> "$bundle_tmp"; fi
   if [ -f "$CFG/trusted-ca.pem" ]; then cat "$CFG/trusted-ca.pem" >> "$bundle_tmp"; fi
-  if [ -s "$bundle_tmp" ]; then
-    mv "$bundle_tmp" "$RADD/ca/bundle.pem"
-    chmod 644 "$RADD/ca/bundle.pem"
-  else
-    rm -f "$bundle_tmp" "$RADD/ca/bundle.pem"
-    log "WARN: no CA root (local or trusted) — EAP-TLS cannot validate clients until a CA exists"
+  # ALWAYS leave a NON-EMPTY bundle file in place. The rendered eap.conf
+  # references ca_file unconditionally, and FreeRADIUS 3.x is strict about it:
+  #   - MISSING file → fails config parse ("HUP - Cannot read configuration
+  #     files") AND fresh loads (radiusd exits at rlm_eap_tls instantiation);
+  #   - EMPTY file   → parses but rlm_eap_tls still refuses to instantiate its
+  #     SSL context ("no certificate or crl found").
+  # Both were observed live on a fresh failover slave before its first sync.
+  # So when no root exists anywhere yet (fresh install before step-ca bootstrap,
+  # or a slave awaiting replication), seed the bundle with the self-signed RADIUS
+  # server cert as a PLACEHOLDER: instantiation succeeds and it trusts no real
+  # client — a validating chain would need the server's private key, which never
+  # leaves this container. The moment any root lands (local bootstrap or a
+  # replicated trusted-ca.pem), the next sync rebuilds the bundle from real roots
+  # only and the placeholder disappears.
+  mv "$bundle_tmp" "$RADD/ca/bundle.pem"
+  chmod 644 "$RADD/ca/bundle.pem"
+  if [ ! -s "$RADD/ca/bundle.pem" ]; then
+    cat "$CERTDIR/server.crt" >> "$RADD/ca/bundle.pem"
+    log "WARN: no CA root (local or trusted) — bundle seeded with the RADIUS server cert as placeholder; EAP-TLS cannot validate clients until a CA exists"
   fi
 
   # Rendered files -> their exact raddb destinations (see header). FreeRADIUS 3.x

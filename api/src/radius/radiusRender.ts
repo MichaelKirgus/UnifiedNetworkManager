@@ -91,9 +91,14 @@ function pemCertificates(pem: string): string[] {
  * replicated/extra trusted roots from the `radiusTrustedCaPem` setting,
  * de-duplicated by SHA-256 of the normalized PEM block — so a slave that also
  * happens to run its own step-ca never carries the same cert twice, and order
- * is stable (local root first). Returns '' when nothing is trustable; callers
- * must then NOT write a bundle file at all (a missing ca_file is tolerated by
- * radiusd — same as a fresh install before CA bootstrap).
+ * is stable (local root first). Returns '' when nothing is trustable.
+ * NOTE: the rendered eap.conf still points ca_file at the bundle unconditionally
+ * and FreeRADIUS 3.x is strict about it — a MISSING file breaks config parse AND
+ * fresh loads, and an EMPTY file fails rlm_eap_tls SSL-context instantiation
+ * ("no certificate or crl found"); both verified live. The entrypoint therefore
+ * ALWAYS leaves a non-empty bundle in place: real roots when this function would
+ * return something, else the self-signed RADIUS server cert as a placeholder that
+ * trusts no real client until a root lands (see radius/entrypoint.sh).
  */
 export function buildCaBundle(localRootPem: string | null, trustedCaPem: string): string {
   const seen = new Set<string>();

@@ -104,6 +104,7 @@ services:
 
   radius:
     image: ghcr.io/michaelkirgus/unifiednetworkmanager-unm-radius:<tag>
+    restart: unless-stopped   # the entrypoint exits non-zero if radiusd dies on a broken config — docker recycles it
     ports: [ "1812:1812/udp", "1813:1813/udp" ]   # reachable from your WLC!
     volumes: [ "radius-cfg:/data/radius", "ca-cfg:/data/ca:ro" ]
 
@@ -172,6 +173,32 @@ first and the slave as fallback (vendor-specific; e.g. UniFi: *Settings →
 Wireless → 802.1X → RADIUS Servers*). Because replication keeps the NAS client
 entries identical — same IP, same shared secret — no per-server differences are
 needed on the WLC side.
+
+### Scaling to multiple slaves
+
+There is **no single-slave limit** — the topology scales to N slaves by design:
+
+- A slave is just another UNM instance; nothing on either side tracks "the"
+  slave. Create one replication target per slave (webapp preset or API), each
+  with its own peer token and passphrase if you like. Syncs are independent
+  per target (own schedule, own in-flight guard, own last-sync report).
+- Each slave is fully self-contained: own Postgres, own radiusd, own probe
+  client entry (rendered from its own API container IP), own copy of the CA
+  trust anchor. Slaves never talk to each other — failover is decided by your
+  WLC's RADIUS server list, which you extend with one entry per slave.
+- Load: most WLCs try the servers in order (failover); some support
+  round-robin/load-balancing mode for RADIUS — that's a vendor setting, not a
+  UNM one. Accounting (`radpostauth`) is written by whichever server handled
+  the auth and is NOT replicated — treat it as per-instance audit data.
+- Cost to know: with *Include secrets* enabled, every sync ships the whole
+  passphrase-encrypted secret store to that slave (not just RADIUS-referenced
+  ones), so each slave holds a full local copy of all secrets re-encrypted
+  under its own key. If that's too broad for your threat model, run the target
+  without `includeSecrets` and provision the NAS shared secrets on the slave
+  manually (they must match byte-for-byte).
+
+Verified live: one primary → two independent slaves in parallel, both
+converging to identical rendered config with a green self-monitoring probe.
 
 ## Operations
 

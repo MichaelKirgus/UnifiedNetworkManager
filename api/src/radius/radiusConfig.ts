@@ -51,7 +51,11 @@ export const RADIUS_CONFIG_PATH = process.env.UNM_RADIUS_CONFIG_PATH ?? '/data/r
 
 /** The raddb path the eap instance validates client certs against (entrypoint-synced).
  *  A BUNDLE: local UNM CA root + replicated trusted roots (RADIUS failover slaves
- *  trust their replication source's CA — see buildCaBundle in radiusRender.ts). */
+ *  trust their replication source's CA — see buildCaBundle in radiusRender.ts).
+ *  ALWAYS exists on disk NON-EMPTY (the entrypoint seeds it with the self-signed
+ *  RADIUS server cert as a placeholder before any real CA has bootstrapped)
+ *  because FR3 fails parse on a missing ca_file and rlm_eap_tls refuses to
+ *  instantiate an empty one. */
 const CA_BUNDLE_IN_RADD = '/etc/freeradius/3.0/ca/bundle.pem';
 /** Rendered file carrying the extra/trusted CA roots from the `radiusTrustedCaPem`
  *  setting; the entrypoint merges it with the local root into CA_BUNDLE_IN_RADD. */
@@ -223,8 +227,12 @@ function renderEapConf(): string {
     `        certificate_file = ${SERVER_CERT}`,
     `        private_key_file = ${SERVER_KEY}`,
     // Bundle (local root + replicated trusted roots) — the entrypoint assembles
-    // it from /data/ca/root_ca.crt + rendered trusted-ca.pem. A missing file is
-    // tolerated by radiusd (fresh install before CA bootstrap), same as before.
+    // it from /data/ca/root_ca.crt + rendered trusted-ca.pem and ALWAYS leaves a
+    // NON-EMPTY file in place: FR3 fails config parse on a MISSING ca_file and
+    // rlm_eap_tls refuses to instantiate an EMPTY one ("no certificate or crl
+    // found") — both verified live. Before any CA exists the entrypoint seeds it
+    // with the self-signed RADIUS server cert as a placeholder that trusts no real
+    // client; see sync_config in radius/entrypoint.sh.
     `        ca_file = ${CA_BUNDLE_IN_RADD}`,
     '        verify_depth = 2',
     '        check_crl = no',
