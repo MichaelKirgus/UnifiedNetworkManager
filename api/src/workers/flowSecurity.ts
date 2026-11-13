@@ -119,6 +119,39 @@ function medianOf(values: number[]): number {
   return sorted.length % 2 === 1 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
 }
 
+/** Verdict for one candidate pair in detectEgressBaseline. */
+export interface EgressVerdict {
+  severity: 'warning' | 'critical';
+  /** avgHourly / baselineMedian, rounded to one decimal; null when the median is zero. */
+  ratio: number | null;
+  /** Median of the pair's per-hour baseline totals (bytes/hour). */
+  baselineMedianBytes: number;
+}
+
+/**
+ * Pure decision core of detectEgressBaseline — extracted for unit testing.
+ * Returns null when NO finding is warranted: no baseline history at all
+ * (first-time pairs are detector 1's job) or the window average stays below
+ * `multiple`× the median. A zero-median baseline means ANY transfer above the
+ * floor is anomalous for this pair; ratio ≥ 10 escalates to critical.
+ */
+export function egressVerdict(
+  totalBytes: number,
+  windowHours: number,
+  baselineHourlyValues: number[],
+  multiple: number
+): EgressVerdict | null {
+  if (baselineHourlyValues.length === 0) return null;
+  const median = medianOf(baselineHourlyValues);
+  const avgHourly = totalBytes / windowHours;
+  // A zero-median baseline (pair was quiet in most active hours) means ANY
+  // transfer above the floor is anomalous for this pair.
+  if (median > 0 && avgHourly < median * multiple) return null;
+  const ratio = median > 0 ? Math.round((avgHourly / median) * 10) / 10 : null;
+  const severity: 'warning' | 'critical' = ratio !== null && ratio >= 10 ? 'critical' : 'warning';
+  return { severity, ratio, baselineMedianBytes: median };
+}
+
 async function lookupDeviceName(deviceId: string): Promise<string | null> {
   try {
     const res = await pool.query(`SELECT name FROM devices WHERE id = $1`, [deviceId]);
@@ -376,25 +409,20 @@ async function detectEgressBaseline(windowEndMs: number): Promise<void> {
        ORDER BY "estBytes"`,
       [srcIp, dstIp, new Date(bFromMs).toISOString(), new Date(windowStartMs).toISOString()]
     );
-    if (baseRes.rows.length === 0) continue; // no history — first-time pair, covered by detector 1
-
-    const median = medianOf(baseRes.rows.map((x) => Number(x.estBytes ?? 0)));
-    const avgHourly = total / windowHours;
-    // A zero-median baseline (pair was quiet in most active hours) means ANY
-    // transfer above the floor is anomalous for this pair.
-    if (median > 0 && avgHourly < median * multiple) continue;
-
-    const ratio = median > 0 ? Math.round((avgHourly / median) * 10) / 10 : null;
-    const severity: 'warning' | 'critical' = ratio !== null && ratio >= 10 ? 'critical' : 'warning';
+    // No history → first-time pair (detector 1's job); within the normal range
+    // → no finding. The verdict math is pure — unit-tested in flowSecurity.test.ts.
+    const verdict = egressVerdict(total, windowHours, baseRes.rows.map((x) => Number(x.estBytes ?? 0)), multiple);
+    if (!verdict) continue;
+    const { severity, ratio } = verdict;
     const detail = `${hostname ?? srcIp} sent ${humanBytes(total)} to ${dstIp}${country ? ` (${country})` : ''} over the last ${windowHours} h — ` +
-      (ratio !== null ? `about ${ratio}× its usual per-hour rate (median ${humanBytes(median)}/h).` : 'the pair had no meaningful history in the baseline window.');
+      (ratio !== null ? `about ${ratio}× its usual per-hour rate (median ${humanBytes(verdict.baselineMedianBytes)}/h).` : 'the pair had no meaningful history in the baseline window.');
     const input: FindingInput = {
       kind: 'egress-baseline',
       srcIp,
       dstIp,
       severity,
       detail,
-      context: { windowHours, estBytes: total, baselineMedianBytes: Math.round(median), ratio, countryCode: country, srcHostname: hostname },
+      context: { windowHours, estBytes: total, baselineMedianBytes: Math.round(verdict.baselineMedianBytes), ratio, countryCode: country, srcHostname: hostname },
       deviceId,
     };
     const isNew = await upsertFinding(input);
