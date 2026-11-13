@@ -32,7 +32,8 @@ import { SYSLOG_COLLECTOR_DEVICE_SUPPORT } from './deviceSupport';
 import { extractVendorIps } from './vendorParsers';
 import { parseSyslogLine } from './syslogParser';
 
-export const PLUGIN_UUID = '00000000-0000-4000-8000-0000000013';
+// Reserved UUID — must stay unique across all plugins (...13 is web-fetch, ...12 flow-collector).
+export const PLUGIN_UUID = '00000000-0000-4000-8000-0000000018';
 export const PLUGIN_NAME = 'Syslog Collector (RFC5424/BSD)';
 
 /**

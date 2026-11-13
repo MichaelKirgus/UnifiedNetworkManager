@@ -27,7 +27,7 @@ const { Pool } = apiRequire('pg') as typeof import('pg');
 const API = process.env.API_URL || 'http://localhost:3000/v1';
 const KEEP = process.env.KEEP === '1';
 const SYSLOG_HOST = 'e2e-syslog-host';
-const PLUGIN_UUID = '00000000-0000-4000-8000-0000000013';
+const PLUGIN_UUID = '00000000-0000-4000-8000-0000000018';
 
 // ── Plumbing ─────────────────────────────────────────────────────────────────
 function sleep(ms: number): Promise<void> { return new Promise((r) => setTimeout(r, ms)); }
