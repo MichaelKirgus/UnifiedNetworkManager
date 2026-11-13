@@ -398,9 +398,10 @@ function LogTriggerEditor({ block, onChange, plugins }: { block: Extract<Automat
     <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
       <div>
         <span className={labelCls}>Source</span>
-        <select className={inputCls} value={block.source} onChange={(e) => { const source = e.target.value as 'plugin' | 'firewall'; setTestResult(null); onChange({ ...block, source, pluginId: source === 'firewall' ? undefined : block.pluginId }); }}>
+        <select className={inputCls} value={block.source} onChange={(e) => { const source = e.target.value as 'plugin' | 'firewall' | 'security'; setTestResult(null); onChange({ ...block, source, pluginId: source === 'plugin' ? block.pluginId : undefined }); }}>
           <option value="plugin">Plugin logs</option>
           <option value="firewall">Firewall events</option>
+          <option value="security">Security events (syslog)</option>
         </select>
       </div>
       {block.source === 'plugin' && (

@@ -3458,7 +3458,8 @@ export type LogLevel = (typeof LOG_LEVELS)[number];
 export interface AutomationLogTrigger {
   id: string;
   type: 'log';
-  source: 'plugin' | 'firewall';
+  /** 'plugin' scans plugin_logs; 'firewall' scans firewall_events; 'security' scans syslog security_events. */
+  source: 'plugin' | 'firewall' | 'security';
   scope?: AutomationDeviceScope;
   pluginId?: string;
   levels?: LogLevel[];
@@ -4872,7 +4873,7 @@ export const api = {
     return apiFetch<{ runs: string[] }>(`/automations/preview-schedule?kind=${kind}&expr=${fullEncode(expr)}&count=${count}`);
   },
   /** Dry-run a log trigger's pattern against recent logs (no firing, no state). */
-  testAutomationPattern: (body: { source: 'plugin' | 'firewall'; pluginId?: string; levels?: LogLevel[]; pattern: string }) =>
+  testAutomationPattern: (body: { source: 'plugin' | 'firewall' | 'security'; pluginId?: string; levels?: LogLevel[]; pattern: string }) =>
     apiFetch<{ count: number; matches: Array<{ deviceId: string | null; message: string; axisValue: string | number }> }>(
       '/automations/test-pattern', { method: 'POST', body: JSON.stringify(body) }),
 };

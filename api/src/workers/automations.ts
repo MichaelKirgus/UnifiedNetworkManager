@@ -527,17 +527,24 @@ export async function scanLogMatches(t: LogTrigger, watermark: string | null): P
     return { matches, newWatermark };
   }
 
-  // firewall_events — tsMs epoch-ms axis (NULL rows are skipped by the > filter).
+  // firewall_events / security_events — tsMs epoch-ms axis (NULL rows are skipped by the > filter).
+  const isSecurity = t.source === 'security';
+  const table = isSecurity ? 'security_events' : 'firewall_events';
   const firstRunFloor = Date.now() - 24 * 3600_000;
   const since = watermark !== null ? Number(watermark) : firstRunFloor;
   let n2 = 1;
   const conds2: string[] = [`"tsMs" > $${n2++}`];
   const params2: unknown[] = [since];
   if (t.pluginId) { conds2.push(`"pluginId" = $${n2++}`); params2.push(t.pluginId); }
-  const messageExpr = `COALESCE("reason", '') || ' ' || "action" || ': ' || "srcIp" || ':' || COALESCE("srcPort", 0) || ' -> ' || "dstIp" || ':' || COALESCE("dstPort", 0)`;
+  // security_events carries a normalized level column — apply the same levels
+  // filter plugin_logs gets. firewall_events has no level concept.
+  if (isSecurity && levels) { conds2.push(`level = ANY($${n2})`); params2.push(levels); }
+  const messageExpr = isSecurity
+    ? 'message'
+    : `COALESCE("reason", '') || ' ' || "action" || ': ' || "srcIp" || ':' || COALESCE("srcPort", 0) || ' -> ' || "dstIp" || ':' || COALESCE("dstPort", 0)`;
   const { rows } = await pool.query<{ deviceId: string | null; message: string; tsMs: number | null }>(
     `SELECT "deviceId", ${messageExpr} AS message, "tsMs"
-       FROM firewall_events
+       FROM ${table}
       WHERE ${conds2.join(' AND ')}
       ORDER BY "tsMs" ASC
       LIMIT ${LOG_SCAN_LIMIT}`,

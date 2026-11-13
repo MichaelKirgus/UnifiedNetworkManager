@@ -106,7 +106,7 @@ function validateTrigger(t: TriggerBlock, where: string): string[] {
       break;
     }
     case 'log': {
-      if (t.source !== 'plugin' && t.source !== 'firewall') e.push(`${where}: source must be "plugin" or "firewall"`);
+      if (t.source !== 'plugin' && t.source !== 'firewall' && t.source !== 'security') e.push(`${where}: source must be "plugin", "firewall" or "security"`);
       if (!t.pattern || typeof t.pattern !== 'string') e.push(`${where}: pattern is required`);
       else if (!isValidRegex(t.pattern)) e.push(`${where}: invalid regex "${t.pattern}"`);
       if (t.levels && !Array.isArray(t.levels)) e.push(`${where}: levels must be an array`);

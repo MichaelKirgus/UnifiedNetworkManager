@@ -71,12 +71,14 @@ export type LogLevel = (typeof LOG_LEVELS)[number];
  * Fires when NEW log rows appear since the last evaluation (watermark in
  * automation_state) whose message matches `pattern` (JS regex, search).
  * source 'plugin' scans plugin_logs (emittedAt axis); 'firewall' scans
- * firewall_events (tsMs epoch-ms axis). Bounded to 5000 rows per tick.
+ * firewall_events and 'security' scans syslog security_events (both on the tsMs
+ * epoch-ms axis; only 'security' rows carry a normalized level column, so the
+ * `levels` filter applies there too). Bounded to 5000 rows per tick.
  */
 export interface LogTrigger {
   id: string;
   type: 'log';
-  source: 'plugin' | 'firewall';
+  source: 'plugin' | 'firewall' | 'security';
   scope?: DeviceScope;
   pluginId?: string;
   /** Only these levels (absent = all). */
