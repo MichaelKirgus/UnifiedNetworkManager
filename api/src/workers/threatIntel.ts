@@ -38,6 +38,8 @@ import { resolveWebFetchProvider, fetchViaWebFetch } from '../webFetchBroker';
 import { LEADER_KEYS } from './leader';
 import { initWorker, trackBeat } from './stats';
 import { upsertFinding, type FindingInput } from './flowSecurity';
+// All IP parsing/math lives in the shared SDK module — never re-implement it here.
+import { ipToWords, ipv4FromInt, ipv6FromWords, splitCidr, stripZoneId, wordsContain } from '@unm/plugin-sdk';
 
 const BEAT_MS = 60_000;
 const BUCKET_MS = 300_000; // flow_agg_5m bucket size
@@ -82,9 +84,12 @@ export function getThreatIntelStats(): {
 }
 
 // ── IP / CIDR matching (v4 + v6) ─────────────────────────────────────────────
+// Address parsing and containment math live in @unm/plugin-sdk (ip.ts); this
+// module only adds threat-intel semantics on top (exact-vs-CIDR entries, the
+// canonical exact-match key, source attribution).
 
 /** One active indicator set: exact host addresses + CIDR networks. */
-interface IocCache {
+export interface IocCache {
   /** Canonical address string → source names containing it. */
   exact: Map<string, string[]>;
   cidrs: Array<{ words: number[]; prefix: number; family: 'v4' | 'v6'; sources: string[] }>;
@@ -92,80 +97,36 @@ interface IocCache {
   total: number;
 }
 
-/** Parses an address into eight 16-bit words (IPv4 occupies the last two). */
-function ipToWords(ip: string): number[] | null {
-  const v6Full = ip.match(/^([0-9a-f]{1,4}:){7}[0-9a-f]{1,4}$/);
-  if (v6Full) return ip.split(':').map((g) => parseInt(g, 16));
-  if (ip.includes('::')) {
-    const [left, right] = ip.split('::');
-    const l = left ? left.split(':') : [];
-    const r = right ? right.split(':') : [];
-    if (l.length + r.length > 7) return null;
-    const groups = [...l, ...Array(8 - l.length - r.length).fill('0'), ...r].map((g) => parseInt(g, 16));
-    if (groups.some((g) => Number.isNaN(g))) return null;
-    return groups;
-  }
-  const m = ip.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
-  if (m) {
-    const o = [Number(m[1]), Number(m[2]), Number(m[3]), Number(m[4])];
-    if (o.some((x) => x > 255)) return null;
-    return [0, 0, 0, 0, 0, 0, (o[0] << 8) | o[1], (o[2] << 8) | o[3]];
-  }
-  return null;
-}
-
-/** True when `words` falls inside the network (netWords, prefix bits). */
-function wordsContain(words: number[], netWords: number[], prefix: number, family: 'v4' | 'v6'): boolean {
-  // IPv4 occupies only the LAST two words of the 128-bit layout — offset both
-  // operands so the prefix is measured from the first address bit. Comparing
-  // from index 0 for v4 would constrain zero-padded leading words and match
-  // every IPv4 address (caught by E2E: a /24 flooded findings on real traffic).
-  const off = family === 'v4' ? 6 : 0;
-  const full = Math.floor(prefix / 16);
-  for (let i = 0; i < full; i += 1) if (words[off + i] !== netWords[off + i]) return false;
-  const rem = prefix % 16;
-  if (rem > 0 && (words[off + full] & (0xffff << (16 - rem))) !== (netWords[off + full] & (0xffff << (16 - rem)))) return false;
-  return true;
-}
-
-/** Canonical exact-match key: dotted quad for v4, expanded hex groups for v6. */
-function canonicalKey(words: number[], family: 'v4' | 'v6'): string {
-  if (family === 'v4') {
-    const w = words.slice(6);
-    return `${w[0] >> 8}.${w[0] & 255}.${w[1] >> 8}.${w[1] & 255}`;
-  }
-  return words.map((g) => g.toString(16)).join(':');
-}
-
 /**
  * Parses a bare IP or CIDR into matchable form. Returns null for anything that
  * is not a valid IPv4/IPv6 address (or network) — callers count those as
- * skipped, never throw on feed noise.
+ * skipped, never throw on feed noise. A /32 or /128 "network" collapses to an
+ * exact host entry (prefix null). `key` is the canonical literal (dotted quad
+ * for v4, RFC 5952 compressed form for v6) used as the exact-match map key.
  */
-function parseIocValue(raw: string): { key: string; words: number[]; prefix: number | null; family: 'v4' | 'v6' } | null {
-  let addr = raw.trim().toLowerCase();
+export function parseIocValue(raw: string): { key: string; words: number[]; prefix: number | null; family: 'v4' | 'v6' } | null {
+  const addr = stripZoneId(String(raw).trim());
   if (!addr) return null;
-  const zone = addr.indexOf('%'); // scoped addresses are not routable — drop the scope
-  if (zone >= 0) addr = addr.slice(0, zone);
+  let netPart = addr;
   let prefix: number | null = null;
   const slash = addr.indexOf('/');
   if (slash >= 0) {
-    prefix = Number(addr.slice(slash + 1));
-    addr = addr.slice(0, slash);
-    if (!Number.isInteger(prefix)) return null;
+    const s = splitCidr(addr); // validates the prefix range for the address family
+    if (!s) return null;
+    netPart = s.net;
+    prefix = s.prefix;
   }
-  const words = ipToWords(addr);
-  if (!words) return null;
-  const family: 'v4' | 'v6' = addr.includes(':') ? 'v6' : 'v4';
-  const maxPrefix = family === 'v6' ? 128 : 32;
-  if (prefix !== null && (prefix < 0 || prefix > maxPrefix)) return null;
+  const p = ipToWords(netPart);
+  if (!p) return null;
+  const maxPrefix = p.family === 'v6' ? 128 : 32;
   // A /32 or /128 "network" is just a host — treat it as an exact entry.
-  if (prefix === maxPrefix) prefix = null;
-  return { key: canonicalKey(words, family), words, prefix, family };
+  if (prefix !== null && prefix === maxPrefix) prefix = null;
+  const key = p.family === 'v4' ? ipv4FromInt(((p.words[6] << 16) | p.words[7]) >>> 0) : ipv6FromWords(p.words);
+  return { key, words: p.words, prefix, family: p.family };
 }
 
 /** Matches one IP against the cache; returns the source names when listed. */
-function matchIoc(ipRaw: string | null | undefined, cache: IocCache): { ip: string; sources: string[] } | null {
+export function matchIoc(ipRaw: string | null | undefined, cache: IocCache): { ip: string; sources: string[] } | null {
   if (!ipRaw) return null;
   const p = parseIocValue(String(ipRaw));
   if (!p) return null;
@@ -182,13 +143,13 @@ function matchIoc(ipRaw: string | null | undefined, cache: IocCache): { ip: stri
 
 // ── Feed parsing ─────────────────────────────────────────────────────────────
 
-interface ParsedFeed {
+export interface ParsedFeed {
   values: string[]; // deduped raw IP/CIDR strings (validated)
   skipped: number; // unparseable lines / entries over the cap
 }
 
 /** Plain-text blocklist: one address or CIDR per line. */
-function parseIpList(bytes: Buffer, maxIocs: number): ParsedFeed {
+export function parseIpList(bytes: Buffer, maxIocs: number): ParsedFeed {
   const values = new Set<string>();
   let skipped = 0;
   for (const rawLine of bytes.toString('utf8').split(/\r?\n/)) {
@@ -208,7 +169,7 @@ function parseIpList(bytes: Buffer, maxIocs: number): ParsedFeed {
 }
 
 /** STIX 2.x bundle — equality patterns of ipv4/ipv6 indicators. */
-function parseStix(bytes: Buffer, maxIocs: number): ParsedFeed {
+export function parseStix(bytes: Buffer, maxIocs: number): ParsedFeed {
   let bundle: unknown;
   try {
     bundle = JSON.parse(bytes.toString('utf8'));
@@ -218,7 +179,10 @@ function parseStix(bytes: Buffer, maxIocs: number): ParsedFeed {
   const rawObjects = Array.isArray(bundle) ? bundle : (bundle as { objects?: unknown }).objects;
   if (!Array.isArray(rawObjects)) throw new Error('STIX bundle has no objects array');
   const objects: unknown[] = rawObjects;
-  const patternRe = /\[(?:ipv4|ipv6)-addr:value\s*=\s*'([^']+)'/g;
+  // No leading '[' anchor: STIX OR patterns repeat the object reference
+  // WITHOUT a bracket (…'a' OR ipv4-addr:value = 'b'), and every equality
+  // value in an indicator's pattern is wanted. Negations (!=) never match.
+  const patternRe = /(?:ipv4|ipv6)-addr:value\s*=\s*'([^']+)'/g;
   const values = new Set<string>();
   let skipped = 0;
   for (const obj of objects) {
