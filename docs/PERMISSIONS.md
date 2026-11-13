@@ -86,7 +86,7 @@ permission.
 
 | Permission | Grants |
 |------------|--------|
-| `security:read` | View the Security page (unsuccessful logins, file-integrity and rate-limit findings across devices) — own permission because findings can carry sensitive detail |
+| `security:read` | View the Security page (cross-device security checks, CVE findings, syslog security events, threat-intel sources & recent hits) — own permission because findings can carry sensitive detail |
 | `topology:read` | View the Topology page (physical + logical network graph) |
 | `logs:read` | View plugin log entries (device and global) — separate from `devices:read` because logs can carry critical details |
 
@@ -206,7 +206,7 @@ read permission: `/networks(+suggestions)` → `networks:read`; `/hosts`,
   `users:write`; credential endpoints → [inline gate](#inline-gates-not-middleware-permissions).
 - Secrets & tokens: see [Inline gates](#inline-gates-not-middleware-permissions).
 - CA: status/certificates → `ca:read`; revoke/renew → `ca:manage`.
-- Security/CVE: vulnerabilities/summary/**refresh** → `security:read`.
+- Security/CVE: vulnerabilities/summary/**refresh** → `security:read`; `/security-events` GET → `security:read`; `/threat-intel` GET → `security:read`, source CRUD + **fetch** → `system:write`.
 - GeoIP: status → `flows:read`; **refresh → `system:write`**.
 - Settings & system: GETs → `system:read`; writes → `system:write`.
 - Notifications: list/count/prefs-GET + ack/close/resolve/delete →
@@ -214,7 +214,8 @@ read permission: `/networks(+suggestions)` → `networks:read`; `/hosts`,
 - Layers: GET open to all authenticated users; writes → `layers:write`.
 - Files, updates, topology, flows, mail, logs, counts: their page's read
   permission (`files:read`, `updates:read`, `topology:read`, `flows:read`,
-  `mail:read`, `logs:read`; `/counts` is auth-only).
+  `mail:read`, `logs:read`; `/counts` is auth-only; `POST /flows/security/baseline/reset`
+  → `system:write`).
 - Backups (all routes) → `instance:backup`.
 
 ### Plugin plane (`api/src/routes/internal.ts`)

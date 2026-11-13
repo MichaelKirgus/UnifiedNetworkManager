@@ -1,6 +1,6 @@
 # Plugin catalog — supported vendors & devices
 
-UNM ships **24 plugins** as independent microservices (one directory each under `plugins/`, plus `_template/` as the scaffold for new ones). Every plugin speaks one common contract and self-registers with the API on boot, so adding a device family never means touching the core — see [PLUGIN-DEVELOPMENT.md](PLUGIN-DEVELOPMENT.md) for how to build your own.
+UNM ships **27 plugins** as independent microservices (one directory each under `plugins/`, plus `_template/` as the scaffold for new ones). Every plugin speaks one common contract and self-registers with the API on boot, so adding a device family never means touching the core — see [PLUGIN-DEVELOPMENT.md](PLUGIN-DEVELOPMENT.md) for how to build your own.
 
 A device can carry **multiple plugins at once** (e.g. generic SNMP + a vendor plugin), each with its own credentials; exactly one is *primary*. Every plugin also supports multi-instance deployments (`PLUGIN_INSTANCE_ID`) for remote sites.
 
@@ -20,6 +20,7 @@ A device can carry **multiple plugins at once** (e.g. generic SNMP + a vendor pl
 | Mailcow Plugin | `plugins/mailcow/` | mailcow | mailcow dockerized — domains, mailboxes and aliases over the REST API | monitoring (system version + service health), inventory, configuration (domain/mailbox/alias CRUD), planning, securityChecks (fail2ban rate limiting, per-domain DKIM) |
 | Zabbix Plugin | `plugins/zabbix/` | Zabbix | Any Zabbix server as an external inventory source | monitoring, inventorySync |
 | netcup SCP Plugin | `plugins/netcup-scp/` | netcup | netcup VPS fleet via the SCP REST API (one Bearer token per account) | monitoring (server + task tables), inventory (networks from VM interface IP aliases, firewall rules from interface policies), configuration (~20 plan-gated actions: power, hostname/nickname, snapshots, rescue system, ISO attach/detach, OS image setup, firewall policy CRUD + apply, rDNS, task cancellation — with pre-change rollback snapshot), planning |
+| WLED Plugin | `plugins/wled/` | WLED | Any WLED light controller (ESP8266/ESP32) over its plain-HTTP JSON API — monitoring is credential-free; optional PIN slot for rename/firmware upload on protected units | monitoring, configuration (firmware update/revert, rename, on/brightness), planning, updates (GitHub release feed via web-fetch broker → one-click apply), quickActions |
 
 ## Generic & platform adapters
 
@@ -35,6 +36,7 @@ Vendor-neutral plugins that work with any device exposing the respective protoco
 | Generic IPMI Plugin | `plugins/generic-ipmi/` | Any bare-metal server BMC over RMCP+ (UDP 623) — protocol stack implemented in-process, no ipmitool subprocess | Chassis power state → health, SDR sensor walk with live readings + threshold states, FRU identity, SEL tail, LAN channel inventory; plan-gated control actions (power on/soft-off/hard-off/reset, boot options, SEL clear, NMI pulse, BMC LAN writes); IPMI SOL serial console | monitoring, inventory, configuration, planning, sshConsole |
 | Docker Plugin | `plugins/docker/` | Any Docker host via the Engine API (+ optional SSH slot for compose deploys) | Containers/images/apps inventory, per-container start/stop/restart/delete, change-image action (recreate on a new image tag/ref), deploy-compose action (Create-app dialog), live per-container stats probe | monitoring, configuration, planning, deviceState, probe |
 | Flow Collector (sFlow/NetFlow) | `plugins/flow-collector/` | — (push-based ingest service; no devices of its own) | Receives sFlow/NetFlow samples and feeds the Flows page (top talkers, pairs, internet egress) | ingest only |
+| Syslog Collector (RFC5424/BSD) | `plugins/syslog-collector/` | — (push-based ingest service; no devices of its own) | Receives device syslog on UDP/TCP :514, parses RFC5424 + BSD formats with vendor src/dst extractors, and feeds the security-events pipeline (Security page search + automation log triggers) | ingest only |
 
 ## Infrastructure plugins
 
@@ -45,7 +47,8 @@ Not device-facing — they serve the UNM core itself and are swappable via `AUTH
 | Basic Auth (Local Users + TOTP) | `plugins/basic-auth/` | Identity provider — local users + TOTP verification on behalf of the API | identityProvider |
 | Secrets Provider (Device Credentials) | `plugins/secrets-provider/` | Crypto holder — encryption at rest (owns `MASTER_KEY`) + key/cert generation (WireGuard key pairs, tunnel PSKs, OpenVPN CA/cert/key) | secretsProvider |
 | File Repo (Storage Backend) | `plugins/file-repo/` | Stateless bytes half of the central file repository — content-addressed (SHA-256) store on a local volume; the API owns all metadata and brokers every read/write. Multi-instance via `PLUGIN_INSTANCE_ID` for per-segment repos | fileRepo |
-| Web Fetch (Internet Egress) | `plugins/web-fetch/` | Pull-based egress service for the API (e.g. GeoIP lookups); no devices of its own | webFetch |
+| Web Fetch (Internet Egress) | `plugins/web-fetch/` | Pull-based egress service for the API (e.g. GeoIP lookups, threat-intel feed fetches); no devices of its own | webFetch |
+| FreeRADIUS (Radius Companion) | `plugins/freeradius/` | Companion to the `unm-radius` sidecar — advertises the RADIUS capability so the Certificates page shows its WiFi (EAP-TLS) client-certificate section and CA enrollment knows a server exists; deliberately no control surface (config hot-applies via render → shared volume → SIGHUP) | radius |
 
 ## Adding a new plugin
 

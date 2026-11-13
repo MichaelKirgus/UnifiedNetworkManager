@@ -63,6 +63,7 @@ One control plane for a mixed-vendor estate — here's what that looks like in p
 - **Cross-device inventory pages** — Networks (logical subnets/VLANs merged across devices), Hosts (one row per MAC, ARP/NDP/DHCP/Wi-Fi sources), Routes (static + connected + dynamic, with gateway health enrichment), Tunnels (WireGuard/IPsec/OpenVPN live state: peer addresses, handshake age, transfer rates), and Wi-Fi clients.
 - **Plugin log pipeline** — plugins ship structured logs to the API (`POST /plugin/logs`); entries are retained for a configurable number of days and browsable globally or per device in the webapp (gated by its own `logs:read` permission). Emission is on by default and can be switched off globally or per device.
 - **Plugin self-metrics** — every plugin auto-serves `GET /metrics` (CPU%, heap/RSS memory, event-loop lag, in-flight polls, last-poll duration + error rate, emitted metric count, log queue depth); the API samples it every 30 s and the webapp shows per-plugin runtime health with history sparklines — for spotting overloaded plugins or growing telemetry payloads.
+- **Security insights & threat intelligence** — flow-based detectors (new destinations, port scans, sustained egress vs. per-endpoint baseline) and IOC feed matching (IP lists/STIX against flow destinations + firewall events) raise findings on the Security page with notifications and `securityFinding` automation triggers; a syslog collector plugin ingests RFC5424/BSD device logs into searchable security events that also drive log-trigger automations.
 - **MCP server** — exposes the whole API to AI agents over the [Model Context Protocol](https://modelcontextprotocol.io); new endpoints appear as tools automatically.
 
 ## Architecture
@@ -107,7 +108,7 @@ flowchart LR
 | `webapp/` | React 18 + Vite + Tailwind SPA (login, devices, plans, networks, hosts, routes, tunnels, Wi-Fi, logs, plugins, secrets, sites, users, roles, tokens) |
 | `packages/plugin-sdk/` | Shared TypeScript SDK for plugins (`@unm/plugin-sdk`): HTTP server scaffolding (incl. auto-mounted self-metrics `/metrics`), settings reading, API client, structured logger |
 | `packages/snmp-client/` | Shared net-snmp CLI wrapper used by the SNMP + LANCOM plugins |
-| `plugins/` | One microservice per vendor adapter — 24 plugins in total. The full list with supported vendors & devices lives in [docs/PLUGINS.md](docs/PLUGINS.md); `_template/` is the scaffold for new plugins |
+| `plugins/` | One microservice per vendor adapter — 27 plugins in total. The full list with supported vendors & devices lives in [docs/PLUGINS.md](docs/PLUGINS.md); `_template/` is the scaffold for new plugins |
 | `plugins/basic-auth/` | Identity provider plugin — local users + TOTP verification on behalf of the API (swappable via `AUTH_PLUGIN_ID`) |
 | `plugins/secrets-provider/` | Secrets provider plugin — encryption at rest (owns `MASTER_KEY`) + key/cert generation (swappable via `SECRETS_PLUGIN_ID`) |
 | `mcp/` | MCP server exposing the OpenAPI operations as tools (+ read-only SQL & plugin probes on a gated debug endpoint) |
