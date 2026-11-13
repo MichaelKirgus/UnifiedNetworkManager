@@ -3540,9 +3540,53 @@ export interface AutomationUpdateTrigger {
   defer?: { schedule: AutomationScheduleSpec; maxWaitHours?: number };
 }
 
-/** Finding kinds produced by the flow security worker (flow_security_findings.kind). */
-export const FLOW_SECURITY_FINDING_KINDS = ['new-destination', 'port-scan', 'egress-baseline'] as const;
+/** Finding kinds produced by the flow security worker (flow_security_findings.kind). 'ioc-hit' rows are written by the threat-intel worker. */
+export const FLOW_SECURITY_FINDING_KINDS = ['new-destination', 'port-scan', 'egress-baseline', 'ioc-hit'] as const;
 export type FlowSecurityFindingKind = (typeof FLOW_SECURITY_FINDING_KINDS)[number];
+
+// ── Threat intelligence (GET /threat-intel) ────────────────────────────────
+
+/** One IOC feed source managed on the Security page. */
+export interface ThreatIntelSource {
+  id: string;
+  name: string;
+  url: string;
+  /** 'ip-list' = one IP/CIDR per line; 'stix' = STIX 2.x bundle (indicator equality patterns). */
+  format: 'ip-list' | 'stix';
+  enabled: boolean;
+  iocCount: number;
+  lastSuccessAt: string | null;
+  lastError: string | null;
+  createdAt: string;
+}
+
+export interface ThreatIntelSourceInput {
+  name?: string;
+  url?: string;
+  format?: 'ip-list' | 'stix';
+  enabled?: boolean;
+}
+
+/** One recent 'ioc-hit' finding (traffic involving a feed-listed IP). */
+export interface ThreatIntelHit {
+  id: string;
+  severity: 'info' | 'warning' | 'critical';
+  srcIp: string;
+  dstIp: string | null;
+  detail: string;
+  deviceId: string | null;
+  deviceName: string | null;
+  firstSeenAt: string;
+  lastSeenAt: string;
+  occurrences: number;
+}
+
+export interface ThreatIntelResponse {
+  enabled: boolean;
+  worker: { lastRunAt: string | null; lastError: string | null; iocTotal: number };
+  sources: ThreatIntelSource[];
+  recentHits: ThreatIntelHit[];
+}
 
 /**
  * Fires when the flow security worker records a NEW open finding after this
@@ -4461,6 +4505,15 @@ export const api = {
     const suffix = qs.toString() ? `?${qs.toString()}` : '';
     return apiFetch<FlowsSecurityResponse>(`/flows/security${suffix}`);
   },
+  // Threat intelligence (Security page) — IOC feed sources + worker status.
+  threatIntel: () => apiFetch<ThreatIntelResponse>('/threat-intel'),
+  addThreatIntelSource: (body: ThreatIntelSourceInput) =>
+    apiFetch<ThreatIntelSource>('/threat-intel/sources', { method: 'POST', body: JSON.stringify(body) }),
+  updateThreatIntelSource: (id: string, body: ThreatIntelSourceInput) =>
+    apiFetch<ThreatIntelSource>(`/threat-intel/sources/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify(body) }),
+  deleteThreatIntelSource: (id: string) =>
+    apiFetch<{ deleted: boolean }>(`/threat-intel/sources/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+  fetchThreatIntelNow: () => apiFetch<{ triggered: number }>('/threat-intel/fetch', { method: 'POST' }),
   // Plugin log entries (global Logs page + per-device section in DeviceDetail).
   logs: (params?: {
     deviceId?: string;

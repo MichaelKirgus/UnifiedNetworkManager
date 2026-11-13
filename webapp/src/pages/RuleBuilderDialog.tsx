@@ -521,6 +521,7 @@ const FINDING_KIND_LABEL: Record<FlowSecurityFindingKind, string> = {
   'new-destination': 'New internet destination',
   'port-scan': 'Port scan',
   'egress-baseline': 'Egress baseline breach',
+  'ioc-hit': 'Threat-intel IOC hit',
 };
 
 function SecurityFindingTriggerEditor({ block, onChange }: { block: Extract<AutomationTriggerBlock, { type: 'securityFinding' }>; onChange: (b: AutomationTriggerBlock) => void }) {

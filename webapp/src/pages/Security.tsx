@@ -1,10 +1,10 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { Bug, Loader2, RefreshCw, ShieldCheck, ShieldAlert, ShieldX, Info } from 'lucide-react';
+import { Bug, Loader2, RefreshCw, Radar, ShieldCheck, ShieldAlert, ShieldX, Info, Trash2 } from 'lucide-react';
 import { useState } from 'react';
 import { Layout } from '../components/Layout';
 import { DataTable, DataTableColumn } from '../components/DataTable';
 import { DeviceChip } from '../components/DeviceChip';
-import { api, SecurityCheckRow, CveVulnerabilityRow } from '../api/client';
+import { api, SecurityCheckRow, CveVulnerabilityRow, ThreatIntelSource } from '../api/client';
 
 /** Check-kind pill — the vocabulary is shared across all plugins (SDK contract). */
 const KIND_STYLES: Record<string, string> = {
@@ -405,6 +405,283 @@ export default function Security() {
           />
         )}
       </div>
+
+      {/* Threat intelligence — IOC feed sources + recent hits */}
+      <ThreatIntelSection />
     </Layout>
+  );
+}
+
+/** Threat-intel section: managed IOC feeds, per-source fetch state and recent hits. */
+function ThreatIntelSection() {
+  const queryClient = useQueryClient();
+  const tiQuery = useQuery({
+    queryKey: ['threatIntel'],
+    queryFn: () => api.threatIntel(),
+    refetchInterval: 30_000,
+  });
+
+  // Add-source form state.
+  const [name, setName] = useState('');
+  const [url, setUrl] = useState('');
+  const [format, setFormat] = useState<'ip-list' | 'stix'>('ip-list');
+  const [adding, setAdding] = useState(false);
+  const [addError, setAddError] = useState<string | null>(null);
+
+  // "Fetch now" runs one full cycle server-side — fire and forget; the
+  // per-source lastSuccessAt/lastError surface the outcome.
+  const [fetching, setFetching] = useState(false);
+  async function fetchNow() {
+    if (fetching) return;
+    setFetching(true);
+    try {
+      await api.fetchThreatIntelNow();
+      void queryClient.invalidateQueries({ queryKey: ['threatIntel'] });
+    } catch (err) {
+      console.warn('Threat-intel fetch reported an error:', (err as Error).message);
+    } finally {
+      setFetching(false);
+    }
+  }
+
+  async function addSource() {
+    if (adding || !name.trim() || !url.trim()) return;
+    setAdding(true);
+    setAddError(null);
+    try {
+      await api.addThreatIntelSource({ name: name.trim(), url: url.trim(), format });
+      setName('');
+      setUrl('');
+      void queryClient.invalidateQueries({ queryKey: ['threatIntel'] });
+    } catch (err) {
+      setAddError((err as Error).message);
+    } finally {
+      setAdding(false);
+    }
+  }
+
+  async function toggleSource(s: ThreatIntelSource) {
+    try {
+      await api.updateThreatIntelSource(s.id, { enabled: !s.enabled });
+      void queryClient.invalidateQueries({ queryKey: ['threatIntel'] });
+    } catch (err) {
+      console.warn('Failed to toggle threat-intel source:', (err as Error).message);
+    }
+  }
+
+  async function deleteSource(s: ThreatIntelSource) {
+    if (!window.confirm(`Delete the "${s.name}" feed and all ${s.iocCount} of its indicators?`)) return;
+    try {
+      await api.deleteThreatIntelSource(s.id);
+      void queryClient.invalidateQueries({ queryKey: ['threatIntel'] });
+    } catch (err) {
+      console.warn('Failed to delete threat-intel source:', (err as Error).message);
+    }
+  }
+
+  const data = tiQuery.data;
+  const sources = data?.sources ?? [];
+  const hits = data?.recentHits ?? [];
+
+  const sourceColumns: DataTableColumn<ThreatIntelSource>[] = [
+    {
+      header: 'Name',
+      key: 'name',
+      width: 200,
+      exportValue: (row) => row.name,
+      render: (row) => <span className="text-sm font-medium">{row.name}</span>,
+    },
+    {
+      header: 'URL',
+      key: 'url',
+      width: 320,
+      exportValue: (row) => row.url,
+      render: (row) => (
+        <a href={row.url} target="_blank" rel="noreferrer" className="font-mono text-xs text-info hover:underline break-all">
+          {row.url}
+        </a>
+      ),
+    },
+    {
+      header: 'Format',
+      key: 'format',
+      width: 100,
+      exportValue: (row) => row.format,
+      render: (row) => <span className="text-xs text-secondary">{row.format}</span>,
+    },
+    {
+      header: 'IOCs',
+      key: 'iocCount',
+      width: 90,
+      sortAccessor: (row) => row.iocCount,
+      render: (row) => <span className="font-mono text-xs">{row.iocCount.toLocaleString()}</span>,
+    },
+    {
+      header: 'Last fetch',
+      key: 'lastSuccessAt',
+      width: 130,
+      sortAccessor: (row) => Date.parse(row.lastSuccessAt ?? '') || 0,
+      render: (row) => (
+        <span className="text-xs text-faint" title={row.lastError ? String(row.lastError) : undefined}>
+          {row.lastSuccessAt ? timeAgo(row.lastSuccessAt) : 'never'}
+        </span>
+      ),
+    },
+    {
+      header: 'Status',
+      key: 'status',
+      width: 260,
+      render: (row) =>
+        row.enabled ? (
+          row.lastError ? (
+            <span className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-xs font-medium bg-danger/20 text-danger-fg" title={String(row.lastError)}>
+              {String(row.lastError).slice(0, 60)}{String(row.lastError).length > 60 ? '…' : ''}
+            </span>
+          ) : (
+            <span className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-xs font-medium bg-success/20 text-success-fg">
+              ok
+            </span>
+          )
+        ) : (
+          <span className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-xs font-medium bg-muted text-secondary">disabled</span>
+        ),
+    },
+    {
+      header: '',
+      key: 'actions',
+      width: 120,
+      render: (row) => (
+        <div className="flex items-center justify-end gap-1">
+          <button
+            type="button"
+            onClick={() => void toggleSource(row)}
+            title={row.enabled ? 'Disable this feed' : 'Enable this feed'}
+            className="rounded px-2 py-1 text-xs font-medium text-secondary hover:bg-muted"
+          >
+            {row.enabled ? 'Disable' : 'Enable'}
+          </button>
+          <button
+            type="button"
+            onClick={() => void deleteSource(row)}
+            title={`Delete "${row.name}"`}
+            className="rounded p-1 text-secondary hover:bg-danger/20 hover:text-danger-fg"
+          >
+            <Trash2 className="h-3.5 w-3.5" />
+          </button>
+        </div>
+      ),
+    },
+  ];
+
+  return (
+    <div className="mt-8">
+      <div className="mb-3 flex items-center justify-between gap-3">
+        <h2 className="flex items-center gap-2 text-sm font-semibold text-foreground">
+          <Radar className="h-4 w-4" /> Threat Intelligence
+        </h2>
+        {sources.some((s) => s.enabled) && (
+          <button
+            type="button"
+            onClick={() => void fetchNow()}
+            disabled={fetching}
+            title="Fetch all enabled feeds now (bypasses the interval)"
+            className="inline-flex items-center gap-2 rounded-md border border-border px-3 py-1.5 text-sm font-medium text-secondary hover:bg-muted disabled:opacity-60"
+          >
+            {fetching ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />} Fetch now
+          </button>
+        )}
+      </div>
+
+      {/* Summary chips — active indicator count + worker state */}
+      {tiQuery.isLoading && <p className="text-sm text-muted-foreground">Loading threat intelligence…</p>}
+      {tiQuery.isError && (
+        <p className="text-sm text-danger-fg">Failed to load threat intelligence: {(tiQuery.error as Error).message}</p>
+      )}
+      {data && (
+        <div className="mb-4 flex flex-wrap items-center gap-3 text-sm">
+          {!data.enabled ? (
+            <span className="inline-flex items-center gap-1.5 rounded-md bg-muted px-2 py-1 text-xs font-medium text-secondary">
+              Threat-intel matching is disabled (Settings → Security)
+            </span>
+          ) : data.worker.iocTotal > 0 ? (
+            <span className="inline-flex items-center gap-1.5 text-success-fg">
+              <Radar className="h-4 w-4" /> {data.worker.iocTotal.toLocaleString()} active indicators
+            </span>
+          ) : (
+            <span className="text-sm text-secondary">No indicators yet — add a feed below to start matching.</span>
+          )}
+          {data.worker.lastError && (
+            <span className="inline-flex items-center gap-1 rounded-md bg-danger/20 px-2 py-1 text-xs font-medium text-danger-fg" title={String(data.worker.lastError)}>
+              worker error: {String(data.worker.lastError).slice(0, 80)}{String(data.worker.lastError).length > 80 ? '…' : ''}
+            </span>
+          )}
+        </div>
+      )}
+
+      {/* Feed sources */}
+      {data && (
+        <DataTable
+          columns={sourceColumns}
+          rows={sources}
+          rowKey={(row) => row.id}
+          storageKey="threat-intel-sources"
+          autoRefresh={{ intervalMs: 30_000, queries: [tiQuery] }}
+          searchPlaceholder="Search feeds…"
+          emptyMessage={'No IOC feed sources yet — add one below (plain IP/CIDR list or STIX bundle). Each fetch is an authoritative snapshot; matched IPs raise "threat intel hit" findings.'}
+        />
+      )}
+
+      {/* Add-source form */}
+      <div className="mt-3 flex flex-wrap items-end gap-2 rounded-md border border-border bg-muted/30 p-3">
+        <label className="flex flex-col gap-1 text-xs font-medium text-secondary">
+          Name
+          <input value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. Emerging Threats" className="w-44 rounded-md border border-border bg-background px-2 py-1.5 text-sm text-foreground" />
+        </label>
+        <label className="flex flex-col gap-1 text-xs font-medium text-secondary">
+          Feed URL
+          <input value={url} onChange={(e) => setUrl(e.target.value)} placeholder="https://…/blocklist.txt" className="w-72 rounded-md border border-border bg-background px-2 py-1.5 font-mono text-sm text-foreground" />
+        </label>
+        <label className="flex flex-col gap-1 text-xs font-medium text-secondary">
+          Format
+          <select value={format} onChange={(e) => setFormat(e.target.value as 'ip-list' | 'stix')} className="rounded-md border border-border bg-background px-2 py-1.5 text-sm text-foreground">
+            <option value="ip-list">IP list (one per line)</option>
+            <option value="stix">STIX 2.x bundle</option>
+          </select>
+        </label>
+        <button
+          type="button"
+          onClick={() => void addSource()}
+          disabled={adding || !name.trim() || !url.trim()}
+          className="inline-flex items-center gap-2 rounded-md bg-primary px-3 py-1.5 text-sm font-medium text-primary-fg hover:opacity-90 disabled:opacity-60"
+        >
+          {adding && <Loader2 className="h-4 w-4 animate-spin" />}
+          Add feed
+        </button>
+        {addError && <span className="text-xs text-danger-fg">{addError}</span>}
+      </div>
+
+      {/* Recent hits */}
+      {hits.length > 0 && (
+        <div className="mt-4">
+          <h3 className="mb-2 text-xs font-semibold uppercase tracking-wide text-faint">Recent threat-intel hits</h3>
+          <ul className="space-y-1.5">
+            {hits.slice(0, 10).map((h) => (
+              <li key={h.id} className="flex items-baseline gap-2 rounded-md border border-border bg-muted/20 px-3 py-2 text-xs" title={h.detail}>
+                <span className={`shrink-0 rounded px-1.5 py-0.5 font-medium uppercase ${h.severity === 'critical' ? 'bg-danger text-danger-fg' : h.severity === 'warning' ? 'bg-warning text-warning-fg' : 'bg-info text-info-fg'}`}>
+                  {h.severity}
+                </span>
+                <span className="font-mono shrink-0">
+                  {h.srcIp} → {h.dstIp ?? '?'}
+                </span>
+                <span className="text-secondary break-words">{h.detail}</span>
+                <span className="ml-auto shrink-0 text-faint" title={new Date(h.lastSeenAt).toLocaleString()}>
+                  {timeAgo(h.lastSeenAt)}
+                </span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+    </div>
   );
 }

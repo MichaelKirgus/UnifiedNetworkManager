@@ -65,6 +65,7 @@ const FINDING_KIND_LABEL: Record<FlowSecurityFindingKind, string> = {
   'new-destination': 'New destination',
   'port-scan': 'Port scan',
   'egress-baseline': 'Egress spike',
+  'ioc-hit': 'Threat intel hit',
 };
 
 /** Severity pill — same palette as the Notifications page. */
