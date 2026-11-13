@@ -30,6 +30,7 @@ import updatesRouter from './routes/updates';
 import securityChecksRouter from './routes/securityChecks';
 import cveRouter from './routes/cve';
 import securityEventsRouter from './routes/securityEvents';
+import threatIntelRouter from './routes/threatIntel';
 import topologyRouter from './routes/topology';
 import logsRouter from './routes/logs';
 import notificationsRouter from './routes/notifications';
@@ -58,6 +59,7 @@ import { startGeoIpWorker } from './workers/geoip';
 import { startCveWorker } from './cve/worker';
 import { startFlowsWorker } from './workers/flows';
 import { startFlowSecurityWorker } from './workers/flowSecurity';
+import { startThreatIntelWorker } from './workers/threatIntel';
 import { startInactiveUsersWorker } from './workers/inactiveUsers';
 import { startReplicationSchedulerWorker } from './workers/replication';
 import { startAutoBackupWorker } from './workers/autoBackup';
@@ -335,6 +337,9 @@ async function main(): Promise<void> {
   // Syslog security events (/security-events) — read view of the append-only log
   // filled by the syslog-collector plugin via POST /plugin/security-events.
   api.use(securityEventsRouter);
+  // Threat intelligence (/threat-intel) — IOC feed sources + status; matching
+  // runs in workers/threatIntel.ts and raises 'ioc-hit' findings.
+  api.use(threatIntelRouter);
 
   // OpenAPI validation error handler.
   api.use(
@@ -435,6 +440,8 @@ async function main(): Promise<void> {
     // Flow security insights — new-destination / port-scan / egress-baseline
     // detectors over the enriched flow tiers (findings + notifications).
     void runAsLeader(LEADER_KEYS.flowSecurity, 'flowSecurity', () => startFlowSecurityWorker()).then((stop) => workerStops.push(stop));
+    // Threat-intel feed fetch + IOC matching (Security page; cadence from threatIntelFetchIntervalMinutes).
+    void runAsLeader(LEADER_KEYS.threatIntel, 'threatIntel', () => startThreatIntelWorker()).then((stop) => workerStops.push(stop));
 
     // GeoIP database refresh (leader-gated; cadence from geoipFetchIntervalHours).
     void runAsLeader(LEADER_KEYS.geoip, 'geoip', () => startGeoIpWorker()).then((stop) => workerStops.push(stop));

@@ -5139,8 +5139,8 @@ paths:
         - in: query
           name: kind
           required: false
-          schema: { type: string, enum: [new-destination, port-scan, egress-baseline] }
-          description: Filter to one detector
+          schema: { type: string, enum: [new-destination, port-scan, egress-baseline, ioc-hit] }
+          description: Filter to one detector ('ioc-hit' rows are written by the threat-intel worker)
         - in: query
           name: status
           required: false
@@ -5193,6 +5193,176 @@ paths:
           description: Authentication required
         '503':
           description: Baseline reload failed (see API logs)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error: { type: string }
+
+  /threat-intel:
+    get:
+      tags: [Security]
+      summary: Threat-intel sources, worker status and recent IOC hits
+      description: >-
+        State of the threat-intelligence feature (workers/threatIntel.ts):
+        whether it is enabled, the worker's last run/error + active indicator
+        count, every configured feed source with its per-source fetch state
+        (iocCount / lastSuccessAt / lastError) and the most recent open
+        'ioc-hit' findings — traffic observed between a peer and an IP listed
+        by one of the feeds. Gated on `security:read`.
+      parameters:
+        - in: query
+          name: limit
+          required: false
+          schema: { type: integer, default: 50, maximum: 200 }
+          description: Max recent hits to return
+      responses:
+        '200':
+          description: Threat-intel state
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ThreatIntelResponse'
+        '401':
+          description: Authentication required
+
+  /threat-intel/sources:
+    post:
+      tags: [Security]
+      summary: Add an IOC feed source (first fetch starts immediately)
+      description: >-
+        Registers a new indicator feed. Supported formats: `ip-list` (one
+        IPv4/IPv6 address or CIDR per line; # and ; comments, blank lines and
+        URLs are skipped) and `stix` (STIX 2.x bundle — equality patterns of
+        ipv4/ipv6 indicators). Each fetch is an authoritative snapshot: the
+        worker upserts all parsed values and prunes indicators the feed no
+        longer lists. Gated on `system:write`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ThreatIntelSourceInput'
+      responses:
+        '201':
+          description: Source created (fetch queued)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ThreatIntelSource'
+        '400':
+          description: Invalid body
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error: { type: string }
+        '401':
+          description: Authentication required
+        '409':
+          description: A source with this name already exists
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error: { type: string }
+
+  /threat-intel/sources/{id}:
+    patch:
+      tags: [Security]
+      summary: Update a feed source (name/url/format/enabled)
+      description: >-
+        Partial update. Changing `url` or `format` clears lastSuccessAt so the
+        worker re-fetches immediately (when the source is enabled). Gated on
+        `system:write`.
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ThreatIntelSourceInput'
+      responses:
+        '200':
+          description: Updated source
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ThreatIntelSource'
+        '400':
+          description: Invalid body or no fields to update
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error: { type: string }
+        '401':
+          description: Authentication required
+        '404':
+          description: Source not found
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error: { type: string }
+    delete:
+      tags: [Security]
+      summary: Remove a feed source and all its indicators
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Source deleted (indicators removed via cascade)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  deleted: { type: boolean }
+        '401':
+          description: Authentication required
+        '404':
+          description: Source not found
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error: { type: string }
+
+  /threat-intel/fetch:
+    post:
+      tags: [Security]
+      summary: Run one fetch cycle for all enabled sources now (bypasses the interval)
+      description: >-
+        Queues an immediate snapshot fetch of every enabled source through the
+        web-fetch plugin; outcomes surface in each source's lastSuccessAt /
+        lastError. Gated on `system:write`.
+      responses:
+        '202':
+          description: Fetch cycle queued
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  triggered: { type: integer, description: Number of sources queued }
+        '401':
+          description: Authentication required
+        '409':
+          description: No enabled sources to fetch
           content:
             application/json:
               schema:
@@ -9930,11 +10100,78 @@ components:
     # shape depends on `kind` (estBytes/countryCode for new-destination,
     # distinctDsts/internalDsts for port-scan, windowHours/baselineMedianBytes/
     # ratio for egress-baseline).
+    # Threat-intel feed source (GET/POST/PATCH /threat-intel/sources). Managed
+    # as rows; the worker fetches each enabled source through the web-fetch
+    # plugin at threatIntelFetchIntervalMinutes. A fetch is an authoritative
+    # snapshot per source — indicators absent from a new list are pruned.
+    ThreatIntelSource:
+      type: object
+      required: [id, name, url, format, enabled]
+      properties:
+        id: { type: string }
+        name: { type: string, description: 'Unique display name (1-100 chars)' }
+        url: { type: string, description: 'http(s) URL of the feed' }
+        format: { type: string, enum: [ip-list, stix], description: "'ip-list' = one IP/CIDR per line; 'stix' = STIX 2.x bundle (indicator equality patterns)" }
+        enabled: { type: boolean }
+        iocCount: { type: integer, description: Indicators currently stored from this source }
+        lastSuccessAt:
+          type: [string, 'null']
+          format: date-time
+          description: Last successful fetch (null = never succeeded yet)
+        lastError:
+          type: [string, 'null']
+          description: Most recent fetch error message (cleared on success)
+        createdAt: { type: string, format: date-time }
+
+    ThreatIntelSourceInput:
+      type: object
+      properties:
+        name: { type: string, minLength: 1, maxLength: 100 }
+        url: { type: string, description: 'http(s) URL of the feed' }
+        format: { type: string, enum: [ip-list, stix] }
+
+    # One recent 'ioc-hit' finding (GET /threat-intel recentHits).
+    ThreatIntelHit:
+      type: object
+      properties:
+        id: { type: string }
+        severity: { type: string, enum: [info, warning, critical] }
+        srcIp: { type: string, description: Peer address (0.0.0.0 when the event had no source)' }
+        dstIp:
+          type: [string, 'null']
+          description: The other endpoint; null when the event had none
+        detail: { type: string }
+        deviceId: { type: [string, 'null'] }
+        deviceName: { type: [string, 'null'] }
+        firstSeenAt: { type: string, format: date-time }
+        lastSeenAt: { type: string, format: date-time }
+        occurrences: { type: integer }
+
+    ThreatIntelResponse:
+      type: object
+      required: [enabled, worker, sources]
+      properties:
+        enabled: { type: boolean, description: 'Master switch (threatIntelEnabled setting)' }
+        worker:
+          type: object
+          properties:
+            lastRunAt: { type: [string, 'null'], format: date-time }
+            lastError: { type: [string, 'null'] }
+            iocTotal: { type: integer, description: Active indicators across all sources (cached count) }
+            cursorBucketMs: { type: integer, format: int64, description: Last matched flow_agg_5m bucket start (ms) — buckets after this are unscanned }
+            fwWatermarkMs: { type: integer, format: int64, description: firewall_events tsMs watermark (epoch ms) — events with tsMs above this have been scanned }
+        sources:
+          type: array
+          items: { $ref: '#/components/schemas/ThreatIntelSource' }
+        recentHits:
+          type: array
+          items: { $ref: '#/components/schemas/ThreatIntelHit' }
+
     FlowSecurityFinding:
       type: object
       properties:
         id: { type: string }
-        kind: { type: string, enum: [new-destination, port-scan, egress-baseline] }
+        kind: { type: string, enum: [new-destination, port-scan, egress-baseline, ioc-hit] }
         severity: { type: string, enum: [info, warning, critical] }
         srcIp: { type: string }
         dstIp:
