@@ -711,6 +711,44 @@ services:
       - api
     restart: unless-stopped
     image: ${UNM_REGISTRY:-ghcr.io/michaelkirgus/unifiednetworkmanager}/flow-collector-plugin:${UNM_IMAGE_TAG:-dev}
+  syslog-collector-plugin:
+    ports:
+      - 4027:4080
+      # Standard syslog ports — devices forward RFC5424/BSD syslog here.
+      - "514:514/udp"
+      - "514:514/tcp"
+    environment:
+      - PORT=4080
+      # BSD syslog timestamps carry NO timezone — they are interpreted in the
+      # collector's local zone. Set SYSLOG_TZ to your fleet's zone (e.g.
+      # Europe/Berlin) so device stamps land at their true instant; RFC5424
+      # lines carry explicit offsets and are unaffected. Stamps >5 min ahead of
+      # now are clamped regardless (broken clock / TZ mismatch guard).
+      - TZ=${SYSLOG_TZ:-UTC}
+      - ADVERTISED_ENDPOINT=http://syslog-collector-plugin:4080
+      - UNM_DEFAULT_GATEWAY=${UNM_DEFAULT_GATEWAY:-}
+      # Runs as root (no privilege drop): the collector must bind privileged
+      # port 514 INSIDE the container so it also works with direct L2/macvlan
+      # reachability, not just published ports.
+      - UNM_RUN_AS_ROOT=1
+      - UNM_SKIP_CHOWN=${UNM_SKIP_CHOWN:-}
+      - UNM_DOCKER_GID=${UNM_DOCKER_GID:-}
+      - UNM_DOCKER_UID=${UNM_DOCKER_UID:-}
+      - UNM_API_URL=http://api:3000/v1
+      - UNM_TLS=${UNM_TLS:-}
+      - PLUGIN_API_KEY=${PLUGIN_API_KEY:-dev-plugin-key}
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - node -e 'require("http").get({host:"127.0.0.1",port:4081,path:"/healthz"},function(r){process.exit(r.statusCode===200?0:1)}).on("error",function(){process.exit(1)})'
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+    depends_on:
+      - api
+    restart: unless-stopped
+    image: ${UNM_REGISTRY:-ghcr.io/michaelkirgus/unifiednetworkmanager}/syslog-collector-plugin:${UNM_IMAGE_TAG:-dev}
   web-fetch-plugin:
     ports:
       - 4022:4080

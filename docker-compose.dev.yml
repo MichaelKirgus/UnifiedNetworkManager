@@ -1234,6 +1234,55 @@ services:
       - api
     restart: unless-stopped
 
+  syslog-collector-plugin:
+    # Root context — the image also builds the shared @unm/plugin-sdk package.
+    build:
+      context: .
+      dockerfile: plugins/syslog-collector/Dockerfile
+    ports:
+      - "4027:4080"
+      # Standard syslog ports — devices forward RFC5424/BSD syslog here.
+      - "514:514/udp"
+      - "514:514/tcp"
+    environment:
+      - PORT=4080
+      # BSD syslog timestamps carry NO timezone — they are interpreted in the
+      # collector's local zone. Set SYSLOG_TZ to your fleet's zone (e.g.
+      # Europe/Berlin) so device stamps land at their true instant; RFC5424
+      # lines carry explicit offsets and are unaffected. Stamps >5 min ahead of
+      # now are clamped regardless (broken clock / TZ mismatch guard).
+      - TZ=${SYSLOG_TZ:-UTC}
+      # Endpoint the API (in its own container) uses to reach this plugin.
+      - ADVERTISED_ENDPOINT=http://syslog-collector-plugin:4080
+      # Optional macvlan default gateway (scripts/docker-entrypoint.sh) — empty = no-op.
+      - UNM_DEFAULT_GATEWAY=${UNM_DEFAULT_GATEWAY:-}
+      # Runs as root (no privilege drop): the collector must bind privileged
+      # port 514 INSIDE the container so it also works with direct L2/macvlan
+      # reachability, not just published ports.
+      - UNM_RUN_AS_ROOT=1
+      - UNM_SKIP_CHOWN=${UNM_SKIP_CHOWN:-}
+      - UNM_DOCKER_GID=${UNM_DOCKER_GID:-}
+      - UNM_DOCKER_UID=${UNM_DOCKER_UID:-}
+      # Base URL of the API's internal endpoints (plugin -> API) — event batch pushes + logs.
+      - UNM_API_URL=http://api:3000/v1
+      # mTLS (Stage 1): enroll against the CA and serve TLS on :4080.
+      # Off by default — set UNM_TLS=1 in .env to enable fleet-wide.
+      - UNM_TLS=${UNM_TLS:-}
+      - PLUGIN_API_KEY=${PLUGIN_API_KEY:-dev-plugin-key}
+    # Liveness check against the SDK's dedicated plain-HTTP health listener on
+    # :4081 (HEALTH_PORT) — a minimal second server that never goes behind mTLS,
+    # so no client cert is needed. A dead process fails this; a broken TLS swap
+    # or failed enrollment does NOT (the main API plane stays up independently).
+    healthcheck:
+      test: ["CMD-SHELL", 'node -e ''require("http").get({host:"127.0.0.1",port:4081,path:"/healthz"},function(r){process.exit(r.statusCode===200?0:1)}).on("error",function(){process.exit(1)})''']
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+    depends_on:
+      - api
+    restart: unless-stopped
+
   # Web-fetch plugin (capability `webFetch`): GLOBAL service — no device
   # assignment, no credentials. Downloads files/web content from the internet
   # on behalf of UNM (POST /fetch), plain or through an egress proxy with

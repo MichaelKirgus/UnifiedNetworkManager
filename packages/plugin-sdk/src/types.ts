@@ -99,8 +99,10 @@ export const CAPABILITIES = [
   // segments; an S3/cloud backend would be another plugin with this capability.
   'fileRepo',
   'identityProvider',
-  // Reserved for future log-forwarder plugins (syslog daemon, OpenSearch, ...).
-  // Regular plugins do NOT advertise this — they ship logs via createPluginLogger.
+  // Ingests device LOGS into UNM's security-events store: the syslog-collector
+  // plugin listens on UDP/TCP 514 (RFC5424 + BSD), parses each line and pushes
+  // normalized rows to POST /plugin/security-events. Regular plugins do NOT
+  // advertise this — they ship their own logs via createPluginLogger.
   'logIngestion',
   // Serves POST /quick-action — resolves a plugin-declared quick action of kind
   // 'url' into the device's management web-UI URL (see QuickAction + buildWebUiUrl).
