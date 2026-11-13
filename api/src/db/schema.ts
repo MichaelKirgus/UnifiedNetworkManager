@@ -1,4 +1,4 @@
-import { pgTable, text, boolean, integer, bigint, doublePrecision, jsonb, timestamp, index, uniqueIndex, primaryKey } from 'drizzle-orm/pg-core';
+import { pgTable, text, boolean, integer, bigint, doublePrecision, jsonb, timestamp, inet, index, uniqueIndex, primaryKey } from 'drizzle-orm/pg-core';
 import { sql } from 'drizzle-orm';
 
 export const users = pgTable('users', {
@@ -777,6 +777,49 @@ export const securityEvents = pgTable(
       idxSecurityEventsDeviceTsMs: index('idx_security_events_device_ts_ms').on(table.deviceId, table.tsMs),
       // Epoch-ms index for the retention sweep (DELETE WHERE tsMs < cutoff).
       idxSecurityEventsTsMs: index('idx_security_events_ts_ms').on(table.tsMs),
+    };
+  }
+);
+
+// Threat-intel feed sources + fetched indicators (workers/threatIntel.ts).
+// `ioc` is INET so one column holds both host addresses and CIDR networks;
+// each fetch cycle is an authoritative snapshot per source (rows not
+// re-upserted are pruned by lastSeenAt). Findings from matching land in
+// flow_security_findings with kind 'ioc-hit'.
+export const threatIntelSources = pgTable(
+  'threat_intel_sources',
+  {
+    id: text('id').primaryKey(),
+    name: text('name').notNull().unique(),
+    url: text('url').notNull(),
+    // 'ip-list' (one IP/CIDR per line) | 'stix' (STIX 2.x bundle, indicator patterns).
+    format: text('format').notNull().default('ip-list'),
+    enabled: boolean('enabled').notNull().default(true),
+    iocCount: integer('iocCount').notNull().default(0),
+    lastSuccessAt: text('lastSuccessAt'),
+    lastError: text('lastError'),
+    createdAt: text('createdAt').notNull(),
+  },
+  (table) => {
+    return { uqThreatIntelSourcesName: uniqueIndex('uq_threat_intel_sources_name').on(table.name) };
+  }
+);
+
+export const threatIocs = pgTable(
+  'threat_iocs',
+  {
+    id: text('id').primaryKey(),
+    sourceId: text('sourceId')
+      .notNull()
+      .references(() => threatIntelSources.id, { onDelete: 'cascade' }),
+    ioc: inet('ioc').notNull(),
+    firstSeenAt: text('firstSeenAt').notNull(),
+    lastSeenAt: text('lastSeenAt').notNull(),
+  },
+  (table) => {
+    return {
+      uqThreatIocsSourceIoc: uniqueIndex('uq_threat_iocs_source_ioc').on(table.sourceId, table.ioc),
+      idxThreatIocsSource: index('idx_threat_iocs_source').on(table.sourceId),
     };
   }
 );

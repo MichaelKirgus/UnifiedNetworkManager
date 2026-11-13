@@ -1958,6 +1958,36 @@ await pool.query(`ALTER TABLE flow_micro ADD COLUMN IF NOT EXISTS "agentCount" I
     CREATE INDEX IF NOT EXISTS idx_flow_security_findings_kind_src
       ON flow_security_findings (kind, "srcIp", "lastSeenAt")`);
 
+  // ── Threat intelligence (workers/threatIntel.ts) ───────────────────────────
+  // User-managed IOC feed sources + the fetched indicators. `ioc` is INET so a
+  // single column holds both host addresses and CIDR networks (Postgres treats
+  // a bare address as a /32 or /128 network for containment checks). Each fetch
+  // cycle is an authoritative SNAPSHOT per source: rows not re-upserted in the
+  // cycle are pruned by their lastSeenAt, so removed indicators drop out.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS threat_intel_sources (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL UNIQUE,
+      url TEXT NOT NULL,
+      format TEXT NOT NULL DEFAULT 'ip-list',
+      enabled BOOLEAN NOT NULL DEFAULT true,
+      "iocCount" INTEGER NOT NULL DEFAULT 0,
+      "lastSuccessAt" TEXT,
+      "lastError" TEXT,
+      "createdAt" TEXT NOT NULL
+    )`);
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS threat_iocs (
+      id TEXT PRIMARY KEY,
+      "sourceId" TEXT NOT NULL REFERENCES threat_intel_sources(id) ON DELETE CASCADE,
+      ioc INET NOT NULL,
+      "firstSeenAt" TEXT NOT NULL,
+      "lastSeenAt" TEXT NOT NULL,
+      UNIQUE ("sourceId", ioc)
+    )`);
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS idx_threat_iocs_source ON threat_iocs ("sourceId")`);
+
   // WebAuthn passkeys per user + credential policies (see schema.ts). The
   // global policy row (userId IS NULL) is seeded once; it defaults to the
   // pre-passkey behavior: TOTP required at login, only `totp` satisfies the

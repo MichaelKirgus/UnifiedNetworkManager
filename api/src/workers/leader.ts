@@ -54,6 +54,7 @@ export const LEADER_KEYS = {
   radiusMonitor: 9020,
   flowSecurity: 9021,
   securityEventRetention: 9022,
+  threatIntel: 9023,
 } as const;
 
 /**

@@ -192,8 +192,8 @@ export interface ContainerLogTrigger {
   pattern: string;
 }
 
-/** Finding kinds produced by the flow security worker (flow_security_findings.kind). Mirrors FLOW_SECURITY_KINDS in workers/flowSecurity.ts. */
-export const FLOW_SECURITY_FINDING_KINDS = ['new-destination', 'port-scan', 'egress-baseline'] as const;
+/** Finding kinds produced by the flow security worker (flow_security_findings.kind). Mirrors FLOW_SECURITY_KINDS in workers/flowSecurity.ts. 'ioc-hit' rows are written by the threat-intel worker. */
+export const FLOW_SECURITY_FINDING_KINDS = ['new-destination', 'port-scan', 'egress-baseline', 'ioc-hit'] as const;
 export type FlowSecurityFindingKind = (typeof FLOW_SECURITY_FINDING_KINDS)[number];
 
 /**

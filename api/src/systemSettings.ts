@@ -468,6 +468,49 @@ export const SETTING_DESCRIPTORS: SettingDescriptor[] = [
       'How many days flow security findings are kept (counted from lastSeenAt). Findings not re-observed for 24 h auto-resolve; resolved rows are pruned by this retention.',
   },
 
+  // Threat intelligence (Security page "Threat Intelligence" section; workers/threatIntel.ts).
+  // IOC feed sources are managed as rows (POST /threat-intel/sources) — these
+  // settings steer the fetch worker and matching. Fetched indicators land in
+  // threat_iocs; matches against flow destinations + firewall-event IPs raise
+  // 'ioc-hit' findings in flow_security_findings (same pipeline as the flow
+  // security detectors: notifications + securityFinding automation trigger).
+  {
+    key: 'threatIntelEnabled',
+    label: 'Threat intelligence matching',
+    type: 'boolean',
+    category: 'Security',
+    default: true,
+    envVar: 'UNM_THREAT_INTEL_ENABLED',
+    help:
+      'Master switch for the threat-intel worker. When on, configured IOC feed sources are fetched through the web-fetch plugin and every flow destination plus firewall-event IP is checked against the active indicators; hits raise "threat intel hit" findings (notifications + securityFinding automation trigger). Turning this off stops fetching and matching but keeps existing data visible.',
+  },
+  {
+    key: 'threatIntelFetchIntervalMinutes',
+    label: 'Threat-intel fetch interval',
+    type: 'integer',
+    category: 'Security',
+    unit: 'min',
+    min: 5,
+    max: 1440,
+    default: 60,
+    envVar: 'UNM_THREAT_INTEL_FETCH_INTERVAL_MINUTES',
+    help:
+      'How often each enabled IOC feed source is re-fetched. A fetch is an authoritative snapshot — indicators absent from the new list are dropped. New sources are fetched immediately on creation.',
+  },
+  {
+    key: 'threatIntelMaxIocsPerSource',
+    label: 'Threat-intel max IOCs per source',
+    type: 'integer',
+    category: 'Security',
+    unit: 'IOCs',
+    min: 1_000,
+    max: 1_000_000,
+    default: 250_000,
+    envVar: 'UNM_THREAT_INTEL_MAX_IOCS_PER_SOURCE',
+    help:
+      'Safety cap on how many indicators one feed may contribute per fetch cycle (excess entries are skipped and counted in the source status). The download itself is additionally bounded by a 10 MiB size limit.',
+  },
+
   // Certificate monitoring (Certificates page).
   {
     key: 'certExpiryWarnDays',

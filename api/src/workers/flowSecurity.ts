@@ -50,7 +50,10 @@ const AUTO_RESOLVE_AFTER_MS = 86_400_000; // 24 h
 /** Detector 3 (egress baseline) is throttled — the rolling window moves slowly. */
 const EGRESS_CHECK_INTERVAL_MS = 30 * 60_000;
 
-export const FLOW_SECURITY_KINDS = ['new-destination', 'port-scan', 'egress-baseline'] as const;
+// 'ioc-hit' rows are written by workers/threatIntel.ts (threat-intel matching)
+// — they share this table, the auto-resolve sweep and the securityFinding
+// automation trigger with the three flow detectors.
+export const FLOW_SECURITY_KINDS = ['new-destination', 'port-scan', 'egress-baseline', 'ioc-hit'] as const;
 export type FlowSecurityKind = (typeof FLOW_SECURITY_KINDS)[number];
 
 const SEVERITY_RANK: Record<'info' | 'warning' | 'critical', number> = { info: 0, warning: 1, critical: 2 };
@@ -154,7 +157,8 @@ async function ensureSeenSet(): Promise<boolean> {
   }
 }
 
-interface FindingInput {
+/** Shared finding shape — also used by workers/threatIntel.ts ('ioc-hit'). */
+export interface FindingInput {
   kind: FlowSecurityKind;
   srcIp: string;
   dstIp: string | null;
@@ -169,7 +173,7 @@ interface FindingInput {
  * when the row was NEW (first detection of this condition) — callers raise the
  * notification only in that case so a persisting condition never re-spams.
  */
-async function upsertFinding(f: FindingInput): Promise<boolean> {
+export async function upsertFinding(f: FindingInput): Promise<boolean> {
   const nowIso = new Date().toISOString();
   const existing = await pool.query(
     `SELECT id, severity FROM flow_security_findings
