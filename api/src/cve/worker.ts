@@ -23,7 +23,7 @@
 
 import { pool } from '../db';
 import { getEffectiveValues } from '../systemSettings';
-import { emitNotification, resolveNotificationsByDedupeKeys } from '../notifications';
+import { emitNotification, resolveNotification, resolveNotificationsByDedupeKeys } from '../notifications';
 import { LEADER_KEYS } from '../workers/leader';
 import { initWorker, trackBeat } from '../workers/stats';
 import type { AdvisoryRow, PackageQuery } from './types';
@@ -303,6 +303,11 @@ export async function recomputeDeviceCves(): Promise<void> {
     }
   }
 
+  // Previous match set (device|cve) — needed AFTER the wholesale recompute to
+  // tell which findings are NEW (alert-worthy) vs. already known.
+  const prevRes = await pool.query(`SELECT "deviceId", "cveId" FROM device_cves`);
+  const prevKeys = new Set(prevRes.rows.map((r: { deviceId: string; cveId: string }) => `${String(r.deviceId)}|${String(r.cveId)}`));
+
   // Wholesale recompute in one transaction — the table is a pure derived view.
   const client = await pool.connect();
   try {
@@ -335,6 +340,102 @@ export async function recomputeDeviceCves(): Promise<void> {
   // it means the advisory table no longer covers any installed version.
   // eslint-disable-next-line no-console
   console.log(`[cve] recomputed device_cves — ${matches.length} match(es) across ${pkgRes.rows.length} package row(s)`);
+
+  // Alert on findings that APPEARED in this recompute (and resolve the ones
+  // that disappeared). Best-effort — a notification failure never breaks the
+  // recompute itself.
+  await alertNewCveMatches(matches, prevKeys);
+}
+
+// ── Finding alerts (new matches → notifications) ───────────────────────────
+
+/** CVSS rank ordering for alert filtering/sorting. */
+const CVE_RANK_SCORE: Record<string, number> = { critical: 4, high: 3, medium: 2, low: 1, unknown: 0 };
+/** Cap on individual notifications per recompute — beyond that one summary row. */
+const MAX_INDIVIDUAL_CVE_ALERTS = 25;
+
+/**
+ * Raises one notification per NEW (device, CVE) match at or above the
+ * configured minimum rank (`cveAlertMinRank`), and resolves notifications of
+ * matches that disappeared (package upgraded / advisory withdrawn).
+ *
+ * First-time baseline: when the previous set was EMPTY (fresh install or first
+ * successful fetch cycle), no alerts are raised — a fleet with hundreds of
+ * historical matches would otherwise flood the bell on boot.
+ */
+async function alertNewCveMatches(matches: DeviceCveRow[], prevKeys: Set<string>): Promise<void> {
+  try {
+    const values = await getEffectiveValues();
+    if (values.cveEnabled !== true) return;
+
+    // Matches that disappeared in this recompute — resolve their stale rows.
+    await resolveStaleCveFoundNotifications(matches);
+
+    const fresh = matches.filter((m) => !prevKeys.has(`${m.deviceId}|${m.cveId}`));
+    if (fresh.length === 0) return;
+    if (prevKeys.size === 0) {
+      // eslint-disable-next-line no-console
+      console.log(`[cve] initial baseline established — ${fresh.length} finding(s), no notifications raised`);
+      return;
+    }
+
+    const minRank = String(values.cveAlertMinRank ?? 'high');
+    const minScore = CVE_RANK_SCORE[minRank] ?? 3;
+    const alertable = fresh.filter((m) => (CVE_RANK_SCORE[m.severityRank] ?? 0) >= minScore);
+    if (alertable.length === 0) return;
+
+    // Device names for the titles — one batched query.
+    const deviceIds = [...new Set(alertable.map((m) => m.deviceId))];
+    const devRes = await pool.query(`SELECT id, name FROM devices WHERE id = ANY($1::text[])`, [deviceIds]);
+    const names = new Map(devRes.rows.map((r: { id: string; name: string }) => [String(r.id), String(r.name)]));
+
+    // Worst first — critical before high before medium.
+    const sorted = [...alertable].sort(
+      (a, b) => (CVE_RANK_SCORE[b.severityRank] ?? 0) - (CVE_RANK_SCORE[a.severityRank] ?? 0) || (b.severityScore ?? 0) - (a.severityScore ?? 0)
+    );
+
+    for (const m of sorted.slice(0, MAX_INDIVIDUAL_CVE_ALERTS)) {
+      await emitNotification({
+        severity: m.severityRank === 'critical' ? 'critical' : 'warning',
+        source: 'device',
+        deviceId: m.deviceId,
+        title: `New CVE finding on ${names.get(m.deviceId) ?? m.deviceId}: ${m.cveId}`,
+        message:
+          `${m.packageName}${m.installedVersion ? ` @ ${m.installedVersion}` : ''} is affected by ${m.cveId} ` +
+          `(${m.severityRank}${m.severityScore !== null ? `, CVSS ${m.severityScore}` : ''}).`,
+        dedupeKey: `cve-found:${m.deviceId}:${m.cveId}`,
+        context: { cveId: m.cveId, packageName: m.packageName, installedVersion: m.installedVersion, severityRank: m.severityRank, url: m.url },
+      });
+    }
+    if (alertable.length > MAX_INDIVIDUAL_CVE_ALERTS) {
+      await emitNotification({
+        severity: 'warning',
+        source: 'system',
+        title: `${alertable.length - MAX_INDIVIDUAL_CVE_ALERTS} additional new CVE findings`,
+        message:
+          `More than ${MAX_INDIVIDUAL_CVE_ALERTS} new vulnerability matches appeared in a single recompute — see the Security page for the full list.`,
+        dedupeKey: 'cve-found-batch',
+      });
+    }
+  } catch (err) {
+    // eslint-disable-next-line no-console
+    console.error('[cve] finding alerts failed:', (err as Error).message);
+  }
+}
+
+/** Resolves cve-found:* notifications whose (device, CVE) pair no longer matches. */
+async function resolveStaleCveFoundNotifications(matches: DeviceCveRow[]): Promise<void> {
+  const current = new Set(matches.map((m) => `cve-found:${m.deviceId}:${m.cveId}`));
+  // The batch-summary row (dedupeKey 'cve-found-batch') is not pair-scoped — it
+  // never matches a `cve-found:<deviceId>:<cveId>` key and stays open for the user.
+  const res = await pool.query(
+    `SELECT id, "dedupeKey" FROM notifications
+     WHERE status IN ('open', 'acknowledged') AND "dedupeKey" LIKE 'cve-found:%'`
+  );
+  for (const r of res.rows) {
+    // Quoted DDL column names keep their case in pg result rows (r.dedupeKey, not r.dedupekey).
+    if (!current.has(String(r.dedupeKey))) await resolveNotification(String(r.id));
+  }
 }
 
 // ── Worker loop ──────────────────────────────────────────────────────────────

@@ -264,6 +264,17 @@ async function tick(): Promise<void> {
     }
   }
 
+  // Security-finding triggers — new open findings since the per-trigger watermark.
+  const securityFindingRules = rules.filter((r) => r.enabled && r.triggers.some((t) => t.type === 'securityFinding'));
+  if (securityFindingRules.length > 0) {
+    try {
+      await evaluateSecurityFindingTriggers(securityFindingRules, nowMs);
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.error('[automations] security-finding trigger evaluation failed:', err);
+    }
+  }
+
   // Container-log triggers — tail the app's containers via the plugin read action.
   const containerLogRules = rules.filter((r) => r.enabled && r.triggers.some((t) => t.type === 'containerLog'));
   if (containerLogRules.length > 0) {
@@ -523,10 +534,9 @@ export async function scanLogMatches(t: LogTrigger, watermark: string | null): P
   const conds2: string[] = [`"tsMs" > $${n2++}`];
   const params2: unknown[] = [since];
   if (t.pluginId) { conds2.push(`"pluginId" = $${n2++}`); params2.push(t.pluginId); }
-  const { rows } = await pool.query<{ deviceId: string; message: string; tsMs: number | null }>(
-    `SELECT "deviceId",
-            COALESCE("reason", '') || ' ' || "action" || ': ' || "srcIp" || ':' || COALESCE("srcPort", 0) || ' -> ' || "dstIp" || ':' || COALESCE("dstPort", 0) AS message,
-            "tsMs"
+  const messageExpr = `COALESCE("reason", '') || ' ' || "action" || ': ' || "srcIp" || ':' || COALESCE("srcPort", 0) || ' -> ' || "dstIp" || ':' || COALESCE("dstPort", 0)`;
+  const { rows } = await pool.query<{ deviceId: string | null; message: string; tsMs: number | null }>(
+    `SELECT "deviceId", ${messageExpr} AS message, "tsMs"
        FROM firewall_events
       WHERE ${conds2.join(' AND ')}
       ORDER BY "tsMs" ASC
@@ -744,6 +754,92 @@ async function evaluateFlowTriggers(rules: Automation[], nowMs: number): Promise
       } catch (err) {
         // eslint-disable-next-line no-console
         console.error(`[automations] flow trigger ${t.id} of rule ${rule.id} failed:`, err);
+      }
+    }
+  }
+}
+
+// ── Security-finding triggers (new open findings since watermark) ────────────
+
+const FINDING_WATERMARK_KEY = 'findingWatermark';
+/** Max findings considered per trigger per tick (bounded work). */
+const FINDING_SCAN_LIMIT = 200;
+
+/**
+ * Evaluates every securityFinding trigger of the given rules. Each trigger keeps
+ * an ISO-timestamp watermark in automation_state: only OPEN findings first seen
+ * after it are candidates, and a null/invalid watermark seeds to "now" without
+ * firing (a freshly created rule never replays finding history). At most ONE
+ * firing per trigger per tick — the NEWEST in-scope finding is the
+ * representative context (matchCount carries how many new findings were seen),
+ * same burst semantics as log triggers. The watermark advances past everything
+ * scanned, so each finding row is examined exactly once.
+ */
+async function evaluateSecurityFindingTriggers(rules: Automation[], nowMs: number): Promise<void> {
+  const deviceRows = await db.query.devices.findMany();
+  const devicesById = new Map(deviceRows.map((d) => [d.id, toScopeDevice(d)]));
+
+  for (const rule of rules) {
+    if (!rule.enabled) continue;
+    // Cooldown — same semantics as the other trigger types.
+    if (rule.cooldownSec > 0 && rule.lastFiredAt) {
+      const last = new Date(rule.lastFiredAt).getTime();
+      if (Number.isFinite(last) && nowMs - last < rule.cooldownSec * 1000) continue;
+    }
+
+    for (const t of rule.triggers) {
+      if (t.type !== 'securityFinding') continue;
+      try {
+        const watermark = await readState(rule.id, t.id, FINDING_WATERMARK_KEY);
+        if (!watermark || Number.isNaN(Date.parse(watermark))) {
+          // First run — seed the watermark so history is never replayed.
+          await writeState(rule.id, t.id, FINDING_WATERMARK_KEY, new Date(nowMs).toISOString());
+          continue;
+        }
+
+        const params: unknown[] = [watermark];
+        let sql = `SELECT id, kind, severity, "srcIp", "dstIp", detail, "deviceId", "firstSeenAt"
+                     FROM flow_security_findings
+                    WHERE status = 'open' AND "firstSeenAt" > $1`; // ISO strings compare lexicographically
+        if (t.kinds && t.kinds.length > 0) {
+          params.push(t.kinds);
+          sql += ` AND kind = ANY($${params.length})`;
+        }
+        sql += ` ORDER BY "lastSeenAt" ASC LIMIT ${FINDING_SCAN_LIMIT}`;
+        // Quoted DDL column names keep their case in pg result rows (srcIp/dstIp/deviceId).
+        const { rows } = await pool.query<{ id: string; kind: string; severity: string; srcIp: string; dstIp: string | null; detail: string | null; deviceId: string | null }>(sql, params);
+
+        // In-scope finding: its device matches the scope. A finding without a
+        // known device (e.g. a scan from an unknown source) only matches an
+        // EMPTY scope — same convention as log triggers.
+        const inScope = rows.filter((r) => {
+          if (!t.scope) return true;
+          const dev = r.deviceId ? devicesById.get(String(r.deviceId)) : undefined;
+          return scopeMatchesDevice(t.scope, dev ?? { id: '', siteId: null, tags: [] });
+        });
+        if (inScope.length === 0) {
+          await writeState(rule.id, t.id, FINDING_WATERMARK_KEY, new Date(nowMs).toISOString()); // advance past scanned rows
+          continue;
+        }
+
+        const newest = inScope[inScope.length - 1]; // scan is ordered by time ASC
+        const dev = newest.deviceId ? devicesById.get(String(newest.deviceId)) : undefined;
+        await fireRule(
+          rule,
+          t,
+          { kind: 'securityFinding', findingId: String(newest.id), srcIp: String(newest.srcIp), dstIp: newest.dstIp ? String(newest.dstIp) : null, matchCount: inScope.length },
+          {
+            trigger: t,
+            device: dev ? { id: dev.id, name: dev.name, address: dev.managementAddress ?? null } : null,
+            finding: { kind: String(newest.kind), srcIp: String(newest.srcIp), dstIp: newest.dstIp ? String(newest.dstIp) : null, severity: String(newest.severity), detail: String(newest.detail ?? '') },
+          }
+        );
+
+        // Advance the watermark past everything scanned — even non-matching rows.
+        await writeState(rule.id, t.id, FINDING_WATERMARK_KEY, new Date(nowMs).toISOString());
+      } catch (err) {
+        // eslint-disable-next-line no-console
+        console.error(`[automations] security-finding trigger ${t.id} of rule ${rule.id} failed:`, err);
       }
     }
   }

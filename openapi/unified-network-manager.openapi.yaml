@@ -5119,6 +5119,87 @@ paths:
         '401':
           description: Authentication required
 
+  /flows/security:
+    get:
+      tags: [Flows]
+      summary: Security findings from the flow tiers
+      description: >-
+        Findings written by the flow security worker (leader-gated): new
+        internet destinations never seen before on this network, horizontal
+        port-scan candidates (one source → many distinct destinations in a
+        5-minute bucket) and sustained-egress anomalies (a pair's current
+        per-hour rate far above its historical median). One row per distinct
+        condition while active; rows not re-observed for 24 h auto-resolve.
+        Detector thresholds are system settings (flowSecurity* keys).
+      parameters:
+        - in: query
+          name: limit
+          required: false
+          schema: { type: integer, default: 50, maximum: 200 }
+        - in: query
+          name: kind
+          required: false
+          schema: { type: string, enum: [new-destination, port-scan, egress-baseline] }
+          description: Filter to one detector
+        - in: query
+          name: status
+          required: false
+          schema: { type: string, enum: [open, resolved, all], default: open }
+      responses:
+        '200':
+          description: Findings (newest lastSeenAt first) + worker status
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  findings:
+                    type: array
+                    items: { $ref: '#/components/schemas/FlowSecurityFinding' }
+                  worker:
+                    type: object
+                    properties:
+                      enabled: { type: boolean }
+                      lastRunAt: { type: [string, 'null'], format: date-time }
+                      lastError: { type: [string, 'null'] }
+                      cursorBucketMs: { type: integer, format: int64 }
+                      seenDstCount: { type: integer }
+        '401':
+          description: Authentication required
+
+  /flows/security/baseline/reset:
+    post:
+      tags: [Flows]
+      summary: Rebuild the flow-security seen-destination baseline now
+      description: >-
+        Clears and immediately reloads the in-memory set of known destination
+        IPs that the new-destination detector compares against. The baseline is
+        normally loaded lazily once per process boot; rows written to the flow
+        aggregate tiers after that load count as "known", so this endpoint makes
+        detection deterministic again when data appears late (E2E seeding) or
+        after backfills/retention changes. Returns the reloaded set size.
+        Gated on `system:write`.
+      responses:
+        '200':
+          description: Baseline rebuilt from current aggregate data
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  reloaded: { type: boolean }
+                  size: { type: integer, description: Distinct destination IPs in the new baseline }
+        '401':
+          description: Authentication required
+        '503':
+          description: Baseline reload failed (see API logs)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error: { type: string }
+
   /geoip/status:
     get:
       tags: [Flows]
@@ -9784,6 +9865,32 @@ components:
         logQueueDepth: { type: [integer, 'null'], description: "Pending entries in the plugin logger queue; null when no logger is registered" }
         sampledAt: { type: string, format: date-time, description: "ISO-8601 sample time, stamped by the API at ingest (server clock)" }
 
+    # One security finding from the flow tiers (GET /flows/security). Written
+    # by workers/flowSecurity.ts; `context` is a free-form JSON object whose
+    # shape depends on `kind` (estBytes/countryCode for new-destination,
+    # distinctDsts/internalDsts for port-scan, windowHours/baselineMedianBytes/
+    # ratio for egress-baseline).
+    FlowSecurityFinding:
+      type: object
+      properties:
+        id: { type: string }
+        kind: { type: string, enum: [new-destination, port-scan, egress-baseline] }
+        severity: { type: string, enum: [info, warning, critical] }
+        srcIp: { type: string }
+        dstIp:
+          type: [string, 'null']
+          description: Null for port-scan findings (the condition aggregates over many destinations)
+        detail: { type: string }
+        context:
+          type: [object, 'null']
+          additionalProperties: true
+        deviceId: { type: [string, 'null'] }
+        deviceName: { type: [string, 'null'] }
+        firstSeenAt: { type: string, format: date-time }
+        lastSeenAt: { type: string, format: date-time }
+        occurrences: { type: integer }
+        status: { type: string, enum: [open, resolved] }
+
     FlowTalker:
       type: object
       description: >-
@@ -13701,6 +13808,7 @@ components:
         - $ref: '#/components/schemas/AutomationFlowTrigger'
         - $ref: '#/components/schemas/AutomationContainerLogTrigger'
         - $ref: '#/components/schemas/AutomationUpdateTrigger'
+        - $ref: '#/components/schemas/AutomationSecurityFindingTrigger'
 
     AutomationScheduleTrigger:
       type: object
@@ -13812,6 +13920,26 @@ components:
           properties:
             schedule: { $ref: '#/components/schemas/AutomationScheduleSpec' }
             maxWaitHours: { type: number, exclusiveMinimum: 0, description: "Fire immediately once the event has waited this long (absent = wait for the slot unbounded)" }
+
+    AutomationSecurityFindingTrigger:
+      type: object
+      required: [id, type]
+      description: >-
+        Fires when NEW flow security findings appear (workers/flowSecurity.ts —
+        new-destination, port-scan or egress-baseline). A per-trigger watermark
+        seeds on first run without firing; each scan fires at most once with the
+        newest in-scope finding. Template tokens: {{finding.kind}},
+        {{finding.srcIp}}, {{finding.dstIp}}, {{finding.severity}},
+        {{finding.detail}}.
+      properties:
+        id: { type: string }
+        type: { type: string, enum: [securityFinding] }
+        scope: { $ref: '#/components/schemas/AutomationDeviceScope' }
+        kinds:
+          type: array
+          minItems: 1
+          items: { type: string, enum: [new-destination, port-scan, egress-baseline] }
+          description: "Only these finding kinds (absent = all)"
 
     AutomationActionBlock:
       oneOf:
@@ -13991,7 +14119,7 @@ components:
         id: { type: string }
         automationId: { type: string }
         firedAt: { type: string, format: date-time }
-        triggerType: { type: string, enum: [schedule, metric, log, deviceStatus, flow, containerLog, updateAvailable] }
+        triggerType: { type: string, enum: [schedule, metric, log, deviceStatus, flow, containerLog, updateAvailable, securityFinding] }
         context: { type: object, additionalProperties: true, description: "Trigger context at firing time" }
         status: { type: string, enum: [succeeded, failed, partial, skipped] }
         error: { type: string, nullable: true }

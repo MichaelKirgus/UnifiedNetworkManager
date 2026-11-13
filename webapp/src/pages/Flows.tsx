@@ -1,12 +1,13 @@
 import { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
-import { Activity, Globe, Radio, ArrowLeftRight, Server, X } from 'lucide-react';
+import { Activity, Globe, Radio, ArrowLeftRight, Server, ShieldAlert, X } from 'lucide-react';
 import { Layout } from '../components/Layout';
 import { DataTable, DataTableColumn } from '../components/DataTable';
 import { TimeRangeFilter, resolveTimeRangeIso, type TimeRangeValue } from '../components/TimeRangeFilter';
 import { formatBytes, formatNumber } from '../components/formatMetric';
 import { can } from '../auth/permissions';
-import { api, FlowTalker, FlowInternetDevice, FlowInternetCountry, FlowPair, FlowPortRow, FlowNetworkRow } from '../api/client';
+import { useTimeFormat } from '../utils/time';
+import { api, FlowTalker, FlowInternetDevice, FlowInternetCountry, FlowPair, FlowPortRow, FlowNetworkRow, FlowSecurityFinding, FlowSecurityFindingKind } from '../api/client';
 
 /** Well-known L4 port names for the port-stats tables (0 = no transport header). */
 const PORT_NAMES: Record<number, string> = {
@@ -57,6 +58,21 @@ function ClassPill({ internal }: { internal: boolean }) {
 
 function orDash(v?: string | null): string {
   return v && v.trim() !== '' ? v : '—';
+}
+
+/** Human labels for the flow security finding kinds. */
+const FINDING_KIND_LABEL: Record<FlowSecurityFindingKind, string> = {
+  'new-destination': 'New destination',
+  'port-scan': 'Port scan',
+  'egress-baseline': 'Egress spike',
+};
+
+/** Severity pill — same palette as the Notifications page. */
+function SeverityPill({ severity }: { severity: FlowSecurityFinding['severity'] }) {
+  const styles = severity === 'critical' ? 'bg-danger text-danger-fg'
+    : severity === 'warning' ? 'bg-warning text-warning-fg'
+      : 'bg-info text-info-fg';
+  return <span className={`inline-flex rounded px-1.5 py-0.5 text-xs font-medium uppercase ${styles}`}>{severity}</span>;
 }
 
 /** ISO-3166 alpha-2 → flag emoji (regional indicators), e.g. "US" → 🇺🇸. */
@@ -119,6 +135,7 @@ export default function Flows() {
   const windowParams = () => resolveTimeRangeIso(range);
   // Every flow query shares the site filter (null = no filter).
   const siteParam = () => (siteId || undefined);
+  const { formatDateTime } = useTimeFormat();
 
   const sitesQuery = useQuery({ queryKey: ['sites'], queryFn: () => api.sites(), enabled: can('sites:read') });
 
@@ -160,6 +177,13 @@ export default function Flows() {
     queryKey: ['flows', 'collectors'],
     queryFn: () => api.flowCollectors(),
     refetchInterval: 30_000,
+  });
+  // Security findings — new internet destinations, port scans and egress
+  // baseline breaches written by the flowSecurity worker (not time-ranged).
+  const securityQuery = useQuery({
+    queryKey: ['flows', 'security'],
+    queryFn: () => api.flowsSecurity({ limit: 100 }),
+    refetchInterval: 60_000,
   });
 
   const talkerColumns: DataTableColumn<FlowTalker>[] = [
@@ -443,6 +467,69 @@ export default function Flows() {
   const topPair = pairsQuery.data?.pairs[0];
   const collectors = collectorsQuery.data?.collectors ?? [];
   const ingest = collectorsQuery.data?.ingest;
+  const securityWorker = securityQuery.data?.worker;
+
+  const findingColumns: DataTableColumn<FlowSecurityFinding>[] = [
+    {
+      header: 'Kind',
+      key: 'kind',
+      width: 130,
+      exportValue: (row) => FINDING_KIND_LABEL[row.kind] ?? row.kind,
+      render: (row) => <span className="text-xs font-medium">{FINDING_KIND_LABEL[row.kind] ?? row.kind}</span>,
+    },
+    {
+      header: 'Severity',
+      key: 'severity',
+      width: 90,
+      sortAccessor: (row) => ({ critical: 2, warning: 1, info: 0 }[row.severity] ?? 0),
+      render: (row) => <SeverityPill severity={row.severity} />,
+    },
+    {
+      header: 'Source',
+      key: 'srcIp',
+      width: 200,
+      exportValue: (row) => row.deviceName ? `${row.srcIp} (${row.deviceName})` : row.srcIp,
+      render: (row) => (
+        <div className="flex flex-col">
+          {row.deviceName && <span className="truncate text-xs font-medium" title={row.deviceName}>{row.deviceName}</span>}
+          <span className="font-mono text-xs">{row.srcIp}</span>
+        </div>
+      ),
+    },
+    {
+      header: 'Destination',
+      key: 'dstIp',
+      width: 150,
+      exportValue: (row) => row.dstIp ?? '',
+      render: (row) => row.dstIp ? <span className="font-mono text-xs">{row.dstIp}</span> : <span className="text-faint" title="Port scans touch many destinations — no single destination.">—</span>,
+    },
+    {
+      header: 'Detail',
+      key: 'detail',
+      render: (row) => <span className="block truncate text-xs" title={row.detail}>{orDash(row.detail)}</span>,
+    },
+    {
+      header: 'First seen',
+      key: 'firstSeenAt',
+      width: 170,
+      sortAccessor: (row) => row.firstSeenAt,
+      render: (row) => <span className="text-xs text-secondary">{formatDateTime(row.firstSeenAt)}</span>,
+    },
+    {
+      header: 'Last seen',
+      key: 'lastSeenAt',
+      width: 170,
+      sortAccessor: (row) => row.lastSeenAt,
+      render: (row) => <span className="text-xs text-secondary">{formatDateTime(row.lastSeenAt)}</span>,
+    },
+    {
+      header: '×',
+      key: 'occurrences',
+      width: 50,
+      sortAccessor: (row) => row.occurrences,
+      render: (row) => <span className="font-mono text-xs">{formatNumber(row.occurrences)}</span>,
+    },
+  ];
 
   return (
     <Layout title="Flows">
@@ -636,6 +723,34 @@ export default function Flows() {
           emptyMessage="No internal device-to-device traffic recorded in this window."
         />
       )}
+
+      {/* Security findings — new destinations, port scans, egress baseline breaches. */}
+      <div className="mt-3 shrink-0 rounded-lg border border-border bg-card px-4 py-2">
+        <p className="flex items-center gap-2 text-xs font-medium text-secondary">
+          <ShieldAlert size={13} /> Security findings
+        </p>
+        {securityQuery.isLoading && <p className="mt-1 text-sm text-muted-foreground">Loading…</p>}
+        {!securityQuery.isLoading && securityQuery.data && (
+          <>
+            {securityWorker && (
+              <p className="mt-1 text-xs text-faint">
+                {securityWorker.enabled
+                  ? `Worker active · last run ${formatDateTime(securityWorker.lastRunAt)} · ${formatNumber(securityWorker.seenDstCount)} known destinations`
+                  : 'Worker disabled — enable “Flow security insights” in Settings → Flows.'}
+                {securityWorker.lastError && <span className="text-danger-fg"> · last error: {securityWorker.lastError}</span>}
+              </p>
+            )}
+            <DataTable
+              columns={findingColumns}
+              rows={securityQuery.data.findings}
+              rowKey={(row) => row.id}
+              storageKey="flows-security"
+              searchPlaceholder="Search findings…"
+              emptyMessage="No open security findings — new internet destinations, port scans and egress baseline breaches will appear here."
+            />
+          </>
+        )}
+      </div>
 
       {/* Collector health — live plugin stats + API ingest queue. */}
       <div className="mt-3 shrink-0 rounded-lg border border-border bg-card px-4 py-2">

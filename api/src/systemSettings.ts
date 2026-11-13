@@ -348,6 +348,113 @@ export const SETTING_DESCRIPTORS: SettingDescriptor[] = [
       'Optional comma-separated IPv4 CIDR blocks classified as EXTERNAL (internet) even when they fall inside "Flow internal IP ranges" or an inventoried network — e.g. a public block you own but want counted as egress ("203.0.113.0/24"). Carve-outs beat the broad range/network matches, but an IP that is a known device (exact inventory hit) still counts as internal. Empty = no carve-outs.',
   },
 
+  // Flow security insights (Flows page "Security" section; workers/flowSecurity.ts).
+  // Deterministic heuristics over the enriched flow_agg_5m / flow_agg_1h tiers —
+  // new internet destinations, horizontal port scans and sustained-egress
+  // anomalies. Findings are recorded in flow_security_findings and raise
+  // notifications; they can also drive automation rules (securityFinding trigger).
+  {
+    key: 'flowSecurityEnabled',
+    label: 'Flow security insights',
+    type: 'boolean',
+    category: 'Flows',
+    default: true,
+    envVar: 'UNM_FLOW_SECURITY_ENABLED',
+    help:
+      'Master switch for the flow-based security detectors (new internet destinations, horizontal port scans, sustained-egress anomalies). Findings appear in the Flows page "Security" section and raise notifications; turning this off stops new detections but keeps existing findings visible.',
+  },
+  {
+    key: 'flowSecurityNewDstAlertMinBytes',
+    label: 'New destination alert threshold',
+    type: 'integer',
+    category: 'Flows',
+    unit: 'bytes',
+    min: 0,
+    max: 1_099_511_627_776,
+    default: 1_048_576,
+    envVar: 'UNM_FLOW_SECURITY_NEW_DST_ALERT_MIN_BYTES',
+    help:
+      'A destination IP never seen before on this network is always RECORDED as a finding; it raises a NOTIFICATION only when the source transferred at least this many estimated bytes to it in the triggering window. 0 = notify for every new destination (noisy — normal web browsing visits new sites all the time).',
+  },
+  {
+    key: 'flowSecurityScanMinDsts',
+    label: 'Port-scan threshold (distinct destinations)',
+    type: 'integer',
+    category: 'Flows',
+    unit: 'dsts/5min',
+    min: 2,
+    max: 10_000,
+    default: 10,
+    envVar: 'UNM_FLOW_SECURITY_SCAN_MIN_DSTS',
+    help:
+      'One internal source talking to at least this many DISTINCT destination IPs within a single 5-minute flow bucket is flagged as a horizontal port-scan candidate (critical at three times this value). Raise it if legitimate fleet-wide updates or scans trip the detector.',
+  },
+  {
+    key: 'flowSecurityEgressWindowHours',
+    label: 'Egress anomaly window',
+    type: 'integer',
+    category: 'Flows',
+    unit: 'hours',
+    min: 1,
+    max: 72,
+    default: 6,
+    envVar: 'UNM_FLOW_SECURITY_EGRESS_WINDOW_HOURS',
+    help:
+      'Rolling window (ending at the newest rolled-up bucket) over which per-pair internet egress is summed for the sustained-egress detector.',
+  },
+  {
+    key: 'flowSecurityEgressMinBytes',
+    label: 'Egress anomaly candidate floor',
+    type: 'integer',
+    category: 'Flows',
+    unit: 'bytes',
+    min: 1_048_576,
+    max: 1_099_511_627_776,
+    default: 262_144_000,
+    envVar: 'UNM_FLOW_SECURITY_EGRESS_MIN_BYTES',
+    help:
+      'A (source → internet destination) pair only becomes a candidate for the sustained-egress detector when it moved at least this many estimated bytes inside the egress window. Pairs below the floor are ignored entirely.',
+  },
+  {
+    key: 'flowSecurityEgressBaselineDays',
+    label: 'Egress baseline lookback',
+    type: 'integer',
+    category: 'Flows',
+    unit: 'days',
+    min: 1,
+    max: 90,
+    default: 14,
+    envVar: 'UNM_FLOW_SECURITY_EGRESS_BASELINE_DAYS',
+    help:
+      'How far back (hourly aggregate tier) the detector looks for a pair\'s historical per-hour egress to compute its median baseline. The current window must exceed this median by at least the configured multiple to be flagged.',
+  },
+  {
+    key: 'flowSecurityEgressBaselineMultiple',
+    label: 'Egress anomaly baseline multiple',
+    type: 'integer',
+    category: 'Flows',
+    unit: '×',
+    min: 2,
+    max: 50,
+    default: 3,
+    envVar: 'UNM_FLOW_SECURITY_EGRESS_BASELINE_MULTIPLE',
+    help:
+      'The current egress window must be at least this multiple of the pair\'s historical per-hour median (and above the candidate floor) to raise a finding. A pair with no history is not flagged here — first-time destinations are covered by the new-destination detector.',
+  },
+  {
+    key: 'flowSecurityFindingsRetentionDays',
+    label: 'Flow security findings retention',
+    type: 'integer',
+    category: 'Retention',
+    unit: 'days',
+    min: 1,
+    max: 365,
+    default: 30,
+    envVar: 'UNM_FLOW_SECURITY_FINDINGS_RETENTION_DAYS',
+    help:
+      'How many days flow security findings are kept (counted from lastSeenAt). Findings not re-observed for 24 h auto-resolve; resolved rows are pruned by this retention.',
+  },
+
   // Certificate monitoring (Certificates page).
   {
     key: 'certExpiryWarnDays',
@@ -917,6 +1024,17 @@ export const SETTING_DESCRIPTORS: SettingDescriptor[] = [
     default: 24,
     help:
       'How often the worker re-queries the advisory provider (default 24 h — OSV.dev publishes new advisories continuously). The manual "Refresh now" button on the Security page bypasses the interval. Device-side matching is recomputed on every beat regardless, so a package upgrade clears its findings without waiting for the next fetch.',
+  },
+  {
+    key: 'cveAlertMinRank',
+    label: 'CVE finding alert severity',
+    type: 'string',
+    category: 'CVE Tracking',
+    default: 'high',
+    envVar: 'UNM_CVE_ALERT_MIN_RANK',
+    pattern: '^(critical|high|medium)$',
+    help:
+      'New vulnerability matches at or above this CVSS rank raise a notification (critical → critical, high/medium → warning). The first recompute after enabling establishes the baseline silently — only findings that APPEAR later alert. Set to "medium" for more noise, "critical" for less.',
   },
 ];
 

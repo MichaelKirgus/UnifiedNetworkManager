@@ -69,6 +69,10 @@ function triggerSummary(t: AutomationTriggerBlock): string {
       const defer = t.defer ? (t.defer.schedule.kind === 'dailyAt' ? `, deferred to ${t.defer.schedule.time}` : ', deferred') : '';
       return `update ${t.condition} (${kinds}${t.namePattern ? `~ /${t.namePattern}/` : ''})${defer}`;
     }
+    case 'securityFinding': {
+      const kinds = t.kinds?.length ? `${t.kinds.join('/')} ` : '';
+      return `new ${kinds}finding`;
+    }
   }
 }
 
@@ -104,6 +108,7 @@ const TRIGGER_CHIP: Record<AutomationTriggerBlock['type'], string> = {
   log: 'bg-muted text-secondary',
   deviceStatus: 'bg-status-warning/20 text-status-warning',
   flow: 'bg-accent-sky/60 text-accent-sky-fg',
+  securityFinding: 'bg-status-critical/20 text-status-critical',
   containerLog: 'bg-accent-teal/60 text-accent-teal-fg',
   updateAvailable: 'bg-status-warning/20 text-status-warning',
 };

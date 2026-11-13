@@ -52,6 +52,7 @@ export const LEADER_KEYS = {
   cve: 9018,
   automationEvaluator: 9019,
   radiusMonitor: 9020,
+  flowSecurity: 9021,
 } as const;
 
 /**

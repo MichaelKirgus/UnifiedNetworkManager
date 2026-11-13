@@ -1513,6 +1513,35 @@ export interface FlowCollectorsResponse {
   collectors: FlowCollectorStats[];
 }
 
+/** One security finding from the flow tiers (GET /flows/security). */
+export interface FlowSecurityFinding {
+  id: string;
+  kind: FlowSecurityFindingKind;
+  severity: 'info' | 'warning' | 'critical';
+  srcIp: string;
+  /** NULL for port-scan findings (the scan touched many destinations). */
+  dstIp: string | null;
+  detail: string;
+  context: Record<string, unknown> | null;
+  deviceId: string | null;
+  deviceName: string | null;
+  firstSeenAt: string;
+  lastSeenAt: string;
+  occurrences: number;
+  status: 'open' | 'resolved';
+}
+
+export interface FlowsSecurityResponse {
+  findings: FlowSecurityFinding[];
+  worker: {
+    enabled: boolean;
+    lastRunAt: string | null;
+    lastError: string | null;
+    cursorBucketMs: number;
+    seenDstCount: number;
+  };
+}
+
 /** One network layer — a horizontal band of the topology view (GET /layers).
  * Built-ins (core/distribution/access/endpoint) are seeded at boot; custom
  * layers are user-created and deletable when unreferenced. */
@@ -3510,6 +3539,23 @@ export interface AutomationUpdateTrigger {
   defer?: { schedule: AutomationScheduleSpec; maxWaitHours?: number };
 }
 
+/** Finding kinds produced by the flow security worker (flow_security_findings.kind). */
+export const FLOW_SECURITY_FINDING_KINDS = ['new-destination', 'port-scan', 'egress-baseline'] as const;
+export type FlowSecurityFindingKind = (typeof FLOW_SECURITY_FINDING_KINDS)[number];
+
+/**
+ * Fires when the flow security worker records a NEW open finding after this
+ * trigger's watermark (first run seeds without firing — no history replay).
+ * At most one firing per tick: the newest in-scope finding, with matchCount.
+ */
+export interface AutomationSecurityFindingTrigger {
+  id: string;
+  type: 'securityFinding';
+  scope?: AutomationDeviceScope;
+  /** Only these finding kinds fire (absent = all kinds). */
+  kinds?: FlowSecurityFindingKind[];
+}
+
 export type AutomationTriggerBlock =
   | AutomationScheduleTrigger
   | AutomationMetricTrigger
@@ -3517,7 +3563,8 @@ export type AutomationTriggerBlock =
   | AutomationDeviceStatusTrigger
   | AutomationFlowTrigger
   | AutomationContainerLogTrigger
-  | AutomationUpdateTrigger;
+  | AutomationUpdateTrigger
+  | AutomationSecurityFindingTrigger;
 
 /** Severity values for automation notification actions (same set as the notification center). */
 export const AUTOMATION_NOTIFICATION_SEVERITIES = ['info', 'warning', 'critical'] as const;
@@ -4404,6 +4451,15 @@ export const api = {
     return apiFetch<FlowsInventoryResponse>(`/flows/inventory${suffix}`);
   },
   flowCollectors: () => apiFetch<FlowCollectorsResponse>('/flow-collectors'),
+  /** Security findings from the flow tiers (new destinations, port scans, egress baseline breaches). */
+  flowsSecurity: (params?: { limit?: number; kind?: FlowSecurityFindingKind; status?: 'open' | 'resolved' | 'all' }) => {
+    const qs = new URLSearchParams();
+    if (params?.limit) qs.set('limit', String(params.limit));
+    if (params?.kind) qs.set('kind', params.kind);
+    if (params?.status) qs.set('status', params.status);
+    const suffix = qs.toString() ? `?${qs.toString()}` : '';
+    return apiFetch<FlowsSecurityResponse>(`/flows/security${suffix}`);
+  },
   // Plugin log entries (global Logs page + per-device section in DeviceDetail).
   logs: (params?: {
     deviceId?: string;

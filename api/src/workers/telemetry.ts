@@ -13,6 +13,7 @@ import { parseDeviceTimeToEpochMs, type Health } from '@unm/plugin-sdk';
 import {
   deviceStatusDedupeKey,
   emitNotification,
+  resolveNotificationsByDedupeKeys,
   statusToSeverity,
 } from '../notifications';
 import { LEADER_KEYS } from './leader';
@@ -2654,6 +2655,18 @@ async function ingestInventory(
           collectedAt,
         });
       }
+      // Previous state for transition detection — a row that APPEARS at
+      // warning/critical (or escalates) raises one notification; a row that
+      // clears or downgrades to 'info' resolves it in place.
+      const oldRows = await db.query.deviceSecurityChecks.findMany({
+        where: and(
+          eq(schema.deviceSecurityChecks.deviceId, deviceId),
+          eq(schema.deviceSecurityChecks.pluginId, pluginId)
+        ),
+      });
+      const oldStatuses = new Map<string, { kind: string; name: string; status: string }>();
+      for (const r of oldRows) oldStatuses.set(`${r.kind}|${r.name}`, { kind: r.kind, name: r.name, status: r.status });
+
       if (values.length > 0) {
         const byKey = new Map<string, typeof values[number]>();
         for (const v of values) byKey.set(`${v.kind}|${v.name}`, v);
@@ -2681,6 +2694,39 @@ async function ingestInventory(
             eq(schema.deviceSecurityChecks.deviceId, deviceId),
             eq(schema.deviceSecurityChecks.pluginId, pluginId)
           ));
+      }
+
+      // --- Security-check transition notifications (best-effort) --------------
+      try {
+        const secDeviceRow = await db.query.devices.findFirst({ where: eq(schema.devices.id, deviceId) });
+        const secDeviceName = secDeviceRow?.name ?? null;
+        for (const v of values) {
+          if (v.status !== 'warning' && v.status !== 'critical') continue; // info rows never alert
+          const old = oldStatuses.get(`${v.kind}|${v.name}`);
+          if (old?.status === v.status) continue; // no transition — the live notification already exists
+          await emitNotification({
+            severity: v.status === 'critical' ? 'critical' : 'warning',
+            source: 'device',
+            deviceId,
+            pluginId,
+            title: `Security check ${v.status} on ${secDeviceName ?? deviceId}: ${v.name}`,
+            message: (v.detail && v.detail.trim() !== '' ? v.detail : `${v.kind} check reported ${v.status}.`).slice(0, 2_000),
+            dedupeKey: `seccheck:${deviceId}:${v.kind}:${v.name}`,
+            context: { kind: v.kind, name: v.name, status: v.status, count: v.count },
+          });
+        }
+        // Rows that cleared (deleted) or downgraded to 'info' — resolve their notifications.
+        const newStatusByKey = new Map(values.map((v) => [`${v.kind}|${v.name}`, v.status]));
+        const staleKeys: string[] = [];
+        for (const { kind, name, status } of oldStatuses.values()) {
+          if (status !== 'warning' && status !== 'critical') continue;
+          const nowStatus = newStatusByKey.get(`${kind}|${name}`); // undefined = row deleted
+          if (nowStatus === 'warning' || nowStatus === 'critical') continue; // still bad — keep live
+          staleKeys.push(`seccheck:${deviceId}:${kind}:${name}`);
+        }
+        if (staleKeys.length > 0) await resolveNotificationsByDedupeKeys(staleKeys);
+      } catch {
+        // best-effort — never break the poll cycle over notifications.
       }
     }
   } catch (err) {

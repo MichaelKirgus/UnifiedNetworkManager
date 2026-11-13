@@ -19,7 +19,7 @@ import type {
   ScheduleSpec,
   TriggerBlock,
 } from './types';
-import { DEVICE_STATUSES, FLOW_CLASSES, FLOW_DIRECTIONS, LOG_LEVELS, METRIC_COMPARATORS, NOTIFICATION_SEVERITIES, BACKUP_PRESETS } from './types';
+import { DEVICE_STATUSES, FLOW_CLASSES, FLOW_DIRECTIONS, FLOW_SECURITY_FINDING_KINDS, LOG_LEVELS, METRIC_COMPARATORS, NOTIFICATION_SEVERITIES, BACKUP_PRESETS } from './types';
 
 // ── Draft validation ─────────────────────────────────────────────────────────
 
@@ -171,8 +171,13 @@ function validateTrigger(t: TriggerBlock, where: string): string[] {
         }
       }
       break;
-    }
-    default:
+    }    case 'securityFinding': {
+      if (t.kinds !== undefined) {
+        if (!Array.isArray(t.kinds) || t.kinds.length === 0) e.push(`${where}: kinds must be a non-empty array`);
+        else if (t.kinds.some((k) => !FLOW_SECURITY_FINDING_KINDS.includes(k))) e.push(`${where}: unknown finding kind in kinds (${FLOW_SECURITY_FINDING_KINDS.join(', ')})`);
+      }
+      break;
+    }    default:
       e.push(`${where}: unknown trigger type`);
   }
   return e;
@@ -526,8 +531,9 @@ export function scopeMatchesDevice(scope: DeviceScope | undefined, device: Scope
 /**
  * Renders {{…}} tokens in a template. Known keys are substituted; UNKNOWN or
  * missing values are left as the literal token (never throws, never blanks).
- * Keys: automation.name, trigger.type, device.name, device.address,
- * metric.key, metric.value, log.message, run.at — see TriggerContext.
+ * Keys: automation.name, trigger.type, device.*, metric.*, log.message,
+ * flow.ip/bytes, update.*, finding.kind/srcIp/dstIp/severity/detail, run.at —
+ * see TriggerContext.
  */
 export function renderTemplate(template: string, vars: Record<string, string | number | boolean | null | undefined>): string {
   if (typeof template !== 'string') return '';
@@ -539,7 +545,7 @@ export function renderTemplate(template: string, vars: Record<string, string | n
 }
 
 /** Builds the flat token map for a firing from its context. */
-export function templateVarsFor(automationName: string, ctx: { triggerType: TriggerBlock['type']; device?: { name: string; address?: string | null } | null; metricKey?: string | null; metricValue?: number | string | boolean | null; logMessage?: string | null; flowIp?: string | null; flowBytes?: number | null; updateKind?: string | null; updateName?: string | null; updateCurrentVersion?: string | null; updateLatestVersion?: string | null; firedAtIso: string }): Record<string, string> {
+export function templateVarsFor(automationName: string, ctx: { triggerType: TriggerBlock['type']; device?: { name: string; address?: string | null } | null; metricKey?: string | null; metricValue?: number | string | boolean | null; logMessage?: string | null; flowIp?: string | null; flowBytes?: number | null; updateKind?: string | null; updateName?: string | null; updateCurrentVersion?: string | null; updateLatestVersion?: string | null; findingKind?: string | null; findingSrcIp?: string | null; findingDstIp?: string | null; findingSeverity?: string | null; findingDetail?: string | null; firedAtIso: string }): Record<string, string> {
   const vars: Record<string, string> = {
     'automation.name': automationName,
     'trigger.type': ctx.triggerType,
@@ -563,6 +569,13 @@ export function templateVarsFor(automationName: string, ctx: { triggerType: Trig
     if (ctx.updateName) vars['update.name'] = ctx.updateName;
     if (ctx.updateCurrentVersion !== undefined && ctx.updateCurrentVersion !== null) vars['update.currentVersion'] = String(ctx.updateCurrentVersion);
     if (ctx.updateLatestVersion !== undefined && ctx.updateLatestVersion !== null) vars['update.latestVersion'] = String(ctx.updateLatestVersion);
+  }
+  if (ctx.findingKind || ctx.findingSrcIp) {
+    if (ctx.findingKind) vars['finding.kind'] = ctx.findingKind;
+    if (ctx.findingSrcIp) vars['finding.srcIp'] = ctx.findingSrcIp;
+    if (ctx.findingDstIp) vars['finding.dstIp'] = ctx.findingDstIp;
+    if (ctx.findingSeverity) vars['finding.severity'] = ctx.findingSeverity;
+    if (ctx.findingDetail) vars['finding.detail'] = ctx.findingDetail;
   }
   return vars;
 }

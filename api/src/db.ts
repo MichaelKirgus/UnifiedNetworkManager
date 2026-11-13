@@ -1893,6 +1893,35 @@ await pool.query(`ALTER TABLE flow_micro ADD COLUMN IF NOT EXISTS "agentCount" I
   // tuple at ingest time (flow_micro's PK cannot gain ports without dropping
   // existing partitions).
 
+  // ── Flow security findings (security insights on top of the flow tiers) ────
+  // Low-volume EVENT log written by workers/flowSecurity.ts: one row per
+  // distinct (kind, srcIp, dstIp) condition while it is active. Plain table +
+  // TEXT timestamps (repo convention) — no partitioning needed at this volume;
+  // retention is a simple DELETE sweep in the same worker. `dstIp` is NULL for
+  // port-scan findings (the condition aggregates over many destinations).
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS flow_security_findings (
+      id TEXT PRIMARY KEY,
+      kind TEXT NOT NULL,
+      severity TEXT NOT NULL DEFAULT 'warning',
+      "srcIp" INET NOT NULL,
+      "dstIp" INET,
+      detail TEXT NOT NULL DEFAULT '',
+      context TEXT NOT NULL DEFAULT '{}',
+      "deviceId" TEXT,
+      "firstSeenAt" TEXT NOT NULL,
+      "lastSeenAt" TEXT NOT NULL,
+      occurrences INTEGER NOT NULL DEFAULT 1,
+      status TEXT NOT NULL DEFAULT 'open',
+      "resolvedAt" TEXT
+    )`);
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS idx_flow_security_findings_status_seen
+      ON flow_security_findings (status, "lastSeenAt")`);
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS idx_flow_security_findings_kind_src
+      ON flow_security_findings (kind, "srcIp", "lastSeenAt")`);
+
   // WebAuthn passkeys per user + credential policies (see schema.ts). The
   // global policy row (userId IS NULL) is seeded once; it defaults to the
   // pre-passkey behavior: TOTP required at login, only `totp` satisfies the

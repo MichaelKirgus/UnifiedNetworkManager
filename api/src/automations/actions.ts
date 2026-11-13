@@ -75,6 +75,11 @@ export async function executeAction(automationId: string, automationName: string
     updateName: ctx.update?.name ?? null,
     updateCurrentVersion: ctx.update?.currentVersion ?? null,
     updateLatestVersion: ctx.update?.latestVersion ?? null,
+    findingKind: ctx.finding?.kind ?? null,
+    findingSrcIp: ctx.finding?.srcIp ?? null,
+    findingDstIp: ctx.finding?.dstIp ?? null,
+    findingSeverity: ctx.finding?.severity ?? null,
+    findingDetail: ctx.finding?.detail ?? null,
     firedAtIso,
   });
 
@@ -282,6 +287,11 @@ export async function simulateAction(automationId: string, automationName: strin
     updateName: ctx.update?.name ?? null,
     updateCurrentVersion: ctx.update?.currentVersion ?? null,
     updateLatestVersion: ctx.update?.latestVersion ?? null,
+    findingKind: ctx.finding?.kind ?? null,
+    findingSrcIp: ctx.finding?.srcIp ?? null,
+    findingDstIp: ctx.finding?.dstIp ?? null,
+    findingSeverity: ctx.finding?.severity ?? null,
+    findingDetail: ctx.finding?.detail ?? null,
     firedAtIso: new Date().toISOString(),
   });
 

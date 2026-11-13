@@ -5,6 +5,8 @@ import { pluginAxios } from '../utils/pluginHttp';
 import { reverseLookup } from '../utils/reverseDns';
 import { lookupGeoIp } from '../utils/geoIp';
 import { getFlowIngestStats } from '../workers/flows';
+import { getFlowSecurityStats, resetFlowSecurityBaseline, FLOW_SECURITY_KINDS } from '../workers/flowSecurity';
+import { getEffectiveSettingValue } from '../systemSettings';
 import { mergeNetworkRows } from './networks';
 import type { MergedNetwork } from './networks';
 import { ipInCidr } from '@unm/plugin-sdk';
@@ -946,5 +948,105 @@ router.get('/flow-collectors', requireAuth, requirePermission('flows:read'), asy
     res.status(500).json({ error: 'Internal server error' });
   }
 });
+
+/**
+ * GET /v1/flows/security — security findings from the flow tiers.
+ *
+ * Rows written by workers/flowSecurity.ts (new-destination, port-scan and
+ * egress-baseline detectors): one row per distinct condition while active,
+ * auto-resolved 24 h after last observation. `status` filters open vs resolved
+ * rows; `kind` narrows to one detector.
+ */
+router.get('/flows/security', requireAuth, requirePermission('flows:read'), async (req: Request, res: Response) => {
+  const q = req.query as Record<string, unknown>;
+  const limit = parseLimit(q.limit, 50, 200);
+  const kind = typeof q.kind === 'string' && (FLOW_SECURITY_KINDS as readonly string[]).includes(q.kind) ? q.kind : null;
+  const status = q.status === 'resolved' || q.status === 'all' ? String(q.status) : 'open';
+
+  try {
+    const params: unknown[] = [];
+    const clauses: string[] = [];
+    if (kind) {
+      params.push(kind);
+      clauses.push(`kind = $${params.length}`);
+    }
+    if (status !== 'all') {
+      params.push(status);
+      clauses.push(`status = $${params.length}`);
+    }
+    const where = clauses.length ? ` WHERE ${clauses.join(' AND ')}` : '';
+    const resRows = await pool.query(
+      `SELECT id, kind, severity, "srcIp", "dstIp", detail, context, "deviceId",
+              "firstSeenAt", "lastSeenAt", occurrences, status
+       FROM flow_security_findings${where}
+       ORDER BY "lastSeenAt" DESC LIMIT $${params.length + 1}`,
+      [...params, limit]
+    );
+
+    // Device names for the source column — one batched query.
+    const deviceIds = [...new Set(resRows.rows.map((r: { deviceId: string | null }) => r.deviceId).filter(Boolean))];
+    const names = await loadDeviceNames(deviceIds as string[]);
+
+    res.status(200).json({
+      findings: resRows.rows.map((r) => ({
+        id: String(r.id),
+        kind: String(r.kind),
+        severity: String(r.severity),
+        // Quoted DDL column names keep their case in pg result rows (r.srcIp, not r.srcip).
+        srcIp: String(r.srcIp),
+        dstIp: r.dstIp === null ? null : String(r.dstIp),
+        detail: String(r.detail ?? ''),
+        context: safeParseContext(String(r.context ?? '{}')),
+        deviceId: r.deviceId ? String(r.deviceId) : null,
+        deviceName: r.deviceId ? (names.get(String(r.deviceId)) ?? null) : null,
+        firstSeenAt: String(r.firstSeenAt),
+        lastSeenAt: String(r.lastSeenAt),
+        occurrences: Number(r.occurrences ?? 1),
+        status: String(r.status),
+      })),
+      worker: {
+        enabled: (await getEffectiveSettingValue('flowSecurityEnabled')) === true,
+        ...getFlowSecurityStats(),
+      },
+    });
+  } catch (error) {
+    console.error('Error querying flow security findings:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+/**
+ * POST /v1/flows/security/baseline/reset — rebuild the flow-security worker's
+ * seen-destination baseline from current aggregate data.
+ *
+ * The baseline is loaded lazily once per process boot; anything written to the
+ * agg tiers after that load counts as "known". Resetting right before new rows
+ * appear (E2E seeding) or after backfills/retention changes makes
+ * new-destination detection deterministic again.
+ */
+router.post('/flows/security/baseline/reset', requireAuth, requirePermission('system:write'), async (_req: Request, res: Response) => {
+  try {
+    const result = await resetFlowSecurityBaseline();
+    if (!result.reloaded) {
+      res.status(503).json({ error: 'baseline reload failed — see API logs' });
+      return;
+    }
+    res.status(200).json(result);
+  } catch (error) {
+    console.error('Error resetting flow security baseline:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+/** Parses a JSON TEXT column into an object (null on malformed input). */
+function safeParseContext(s: string): Record<string, unknown> | null {
+  if (!s || s === '{}') return null;
+  try {
+    const v = JSON.parse(s);
+    return v && typeof v === 'object' ? (v as Record<string, unknown>) : null;
+  } catch {
+    return null;
+  }
+}
 
 export default router;

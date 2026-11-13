@@ -55,6 +55,7 @@ import { startUpdateCheckWorker } from './workers/updateCheck';
 import { startGeoIpWorker } from './workers/geoip';
 import { startCveWorker } from './cve/worker';
 import { startFlowsWorker } from './workers/flows';
+import { startFlowSecurityWorker } from './workers/flowSecurity';
 import { startInactiveUsersWorker } from './workers/inactiveUsers';
 import { startReplicationSchedulerWorker } from './workers/replication';
 import { startAutoBackupWorker } from './workers/autoBackup';
@@ -421,6 +422,9 @@ async function main(): Promise<void> {
     // Flow data: drains the POST /plugin/flows queue into flow_micro and runs
     // the 5m/hourly rollups + partition maintenance (sFlow/NetFlow feature).
     void runAsLeader(LEADER_KEYS.flows, 'flows', () => startFlowsWorker()).then((stop) => workerStops.push(stop));
+    // Flow security insights — new-destination / port-scan / egress-baseline
+    // detectors over the enriched flow tiers (findings + notifications).
+    void runAsLeader(LEADER_KEYS.flowSecurity, 'flowSecurity', () => startFlowSecurityWorker()).then((stop) => workerStops.push(stop));
 
     // GeoIP database refresh (leader-gated; cadence from geoipFetchIntervalHours).
     void runAsLeader(LEADER_KEYS.geoip, 'geoip', () => startGeoIpWorker()).then((stop) => workerStops.push(stop));

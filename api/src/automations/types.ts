@@ -190,7 +190,30 @@ export interface ContainerLogTrigger {
   pattern: string;
 }
 
-export type TriggerBlock = ScheduleTrigger | MetricTrigger | LogTrigger | DeviceStatusTrigger | FlowTrigger | ContainerLogTrigger | UpdateTrigger;
+/** Finding kinds produced by the flow security worker (flow_security_findings.kind). Mirrors FLOW_SECURITY_KINDS in workers/flowSecurity.ts. */
+export const FLOW_SECURITY_FINDING_KINDS = ['new-destination', 'port-scan', 'egress-baseline'] as const;
+export type FlowSecurityFindingKind = (typeof FLOW_SECURITY_FINDING_KINDS)[number];
+
+/**
+ * Fires when the flow security worker records a NEW open finding in
+ * flow_security_findings after this trigger's watermark. The worker scans the
+ * 5-minute aggregates for new internet destinations, port scans and egress
+ * baseline breaches; each distinct (kind, srcIp, dstIp) tuple is one finding
+ * row that stays 'open' until it goes quiet for a day. A per-trigger ISO
+ * timestamp watermark in automation_state means only findings first seen after
+ * the rule existed fire — creating a rule never replays history. Scope matches
+ * against the finding's deviceId when present; findings without a device (e.g.
+ * scans from unknown sources) only match an empty scope.
+ */
+export interface SecurityFindingTrigger {
+  id: string;
+  type: 'securityFinding';
+  scope?: DeviceScope;
+  /** Only these finding kinds fire (absent = all kinds). */
+  kinds?: FlowSecurityFindingKind[];
+}
+
+export type TriggerBlock = ScheduleTrigger | MetricTrigger | LogTrigger | DeviceStatusTrigger | FlowTrigger | ContainerLogTrigger | UpdateTrigger | SecurityFindingTrigger;
 
 // ── Action blocks ────────────────────────────────────────────────────────────
 
@@ -332,6 +355,8 @@ export interface TriggerContext {
   logMessage?: string | null;
   /** Flow tuple + measured bytes, for flow triggers. */
   flow?: { ip: string; estBytes: number; windowSec: number; direction: string } | null;
+  /** Finding snapshot at firing time, for securityFinding triggers ({{finding.*}} tokens). */
+  finding?: { kind: string; srcIp: string; dstIp: string | null; severity: string; detail: string } | null;
   /** Update row snapshot at firing time, for updateAvailable triggers ({{update.*}} tokens). */
   update?: {
     kind: string;

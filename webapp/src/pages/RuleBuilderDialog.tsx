@@ -8,7 +8,7 @@ import { GripVertical, Trash2, Workflow } from 'lucide-react';
 import {
   api, ApiError, Automation, AutomationActionBlock, AutomationDraft, AutomationNotificationSeverity, AutomationScheduleSpec, AutomationTriggerBlock,
   AUTOMATION_NOTIFICATION_SEVERITIES, BACKUP_PRESETS, CatalogEntry, DEVICE_STATUSES, DeviceStatusValue, FLOW_CLASSES, FLOW_DIRECTIONS,
-  FlowClassValue, FlowDirectionValue, InputSchema, LOG_LEVELS, LogLevel, METRIC_COMPARATORS, MetricComparator, Plugin, Site,
+  FLOW_SECURITY_FINDING_KINDS, FlowClassValue, FlowDirectionValue, FlowSecurityFindingKind, InputSchema, LOG_LEVELS, LogLevel, METRIC_COMPARATORS, MetricComparator, Plugin, Site,
 } from '../api/client';
 import { DialogShell } from '../components/DialogShell';
 import { defaultValues, SchemaForm, validateSchema } from '../components/SchemaForm';
@@ -41,6 +41,9 @@ function newContainerLogTrigger(): AutomationTriggerBlock {
 }
 function newUpdateTrigger(): AutomationTriggerBlock {
   return { id: newId('t'), type: 'updateAvailable', condition: 'available' };
+}
+function newSecurityFindingTrigger(): AutomationTriggerBlock {
+  return { id: newId('t'), type: 'securityFinding' };
 }
 
 function newIntentAction(): AutomationActionBlock {
@@ -121,6 +124,12 @@ function validateDraft(draft: AutomationDraft): string[] {
         if (t.namePattern) { try { new RegExp(t.namePattern); } catch (e) { errors.push(`${where}: invalid name regex — ${(e as Error).message}`); } }
         if (t.defer?.maxWaitHours !== undefined && (!Number.isFinite(t.defer.maxWaitHours) || t.defer.maxWaitHours <= 0)) {
           errors.push(`${where}: max wait must be a positive number of hours`);
+        }
+        break;
+      }
+      case 'securityFinding': {
+        if (t.kinds !== undefined && t.kinds.length > 0 && !t.kinds.every((k) => FLOW_SECURITY_FINDING_KINDS.includes(k))) {
+          errors.push(`${where}: unknown finding kind`);
         }
         break;
       }
@@ -506,6 +515,39 @@ function FlowTriggerEditor({ block, onChange }: { block: Extract<AutomationTrigg
   );
 }
 
+/** Human labels for the flow security finding kinds. */
+const FINDING_KIND_LABEL: Record<FlowSecurityFindingKind, string> = {
+  'new-destination': 'New internet destination',
+  'port-scan': 'Port scan',
+  'egress-baseline': 'Egress baseline breach',
+};
+
+function SecurityFindingTriggerEditor({ block, onChange }: { block: Extract<AutomationTriggerBlock, { type: 'securityFinding' }>; onChange: (b: AutomationTriggerBlock) => void }) {
+  const toggleKind = (k: FlowSecurityFindingKind) => {
+    const cur = block.kinds ?? [];
+    const next = cur.includes(k) ? cur.filter((x) => x !== k) : [...cur, k];
+    // Empty or all-selected both mean "every kind" — store undefined for both.
+    onChange({ ...block, kinds: next.length === 0 || next.length === FLOW_SECURITY_FINDING_KINDS.length ? undefined : next });
+  };
+  return (
+    <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+      <div>
+        <span className={labelCls}>Finding kinds</span>
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-1 pt-1">
+          {FLOW_SECURITY_FINDING_KINDS.map((k) => (
+            <label key={k} className="flex cursor-pointer items-center gap-1.5 text-sm">
+              <input type="checkbox" checked={(block.kinds ?? []).includes(k)} onChange={() => toggleKind(k)} />
+              {FINDING_KIND_LABEL[k]}
+            </label>
+          ))}
+        </div>
+        <p className={hintCls}>Nothing (or all) selected = every kind. Fires on NEW open findings only — the first run seeds a watermark and never replays history.</p>
+      </div>
+      <ScopeEditor scope={block.scope} onChange={(scope) => onChange({ ...block, scope: Object.keys(scope).length ? scope : undefined })} />
+    </div>
+  );
+}
+
 function ContainerLogTriggerEditor({ block, onChange, plugins }: { block: Extract<AutomationTriggerBlock, { type: 'containerLog' }>; onChange: (b: AutomationTriggerBlock) => void; plugins: Plugin[] }) {
   // App-name suggestions from the live Containers overview — best-effort: users
   // without containers:read get a 403 and the datalist simply stays empty.
@@ -808,7 +850,7 @@ function InternalActionEditor({ block, onChange }: { block: Extract<AutomationAc
 
 // ── Block cards ───────────────────────────────────────────────────────────────
 
-const TRIGGER_LABEL: Record<AutomationTriggerBlock['type'], string> = { schedule: 'Schedule', metric: 'Metric condition', log: 'Log pattern', deviceStatus: 'Device status', flow: 'Flow traffic', containerLog: 'Container log', updateAvailable: 'Update available' };
+const TRIGGER_LABEL: Record<AutomationTriggerBlock['type'], string> = { schedule: 'Schedule', metric: 'Metric condition', log: 'Log pattern', deviceStatus: 'Device status', flow: 'Flow traffic', containerLog: 'Container log', updateAvailable: 'Update available', securityFinding: 'Security finding' };
 const ACTION_LABEL: Record<AutomationActionBlock['type'], string> = { intent: 'Run plan (intent)', webhook: 'Webhook', notification: 'Notification', internal: 'Internal operation' };
 
 /** Drop-zone ids for the two canvas columns. */
@@ -822,6 +864,7 @@ const TRIGGER_PALETTE: Array<{ type: AutomationTriggerBlock['type']; label: stri
   { type: 'log', label: 'Log pattern', make: newLogTrigger },
   { type: 'deviceStatus', label: 'Device status', make: newDeviceStatusTrigger },
   { type: 'flow', label: 'Flow traffic', make: newFlowTrigger },
+  { type: 'securityFinding', label: 'Security finding', make: newSecurityFindingTrigger },
   { type: 'containerLog', label: 'Container log', make: newContainerLogTrigger },
   { type: 'updateAvailable', label: 'Update available', make: newUpdateTrigger },
 ];
@@ -1079,6 +1122,7 @@ export default function RuleBuilderDialog({ existing, initialDraft, onClose, onS
                       {t.type === 'log' && <LogTriggerEditor block={t} onChange={setTrigger} plugins={plugins} />}
                       {t.type === 'deviceStatus' && <DeviceStatusTriggerEditor block={t} onChange={setTrigger} />}
                       {t.type === 'flow' && <FlowTriggerEditor block={t} onChange={setTrigger} />}
+                      {t.type === 'securityFinding' && <SecurityFindingTriggerEditor block={t} onChange={setTrigger} />}
                       {t.type === 'containerLog' && <ContainerLogTriggerEditor block={t} onChange={setTrigger} plugins={plugins} />}
                       {t.type === 'updateAvailable' && <UpdateTriggerEditor block={t} onChange={setTrigger} plugins={plugins} />}
                     </SortableBlock>
