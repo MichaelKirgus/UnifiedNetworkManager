@@ -203,6 +203,35 @@ function ipv6ToBigIntFromWords(words: number[]): bigint {
 }
 
 /**
+ * Parses an IPv4 or IPv6 literal into this module's unified 8×16-bit word
+ * layout — one entry point for code that needs both families in a single
+ * representation (e.g. a mixed-family indicator cache). IPv4 occupies the LAST
+ * two words, zero-padded; IPv6 fills all eight. Null when not a valid literal.
+ */
+export function ipToWords(addr: string): { family: 'v4' | 'v6'; words: number[] } | null {
+  const v = stripZoneId(addr);
+  const n = ipv4ToInt(v);
+  if (n !== null) return { family: 'v4', words: [0, 0, 0, 0, 0, 0, (n >>> 16) & 0xffff, n & 0xffff] };
+  const g = ipv6ToWords(v);
+  if (g !== null) return { family: 'v6', words: g };
+  return null;
+}
+
+/**
+ * True when `words` falls inside the network defined by `netWords` + its top
+ * `prefix` address bits. Both operands must come from ipToWords with the SAME
+ * family — for v4 the prefix starts at word 6 (the first bit of the 32-bit
+ * address), so comparing from index 0 would only constrain zero-padded leading
+ * words and match every IPv4 address (regression pinned in verify-ip-math.ts).
+ */
+export function wordsContain(words: number[], netWords: number[], prefix: number, family: 'v4' | 'v6'): boolean {
+  if (family === 'v4') {
+    return v4PrefixMatch(((words[6] << 16) | words[7]) >>> 0, ((netWords[6] << 16) | netWords[7]) >>> 0, prefix);
+  }
+  return v6PrefixMatch(words, netWords, prefix);
+}
+
+/**
  * Computes the network prefix ("192.168.1.0/24", "fd00::/64") for an IP
  * literal + prefix length — used to group interface rows into logical networks
  * across devices (several interfaces with addresses in the same subnet are ONE

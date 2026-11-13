@@ -28,6 +28,8 @@ import {
   ipInCidr,
   v4PrefixMatch,
   v6PrefixMatch,
+  ipToWords,
+  wordsContain,
   subnetOf,
   isPrivateIpv4,
   isLoopbackIpv4,
@@ -203,6 +205,36 @@ check("ipScope v6 GUA public", ipScope('2001:4860:4860::8888') === 'public');
 
 check('ipScope CIDR classifies network address only', ipScope('192.168.1.5/32') === 'private' && ipScope('fd00::abcd/126') === 'private');
 check('ipScope null for DNS name', ipScope('router.local') === null);
+
+// ---------------------------------------------------------------------------
+// Unified word layout (mixed-family indicator caches)
+// ---------------------------------------------------------------------------
+
+check('ipToWords v4 zero-pads into the last two words', JSON.stringify(ipToWords('198.51.100.66')) === JSON.stringify({ family: 'v4', words: [0, 0, 0, 0, 0, 0, (198 << 8) | 51, (100 << 8) | 66] }));
+check('ipToWords v4 boundaries', ipToWords('0.0.0.0')?.words[7] === 0 && ipToWords('255.255.255.255')?.words[6] === 0xffff);
+check('ipToWords v6 full form', JSON.stringify(ipToWords('2001:0db8:0000:0000:0000:0000:0000:0066')) === JSON.stringify({ family: 'v6', words: [0x2001, 0xdb8, 0, 0, 0, 0, 0, 0x66] }));
+check('ipToWords v6 compressed', ipToWords('::1')?.family === 'v6' && ipToWords('::1')?.words[7] === 1);
+check('ipToWords embedded-IPv4 tail', JSON.stringify(ipToWords('::ffff:192.0.2.1')) === JSON.stringify({ family: 'v6', words: [0, 0, 0, 0, 0, 0xffff, (192 << 8) | 0, (2 << 8) | 1] }));
+check('ipToWords strips zone id', ipToWords('fe80::1%eth0')?.words[7] === 1);
+check('ipToWords null for garbage', ['not-an-ip', '999.1.1.1', 'gggg::1', '1:2:3:4:5:6:7:8::9'].every((b) => ipToWords(b) === null));
+
+const tw = (a: string): number[] => {
+  const p = ipToWords(a);
+  if (!p) throw new Error(`verify-ip-math: unparseable ${a}`);
+  return p.words;
+};
+check('wordsContain v4 /24 inside', wordsContain(tw('203.0.113.77'), tw('203.0.113.0'), 24, 'v4'));
+check('wordsContain v4 /24 network address itself', wordsContain(tw('203.0.113.0'), tw('203.0.113.0'), 24, 'v4'));
+// Regression (threat-intel E2E run 1): comparing from word index 0 for v4 only
+// constrains zero-padded leading words → EVERY IPv4 matched every v4 CIDR and
+// flooded 3,554 false-positive findings on live traffic.
+check('REGRESSION: v4 /24 does NOT match a different network', !wordsContain(tw('203.0.114.77'), tw('203.0.113.0'), 24, 'v4'));
+check('REGRESSION: v4 /8 negative case', !wordsContain(tw('203.51.100.66'), tw('198.0.0.0'), 8, 'v4'));
+check('wordsContain v4 word-boundary prefixes (/16, /32)', wordsContain(tw('10.0.255.1'), tw('10.0.0.0'), 16, 'v4') && !wordsContain(tw('10.1.0.1'), tw('10.0.0.0'), 16, 'v4') && wordsContain(tw('198.51.100.66'), tw('198.51.100.66'), 32, 'v4') && !wordsContain(tw('198.51.100.67'), tw('198.51.100.66'), 32, 'v4'));
+check('wordsContain v4 partial-word prefix (/20)', wordsContain(tw('203.0.113.77'), tw('203.0.112.0'), 20, 'v4') && !wordsContain(tw('203.0.128.5'), tw('203.0.112.0'), 20, 'v4'));
+check('wordsContain v6 /64', wordsContain(tw('2001:db8::5'), tw('2001:db8::'), 64, 'v6') && !wordsContain(tw('2001:db9::5'), tw('2001:db8::'), 64, 'v6'));
+check('wordsContain v6 partial-word prefix (/10)', wordsContain(tw('fe80::1'), tw('fe80::'), 10, 'v6') && !wordsContain(tw('ff00::1'), tw('fe80::'), 10, 'v6'));
+check('wordsContain v6 /128 exact', wordsContain(tw('2001:db8::66'), tw('2001:db8::66'), 128, 'v6') && !wordsContain(tw('2001:db8::67'), tw('2001:db8::66'), 128, 'v6'));
 
 // ---------------------------------------------------------------------------
 // Webapp mirror stays in sync with the SDK source
