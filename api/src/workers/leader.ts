@@ -53,6 +53,7 @@ export const LEADER_KEYS = {
   automationEvaluator: 9019,
   radiusMonitor: 9020,
   flowSecurity: 9021,
+  securityEventRetention: 9022,
 } as const;
 
 /**

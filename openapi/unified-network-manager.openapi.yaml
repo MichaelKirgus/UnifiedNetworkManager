@@ -6769,6 +6769,66 @@ paths:
         '401':
           description: Authentication required
 
+  /security-events:
+    get:
+      tags: [Security]
+      summary: Syslog security events ingested from device log forwarding
+      description: >-
+        Cross-device view of the `security_events` log table, populated by the
+        syslog-collector plugin (UDP/TCP 514, RFC5424 + BSD parsing) which devices
+        forward their logs to. Each row is one parsed log line with normalized level
+        (debug/info/warn/error), raw severity/facility names, originating hostname,
+        application tag and the full message text; deviceId is resolved at ingest
+        from the hostname (NULL when unresolvable). Rows are windowed on `tsMs`
+        (epoch ms of the syslog timestamp). The automation `log` trigger with source
+        'security' scans this same table by watermark. Device-scoped callers only see
+        rows attributed to their own devices. Retention is swept hourly (default 7 days,
+        securityEventRetentionDays setting).
+      parameters:
+        - in: query
+          name: from
+          required: false
+          schema: { type: string }
+          description: "Window start — ISO-8601 or epoch ms (default: one hour before `to`)"
+        - in: query
+          name: to
+          required: false
+          schema: { type: string }
+          description: "Window end — ISO-8601 or epoch ms (default: now). Range capped at 400 days."
+        - in: query
+          name: deviceId
+          required: false
+          schema: { type: string }
+          description: Filter to one device
+        - in: query
+          name: level
+          required: false
+          schema:
+            type: string
+            enum: [debug, info, warn, error, all]
+          description: "Filter by normalized syslog severity (default: all)"
+        - in: query
+          name: search
+          required: false
+          schema: { type: string }
+          description: Case-insensitive match on message, hostname, appname, facility or IP fields
+        - in: query
+          name: limit
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 2000 }
+          description: Max rows to return (default 500)
+      responses:
+        '200':
+          description: Security event rows + per-level summary counts over the same window/filters
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SecurityEventsResponse'
+        '400':
+          description: Invalid level filter value
+        '401':
+          description: Authentication required
+
   /firewall-events:
     get:
       tags: [Inventory]
@@ -11267,6 +11327,50 @@ components:
         ruleName: { type: [string, 'null'], description: "The matched rule's description text as reported by the appliance" }
         vendorEventId: { type: string, description: "Appliance per-row unique id — dedupe key at ingest (unique with deviceId + pluginId)" }
 
+    SecurityEventRow:
+      type: object
+      required: [id, pluginId, tsMs, level, message]
+      properties:
+        id: { type: string }
+        deviceId: { type: [string, 'null'], description: "Resolved from the syslog hostname at ingest; null when unresolvable" }
+        deviceName: { type: [string, 'null'] }
+        pluginId: { type: string }
+        pluginName: { type: [string, 'null'] }
+        tsMs: { type: integer, format: int64, description: "Epoch ms of the syslog timestamp" }
+        level: { type: string, enum: [debug, info, warn, error], description: "Syslog severity normalized to UNM levels" }
+        severity: { type: [string, 'null'], description: "Raw RFC5424 severity name (emergency..debug); null on BSD lines" }
+        facility: { type: [string, 'null'] }
+        hostname: { type: [string, 'null'], description: "Originating host from the syslog header" }
+        appname: { type: [string, 'null'], description: "Application tag / structured-data originator (e.g. sshd, kernel)" }
+        srcIp: { type: [string, 'null'] }
+        dstIp: { type: [string, 'null'] }
+        message: { type: string, description: "Full parsed message text" }
+
+    SecurityEventsResponse:
+      type: object
+      required: [fromMs, toMs, rows, summary]
+      properties:
+        fromMs: { type: integer, format: int64, description: "Effective window start (epoch ms) after clamping" }
+        toMs: { type: integer, format: int64, description: "Effective window end (epoch ms)" }
+        rows:
+          type: array
+          items:
+            $ref: '#/components/schemas/SecurityEventRow'
+          description: "Newest-first event rows within the window"
+        summary:
+          type: object
+          required: [total, byLevel]
+          properties:
+            total: { type: integer, description: "Total rows over the same window/filters (SQL-side)" }
+            byLevel:
+              type: object
+              required: [debug, info, warn, error]
+              properties:
+                debug: { type: integer }
+                info: { type: integer }
+                warn: { type: integer }
+                error: { type: integer }
+
     FirewallEventsResponse:
       type: object
       required: [fromMs, toMs, rows, summary]
@@ -13839,7 +13943,7 @@ components:
       properties:
         id: { type: string }
         type: { type: string, enum: [log] }
-        source: { type: string, enum: [plugin, firewall] }
+        source: { type: string, enum: [plugin, firewall, security], description: "'plugin' scans plugin_logs; 'firewall' scans firewall_events; 'security' scans syslog security_events" }
         scope: { $ref: '#/components/schemas/AutomationDeviceScope' }
         pluginId: { type: string }
         levels: { type: array, items: { type: string, enum: [debug, info, warn, error] } }

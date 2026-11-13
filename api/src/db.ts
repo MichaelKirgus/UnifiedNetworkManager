@@ -1688,6 +1688,42 @@ export async function initDb(): Promise<void> {
     CREATE INDEX IF NOT EXISTS idx_firewall_events_ts_ms
       ON firewall_events ("tsMs")`);
 
+  // Security events — syslog lines ingested by the syslog-collector plugin
+  // (UDP/TCP 514, RFC5424 + BSD) via POST /plugin/security-events. Append-only
+  // log: `level` is the syslog severity normalized to UNM levels so the
+  // automation log trigger's level filter works uniformly across all three
+  // sources; `severity`/`facility` keep the raw RFC5424 names for display.
+  // deviceId is resolved at ingest from the originating hostname (hosts table,
+  // then devices name/managementAddress) — NULL when unresolvable. Dedupe key
+  // = vendorEventId (plugin-computed stable hash of host+ts+message), so a
+  // re-sent batch after a lost ack is harmless. Swept after
+  // securityEventRetentionDays (workers/securityEventRetention.ts).
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS security_events (
+      id TEXT PRIMARY KEY,
+      "pluginId" TEXT NOT NULL,
+      "deviceId" TEXT,
+      "tsMs" BIGINT NOT NULL,
+      level TEXT NOT NULL DEFAULT 'info',
+      severity TEXT,
+      facility TEXT,
+      hostname TEXT,
+      appname TEXT,
+      "srcIp" TEXT,
+      "dstIp" TEXT,
+      message TEXT NOT NULL,
+      "vendorEventId" TEXT NOT NULL
+    )`);
+  await pool.query(`
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_security_events_vendor
+      ON security_events ("pluginId", "vendorEventId")`);
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS idx_security_events_device_ts_ms
+      ON security_events ("deviceId", "tsMs")`);
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS idx_security_events_ts_ms
+      ON security_events ("tsMs")`);
+
   // Per-host firewall state-table snapshots (Hosts/Networks "States" columns) —
   // append-only, pushed by plugins via POST /plugin/host-states. One row per
   // (device, host IP) per walk; churn deltas are NULL without a baseline.

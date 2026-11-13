@@ -1,7 +1,7 @@
 import { Request, Response } from 'express';
 import bcrypt from 'bcryptjs';
 import { db } from '../db';
-import { and, desc, eq, inArray, sql } from 'drizzle-orm';
+import { and, desc, eq, inArray, or, sql } from 'drizzle-orm';
 import { v4 as uuidv4 } from 'uuid';
 import * as schema from '../db/schema';
 
@@ -754,6 +754,127 @@ export function internalRouter() {
       res.status(201).json({ accepted });
     } catch (error) {
       console.error('Error ingesting firewall events:', error);
+      res.status(500).json({ error: 'Internal server error' });
+    }
+  });
+
+  // POST /plugin/security-events - accept a batch of syslog security-event rows
+  // from the syslog-collector plugin (UDP/TCP 514, RFC5424 + BSD parsing done in
+  // the plugin). Append-only log: rows are inserted with on-conflict-ignore
+  // keyed on vendorEventId (the plugin's stable hash of host+ts+message), so a
+  // re-sent batch after a lost ack is harmless. Growth is bounded by the
+  // security-event retention worker (securityEventRetentionDays). The API
+  // resolves each row's deviceId from its originating hostname — hosts table
+  // first (hostname or IP match, newest lastSeenAt wins), then devices
+  // (name/managementAddress) — so the plugin stays device-agnostic.
+  const MAX_SECURITY_EVENTS_PER_REQUEST = 5_000;
+  router.post('/plugin/security-events', pluginAuth, async (req: Request, res: Response) => {
+    const body = req.body ?? {};
+    const pluginId = typeof body.pluginId === 'string' ? body.pluginId : '';
+    if (!pluginId) {
+      return res.status(400).json({ error: 'pluginId is required' });
+    }
+    const events = Array.isArray(body.events) ? body.events : null;
+    if (!events || events.length === 0) {
+      return res.status(400).json({ error: '"events" array with at least one entry is required' });
+    }
+
+    try {
+      const plugin = await db.query.plugins.findFirst({ where: eq(schema.plugins.id, pluginId) });
+      if (!plugin) {
+        return res.status(400).json({ error: `Unknown plugin id: ${pluginId}` });
+      }
+
+      let accepted = 0;
+      const batch = events.slice(0, MAX_SECURITY_EVENTS_PER_REQUEST);
+      if (events.length > MAX_SECURITY_EVENTS_PER_REQUEST) {
+        // eslint-disable-next-line no-console
+        console.warn(
+          `[security-events] plugin ${pluginId} sent ${events.length} rows in one request; ` +
+            `dropping the last ${events.length - MAX_SECURITY_EVENTS_PER_REQUEST}`
+        );
+      }
+
+      const str = (v: unknown, maxLen = 512): string | null => {
+        if (typeof v !== 'string') return null;
+        const t = v.trim();
+        return t === '' ? null : t.slice(0, maxLen);
+      };
+      const LEVELS = ['debug', 'info', 'warn', 'error'];
+      const levelOf = (v: unknown): string => {
+        const l = typeof v === 'string' ? v.toLowerCase() : '';
+        return LEVELS.includes(l) ? l : 'info';
+      };
+
+      // Hostname → deviceId resolution for the whole batch (two small queries).
+      const hostnames = new Set<string>();
+      for (const e of batch) {
+        if (!e || typeof e !== 'object') continue;
+        const h = str(e.hostname, 255);
+        if (h) hostnames.add(h);
+      }
+      const deviceByHost = new Map<string, string>();
+      if (hostnames.size > 0) {
+        const names = [...hostnames];
+        // Inventory hosts first — hostname OR IP match; newest sighting wins.
+        const hostRows = await db.query.hosts.findMany({
+          where: or(inArray(schema.hosts.hostname, names), inArray(schema.hosts.ip, names)),
+          orderBy: [desc(schema.hosts.lastSeenAt)],
+        });
+        for (const h of hostRows) {
+          if (h.hostname && !deviceByHost.has(h.hostname)) deviceByHost.set(h.hostname, h.deviceId);
+          if (!deviceByHost.has(h.ip)) deviceByHost.set(h.ip, h.deviceId);
+        }
+        // Fallback: the devices table itself (name or management address).
+        const unresolved = names.filter((n) => !deviceByHost.has(n));
+        if (unresolved.length > 0) {
+          const devRows = await db.query.devices.findMany({
+            where: or(inArray(schema.devices.name, unresolved), inArray(schema.devices.managementAddress, unresolved)),
+          });
+          for (const d of devRows) {
+            if (!deviceByHost.has(d.name)) deviceByHost.set(d.name, d.id);
+            if (!deviceByHost.has(d.managementAddress)) deviceByHost.set(d.managementAddress, d.id);
+          }
+        }
+      }
+
+      const rows = [];
+      for (const e of batch) {
+        if (!e || typeof e !== 'object') continue;
+        const vendorEventId = str(e.vendorEventId, 128);
+        const message = str(e.message, 4_096);
+        const tsMsRaw = typeof e.tsMs === 'number' ? e.tsMs : Number(e.tsMs);
+        if (!vendorEventId || !message || !Number.isFinite(tsMsRaw)) continue; // unusable row — skip
+
+        const hostname = str(e.hostname, 255) ?? '';
+        rows.push({
+          id: uuidv4(),
+          pluginId,
+          deviceId: hostname ? (deviceByHost.get(hostname) ?? null) : null,
+          tsMs: Math.trunc(tsMsRaw),
+          level: levelOf(e.level),
+          severity: str(e.severity, 32)?.toLowerCase() ?? null,
+          facility: str(e.facility, 64)?.toLowerCase() ?? null,
+          hostname: hostname || null,
+          appname: str(e.appname, 128) ?? null,
+          srcIp: str(e.srcIp, 64) ?? null,
+          dstIp: str(e.dstIp, 64) ?? null,
+          message,
+          vendorEventId,
+        });
+      }
+
+      if (rows.length > 0) {
+        // One batched insert; on-conflict-ignore makes re-sent batches harmless.
+        await db.insert(schema.securityEvents).values(rows).onConflictDoNothing({
+          target: [schema.securityEvents.pluginId, schema.securityEvents.vendorEventId],
+        });
+      }
+      accepted = rows.length;
+
+      res.status(201).json({ accepted });
+    } catch (error) {
+      console.error('Error ingesting security events:', error);
       res.status(500).json({ error: 'Internal server error' });
     }
   });

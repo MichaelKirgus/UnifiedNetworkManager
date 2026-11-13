@@ -740,6 +740,47 @@ export const firewallEvents = pgTable(
   }
 );
 
+// Syslog security events pushed by the syslog-collector plugin via POST
+// /plugin/security-events (see routes/internal.ts) — append-only log of device
+// log lines. `level` is the RFC5424 severity normalized to UNM levels so the
+// automation log trigger's level filter works uniformly across all sources;
+// `severity`/`facility` keep the raw names for display. deviceId is resolved at
+// ingest from the originating hostname (NULL when unresolvable). vendorEventId
+// = plugin-computed stable hash of host+ts+message → idempotent re-pushes.
+export const securityEvents = pgTable(
+  'security_events',
+  {
+    id: text('id').primaryKey(),
+    // Self-reported by the sender (its effectiveUuid); validated against the
+    // plugins table at ingest — unknown ids are rejected with a 400.
+    pluginId: text('pluginId').notNull(),
+    // Resolved from the syslog hostname at ingest; NULL when unresolvable.
+    deviceId: text('deviceId'),
+    // Epoch ms of the syslog timestamp (RFC5424 or BSD) — the queryable axis.
+    tsMs: bigint('tsMs', { mode: 'number' }).notNull(),
+    // debug | info | warn | error — normalized from the syslog severity.
+    level: text('level').notNull().default('info'),
+    // Raw RFC5424 severity name (emergency..debug) for display; NULL on BSD.
+    severity: text('severity'),
+    facility: text('facility'),
+    hostname: text('hostname'),
+    appname: text('appname'),
+    srcIp: text('srcIp'),
+    dstIp: text('dstIp'),
+    // Full parsed message text — what the log trigger's regex matches.
+    message: text('message').notNull(),
+    vendorEventId: text('vendorEventId').notNull(),
+  },
+  (table) => {
+    return {
+      uqSecurityEventsVendor: uniqueIndex('uq_security_events_vendor').on(table.pluginId, table.vendorEventId),
+      idxSecurityEventsDeviceTsMs: index('idx_security_events_device_ts_ms').on(table.deviceId, table.tsMs),
+      // Epoch-ms index for the retention sweep (DELETE WHERE tsMs < cutoff).
+      idxSecurityEventsTsMs: index('idx_security_events_ts_ms').on(table.tsMs),
+    };
+  }
+);
+
 // Per-host firewall state-table snapshots pushed by plugins via POST
 // /plugin/host-states (see routes/internal.ts) — one row per (device, host IP)
 // per state-table walk. Powers the "States" columns on the Hosts + Networks

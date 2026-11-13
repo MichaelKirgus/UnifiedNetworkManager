@@ -254,6 +254,19 @@ export const SETTING_DESCRIPTORS: SettingDescriptor[] = [
       'How many days of firewall event-log rows (blocked/allowed traffic events pushed by plugins) are kept before the hourly retention sweep deletes them.',
   },
   {
+    key: 'securityEventRetentionDays',
+    label: 'Security event (syslog) retention',
+    type: 'integer',
+    category: 'Retention',
+    unit: 'days',
+    min: 1,
+    max: 365,
+    default: 7,
+    envVar: 'SECURITY_EVENT_RETENTION_DAYS',
+    help:
+      'How many days of ingested syslog security events are kept before the hourly retention sweep deletes them. Devices forward their logs to the syslog-collector plugin (UDP/TCP 514); raise this if you want a longer audit trail for automation log triggers and future threat-intel matching.',
+  },
+  {
     key: 'hostStateRetentionDays',
     label: 'Host state snapshot retention',
     type: 'integer',

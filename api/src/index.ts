@@ -29,6 +29,7 @@ import documentedNetworksRouter from './routes/documentedNetworks';
 import updatesRouter from './routes/updates';
 import securityChecksRouter from './routes/securityChecks';
 import cveRouter from './routes/cve';
+import securityEventsRouter from './routes/securityEvents';
 import topologyRouter from './routes/topology';
 import logsRouter from './routes/logs';
 import notificationsRouter from './routes/notifications';
@@ -44,6 +45,7 @@ import { startNotificationsWorker } from './workers/notifications';
 import { startTelemetryWorker } from './workers/telemetry';
 import { startTelemetryRetentionWorker } from './workers/telemetryRetention';
 import { startFirewallEventRetentionWorker } from './workers/firewallEventRetention';
+import { startSecurityEventRetentionWorker } from './workers/securityEventRetention';
 import { startHostStateRetentionWorker } from './workers/hostStateRetention';
 import { startPluginDiscovery } from './plugins/discovery';
 import { startPlanExecutorWorker } from './workers/planExecutor';
@@ -330,6 +332,9 @@ async function main(): Promise<void> {
   // Actions & Schedules — automation rules CRUD + test-run + run history
   // (self-defining /automations/... paths; engine in workers/automations.ts).
   api.use(automationsRouter);
+  // Syslog security events (/security-events) — read view of the append-only log
+  // filled by the syslog-collector plugin via POST /plugin/security-events.
+  api.use(securityEventsRouter);
 
   // OpenAPI validation error handler.
   api.use(
@@ -399,6 +404,11 @@ async function main(): Promise<void> {
     // Firewall event-log retention (append-only log pushed via /plugin/firewall-events).
     void runAsLeader(LEADER_KEYS.firewallEventRetention, 'firewallEventRetention', () => {
       const timer = startFirewallEventRetentionWorker();
+      return () => clearInterval(timer);
+    }).then((stop) => workerStops.push(stop));
+    // Syslog security-event retention (append-only log pushed via /plugin/security-events).
+    void runAsLeader(LEADER_KEYS.securityEventRetention, 'securityEventRetention', () => {
+      const timer = startSecurityEventRetentionWorker();
       return () => clearInterval(timer);
     }).then((stop) => workerStops.push(stop));
     // Per-host state snapshot retention (append-only log pushed via /plugin/host-states).
