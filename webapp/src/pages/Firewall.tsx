@@ -269,27 +269,28 @@ export default function Firewall() {
       render: (row) => <StatsCell row={row} />,
     },
     {
-      // Disabled rules are dimmed instead of hidden — they still matter.
-      header: 'Enabled',
-      key: 'enabled',
-      width: 90,
-      render: (row) =>
-        row.enabled ? (
-          <span className="text-xs font-medium text-success-fg">yes</span>
-        ) : (
-          <span className="text-xs font-medium text-faint">no</span>
-        ),
-    },
-    {
+      // Disabled rules are dimmed row-wide instead of hidden — they still
+      // matter; the pill in this cell names why a row is dimmed.
       header: 'Description',
       key: 'description',
       width: 260,
-      render: (row) =>
-        row.description && row.description.trim() !== '' ? (
-          <span className="text-xs text-secondary">{row.description}</span>
-        ) : (
-          <span className="text-faint">—</span>
-        ),
+      render: (row) => (
+        <span className="flex items-center gap-1.5">
+          {!row.enabled && (
+            <span
+              title="Rule is disabled on the device — it never matches traffic"
+              className="shrink-0 rounded-full bg-muted px-1.5 py-px text-[9px] font-semibold uppercase tracking-wide text-secondary"
+            >
+              disabled
+            </span>
+          )}
+          {row.description && row.description.trim() !== '' ? (
+            <span className="text-xs text-secondary">{row.description}</span>
+          ) : row.enabled ? (
+            <span className="text-faint">—</span>
+          ) : null}
+        </span>
+      ),
     },
   ];
 
@@ -328,6 +329,8 @@ export default function Firewall() {
           columns={columns}
           rows={visibleRows ?? []}
           rowKey={(row) => `${row.deviceId}|${row.pluginId}|${row.ruleType}|${row.vendorRuleId}`}
+          // Disabled rules are dimmed instead of hidden — they still matter.
+          rowClassName={(row) => (row.enabled ? undefined : 'opacity-50')}
           storageKey="firewall-rules"
           autoRefresh={{ intervalMs: 30_000, queries: [firewallQuery] }}
           searchPlaceholder="Search firewall rules…"
