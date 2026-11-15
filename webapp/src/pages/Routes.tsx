@@ -98,8 +98,10 @@ export default function Routes() {
       width: 260,
       exportValue: (row) => `${row.deviceName ?? '?'} (${row.managementAddress ?? '?'})`,
       render: (row) => {
-        // LCOS rows carry the route's peer/interface name in extra.peer.
-        const peerRaw = row.extra?.['peer'];
+        // LCOS rows carry the route's peer/interface name in extra.peer;
+        // OPNsense OSPF-learned rows carry the egress interface in
+        // extra.interfaceName (which tunnel carries that prefix).
+        const peerRaw = row.protocol === 'ospf' ? row.extra?.['interfaceName'] : row.extra?.['peer'];
         const peer = typeof peerRaw === 'string' && peerRaw.trim() !== '' ? peerRaw : null;
         return (
           <DeviceChip
