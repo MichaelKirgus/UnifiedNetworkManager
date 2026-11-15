@@ -420,12 +420,14 @@ export default function DeviceDetail() {
       title={device?.name ?? deviceId}
       actions={
         <>
-          {monitoringQuery.data && (
+          {/* Polling disabled → the last health is stale and misleading; show
+              ONLY the disabled tag (same rule as the Devices table). */}
+          {monitoringQuery.data && device?.enabled !== false && (
             <StatusBadge status={monitoringQuery.data.health} title={statusReasonsTitle(monitoringQuery.data.health, monitoringQuery.data.healthReasons)} />
           )}
           {device?.enabled === false && (
             <span
-              title="Telemetry polling disabled — historical data and last metrics are preserved"
+              title="Telemetry polling disabled — live status hidden, historical data and last metrics are preserved"
               className="rounded-full bg-muted px-2.5 py-1 text-xs font-semibold uppercase tracking-wide text-secondary"
             >
               disabled

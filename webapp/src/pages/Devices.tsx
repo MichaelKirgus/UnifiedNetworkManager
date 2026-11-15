@@ -563,20 +563,20 @@ export default function Devices() {
     {
       header: 'Status',
       key: 'status',
-      render: (row) => (
-        <span className="inline-flex items-center gap-1.5">
-          {/* Tooltip lists which plugin is non-ok and why (worst-wins rollup). */}
+      render: (row) =>
+        row.enabled === false ? (
+          // Polling disabled → the last status is stale and misleading; show
+          // ONLY the disabled tag.
+          <span
+            title="Telemetry polling disabled — live status hidden, historical data and last metrics are preserved"
+            className="rounded-full bg-muted px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-secondary"
+          >
+            disabled
+          </span>
+        ) : (
+          // Tooltip lists which plugin is non-ok and why (worst-wins rollup).
           <StatusBadge status={row.status} title={statusReasonsTitle(row.status, row.healthReasons)} />
-          {row.enabled === false && (
-            <span
-              title="Telemetry polling disabled — historical data and last metrics are preserved"
-              className="rounded-full bg-muted px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-secondary"
-            >
-              disabled
-            </span>
-          )}
-        </span>
-      ),
+        ),
     },
     {
       header: 'Metrics',
