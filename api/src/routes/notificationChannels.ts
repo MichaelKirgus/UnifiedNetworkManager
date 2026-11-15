@@ -1,6 +1,6 @@
 import { Router, Request, Response } from 'express';
 import { v4 as uuidv4 } from 'uuid';
-import { and, desc, eq, inArray } from 'drizzle-orm';
+import { and, desc, eq, inArray, isNull, or } from 'drizzle-orm';
 import { db } from '../db';
 import * as schema from '../db/schema';
 import { requireAuth, requirePermission } from '../auth/middleware';
@@ -109,6 +109,32 @@ interface ChannelInput {
   enabled?: unknown;
   config?: unknown;
   secretId?: unknown;
+  ownerId?: unknown;
+}
+
+/**
+ * Resolves + validates the requested channel owner. null/absent = SHARED channel.
+ * A user may create personal channels for themselves; creating one for ANOTHER
+ * user requires users:write (admin setup on someone's behalf).
+ */
+async function resolveOwner(req: Request, input: unknown): Promise<{ ok: true; value: string | null } | { ok: false; status: number; error: string }> {
+  if (input === undefined || input === null || input === '') return { ok: true, value: null };
+  if (typeof input !== 'string') return { ok: false, status: 400, error: '"ownerId" must be a user id or null' };
+  const me = req.user!.sub;
+  if (input === me) return { ok: true, value: me };
+  if (!(req.user?.permissions ?? []).includes('users:write')) {
+    return { ok: false, status: 403, error: '"ownerId" may only be set to yourself (or null for a shared channel) without users:write' };
+  }
+  const u = await db.query.users.findFirst({ where: eq(schema.users.id, input) });
+  if (!u) return { ok: false, status: 400, error: 'The selected owner user does not exist' };
+  return { ok: true, value: u.id };
+}
+
+/** Shared channels are managed by any notifications:write holder; personal ones only by their owner (or users:write). */
+function canManageChannel(req: Request, ownerId: string | null): boolean {
+  if (!ownerId) return true;
+  const perms = req.user?.permissions ?? [];
+  return ownerId === req.user!.sub || perms.includes('users:write');
 }
 
 /** Validates a CREATE payload (all fields required except enabled/secretId). */
@@ -165,7 +191,7 @@ async function validateChannel(input: ChannelInput): Promise<{ values: Record<st
   return { values };
 }
 
-function serializeChannel(row: typeof schema.notificationChannels.$inferSelect, extra?: { pluginName?: string | null; typeLabel?: string | null; lastDelivery?: { status: string; sentAt: string; error: string | null } | null }) {
+function serializeChannel(row: typeof schema.notificationChannels.$inferSelect, extra?: { pluginName?: string | null; typeLabel?: string | null; lastDelivery?: { status: string; sentAt: string; error: string | null } | null; ownerName?: string | null }) {
   let config: Record<string, unknown> = {};
   try {
     const parsed = JSON.parse(row.config || '{}');
@@ -179,18 +205,26 @@ function serializeChannel(row: typeof schema.notificationChannels.$inferSelect, 
     enabled: row.enabled,
     config,
     secretId: row.secretId ?? null,
+    ownerId: row.ownerId ?? null,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
     ...(extra?.pluginName !== undefined ? { pluginName: extra.pluginName } : {}),
     ...(extra?.typeLabel !== undefined ? { typeLabel: extra.typeLabel } : {}),
     ...(extra?.lastDelivery !== undefined ? { lastDelivery: extra.lastDelivery } : {}),
+    ...(extra?.ownerName !== undefined ? { ownerName: extra.ownerName } : {}),
   };
 }
 
-// GET /notification-channels — all channels with plugin name, catalog label and
-// the most recent delivery attempt (drives the UI's status column).
-router.get('/notification-channels', requireAuth, requirePermission('notifications:read'), async (_req: Request, res: Response) => {
-  const rows = await db.query.notificationChannels.findMany({ orderBy: [desc(schema.notificationChannels.createdAt)] });
+// GET /notification-channels — channels with plugin name, catalog label and the
+// most recent delivery attempt (drives the UI's status column). Personal
+// channels are only visible to their owner (or users:write holders).
+router.get('/notification-channels', requireAuth, requirePermission('notifications:read'), async (req: Request, res: Response) => {
+  const me = req.user!.sub;
+  const canSeeAll = (req.user?.permissions ?? []).includes('users:write');
+  const rows = await db.query.notificationChannels.findMany({
+    where: canSeeAll ? undefined : or(isNull(schema.notificationChannels.ownerId), eq(schema.notificationChannels.ownerId, me)),
+    orderBy: [desc(schema.notificationChannels.createdAt)],
+  });
   if (rows.length === 0) {
     res.status(200).json([]);
     return;
@@ -211,6 +245,10 @@ router.get('/notification-channels', requireAuth, requirePermission('notificatio
   const plugins = await db.query.plugins.findMany({ where: inArray(schema.plugins.id, pluginIds) });
   const pluginById = new Map(plugins.map((p) => [p.id, p]));
 
+  const ownerIds = [...new Set(rows.map((r) => r.ownerId).filter((v): v is string => !!v))];
+  const owners = ownerIds.length > 0 ? await db.query.users.findMany({ where: inArray(schema.users.id, ownerIds) }) : [];
+  const ownerNameById = new Map(owners.map((u) => [u.id, u.username]));
+
   res.status(200).json(rows.map((row) => {
     const plugin = pluginById.get(row.pluginId);
     let typeLabel: string | null = null;
@@ -220,16 +258,28 @@ router.get('/notification-channels', requireAuth, requirePermission('notificatio
         typeLabel = Array.isArray(catalog) ? catalog.find((c) => c.type === row.channelType)?.label ?? null : null;
       } catch { /* keep null */ }
     }
-    return serializeChannel(row, { pluginName: plugin?.name ?? null, typeLabel, lastDelivery: lastByChannel.get(row.id) ?? null });
+    return serializeChannel(row, {
+      pluginName: plugin?.name ?? null,
+      typeLabel,
+      lastDelivery: lastByChannel.get(row.id) ?? null,
+      ownerName: row.ownerId ? (ownerNameById.get(row.ownerId) ?? null) : null,
+    });
   }));
 });
 
 // POST /notification-channels — create a channel (validated against the catalog).
+// Optional ownerId makes it a PERSONAL channel of that user (self, or anyone
+// with users:write) — the fan-out target for rule audiences.
 router.post('/notification-channels', requireAuth, requirePermission('notifications:write'), async (req: Request, res: Response) => {
   const body = (req.body ?? {}) as ChannelInput;
   const v = await validateChannel(body);
   if ('error' in v) {
     res.status(400).json({ error: v.error });
+    return;
+  }
+  const ownerRes = await resolveOwner(req, body.ownerId);
+  if (!ownerRes.ok) {
+    res.status(ownerRes.status).json({ error: ownerRes.error });
     return;
   }
   const now = new Date().toISOString();
@@ -242,6 +292,7 @@ router.post('/notification-channels', requireAuth, requirePermission('notificati
     enabled: v.values.enabled === false ? false : true,
     config: String(v.values.config),
     secretId: (v.values.secretId as string | null) ?? null,
+    ownerId: ownerRes.value,
     createdAt: now,
     updatedAt: now,
   });
@@ -249,11 +300,11 @@ router.post('/notification-channels', requireAuth, requirePermission('notificati
   res.status(201).json(serializeChannel(row!));
 });
 
-// GET /notification-channels/:id — single channel.
+// GET /notification-channels/:id — single channel (personal ones only to their owner).
 router.get('/notification-channels/:id', requireAuth, requirePermission('notifications:read'), async (req: Request, res: Response) => {
   const id = String(req.params.id ?? '');
   const row = await db.query.notificationChannels.findFirst({ where: eq(schema.notificationChannels.id, id) });
-  if (!row) {
+  if (!row || !canManageChannel(req, row.ownerId)) {
     res.status(404).json({ error: 'Channel not found' });
     return;
   }
@@ -268,15 +319,19 @@ router.get('/notification-channels/:id', requireAuth, requirePermission('notific
   res.status(200).json(serializeChannel(row, { pluginName: plugin?.name ?? null, typeLabel }));
 });
 
-// PUT /notification-channels/:id — partial update.
+// PUT /notification-channels/:id — partial update. ownerId is immutable.
 router.put('/notification-channels/:id', requireAuth, requirePermission('notifications:write'), async (req: Request, res: Response) => {
   const id = String(req.params.id ?? '');
   const existing = await db.query.notificationChannels.findFirst({ where: eq(schema.notificationChannels.id, id) });
-  if (!existing) {
+  if (!existing || !canManageChannel(req, existing.ownerId)) {
     res.status(404).json({ error: 'Channel not found' });
     return;
   }
   const body = (req.body ?? {}) as ChannelInput;
+  if (body.ownerId !== undefined) {
+    res.status(400).json({ error: '"ownerId" cannot be changed after creation — delete and recreate the channel instead' });
+    return;
+  }
   const v = await validateChannelWithId(body, id);
   if ('error' in v) {
     res.status(400).json({ error: v.error });
@@ -293,7 +348,7 @@ router.put('/notification-channels/:id', requireAuth, requirePermission('notific
 router.delete('/notification-channels/:id', requireAuth, requirePermission('notifications:write'), async (req: Request, res: Response) => {
   const id = String(req.params.id ?? '');
   const existing = await db.query.notificationChannels.findFirst({ where: eq(schema.notificationChannels.id, id) });
-  if (!existing) {
+  if (!existing || !canManageChannel(req, existing.ownerId)) {
     res.status(404).json({ error: 'Channel not found' });
     return;
   }
@@ -307,7 +362,7 @@ router.delete('/notification-channels/:id', requireAuth, requirePermission('noti
 router.post('/notification-channels/:id/test', requireAuth, requirePermission('notifications:write'), async (req: Request, res: Response) => {
   const id = String(req.params.id ?? '');
   const existing = await db.query.notificationChannels.findFirst({ where: eq(schema.notificationChannels.id, id) });
-  if (!existing) {
+  if (!existing || !canManageChannel(req, existing.ownerId)) {
     res.status(404).json({ error: 'Channel not found' });
     return;
   }

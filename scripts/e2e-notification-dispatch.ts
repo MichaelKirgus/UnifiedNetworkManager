@@ -121,6 +121,9 @@ async function preClean(): Promise<void> {
   for (const r of rules.data ?? []) if (r.name.startsWith('e2e-notify-')) await api('DELETE', `/notification-rules/${r.id}`);
   const channels = await api<ChannelRow[]>('GET', '/notification-channels');
   for (const c of channels.data ?? []) if (c.name.startsWith('e2e-notify-')) await api('DELETE', `/notification-channels/${c.id}`);
+  // Leftover test users from a crashed run (their personal channels are gone by now).
+  const users = await api<Array<{ id: string; username: string }>>('GET', '/users');
+  for (const u of users.data ?? []) if (u.username.startsWith('e2e-notify-')) { await api('DELETE', `/users/${u.id}`); console.log(`  deleted user ${u.username}`); }
   const notes = await api<Array<{ id: string; title: string }>>('GET', '/notifications?search=e2e-notify-dispatch&all=true');
   for (const n of notes.data ?? []) await api('DELETE', `/notifications/${n.id}`);
 }
@@ -261,6 +264,93 @@ async function phaseD(sender: PluginRow, channelId: string): Promise<void> {
   check('second trigger suppressed by cooldown (exactly one delivery)', sentCount === 1, `sentRows=${sentCount}`);
 }
 
+// ── F. Audience fan-out to personal channels ────────────────────────────────
+async function phaseF(sender: PluginRow): Promise<void> {
+  console.log('\n[F] Audience — per-user fan-out to personal channels');
+  const host = discoverHostForContainers();
+  const url = `http://${host}:${SINK_PORT}/sink`;
+
+  // 1. Test user (the admin token carries users:create).
+  const createdUser = await api<{ user?: { id: string } }>('POST', '/users', {
+    username: 'e2e-notify-user',
+    password: 'E2eNotify!passw0rd',
+  });
+  check('test user created (201)', createdUser.status === 201, `status=${createdUser.status} ${JSON.stringify(createdUser.data ?? {}).slice(0, 80)}`);
+  const userId = createdUser.data?.user?.id ?? '';
+
+  // 2. Personal webhook channel owned by that user (admin has users:write).
+  const ch = await api<ChannelRow>('POST', '/notification-channels', {
+    name: 'e2e-notify-personal',
+    pluginId: sender.id,
+    channelType: 'webhook',
+    config: { url, method: 'POST', contentType: 'json' },
+    ownerId: userId,
+  });
+  check('personal channel created for the test user (201 + ownerId set)', ch.status === 201 && ch.data?.ownerId === userId, `status=${ch.status} owner=${ch.data?.ownerId ?? '—'}`);
+  const personalChannelId = ch.data?.id ?? '';
+
+  // Validation guard: an unknown owner must be rejected.
+  const badOwner = await api<{ error?: string }>('POST', '/notification-channels', {
+    name: 'e2e-notify-badowner', pluginId: sender.id, channelType: 'webhook', config: {},
+    ownerId: '00000000-0000-4000-8000-00000000dead',
+  });
+  check('unknown owner rejected (400)', badOwner.status === 400, `status=${badOwner.status}`);
+
+  // 3. Rule: NO shared channels — audience = the test user only, fan-out to webhooks.
+  const rule = await api<RuleRow>('POST', '/notification-rules', {
+    name: 'e2e-notify-fanrule',
+    filter: {},
+    channelIds: [],
+    audience: { type: 'users', userIds: [userId], fanOutTypes: ['webhook'] },
+    titleTemplate: '[E2E-FAN] {{notification.title}}',
+    bodyTemplate: 'fan-out probe sev={{notification.severity}}',
+    cooldownSec: 0,
+  });
+  check('fan-out rule created (201 + audience persisted)', rule.status === 201 && rule.data?.audience?.type === 'users' && JSON.stringify(rule.data?.audience?.userIds ?? []) === JSON.stringify([userId]), `status=${rule.status} ${JSON.stringify(rule.data?.audience ?? {})}`);
+  const ruleId = rule.data?.id ?? '';
+
+  // Validation guard: an unknown user id in the audience must be rejected.
+  const badAudience = await api<{ error?: string }>('POST', '/notification-rules', {
+    name: 'e2e-notify-badaud', filter: {}, channelIds: [],
+    audience: { type: 'users', userIds: ['00000000-0000-4000-8000-00000000dead'], fanOutTypes: ['webhook'] },
+    titleTemplate: 'x', cooldownSec: 0,
+  });
+  check('unknown audience user rejected (400)', badAudience.status === 400, `status=${badAudience.status}`);
+
+  // 4. Trigger — the message must arrive via the PERSONAL channel.
+  const before = sinkHits.length;
+  await api('POST', '/plugin/notifications', { pluginId: sender.id, notifications: [{ severity: 'warning', title: 'e2e-notify-dispatch-fanout' }] }, { 'x-plugin-api-key': pluginKey });
+
+  const delivered = await pollUntil(30_000, async () => {
+    const d = await api<DeliveryRow[]>('GET', `/notification-deliveries?ruleId=${ruleId}&limit=10`);
+    return (d.data ?? []).some((x) => x.status === 'sent' && x.channelId === personalChannelId);
+  });
+  check('fan-out delivery row for the PERSONAL channel (status=sent)', delivered);
+
+  const gotFan = await pollUntil(15_000, async () => sinkHits.slice(before).some((h) => h.title.includes('[E2E-FAN]')));
+  check('sink received the fan-out message', gotFan, `hits=${JSON.stringify(sinkHits.slice(before), null, 0).slice(0, 160)}`);
+
+  // Negative control: an audience WITHOUT fanOutTypes (and no shared channels)
+  // must stay completely silent.
+  const noFan = await api<RuleRow>('POST', '/notification-rules', {
+    name: 'e2e-notify-nofanrule', filter: {}, channelIds: [],
+    audience: { type: 'users', userIds: [userId] },
+    titleTemplate: '[E2E-NOFAN] {{notification.title}}', bodyTemplate: '', cooldownSec: 0,
+  });
+  const noFanId = noFan.data?.id ?? '';
+  await api('POST', '/plugin/notifications', { pluginId: sender.id, notifications: [{ severity: 'warning', title: 'e2e-notify-dispatch-nofan' }] }, { 'x-plugin-api-key': pluginKey });
+  await sleep(4_000);
+  const noFanDeliveries = await api<DeliveryRow[]>('GET', `/notification-deliveries?ruleId=${noFanId}&limit=10`);
+  check('audience without fanOutTypes stays silent (no shared channels either)', (noFanDeliveries.data ?? []).length === 0, `rows=${(noFanDeliveries.data ?? []).length}`);
+
+  if (!KEEP) {
+    await api('DELETE', `/notification-rules/${ruleId}`);
+    await api('DELETE', `/notification-rules/${noFanId}`);
+    await api('DELETE', `/notification-channels/${personalChannelId}`);
+    await api('DELETE', `/users/${userId}`);
+  }
+}
+
 // ── E. Cleanup ───────────────────────────────────────────────────────────────
 async function cleanup(): Promise<void> {
   if (KEEP) { console.log('\n[E] KEEP=1 — leaving test data in place'); return; }
@@ -283,6 +373,7 @@ async function main(): Promise<void> {
     const channelId = await phaseB(sender);
     await phaseC(sender, channelId);
     await phaseD(sender, channelId);
+    await phaseF(sender);
   } finally {
     await cleanup().catch((e) => console.error('cleanup error:', e.message));
     sinkServer?.close();

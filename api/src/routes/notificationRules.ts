@@ -4,6 +4,7 @@ import { and, desc, eq, inArray } from 'drizzle-orm';
 import { db } from '../db';
 import * as schema from '../db/schema';
 import { requireAuth, requirePermission } from '../auth/middleware';
+import type { NotificationRuleAudience } from '../notificationDispatch';
 
 /**
  * Notification RULES — "when a notification matches this filter, render the
@@ -72,9 +73,64 @@ interface RuleInput {
   enabled?: unknown;
   filter?: unknown;
   channelIds?: unknown;
+  audience?: unknown;
   titleTemplate?: unknown;
   bodyTemplate?: unknown;
   cooldownSec?: unknown;
+}
+
+/**
+ * Validates an audience document. `type:'roles'` requires existing role names,
+ * `type:'users'` requires existing user ids; fanOutTypes are free channel-type
+ * strings (matched against personal channels at dispatch time). Returns the
+ * cleaned, normalized document.
+ */
+async function validateAudience(input: unknown): Promise<{ ok: true; value: NotificationRuleAudience } | { ok: false; error: string }> {
+  if (input === undefined || input === null) return { ok: true, value: { type: 'all' } };
+  if (!input || typeof input !== 'object' || Array.isArray(input)) return { ok: false, error: '"audience" must be an object' };
+  const a = input as Record<string, unknown>;
+
+  const out: NotificationRuleAudience = { type: 'all' };
+  if (a.type !== undefined && a.type !== null) {
+    if (a.type !== 'all' && a.type !== 'roles' && a.type !== 'users') {
+      return { ok: false, error: '"audience.type" must be one of all, roles, users' };
+    }
+    out.type = a.type;
+  }
+
+  if (out.type === 'roles') {
+    if (!Array.isArray(a.roleNames) || a.roleNames.length === 0) return { ok: false, error: '"audience.roleNames" must be a non-empty array of role names' };
+    for (const v of a.roleNames) {
+      if (typeof v !== 'string' || !v.trim()) return { ok: false, error: '"audience.roleNames" entries must be non-empty strings' };
+    }
+    out.roleNames = [...new Set((a.roleNames as string[]).map((s) => s.trim()))];
+    const existing = await db.query.roles.findMany({ where: inArray(schema.roles.name, out.roleNames) });
+    const found = new Set(existing.map((r) => r.name));
+    const missing = out.roleNames.filter((n) => !found.has(n));
+    if (missing.length > 0) return { ok: false, error: `Unknown role name(s): ${missing.join(', ')}` };
+  }
+
+  if (out.type === 'users') {
+    if (!Array.isArray(a.userIds) || a.userIds.length === 0) return { ok: false, error: '"audience.userIds" must be a non-empty array of user ids' };
+    for (const v of a.userIds) {
+      if (typeof v !== 'string' || !v.trim()) return { ok: false, error: '"audience.userIds" entries must be non-empty strings' };
+    }
+    out.userIds = [...new Set((a.userIds as string[]).map((s) => s.trim()))];
+    const existing = await db.query.users.findMany({ where: inArray(schema.users.id, out.userIds) });
+    const found = new Set(existing.map((u) => u.id));
+    const missing = out.userIds.filter((id) => !found.has(id));
+    if (missing.length > 0) return { ok: false, error: `Unknown user id(s): ${missing.join(', ')}` };
+  }
+
+  if (a.fanOutTypes !== undefined && a.fanOutTypes !== null) {
+    if (!Array.isArray(a.fanOutTypes)) return { ok: false, error: '"audience.fanOutTypes" must be an array' };
+    for (const v of a.fanOutTypes) {
+      if (typeof v !== 'string' || !v.trim() || v.trim().length > 50) return { ok: false, error: '"audience.fanOutTypes" entries must be strings of at most 50 characters' };
+    }
+    out.fanOutTypes = [...new Set((a.fanOutTypes as string[]).map((s) => s.trim().toLowerCase()))];
+  }
+
+  return { ok: true, value: out };
 }
 
 /** Validates a CREATE payload. */
@@ -105,6 +161,10 @@ async function validateRule(input: RuleInput): Promise<{ values: Record<string, 
     if (missing.length > 0) return { error: `Unknown channel id(s): ${missing.join(', ')}` };
   }
   values.channelIds = JSON.stringify(channelIds);
+
+  const audienceRes = await validateAudience(input.audience);
+  if (!audienceRes.ok) return { error: audienceRes.error };
+  values.audience = JSON.stringify(audienceRes.value);
 
   if (typeof input.titleTemplate !== 'string' || input.titleTemplate.trim().length === 0) {
     return { error: '"titleTemplate" must be a non-empty string' };
@@ -165,6 +225,12 @@ async function validateRuleUpdate(input: RuleInput, existing: typeof schema.noti
     values.channelIds = JSON.stringify(channelIds);
   }
 
+  if (input.audience !== undefined) {
+    const audienceRes = await validateAudience(input.audience);
+    if (!audienceRes.ok) return { error: audienceRes.error };
+    values.audience = JSON.stringify(audienceRes.value);
+  }
+
   if (input.titleTemplate !== undefined) {
     if (typeof input.titleTemplate !== 'string' || input.titleTemplate.trim().length === 0) return { error: '"titleTemplate" must be a non-empty string' };
     values.titleTemplate = input.titleTemplate;
@@ -206,6 +272,7 @@ function serializeRule(row: typeof schema.notificationRules.$inferSelect, extra?
     enabled: row.enabled,
     filter: parseJson<Record<string, unknown>>(row.filter, {}),
     channelIds: parseJson<string[]>(row.channelIds, []),
+    audience: parseJson<NotificationRuleAudience>(row.audience ?? '{"type":"all"}', { type: 'all' }),
     titleTemplate: row.titleTemplate,
     bodyTemplate: row.bodyTemplate ?? '',
     cooldownSec: row.cooldownSec ?? 300,
@@ -249,6 +316,7 @@ router.post('/notification-rules', requireAuth, requirePermission('notifications
     enabled: v.values.enabled === false ? false : true,
     filter: String(v.values.filter),
     channelIds: String(v.values.channelIds),
+    audience: String(v.values.audience ?? '{"type":"all"}'),
     titleTemplate: String(v.values.titleTemplate),
     bodyTemplate: String(v.values.bodyTemplate ?? ''),
     cooldownSec: Number(v.values.cooldownSec ?? 300),

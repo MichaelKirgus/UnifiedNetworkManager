@@ -9,7 +9,7 @@
 // under test never call it, so a static stub is enough.
 jest.mock('uuid', () => ({ v4: () => '00000000-0000-4000-8000-000000000000' }));
 
-import { buildNotificationVars, NotificationRuleFilter, ruleMatches } from './notificationDispatch';
+import { audienceIncludesUser, buildNotificationVars, NotificationRuleFilter, parseAudience, ruleMatches } from './notificationDispatch';
 
 const ROW = { severity: 'warning', source: 'device', title: 'WAN link down', message: 'wan0 lost carrier since 12:03' };
 
@@ -145,5 +145,65 @@ describe('buildNotificationVars', () => {
     expect(vars['context.to']).toBe('10.0.0.2');
     expect(vars['context.nested']).toBeUndefined();
     expect(vars['context.nothing']).toBeUndefined();
+  });
+});
+
+describe('parseAudience', () => {
+  it('defaults to "all" for null/empty/malformed input', () => {
+    expect(parseAudience(null)).toEqual({ type: 'all' });
+    expect(parseAudience(undefined)).toEqual({ type: 'all' });
+    expect(parseAudience('')).toEqual({ type: 'all' });
+    expect(parseAudience('not-json{')).toEqual({ type: 'all' });
+    expect(parseAudience('[1,2]')).toEqual({ type: 'all' }); // arrays are not audience documents
+  });
+
+  it('normalizes lists (trim, dedupe) and lowercases fanOutTypes', () => {
+    const a = parseAudience(JSON.stringify({
+      type: 'roles',
+      roleNames: [' admin ', 'admin', 'noc'],
+      fanOutTypes: ['Telegram', 'telegram', ' WEBHOOK '],
+    }));
+    expect(a.type).toBe('roles');
+    expect(a.roleNames).toEqual(['admin', 'noc']);
+    expect(a.fanOutTypes).toEqual(['telegram', 'webhook']);
+  });
+
+  it('treats an unknown type as "all" but keeps fanOutTypes', () => {
+    const a = parseAudience(JSON.stringify({ type: 'bogus', fanOutTypes: ['smtp'] }));
+    expect(a.type).toBe('all');
+    expect(a.fanOutTypes).toEqual(['smtp']);
+  });
+
+  it('drops whitespace-only list entries', () => {
+    const a = parseAudience(JSON.stringify({ type: 'users', userIds: ['  ', 'u1'] }));
+    expect(a.userIds).toEqual(['u1']);
+  });
+});
+
+describe('audienceIncludesUser', () => {
+  const admin = { id: 'u-admin', roles: ['admin'], disabled: false };
+  const wifiOps = { id: 'u-wifi', roles: ['wifi-ops', 'viewer'], disabled: false };
+  const nobody = { id: 'u-off', roles: ['admin'], disabled: true };
+
+  it('"all" matches every non-disabled user', () => {
+    expect(audienceIncludesUser({ type: 'all' }, admin)).toBe(true);
+    expect(audienceIncludesUser({ type: 'all' }, nobody)).toBe(false); // disabled never matches
+  });
+
+  it('roles match on ANY of the user\'s roles', () => {
+    const a = { type: 'roles' as const, roleNames: ['wifi-ops'] };
+    expect(audienceIncludesUser(a, wifiOps)).toBe(true);
+    expect(audienceIncludesUser(a, admin)).toBe(false);
+  });
+
+  it('an empty role list matches nobody', () => {
+    expect(audienceIncludesUser({ type: 'roles', roleNames: [] }, admin)).toBe(false);
+    expect(audienceIncludesUser({ type: 'roles' }, wifiOps)).toBe(false); // missing list = unconstrained is NOT the semantics here
+  });
+
+  it('users match by exact id only', () => {
+    const a = { type: 'users' as const, userIds: ['u-wifi'] };
+    expect(audienceIncludesUser(a, wifiOps)).toBe(true);
+    expect(audienceIncludesUser(a, admin)).toBe(false);
   });
 });

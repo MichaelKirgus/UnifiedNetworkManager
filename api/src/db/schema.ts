@@ -2508,12 +2508,17 @@ export const notificationChannels = pgTable(
     // Bound secret id (secrets table) carrying this channel's credentials,
     // or NULL when the channel type needs none.
     secretId: text('secretId'),
+    // Personal-channel owner (users.id), or NULL for a SHARED channel visible
+    // to everyone. Personal channels are only listed/managed by their owner and
+    // are the fan-out targets of rule audiences (see notification_rules.audience).
+    ownerId: text('ownerId'),
     createdAt: text('createdAt').notNull(),
     updatedAt: text('updatedAt').notNull(),
   },
   (table) => {
     return {
       idxNotificationChannelsPlugin: index('idx_notification_channels_plugin').on(table.pluginId),
+      idxNotificationChannelsOwner: index('idx_notification_channels_owner').on(table.ownerId),
     };
   }
 );
@@ -2537,6 +2542,13 @@ export const notificationRules = pgTable(
     filter: text('filter').notNull().default('{}'),
     // JSON string array of notification_channels ids this rule delivers to.
     channelIds: text('channelIds').notNull().default('[]'),
+    // WHO the rule targets (see NotificationRuleAudience in
+    // notificationDispatch.ts): { type: 'all' } (default — everyone, shared
+    // channels only) | { type:'roles', roleNames:[…] } | { type:'users',
+    // userIds:[…] }, plus optional fanOutTypes: channel types delivered to each
+    // audience member's PERSONAL channels of those types. Absent/empty = no
+    // per-user fan-out (shared channels fire for everyone, as before).
+    audience: text('audience').notNull().default('{"type":"all"}'),
     // {{token}} templates rendered per firing (see renderNotificationTemplate).
     titleTemplate: text('titleTemplate').notNull(),
     bodyTemplate: text('bodyTemplate').notNull().default(''),

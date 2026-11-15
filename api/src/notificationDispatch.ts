@@ -1,5 +1,5 @@
 import { v4 as uuidv4 } from 'uuid';
-import { desc, eq } from 'drizzle-orm';
+import { and, desc, eq } from 'drizzle-orm';
 import { db } from './db';
 import * as schema from './db/schema';
 import { getSecret } from './secretsProvider';
@@ -41,6 +41,85 @@ export interface NotificationRuleFilter {
   titleRegex?: string;
   /** Case-insensitive regex matched against the notification message. */
   messageRegex?: string;
+}
+
+/**
+ * Audience document stored on notification_rules.audience — WHO a rule targets.
+ * `type:'all'` (the default) keeps today's semantics: shared channels fire for
+ * everyone, no per-user fan-out. With `roles`/`users` + non-empty `fanOutTypes`,
+ * each audience member ALSO gets the message on their PERSONAL channels of those
+ * types (notification_channels.ownerId = the user). Roles are the appliance's
+ * existing named user collections (users.roles ∩ roleNames); a pure membership
+ * group concept can be added later as another `type` without migration.
+ */
+export interface NotificationRuleAudience {
+  type: 'all' | 'roles' | 'users';
+  /** Required when type='roles': the user matches if ANY of their roles is listed. */
+  roleNames?: string[];
+  /** Required when type='users': explicit user id list. */
+  userIds?: string[];
+  /** Channel types to fan out to each member's personal channels (absent/empty = none). */
+  fanOutTypes?: string[];
+}
+
+/** Minimal user shape the audience checks need (avoids importing the full row type). */
+export interface AudienceUser {
+  id: string;
+  roles: string[];
+  disabled: boolean;
+}
+
+const DEFAULT_AUDIENCE: NotificationRuleAudience = { type: 'all' };
+
+/** Trims, drops empties and dedupes a JSON string array (order-preserving). */
+function strArray(v: unknown): string[] {
+  if (!Array.isArray(v)) return [];
+  const out = new Set<string>();
+  for (const x of v) {
+    if (typeof x === 'string' && x.trim() !== '') out.add(x.trim());
+  }
+  return [...out];
+}
+
+/**
+ * Parses + normalizes a stored audience document; anything malformed degrades to "all".
+ * The result is COMPACT — empty lists are omitted, so the default serializes as exactly
+ * {"type":"all"} (matters for comparisons and storage hygiene).
+ */
+export function parseAudience(raw: string | null | undefined): NotificationRuleAudience {
+  if (!raw) return { ...DEFAULT_AUDIENCE };
+  try {
+    const v = JSON.parse(raw);
+    if (!v || typeof v !== 'object' || Array.isArray(v)) return { ...DEFAULT_AUDIENCE };
+    const out: NotificationRuleAudience = { type: v.type === 'roles' || v.type === 'users' ? v.type : 'all' };
+    const roleNames = strArray(v.roleNames);
+    if (roleNames.length > 0) out.roleNames = roleNames;
+    const userIds = strArray(v.userIds);
+    if (userIds.length > 0) out.userIds = userIds;
+    // Lowercase FIRST so "Telegram"/"telegram" dedupe to one entry.
+    const fanOutTypes = [...new Set(strArray(v.fanOutTypes).map((t) => t.toLowerCase()))];
+    if (fanOutTypes.length > 0) out.fanOutTypes = fanOutTypes;
+    return out;
+  } catch {
+    return { ...DEFAULT_AUDIENCE };
+  }
+}
+
+/** Pure membership test — exported for unit tests. Disabled users never match. */
+export function audienceIncludesUser(audience: NotificationRuleAudience, user: AudienceUser): boolean {
+  if (user.disabled) return false;
+  switch (audience.type) {
+    case 'all':
+      return true;
+    case 'roles': {
+      const names = strArray(audience.roleNames);
+      return names.length > 0 && user.roles.some((r) => names.includes(r));
+    }
+    case 'users':
+      return strArray(audience.userIds).includes(user.id);
+    default:
+      return false;
+  }
 }
 
 interface DeviceInfo {
@@ -174,11 +253,19 @@ export function buildNotificationVars(row: { title: string; message: string; sev
   return vars;
 }
 
-/** True when the rule fired a delivery within its cooldown window. */
-async function inCooldown(ruleId: string, cooldownSec: number): Promise<boolean> {
+/**
+ * True when a delivery fired within the cooldown window. Without `channelId` this is
+ * RULE-level (any delivery of the rule suppresses it — shared-channel semantics);
+ * with one it is per-(rule, channel), so audience fan-out rate-limits each person's
+ * personal channel individually.
+ */
+async function inCooldown(ruleId: string, cooldownSec: number, channelId?: string): Promise<boolean> {
   if (cooldownSec <= 0) return false;
+  const where = channelId
+    ? and(eq(schema.notificationDeliveries.ruleId, ruleId), eq(schema.notificationDeliveries.channelId, channelId))
+    : eq(schema.notificationDeliveries.ruleId, ruleId);
   const last = await db.query.notificationDeliveries.findFirst({
-    where: eq(schema.notificationDeliveries.ruleId, ruleId),
+    where,
     orderBy: [desc(schema.notificationDeliveries.sentAt)],
   });
   if (!last) return false;
@@ -290,12 +377,23 @@ export async function dispatchNotification(notificationId: string): Promise<void
       pluginName = p?.name ?? null;
     }
 
+    // Lazy cache of all users — audience fan-out needs it; loaded at most once per dispatch.
+    let userCache: AudienceUser[] | null = null;
+    const loadAudienceUsers = async (): Promise<AudienceUser[]> => {
+      if (!userCache) {
+        const users = await db.query.users.findMany();
+        userCache = users.map((u) => ({ id: u.id, roles: parseStrArray(u.roles), disabled: u.disabled }));
+      }
+      return userCache;
+    };
+
     for (const rule of rules) {
       const filter = parseFilter(rule.filter);
       if (!ruleMatches(filter, row, device)) continue;
 
-      // Cooldown: any delivery of THIS rule within the window suppresses it.
-      if (await inCooldown(rule.id, Number(rule.cooldownSec) || 0)) continue;
+      const cooldownSec = Number(rule.cooldownSec) || 0;
+      const audience = parseAudience(rule.audience);
+      const fanOutTypes = audience.fanOutTypes ?? [];
 
       const vars = buildNotificationVars(
         { title: row.title, message: row.message ?? '', severity: row.severity, source: row.source, status: row.status, createdAt: row.createdAt, lastSeenAt: row.lastSeenAt, occurrences: row.occurrences ?? 1 },
@@ -306,12 +404,33 @@ export async function dispatchNotification(notificationId: string): Promise<void
       const title = renderTemplate(rule.titleTemplate || '{{notification.title}}', vars).slice(0, 300);
       const body = renderTemplate(rule.bodyTemplate || '', vars).slice(0, 4000);
 
-      const channelIds = parseStrArray(rule.channelIds);
-      if (channelIds.length === 0) continue;
+      const sharedChannelIds = parseStrArray(rule.channelIds);
+      if (sharedChannelIds.length === 0 && fanOutTypes.length === 0) continue;
 
-      for (const channelId of channelIds) {
-        const result = await deliverToChannel(channelId, { severity: row.severity, title, body });
-        await recordDelivery(rule.id, channelId, row.id, result.error ? 'failed' : 'sent', result.error);
+      // Shared channels — rule-level cooldown: any delivery of THIS rule within the window suppresses it.
+      if (sharedChannelIds.length > 0 && !(await inCooldown(rule.id, cooldownSec))) {
+        for (const channelId of sharedChannelIds) {
+          const result = await deliverToChannel(channelId, { severity: row.severity, title, body });
+          await recordDelivery(rule.id, channelId, row.id, result.error ? 'failed' : 'sent', result.error);
+        }
+      }
+
+      // Audience fan-out — each member's PERSONAL channels of the listed types get the message,
+      // rate-limited per (rule, personal channel) so every person has their own cooldown window.
+      if (fanOutTypes.length > 0) {
+        const users = await loadAudienceUsers();
+        for (const user of users) {
+          if (!audienceIncludesUser(audience, user)) continue;
+          const personal = await db.query.notificationChannels.findMany({
+            where: and(eq(schema.notificationChannels.ownerId, user.id), eq(schema.notificationChannels.enabled, true)),
+          });
+          for (const ch of personal) {
+            if (!fanOutTypes.includes(ch.channelType.toLowerCase())) continue;
+            if (await inCooldown(rule.id, cooldownSec, ch.id)) continue;
+            const result = await deliverToChannel(ch.id, { severity: row.severity, title, body });
+            await recordDelivery(rule.id, ch.id, row.id, result.error ? 'failed' : 'sent', result.error);
+          }
+        }
       }
     }
   } catch (err) {

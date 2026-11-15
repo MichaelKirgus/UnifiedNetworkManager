@@ -32,6 +32,7 @@ export function NotificationChannelsTab() {
 
   const channelsQuery = useQuery({ queryKey: ['notificationChannels'], queryFn: api.notificationChannels });
   const deliveriesQuery = useQuery({ queryKey: ['notificationDeliveries', 'recent'], queryFn: () => api.notificationDeliveries({ limit: 50 }) });
+  const meQuery = useQuery({ queryKey: ['me'], queryFn: api.me });
 
   const invalidate = () => {
     void queryClient.invalidateQueries({ queryKey: ['notificationChannels'] });
@@ -58,6 +59,19 @@ export function NotificationChannelsTab() {
           {c.pluginName && <p className="truncate text-xs text-faint" title={c.pluginName}>{c.pluginName}</p>}
         </div>
       ),
+    },
+    {
+      header: 'Owner',
+      key: 'ownerId',
+      width: 120,
+      render: (c) =>
+        c.ownerId ? (
+          <span className="inline-flex rounded bg-accent-indigo/15 px-1.5 py-0.5 text-xs font-medium text-accent-indigo" title={`Personal channel of ${c.ownerName ?? 'unknown user'} — fan-out target for rule audiences`}>
+            {c.ownerId === meQuery.data?.id ? 'you' : (c.ownerName ?? 'personal')}
+          </span>
+        ) : (
+          <span className="text-xs text-faint">shared</span>
+        ),
     },
     {
       header: 'Enabled',
@@ -216,6 +230,7 @@ function ChannelDialog({ initial, onClose }: { initial?: NotificationChannel; on
   const queryClient = useQueryClient();
   const pluginsQuery = useQuery({ queryKey: ['plugins'], queryFn: api.plugins });
   const secretsQuery = useQuery({ queryKey: ['secrets'], queryFn: api.secrets });
+  const meQuery = useQuery({ queryKey: ['me'], queryFn: api.me });
 
   // Sender plugins = capability + a non-empty channel catalog.
   const senderPlugins = useMemo(
@@ -229,6 +244,8 @@ function ChannelDialog({ initial, onClose }: { initial?: NotificationChannel; on
   const [config, setConfig] = useState<Record<string, unknown>>(initial?.config ?? {});
   const [secretId, setSecretId] = useState<string>(initial?.secretId ?? '');
   const [enabled, setEnabled] = useState(initial?.enabled ?? true);
+  // Personal channel (create only — ownership is immutable after creation).
+  const [personal, setPersonal] = useState(false);
 
   // When the dialog opens with no initial channelType (create), pick the first
   // catalog entry of the default plugin once plugins have loaded.
@@ -271,6 +288,8 @@ function ChannelDialog({ initial, onClose }: { initial?: NotificationChannel; on
         enabled,
         config,
         secretId: secretId || null,
+        // Personal channels belong to the caller (the API enforces this).
+        ...(initial ? {} : personal && meQuery.data ? { ownerId: meQuery.data.id } : {}),
       };
       return initial ? api.updateNotificationChannel(initial.id, payload) : api.createNotificationChannel(payload);
     },
@@ -412,6 +431,22 @@ function ChannelDialog({ initial, onClose }: { initial?: NotificationChannel; on
           <input type="checkbox" checked={enabled} onChange={(e) => setEnabled(e.target.checked)} className="h-4 w-4 rounded border-border" />
           Channel enabled (disabled channels are skipped by rules)
         </label>
+
+        {initial?.ownerId ? (
+          <p className="rounded-md border border-border bg-background px-3 py-2 text-xs text-muted-foreground">
+            Personal channel of <span className="font-medium text-secondary">{initial.ownerName ?? 'unknown user'}</span> — ownership cannot be changed.
+          </p>
+        ) : (
+          !initial && (
+            <div>
+              <label className="flex cursor-pointer items-center gap-2 text-sm text-secondary">
+                <input type="checkbox" checked={personal} onChange={(e) => setPersonal(e.target.checked)} className="h-4 w-4 rounded border-border" />
+                Personal channel (only you can see/manage it)
+              </label>
+              <p className="mt-1 text-xs text-faint">Personal channels are the fan-out targets of rule audiences — e.g. "critical alerts → every admin's own Telegram chat".</p>
+            </div>
+          )
+        )}
 
         {missingRequired.length > 0 && (
           <p className="text-xs text-danger-fg">Missing required fields: {missingRequired.map((f) => f.label).join(', ')}</p>

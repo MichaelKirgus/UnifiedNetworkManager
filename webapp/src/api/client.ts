@@ -1759,11 +1759,14 @@ export interface NotificationChannel {
   enabled: boolean;
   config: Record<string, unknown>;
   secretId?: string | null;
+  /** Personal-channel owner (users.id); null = shared channel visible to everyone. */
+  ownerId?: string | null;
   createdAt: string;
   updatedAt: string;
   pluginName?: string | null;
   typeLabel?: string | null;
   lastDelivery?: { status: 'sent' | 'failed'; sentAt: string; error: string | null } | null;
+  ownerName?: string | null;
 }
 
 /** Create/update payload for a channel. */
@@ -1774,6 +1777,8 @@ export interface NotificationChannelInput {
   enabled?: boolean;
   config?: Record<string, unknown>;
   secretId?: string | null;
+  /** Personal channel for this user (yourself by default); immutable after creation. */
+  ownerId?: string | null;
 }
 
 /** Rule filter — all fields optional (empty = matches everything). */
@@ -1787,6 +1792,17 @@ export interface NotificationRuleFilter {
   messageRegex?: string | null;
 }
 
+/** WHO a rule targets (see the API's NotificationRuleAudience). */
+export interface NotificationRuleAudience {
+  type: 'all' | 'roles' | 'users';
+  /** Required when type='roles': user matches if ANY of their roles is listed. */
+  roleNames?: string[];
+  /** Required when type='users': explicit user ids. */
+  userIds?: string[];
+  /** Channel types fanned out to each member's PERSONAL channels (empty = none). */
+  fanOutTypes?: string[];
+}
+
 /** One notification rule (see GET /notification-rules). */
 export interface NotificationRule {
   id: string;
@@ -1794,6 +1810,7 @@ export interface NotificationRule {
   enabled: boolean;
   filter: NotificationRuleFilter;
   channelIds: string[];
+  audience?: NotificationRuleAudience;
   titleTemplate: string;
   bodyTemplate: string;
   cooldownSec: number;
@@ -1808,6 +1825,7 @@ export interface NotificationRuleInput {
   enabled?: boolean;
   filter?: NotificationRuleFilter;
   channelIds?: string[];
+  audience?: NotificationRuleAudience;
   titleTemplate: string;
   bodyTemplate?: string;
   cooldownSec?: number;

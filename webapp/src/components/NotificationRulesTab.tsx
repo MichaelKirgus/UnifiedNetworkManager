@@ -5,7 +5,7 @@ import { Pencil, Plus, Trash2 } from 'lucide-react';
 import { DataTable, DataTableColumn } from './DataTable';
 import { DialogShell } from './DialogShell';
 import { ChipInput } from './ChipInput';
-import { api, NotificationRule, NotificationRuleFilter, NotificationSeverity, NotificationSource } from '../api/client';
+import { api, NotificationRule, NotificationRuleAudience, NotificationRuleFilter, NotificationSeverity, NotificationSource } from '../api/client';
 import { can } from '../auth/permissions';
 
 /**
@@ -88,6 +88,14 @@ export function NotificationRulesTab() {
     return parts.length > 0 ? parts.join(' · ') : 'matches everything';
   }
 
+  /** One-line summary of a rule's audience for the table. */
+  function audienceSummary(a?: NotificationRuleAudience): string {
+    const fan = a?.fanOutTypes?.length ? ` + personal (${a.fanOutTypes.join('/')})` : '';
+    if (!a || a.type === 'all') return `everyone${fan}`;
+    const who = a.type === 'roles' ? (a.roleNames ?? []).join(', ') : `${(a.userIds ?? []).length} user(s)`;
+    return `${who}${fan}`;
+  }
+
   const columns: DataTableColumn<NotificationRule>[] = [
     {
       header: 'Name',
@@ -101,6 +109,13 @@ export function NotificationRulesTab() {
       width: 340,
       render: (r) => <span className="block truncate text-xs text-muted-foreground" title={filterSummary(r.filter)}>{filterSummary(r.filter)}</span>,
       exportValue: (r) => filterSummary(r.filter),
+    },
+    {
+      header: 'Audience',
+      key: 'audience',
+      width: 180,
+      render: (r) => <span className="block truncate text-xs text-secondary" title={audienceSummary(r.audience)}>{audienceSummary(r.audience)}</span>,
+      exportValue: (r) => audienceSummary(r.audience),
     },
     {
       header: 'Channels',
@@ -202,6 +217,9 @@ function RuleDialog({ initial, onClose }: { initial?: NotificationRule; onClose:
   const queryClient = useQueryClient();
   const channelsQuery = useQuery({ queryKey: ['notificationChannels'], queryFn: api.notificationChannels });
   const devicesQuery = useQuery({ queryKey: ['devices'], queryFn: api.devices });
+  const rolesQuery = useQuery({ queryKey: ['roles'], queryFn: api.roles, enabled: can('users:read') });
+  const usersQuery = useQuery({ queryKey: ['users'], queryFn: api.users, enabled: can('users:read') });
+  const pluginsQuery = useQuery({ queryKey: ['plugins'], queryFn: api.plugins });
 
   const [name, setName] = useState(initial?.name ?? '');
   const [enabled, setEnabled] = useState(initial?.enabled ?? true);
@@ -214,6 +232,10 @@ function RuleDialog({ initial, onClose }: { initial?: NotificationRule; onClose:
   const [titleRegex, setTitleRegex] = useState(initial?.filter.titleRegex ?? '');
   const [messageRegex, setMessageRegex] = useState(initial?.filter.messageRegex ?? '');
   const [channelIds, setChannelIds] = useState<string[]>(initial?.channelIds ?? []);
+  const [audienceType, setAudienceType] = useState<'all' | 'roles' | 'users'>(initial?.audience?.type ?? 'all');
+  const [roleNames, setRoleNames] = useState<string[]>(initial?.audience?.roleNames ?? []);
+  const [userIds, setUserIds] = useState<string[]>(initial?.audience?.userIds ?? []);
+  const [fanOutTypes, setFanOutTypes] = useState<string[]>(initial?.audience?.fanOutTypes ?? []);
   const [titleTemplate, setTitleTemplate] = useState(initial?.titleTemplate ?? '{{notification.title}}');
   const [bodyTemplate, setBodyTemplate] = useState(initial?.bodyTemplate ?? '');
 
@@ -230,6 +252,16 @@ function RuleDialog({ initial, onClose }: { initial?: NotificationRule; onClose:
     const sort = (s: Set<string>) => [...s].sort((a, b) => a.localeCompare(b));
     return { tagSuggestions: sort(tags), vendorSuggestions: sort(vendors), typeSuggestions: sort(types) };
   }, [devicesQuery.data]);
+
+  // Channel types offered for personal-channel fan-out (union of sender catalogs).
+  const fanOutOptions = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const p of pluginsQuery.data ?? []) {
+      if (!p.capabilities?.includes('notificationSender')) continue;
+      for (const d of p.notificationChannels ?? []) map.set(d.type, d.label);
+    }
+    return [...map.entries()].sort((a, b) => a[0].localeCompare(b[0]));
+  }, [pluginsQuery.data]);
 
   function toggle<T>(list: T[], value: T): T[] {
     return list.includes(value) ? list.filter((x) => x !== value) : [...list, value];
@@ -259,6 +291,9 @@ function RuleDialog({ initial, onClose }: { initial?: NotificationRule; onClose:
   const validCooldown = Number.isInteger(cooldownNum) && cooldownNum >= 0;
   const validName = name.trim().length > 0 && name.trim().length <= 200;
   const validTitleTemplate = titleTemplate.trim().length > 0;
+  const audienceValid =
+    (audienceType === 'all' || roleNames.length > 0) &&
+    (audienceType !== 'users' || userIds.length > 0);
 
   function insertToken(target: 'title' | 'body', token: string) {
     const t = `{{${token}}}`;
@@ -277,11 +312,17 @@ function RuleDialog({ initial, onClose }: { initial?: NotificationRule; onClose:
       if (titleRegex.trim()) filter.titleRegex = titleRegex.trim();
       if (messageRegex.trim()) filter.messageRegex = messageRegex.trim();
 
+      const audience: NotificationRuleAudience = { type: audienceType };
+      if (audienceType === 'roles') audience.roleNames = roleNames;
+      if (audienceType === 'users') audience.userIds = userIds;
+      if (fanOutTypes.length > 0) audience.fanOutTypes = fanOutTypes;
+
       const payload = {
         name: name.trim(),
         enabled,
         filter,
         channelIds,
+        audience,
         titleTemplate,
         bodyTemplate,
         cooldownSec: cooldownNum,
@@ -316,7 +357,7 @@ function RuleDialog({ initial, onClose }: { initial?: NotificationRule; onClose:
           </button>
           <button
             type="submit"
-            disabled={saveMut.isPending || !validName || !validTitleTemplate || !validCooldown || !!titleRegexError || !!messageRegexError}
+            disabled={saveMut.isPending || !validName || !validTitleTemplate || !validCooldown || !!titleRegexError || !!messageRegexError || !audienceValid}
             className="rounded-md bg-primary px-4 py-1.5 text-sm font-semibold text-white hover:bg-primary-hover disabled:opacity-50"
           >
             {saveMut.isPending ? 'Saving…' : initial ? 'Save rule' : 'Create rule'}
@@ -382,7 +423,77 @@ function RuleDialog({ initial, onClose }: { initial?: NotificationRule; onClose:
             </div>
           </div>
         </fieldset>
+        {/* ── Audience (who gets notified) ─────────────────────────── */}
+        <fieldset className="rounded-md border border-border p-3">
+          <legend className="px-1 text-xs font-semibold uppercase tracking-wide text-faint">Audience — who gets notified</legend>
+          <div className="flex flex-wrap gap-x-4 gap-y-2">
+            {([
+              ['all', 'Everyone (shared channels only)'],
+              ['roles', 'Members of specific roles'],
+              ['users', 'Specific users'],
+            ] as Array<['all' | 'roles' | 'users', string]>).map(([t, label]) => (
+              <label key={t} className="flex cursor-pointer items-center gap-2 text-sm text-secondary">
+                <input type="radio" name="audienceType" checked={audienceType === t} onChange={() => setAudienceType(t)} className="h-4 w-4 border-border" />
+                {label}
+              </label>
+            ))}
+          </div>
 
+          {audienceType === 'roles' && (
+            <div className="mt-3">
+              <label className="mb-1 block text-xs font-medium text-secondary">Roles (a user matches if they carry ANY of these)</label>
+              {(rolesQuery.data ?? []).length === 0 ? (
+                <p className="text-xs text-faint">No roles available{can('users:read') ? '' : ' — needs the users:read permission'}.</p>
+              ) : (
+                <div className="grid grid-cols-2 gap-x-4 gap-y-1.5 sm:grid-cols-3">
+                  {(rolesQuery.data ?? []).map((r) => (
+                    <label key={r.name} className="flex cursor-pointer items-center gap-2 text-sm text-secondary" title={r.description ?? undefined}>
+                      <input type="checkbox" checked={roleNames.includes(r.name)} onChange={() => setRoleNames((prev) => toggle(prev, r.name))} className="h-4 w-4 rounded border-border" />
+                      {r.name}
+                    </label>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+
+          {audienceType === 'users' && (
+            <div className="mt-3">
+              <label className="mb-1 block text-xs font-medium text-secondary">Users</label>
+              {(usersQuery.data ?? []).length === 0 ? (
+                <p className="text-xs text-faint">No users available{can('users:read') ? '' : ' — needs the users:read permission'}.</p>
+              ) : (
+                <div className="grid max-h-40 grid-cols-2 gap-x-4 gap-y-1.5 overflow-y-auto sm:grid-cols-3">
+                  {(usersQuery.data ?? []).map((u) => (
+                    <label key={u.id} className="flex cursor-pointer items-center gap-2 text-sm text-secondary">
+                      <input type="checkbox" checked={userIds.includes(u.id)} onChange={() => setUserIds((prev) => toggle(prev, u.id))} className="h-4 w-4 rounded border-border" />
+                      {u.username}
+                    </label>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+
+          <div className="mt-3">
+            <label className="mb-1 block text-xs font-medium text-secondary">Also deliver to each member's PERSONAL channels of type</label>
+            {fanOutOptions.length === 0 ? (
+              <p className="text-xs text-faint">No sender plugins online — nothing to fan out to.</p>
+            ) : (
+              <div className="flex flex-wrap gap-x-4 gap-y-1.5">
+                {fanOutOptions.map(([type, label]) => (
+                  <label key={type} className="flex cursor-pointer items-center gap-2 text-sm text-secondary">
+                    <input type="checkbox" checked={fanOutTypes.includes(type)} onChange={() => setFanOutTypes((prev) => toggle(prev, type))} className="h-4 w-4 rounded border-border" />
+                    {label}
+                  </label>
+                ))}
+              </div>
+            )}
+            <p className="mt-1.5 text-xs text-faint">
+              Personal channels are created by users on the Channels tab ("personal channel" toggle). Each member's personal channel has its own cooldown window.
+            </p>
+          </div>
+        </fieldset>
         {/* ── Templates ──────────────────────────────────────────────────── */}
         <div>
           <label className="mb-1.5 block text-sm font-medium text-secondary">Title template</label>
