@@ -75,6 +75,7 @@ const V6_ROUTE_TABLE = [
 /** The full combined script output for a healthy box (all sections). */
 const HEALTHY_COMBINED = [
   '__FRR_INSTALLED__',
+  'dir-present',
   'daemons.conf',
   'frr.conf',
   '__OSPF_CONFIGURED__',
@@ -97,6 +98,7 @@ const HEALTHY_COMBINED = [
 /** The full combined script output when FRR is DOWN (vtysh errors, no tables). */
 const FRR_DOWN_COMBINED = [
   '__FRR_INSTALLED__',
+  'dir-present',
   'daemons.conf',
   'frr.conf',
   '__OSPF_CONFIGURED__',
@@ -385,6 +387,7 @@ describe('decideFrrCollection', () => {
 describe('deriveFrrConditions', () => {
   const base: FrrOspfResult = {
     frrInstalled: true,
+    frrInspectable: true,
     ospfConfigured: true,
     frrReachable: true,
     routerId: '10.1.1.94',
@@ -406,6 +409,20 @@ describe('deriveFrrConditions', () => {
 
   it('stays silent when OSPF was never configured (box outside the routing domain)', () => {
     expect(deriveFrrConditions({ ...base, ospfConfigured: false })).toEqual([]);
+  });
+
+  it('raises a permission warning when FRR is installed but not inspectable by the bound user', () => {
+    const conds = deriveFrrConditions(
+      { ...base, frrInspectable: false, frrReachable: false, neighbors: [], routerId: null },
+      'OPNSENSE01'
+    );
+    expect(conds).toHaveLength(1);
+    expect(conds[0]).toMatchObject({ severity: 'warning', dedupeKey: 'frr-permissions:OPNSENSE01' });
+    expect(conds[0].message).toContain('not inspectable');
+  });
+
+  it('does NOT raise the permission warning when FRR is absent at all (silent skip)', () => {
+    expect(deriveFrrConditions({ ...base, frrInstalled: false, frrInspectable: false })).toEqual([]);
   });
 
   it('raises a critical condition when vtysh does not answer (the blackhole case)', () => {

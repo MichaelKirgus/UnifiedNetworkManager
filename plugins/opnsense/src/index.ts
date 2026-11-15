@@ -148,7 +148,14 @@ const identity = resolvePluginIdentity({
   // extra. A FRR that is DOWN yields no rows → stale OSPF routes are wiped at
   // ingest (they left the kernel RIB too). The learned-route COUNT metrics stay
   // format-agnostic (awk over the raw table) so alerting never depends on parsing.
-  version: '0.8.0',
+  // 0.9.0 — OPNsense locks ALL FRR state to user/group `frr` (/usr/local/etc/frr and
+  // /var/run/frr are frr:frr 750/640), so a non-root SSH slot previously looked exactly
+  // like "no FRR installed" → silent skip + a misleading routing.frr.reachable=0 metric.
+  // The check now distinguishes the three states: no os-frr package (silent, no metrics),
+  // installed but NOT inspectable by the bound user (new warning condition
+  // frr-permissions:<host> — bind a root slot or add the user to group frr), and fully
+  // inspectable (normal monitoring). Routing metrics are only emitted in the third case.
+  version: '0.9.0',
   vendors: ['opnsense'],
   // 'planning' advertises the /plan endpoint (multi-device intents) so the API
   // can offer bulk rollout + tunnel provisioning flows in the webapp.
@@ -1215,7 +1222,7 @@ const PLUGIN_OPTIONS: PluginOptionDescriptor[] = [
     min: 0,
     max: 86400,
     description:
-      'How often the plugin checks FRR/OSPF routing-protocol state over a bound SSH slot (vtysh neighbor states + learned-route counts). Catches a dead or flapping FRR daemon that silently drops OSPF-learned routes — traffic to routed segments then blackholes while the box still answers ping and REST. Requires an SSH credential slot; skipped silently without one. 0 disables.',
+      'How often the plugin checks FRR/OSPF routing-protocol state over a bound SSH slot (vtysh neighbor states + learned-route counts). Catches a dead or flapping FRR daemon that silently drops OSPF-learned routes — traffic to routed segments then blackholes while the box still answers ping and REST. Requires an SSH credential slot whose user can read FRR state (on OPNsense: root, or a member of group frr — otherwise a warning condition is raised instead of monitoring); skipped silently without one. 0 disables.',
   },
   {
     key: 'enableInventoryCache',
@@ -2267,9 +2274,12 @@ app.post('/monitoring', async (req, res) => {
       }
     }
 
-    // Emit routing-protocol metrics from the (possibly cached) result. Absent
-    // keys when there is no data at all (no SSH slot / FRR never seen).
-    if (frrResult !== null) {
+    // Emit routing-protocol metrics from the (possibly cached) result — but ONLY
+    // when this box actually runs FRR AND we can inspect it with the bound user.
+    // Boxes without os-frr stay metric-free (no misleading "reachable 0" cards),
+    // and an installed-but-uninspectable box surfaces via its warning condition
+    // instead of fake routing metrics.
+    if (frrResult !== null && frrResult.frrInstalled && frrResult.frrInspectable) {
       metrics['routing.frr.reachable'] = frrResult.frrReachable ? 1 : 0;
       if (frrResult.routerId) metrics['routing.ospf.routerId'] = frrResult.routerId;
       metrics['routing.ospf.neighborsTotal'] = frrResult.neighbors.length;

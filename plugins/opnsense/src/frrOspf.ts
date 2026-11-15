@@ -12,7 +12,9 @@
  * "Device reachable" can never catch that; only adjacency/route state can.
  *
  * Data collected in ONE SSH exec (section markers, same style as zfsSsh.ts):
- *   - FRR installed?        ls /usr/local/etc/frr/
+ *   - FRR installed?        [ -d /usr/local/etc/frr ] (permission-free) + ls listing
+ *                           (read access only — OPNsense locks the dir to frr:frr,
+ *                           so a non-root slot yields "installed but not inspectable")
  *   - OSPF configured?      grep '^router (ospf|ospfv3)' over the frr confs
  *   - v4 neighbors          vtysh "show ip ospf neighbor"
  *   - v6 neighbors          vtysh "show ipv6 ospf6 neighbor"
@@ -72,9 +74,13 @@ export interface OspfRouteRow {
 
 /** One complete FRR/OSPF collection for a host. */
 export interface FrrOspfResult {
-  /** /usr/local/etc/frr exists with config files — false = box has no FRR at all (out of scope, silent). */
+  /** /usr/local/etc/frr exists (os-frr package installed) — false = box has no FRR at all (out of scope, silent). */
   frrInstalled: boolean;
-  /** A `router ospf`/`router ospfv3` block exists in the frr configs. */
+  /** We could actually READ the FRR state with this SSH user (config listing or a live vtysh answer).
+   * OPNsense locks /usr/local/etc/frr + /var/run/frr to user/group `frr`, so a non-root slot
+   * sees an installed-but-uninspectable box — that is its own condition, NOT "no OSPF configured". */
+  frrInspectable: boolean;
+  /** A `router ospf`/`router ospfv3` block exists in the frr configs (only meaningful when inspectable). */
   ospfConfigured: boolean;
   /** vtysh answered with a recognizable OSPF table — false = FRR stack not responding (the alert case). */
   frrReachable: boolean;
@@ -122,6 +128,11 @@ export const DEFAULT_FRR_MONITOR_INTERVAL_SEC = 300;
 
 const FRR_SSH_COMMAND = [
   'echo __FRR_INSTALLED__',
+  // Existence test FIRST — stat needs no read permission, so ANY user can tell
+  // us the os-frr package is present. The listing below only succeeds for users
+  // who may READ the dir (OPNsense locks it to frr:frr) — that distinction is
+  // what separates "no FRR" from "FRR present but not inspectable by this user".
+  '[ -d /usr/local/etc/frr ] && echo dir-present',
   'ls /usr/local/etc/frr/ 2>/dev/null | head -10',
   'echo __OSPF_CONFIGURED__',
   "grep -lE '^router (ospf|ospfv3)' /usr/local/etc/frr/*.conf 2>/dev/null | head -5",
@@ -369,7 +380,13 @@ export async function collectFrrOspfViaSsh(
     return null;
   }
 
-  const frrInstalled = sections.frrInstalled.trim() !== '';
+  // dir-present comes from the permission-free existence test; any OTHER line in
+  // the section is a file listing — which only appears when this user may READ
+  // the FRR state (OPNsense locks /usr/local/etc/frr to frr:frr).
+  const frrInstalled = sections.frrInstalled.includes('dir-present');
+  const frrStateReadable = sections.frrInstalled
+    .split('\n')
+    .some((line) => line.trim() !== '' && line !== 'dir-present');
   const ospfConfigured = sections.ospfConfigured.trim() !== '';
   // vtysh answered when it prints the neighbor-table header (even with zero
   // neighbors) or a parseable router ID — connection errors print neither.
@@ -388,6 +405,9 @@ export async function collectFrrOspfViaSsh(
 
   return {
     frrInstalled,
+    // Read access to the configs OR a live vtysh answer — either proves this
+    // user can inspect FRR state; neither = installed-but-uninspectable.
+    frrInspectable: frrStateReadable || frrReachable,
     ospfConfigured,
     frrReachable,
     routerId: parseRouterId(sections.routerId) ?? null,
@@ -430,15 +450,28 @@ export function decideFrrCollection(
 export function deriveFrrConditions(result: FrrOspfResult | null, hostname?: string): FrrCondition[] {
   if (!result) return []; // no fresh data — caller must not touch known-sets
   const label = hostname && hostname.trim() !== '' ? hostname : 'appliance';
+  const conditions: FrrCondition[] = [];
 
   // Box without FRR at all → out of scope, stay silent.
   if (!result.frrInstalled) return [];
 
+  // FRR is installed but this SSH user cannot read its state (OPNsense locks
+  // /usr/local/etc/frr + the vtysh sockets to user/group `frr`). We must NOT
+  // call that "OSPF not configured" — say what we actually know.
+  if (!result.frrInspectable) {
+    conditions.push({
+      severity: 'warning',
+      message: `${label}: OSPF state not inspectable with the bound SSH user`,
+      detail:
+        "OPNsense locks FRR config and vtysh sockets to user/group 'frr'. Bind a root SSH slot (or add the slot user to group frr) to monitor routing-protocol state.",
+      dedupeKey: `frr-permissions:${label}`,
+    });
+    return conditions;
+  }
+
   // FRR installed but OSPF never configured: nothing to monitor here (the box
   // doesn't participate in the routing domain).
   if (!result.ospfConfigured) return [];
-
-  const conditions: FrrCondition[] = [];
 
   if (!result.frrReachable) {
     conditions.push({
