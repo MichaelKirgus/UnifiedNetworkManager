@@ -79,6 +79,15 @@ import { PREFLIGHT_RESOLVERS } from './actions/preflight';
 import { InventorySnapshot } from './inventoryTypes';
 import { buildOpnsenseState } from './state';
 import { mirrorOpnsenseConditions, type ZfsPoolCondition, type SecurityFinding } from './notifications';
+import {
+  collectFrrOspfViaSsh,
+  decideFrrCollection,
+  deriveFrrConditions,
+  DEFAULT_FRR_MONITOR_INTERVAL_SEC,
+  type FrrCondition,
+  type FrrOspfEntry,
+  type FrrOspfResult,
+} from './frrOspf';
 
 // Base UUID + shared state store live in ./stateStore so the monitoring path,
 // the security actions AND the firewall-event cursor all bind to the SAME
@@ -120,7 +129,17 @@ const identity = resolvePluginIdentity({
   //   - security-check findings at warning/critical (file-integrity change,
   //     brute-force login burst, unexpected uid-0 account).
   // Gated by the `notifyAlerts` option. Device-state mirroring stays API-side.
-  version: '0.6.0',
+  // 0.7.0 — FRR/OSPF routing-protocol monitoring (option `frrMonitorIntervalSec`,
+  // default 5 min, 0 disables): OPNsense's REST API exposes NO routing-protocol
+  // state, and a dead FRR daemon silently drops every OSPF-learned route while
+  // the box keeps answering ping + REST — forwarded traffic to routed segments
+  // then blackholes via the WAN default route (the 2026-11-15 GWST03 mail
+  // outage). The plugin now checks FRR over a bound SSH slot at its own cadence:
+  // vtysh neighbor states (v4 + v6), learned-route counts and router ID. A down
+  // FRR escalates device health to critical with status-badge reasons, mirrors
+  // into the notification center (stable dedupe keys, resolve on recovery) and
+  // surfaces a Routing metric group. No SSH slot bound → skipped silently.
+  version: '0.7.0',
   vendors: ['opnsense'],
   // 'planning' advertises the /plan endpoint (multi-device intents) so the API
   // can offer bulk rollout + tunnel provisioning flows in the webapp.
@@ -1097,6 +1116,29 @@ function descriptorsFromMetrics(metrics: Record<string, unknown>): MetricDescrip
     push({ key: 'interfaces', label: 'Interfaces', type: 'string', visualization: 'table', group: 'Inventory', columns: ['name', 'mac'], intervalMs: LIVE_INTERVAL_MS });
   }
 
+  // FRR/OSPF routing-protocol state (SSH slot, own cadence — cached between runs).
+  if (typeof metrics['routing.frr.reachable'] === 'number') {
+    push({ key: 'routing.frr.reachable', label: 'FRR Reachable', type: 'number', visualization: 'gauge', group: 'Routing', min: 0, max: 1, color: '#22c55e', intervalMs: INVENTORY_INTERVAL_MS });
+  }
+  if (typeof metrics['routing.ospf.routerId'] === 'string') {
+    push({ key: 'routing.ospf.routerId', label: 'OSPF Router ID', type: 'string', visualization: 'text', group: 'Routing' });
+  }
+  if (typeof metrics['routing.ospf.neighborsTotal'] === 'number') {
+    push({ key: 'routing.ospf.neighborsTotal', label: 'OSPF Neighbors', type: 'number', visualization: 'text', group: 'Routing', intervalMs: INVENTORY_INTERVAL_MS });
+  }
+  if (typeof metrics['routing.ospf.neighborsFull'] === 'number') {
+    push({ key: 'routing.ospf.neighborsFull', label: 'Neighbors Full', type: 'number', visualization: 'text', group: 'Routing', intervalMs: INVENTORY_INTERVAL_MS });
+  }
+  if (typeof metrics['routing.ospf.routesV4'] === 'number') {
+    push({ key: 'routing.ospf.routesV4', label: 'OSPF Routes v4', type: 'number', visualization: 'text', group: 'Routing', intervalMs: INVENTORY_INTERVAL_MS });
+  }
+  if (typeof metrics['routing.ospf.routesV6'] === 'number') {
+    push({ key: 'routing.ospf.routesV6', label: 'OSPF Routes v6', type: 'number', visualization: 'text', group: 'Routing', intervalMs: INVENTORY_INTERVAL_MS });
+  }
+  if (Array.isArray(metrics['ospfNeighbors']) && (metrics['ospfNeighbors'] as unknown[]).length > 0) {
+    push({ key: 'ospfNeighbors', label: 'OSPF Neighbors', type: 'string', visualization: 'table', group: 'Routing', columns: ['version', 'neighborId', 'interfaceName', 'state', 'status'], intervalMs: INVENTORY_INTERVAL_MS });
+  }
+
   // Fallback: any other numeric metric becomes a text card so nothing is lost.
   for (const [key, value] of Object.entries(metrics)) {
     if (seen.has(key)) continue;
@@ -1144,6 +1186,16 @@ const PLUGIN_OPTIONS: PluginOptionDescriptor[] = [
     max: 86400,
     description:
       'How often the plugin triggers a fresh update SEARCH on the appliance (POST /api/core/firmware/status — a synchronous probe against pkg.opnsense.org that takes ~30–90 s). OPNsense only advertises available updates after such a search has run; without it, devices that never checked show no updates at all. The probe runs in the background and never blocks or fails a poll — its result surfaces on the next monitoring beat via the cached status read. 0 disables automatic searches (updates then only appear after an explicit "Check now" or the firmware.check plan action).',
+  },
+  {
+    key: 'frrMonitorIntervalSec',
+    label: 'FRR/OSPF check interval (seconds)',
+    type: 'integer' as const,
+    default: DEFAULT_FRR_MONITOR_INTERVAL_SEC,
+    min: 0,
+    max: 86400,
+    description:
+      'How often the plugin checks FRR/OSPF routing-protocol state over a bound SSH slot (vtysh neighbor states + learned-route counts). Catches a dead or flapping FRR daemon that silently drops OSPF-learned routes — traffic to routed segments then blackholes while the box still answers ping and REST. Requires an SSH credential slot; skipped silently without one. 0 disables.',
   },
   {
     key: 'enableInventoryCache',
@@ -1974,6 +2026,20 @@ async function collectAndPushHostStates(
 
 const updateSearches = new Map<string, UpdateSearchEntry>(); // key = management address
 
+// --- FRR/OSPF monitoring (routing-protocol health over the SSH slot) ---------
+// OPNsense's REST API exposes NO routing-protocol state; a dead FRR daemon
+// silently drops every OSPF-learned route while the box keeps answering ping +
+// REST (the 2026-11-15 GWST03 mail blackhole). The check runs INLINE at its own
+// cadence (option `frrMonitorIntervalSec`, default 5 min, 0 disables) — one ~2–4 s
+// SSH exec with per-vtysh `timeout 3` guards. A FRR-down result is a successful
+// run (it IS the alert case), so it re-checks on schedule; only an SSH-level
+// failure (null) does not advance the cadence and retries on the next beat.
+// The last successful result is cached per host and re-emitted between
+// collections (absent = keep previous). No SSH slot bound → skipped.
+
+const frrEntries = new Map<string, FrrOspfEntry>(); // key = management address
+const frrCache = new Map<string, FrrOspfResult>(); // last successful result per host
+
 /**
  * Triggers a fresh update search on one appliance when its cadence has elapsed
  * (or this is an explicit forced check). Runs fire-and-forget from /monitoring;
@@ -2151,6 +2217,61 @@ app.post('/monitoring', async (req, res) => {
     const updateCheckIntervalSec = typeof settings.updateCheckIntervalSec === 'number' ? settings.updateCheckIntervalSec : undefined;
     void maybeRunUpdateSearch(managementAddress, apiKey, apiSecret, transport, ports, updateCheckIntervalSec, body.forceUpdateCheck === true).catch(() => { /* best-effort */ });
 
+    // FRR/OSPF routing-protocol state over the optional SSH slot (option
+    // frrMonitorIntervalSec): INLINE at its own cadence — a dead FRR daemon is
+    // exactly what we must catch fast, and one ~2–4 s exec (15 s worst-case
+    // budget) keeps the poll inside the API's 30 s timeout. No SSH slot bound →
+    // collectFrrOspfViaSsh returns null and the feature stays silent. An
+    // SSH-level failure does not advance the cadence (retry next beat); a down
+    // FRR still yields a result, so it re-checks on schedule.
+    const frrIntervalMs = Math.max(0, Number(settings.frrMonitorIntervalSec ?? DEFAULT_FRR_MONITOR_INTERVAL_SEC)) * 1000;
+    let frrResult: FrrOspfResult | null = frrCache.get(managementAddress) ?? null;
+    let frrFreshThisBeat = false;
+    if (decideFrrCollection(frrEntries.get(managementAddress), Date.now(), frrIntervalMs) === 'run') {
+      const entry: FrrOspfEntry = { lastRunAt: frrEntries.get(managementAddress)?.lastRunAt ?? 0, inFlight: true };
+      frrEntries.set(managementAddress, entry);
+      try {
+        const fresh = await collectFrrOspfViaSsh(managementAddress, credentials, (level, message) => logger.warn(message), { port: sshPort });
+        if (fresh !== null) {
+          // A result with frrReachable=false IS a successful run — it is the
+          // alert case; advance the cadence so we re-check on schedule.
+          frrCache.set(managementAddress, fresh);
+          frrResult = fresh;
+          entry.lastRunAt = Date.now();
+          frrFreshThisBeat = true;
+        }
+      } catch {
+        /* best-effort — a failed check must never sink the poll */
+      } finally {
+        entry.inFlight = false;
+      }
+    }
+
+    // Emit routing-protocol metrics from the (possibly cached) result. Absent
+    // keys when there is no data at all (no SSH slot / FRR never seen).
+    if (frrResult !== null) {
+      metrics['routing.frr.reachable'] = frrResult.frrReachable ? 1 : 0;
+      if (frrResult.routerId) metrics['routing.ospf.routerId'] = frrResult.routerId;
+      metrics['routing.ospf.neighborsTotal'] = frrResult.neighbors.length;
+      metrics['routing.ospf.neighborsFull'] = frrResult.neighbors.filter((n) => n.full).length;
+      if (typeof frrResult.v4RoutesLearned === 'number') metrics['routing.ospf.routesV4'] = frrResult.v4RoutesLearned;
+      if (typeof frrResult.v6RoutesLearned === 'number') metrics['routing.ospf.routesV6'] = frrResult.v6RoutesLearned;
+      if (frrResult.neighbors.length > 0) {
+        metrics['ospfNeighbors'] = frrResult.neighbors.map((n) => ({
+          version: n.version,
+          neighborId: n.neighborId,
+          interfaceName: n.interfaceName,
+          state: n.state,
+          status: n.full ? 'up' : 'down',
+        }));
+      }
+    }
+
+    // Actionable conditions from the (possibly cached) result — drive both the
+    // health escalation below and the notification-center mirroring. [] = clean.
+    const frrHostname = typeof metrics['hostname'] === 'string' ? metrics['hostname'] : undefined;
+    const frrConditions: FrrCondition[] = deriveFrrConditions(frrResult, frrHostname);
+
     // Echo of the user-selected model/firmware (mirrors the LANCOM plugin) —
     // informational only; shown as text cards in the device detail view.
     if (selectedModel) metrics['system.model'] = selectedModel;
@@ -2240,6 +2361,7 @@ app.post('/monitoring', async (req, res) => {
         typeof metrics['hostname'] === 'string' ? metrics['hostname'] : undefined,
         zfsPools,
         securityFindings,
+        frrFreshThisBeat ? frrConditions : null,
       );
     }
 
@@ -2255,11 +2377,21 @@ app.post('/monitoring', async (req, res) => {
       health = 'critical';
     }
 
+    // FRR/OSPF conditions escalate device health: a dead routing daemon
+    // blackholes traffic while the appliance's own status stays "ok".
+    if (frrConditions.length > 0) {
+      const hasCritical = frrConditions.some((c) => c.severity === 'critical');
+      if (hasCritical) health = 'critical';
+      else if (health === 'ok') health = 'warning';
+    }
+
     res.status(200).json({
       deviceId: deviceId ?? null,
       collectedAt: new Date().toISOString(),
       health,
       metrics,
+      // Status-badge tooltip reasons — only when non-ok and we have specifics.
+      ...(health !== 'ok' && frrConditions.length > 0 ? { healthReasons: frrConditions.map((c) => ({ severity: c.severity, message: c.message })) } : {}),
       // Descriptors are generated DYNAMICALLY from the metrics actually
       // collected, so the UI always matches the data (works across OPNsense
       // versions and any plugin). The API persists these from /discover too.
@@ -2272,6 +2404,7 @@ app.post('/monitoring', async (req, res) => {
         transport,
         logToApi: settings.logToApi === true,
         notifyAlerts: settings.notifyAlerts !== false,
+        frrMonitorIntervalSec: settings.frrMonitorIntervalSec,
         model: selectedModel,
         firmwareVersion: selectedFirmware,
       },

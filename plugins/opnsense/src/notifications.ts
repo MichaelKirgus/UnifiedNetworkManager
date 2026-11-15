@@ -27,6 +27,7 @@
  */
 
 import type { PluginNotifier } from '@unm/plugin-sdk';
+import type { FrrCondition } from './frrOspf';
 
 /** One ZFS pool in a non-healthy state (status already lower-cased). */
 export interface ZfsPoolCondition {
@@ -46,10 +47,11 @@ export interface SecurityFinding {
 // Per-host snapshot of the last-seen condition dedupe keys — used to diff across
 // polls so each condition notifies ONCE (dedupeKey upsert keeps it live) and is
 // resolved when it disappears. Keyed by management address, like ix-truenas's
-// knownAlertsByHost. Two independent maps: a ZFS recovery must not touch the
-// security set and vice versa.
+// knownAlertsByHost. Three independent maps: a ZFS recovery must not touch the
+// security or FRR sets and vice versa.
 const zfsKnownByHost = new Map<string, Set<string>>();
 const securityKnownByHost = new Map<string, Set<string>>();
+const frrKnownByHost = new Map<string, Set<string>>();
 
 /** Stable dedupe key for a problematic pool (stable across degraded→offline). */
 function zfsKey(pool: ZfsPoolCondition): string {
@@ -78,6 +80,8 @@ function securityKey(f: SecurityFinding): string {
  *                      this cycle (don't touch the ZFS known-set).
  * @param securityFindings  Fresh warning/critical findings, or `null` when none
  *                      were collected this cycle (don't touch the security set).
+ * @param frrConditions Fresh FRR/OSPF conditions, or `null` when no fresh
+ *                      collection ran this cycle (don't touch the FRR known-set).
  */
 export function mirrorOpnsenseConditions(
   notifier: PluginNotifier,
@@ -86,6 +90,7 @@ export function mirrorOpnsenseConditions(
   hostname: string | undefined,
   zfsPools: ZfsPoolCondition[] | null,
   securityFindings: SecurityFinding[] | null,
+  frrConditions: FrrCondition[] | null = null,
 ): void {
   const label = hostname && hostname.trim() !== '' ? hostname : host;
 
@@ -132,6 +137,27 @@ export function mirrorOpnsenseConditions(
     const gone = Array.from(prev).filter((k) => !seen.has(k));
     if (gone.length > 0) notifier.resolve(gone);
     securityKnownByHost.set(host, seen);
+  }
+
+  // --- FRR/OSPF conditions ---------------------------------------------------
+  if (frrConditions !== null) {
+    const seen = new Set<string>();
+    for (const c of frrConditions) {
+      if (!c.dedupeKey || !c.message) continue;
+      seen.add(c.dedupeKey);
+      notifier.notify({
+        severity: c.severity,
+        title: c.message, // already label-prefixed by deriveFrrConditions
+        message: (c.detail ?? '').slice(0, 500),
+        dedupeKey: c.dedupeKey,
+        deviceId,
+        context: { source: 'frr', key: c.dedupeKey },
+      });
+    }
+    const prev = frrKnownByHost.get(host) ?? new Set<string>();
+    const gone = Array.from(prev).filter((k) => !seen.has(k));
+    if (gone.length > 0) notifier.resolve(gone);
+    frrKnownByHost.set(host, seen);
   }
 }
 
