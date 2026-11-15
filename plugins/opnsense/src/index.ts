@@ -88,6 +88,7 @@ import {
   type FrrOspfEntry,
   type FrrOspfResult,
 } from './frrOspf';
+import { collectFrrViaRest } from './frrRest';
 
 // Base UUID + shared state store live in ./stateStore so the monitoring path,
 // the security actions AND the firewall-event cursor all bind to the SAME
@@ -155,7 +156,17 @@ const identity = resolvePluginIdentity({
   // installed but NOT inspectable by the bound user (new warning condition
   // frr-permissions:<host> — bind a root slot or add the user to group frr), and fully
   // inspectable (normal monitoring). Routing metrics are only emitted in the third case.
-  version: '0.9.0',
+  // 0.10.0 — REST-FIRST FRR/OSPF collection: OPNsense's own Diagnostics → Routing
+  // screen proves the data path — /api/quagga/service/status +
+  // /api/quagga/diagnostics/* (ospfoverview, searchOspfneighbor, searchOspfroute,
+  // ospfv3overview, searchOspfv3route) call configd's quagga plugin, which runs
+  // vtysh as root ON THE APPLIANCE. No SSH slot and no frr group membership needed;
+  // the Quagga API area is core code in both Community and Business Edition, and
+  // service/status reflects the optional os-frr package's state (disabled = absent
+  // or intentionally off → silent; stopped = installed but down → CRITICAL;
+  // running → full neighbor/route collection). The vtysh-over-SSH path remains as
+  // an automatic fallback for firmware without the quagga REST area.
+  version: '0.10.0',
   vendors: ['opnsense'],
   // 'planning' advertises the /plan endpoint (multi-device intents) so the API
   // can offer bulk rollout + tunnel provisioning flows in the webapp.
@@ -1222,7 +1233,7 @@ const PLUGIN_OPTIONS: PluginOptionDescriptor[] = [
     min: 0,
     max: 86400,
     description:
-      'How often the plugin checks FRR/OSPF routing-protocol state over a bound SSH slot (vtysh neighbor states + learned-route counts). Catches a dead or flapping FRR daemon that silently drops OSPF-learned routes — traffic to routed segments then blackholes while the box still answers ping and REST. Requires an SSH credential slot whose user can read FRR state (on OPNsense: root, or a member of group frr — otherwise a warning condition is raised instead of monitoring); skipped silently without one. 0 disables.',
+      'How often the plugin checks FRR/OSPF routing-protocol state — via the appliance\'s own REST diagnostics API (the same data path as its Diagnostics → Routing screen: configd runs vtysh as root on the box, so NO SSH slot is required and it works in both Community and Business Edition), falling back to vtysh over a bound SSH slot only on firmware without the quagga REST area. Catches a dead or flapping FRR daemon that silently drops OSPF-learned routes — traffic to routed segments then blackholes while the box still answers ping and REST. The optional os-frr package\'s state is reflected: not installed / disabled → silent, stopped → critical alert. 0 disables.',
   },
   {
     key: 'enableInventoryCache',
@@ -2053,16 +2064,18 @@ async function collectAndPushHostStates(
 
 const updateSearches = new Map<string, UpdateSearchEntry>(); // key = management address
 
-// --- FRR/OSPF monitoring (routing-protocol health over the SSH slot) ---------
-// OPNsense's REST API exposes NO routing-protocol state; a dead FRR daemon
-// silently drops every OSPF-learned route while the box keeps answering ping +
-// REST (the 2026-11-15 GWST03 mail blackhole). The check runs INLINE at its own
-// cadence (option `frrMonitorIntervalSec`, default 5 min, 0 disables) — one ~2–4 s
-// SSH exec with per-vtysh `timeout 3` guards. A FRR-down result is a successful
-// run (it IS the alert case), so it re-checks on schedule; only an SSH-level
-// failure (null) does not advance the cadence and retries on the next beat.
-// The last successful result is cached per host and re-emitted between
-// collections (absent = keep previous). No SSH slot bound → skipped.
+// --- FRR/OSPF monitoring (routing-protocol health, REST-first) --------------
+// A dead FRR daemon silently drops every OSPF-learned route while the box keeps
+// answering ping + REST (the 2026-11-15 GWST03 mail blackhole). The check runs
+// INLINE at its own cadence (option `frrMonitorIntervalSec`, default 5 min, 0
+// disables). PRIMARY path since v0.10.0: the appliance's REST diagnostics API
+// (/api/quagga/* — configd runs vtysh as root server-side; no SSH slot or frr
+// group membership needed, CE + BE alike). Fallback for firmware without that
+// area: vtysh over a bound SSH slot (frrOspf.ts) with per-vtysh `timeout 3`
+// guards. A FRR-down result is a successful run (it IS the alert case), so it
+// re-checks on schedule; only a total failure (null from both paths) does not
+// advance the cadence and retries on the next beat. The last successful result
+// is cached per host and re-emitted between collections (absent = keep previous).
 
 const frrEntries = new Map<string, FrrOspfEntry>(); // key = management address
 const frrCache = new Map<string, FrrOspfResult>(); // last successful result per host
@@ -2244,13 +2257,16 @@ app.post('/monitoring', async (req, res) => {
     const updateCheckIntervalSec = typeof settings.updateCheckIntervalSec === 'number' ? settings.updateCheckIntervalSec : undefined;
     void maybeRunUpdateSearch(managementAddress, apiKey, apiSecret, transport, ports, updateCheckIntervalSec, body.forceUpdateCheck === true).catch(() => { /* best-effort */ });
 
-    // FRR/OSPF routing-protocol state over the optional SSH slot (option
-    // frrMonitorIntervalSec): INLINE at its own cadence — a dead FRR daemon is
-    // exactly what we must catch fast, and one ~2–4 s exec (15 s worst-case
-    // budget) keeps the poll inside the API's 30 s timeout. No SSH slot bound →
-    // collectFrrOspfViaSsh returns null and the feature stays silent. An
-    // SSH-level failure does not advance the cadence (retry next beat); a down
-    // FRR still yields a result, so it re-checks on schedule.
+    // FRR/OSPF routing-protocol state (option frrMonitorIntervalSec): INLINE at
+    // its own cadence — a dead FRR daemon is exactly what we must catch fast.
+    // REST-FIRST: the appliance's own diagnostics data path (configd runs vtysh
+    // as root server-side) needs no SSH slot and no frr group membership, works
+    // on CE + BE alike, and a few small GETs keep the poll well inside the API's
+    // 30 s timeout. Firmware without the quagga REST area (or an ACL-blocked one)
+    // falls back to vtysh over a bound SSH slot — with no slot at all the feature
+    // stays silent. A FRR-down result is a successful run (it IS the alert case),
+    // so it re-checks on schedule; only a total failure (null from both paths)
+    // does not advance the cadence and retries on the next beat.
     const frrIntervalMs = Math.max(0, Number(settings.frrMonitorIntervalSec ?? DEFAULT_FRR_MONITOR_INTERVAL_SEC)) * 1000;
     let frrResult: FrrOspfResult | null = frrCache.get(managementAddress) ?? null;
     let frrFreshThisBeat = false;
@@ -2258,7 +2274,18 @@ app.post('/monitoring', async (req, res) => {
       const entry: FrrOspfEntry = { lastRunAt: frrEntries.get(managementAddress)?.lastRunAt ?? 0, inFlight: true };
       frrEntries.set(managementAddress, entry);
       try {
-        const fresh = await collectFrrOspfViaSsh(managementAddress, credentials, (level, message) => logger.warn(message), { port: sshPort });
+        let fresh: FrrOspfResult | null = null;
+        // Primary path — REST (no SSH required).
+        try {
+          const frrClient = createClient(managementAddress, { apiKey, apiSecret }, transport, ports);
+          fresh = await collectFrrViaRest(frrClient);
+        } catch {
+          /* fall through to the SSH fallback */
+        }
+        // Fallback — vtysh over the bound SSH slot (older firmware / ACL-blocked REST).
+        if (fresh === null) {
+          fresh = await collectFrrOspfViaSsh(managementAddress, credentials, (level, message) => logger.warn(message), { port: sshPort });
+        }
         if (fresh !== null) {
           // A result with frrReachable=false IS a successful run — it is the
           // alert case; advance the cadence so we re-check on schedule.

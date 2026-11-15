@@ -1,15 +1,23 @@
 /**
- * FRR/OSPF monitoring — routing-protocol state over the optional SSH slot.
+ * FRR/OSPF monitoring — routing-protocol state over the optional SSH slot
+ * (LEGACY FALLBACK PATH since v0.10.0).
  *
- * Why this exists: OPNsense's REST API exposes NO routing-protocol state (no
- * OSPF neighbor listing, no learned-route table — probed 404 on 26.x). The
- * only source of truth is FRR itself via `vtysh`. This matters because a dead
- * or flapping FRR daemon silently drops every OSPF-learned route from the
- * kernel table while the appliance keeps answering ICMP + REST — dNAT'd and
- * transit traffic then follows the WAN default route into the void (the
- * 2026-11-15 GWST03 mail blackhole: FRR died, segment routes vanished, all
- * forwarded TCP to internal segments timed out for hours while ping worked).
- * "Device reachable" can never catch that; only adjacency/route state can.
+ * Why this exists: a dead or flapping FRR daemon silently drops every
+ * OSPF-learned route from the kernel table while the appliance keeps answering
+ * ICMP + REST — dNAT'd and transit traffic then follows the WAN default route
+ * into the void (the 2026-11-15 GWST03 mail blackhole: FRR died, segment routes
+ * vanished, all forwarded TCP to internal segments timed out for hours while
+ * ping worked). "Device reachable" can never catch that; only adjacency/route
+ * state can.
+ *
+ * Since v0.10.0 the PRIMARY data path is REST (frrRest.ts): OPNsense's own
+ * Diagnostics → Routing screen proves /api/quagga/* exposes neighbor + route
+ * state — configd runs vtysh as root on the appliance, so no SSH slot and no frr
+ * group membership are required. This module remains for firmware without the
+ * quagga REST area (or an ACL-blocked one): it is only invoked when the REST
+ * path returns null AND a bound SSH slot exists. Note OPNsense locks ALL FRR
+ * state to user/group `frr`, so the SSH fallback needs a root slot (or a member
+ * of group frr) — see deriveFrrConditions' permission warning.
  *
  * Data collected in ONE SSH exec (section markers, same style as zfsSsh.ts):
  *   - FRR installed?        [ -d /usr/local/etc/frr ] (permission-free) + ls listing
