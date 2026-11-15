@@ -1,3 +1,4 @@
+import { useMemo, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { Layout } from '../components/Layout';
 import { DataTable, DataTableColumn } from '../components/DataTable';
@@ -160,6 +161,9 @@ function addrPort(addr?: string, port?: string | null): string {
 }
 
 export default function Firewall() {
+  // '' = all firewalls; otherwise the selected device's id.
+  const [deviceFilter, setDeviceFilter] = useState('');
+
   // The API polls plugins every 30s and upserts these rows — refresh at the
   // same cadence so the view tracks live inventory.
   const firewallQuery = useQuery({
@@ -167,6 +171,20 @@ export default function Firewall() {
     queryFn: () => api.firewallRules(),
     refetchInterval: 30_000,
   });
+
+  // Options for the device filter — only devices that actually carry collected
+  // rules (derived from the same payload, so no extra request). Filtering is
+  // client-side: the page already fetches every row each cycle.
+  const ruleDevices = useMemo(() => {
+    const names = new Map<string, string>();
+    for (const r of firewallQuery.data ?? []) if (r.deviceName) names.set(r.deviceId, r.deviceName);
+    return [...names.entries()].sort((a, b) => a[1].localeCompare(b[1]));
+  }, [firewallQuery.data]);
+
+  const visibleRows = useMemo(
+    () => (deviceFilter ? (firewallQuery.data ?? []).filter((r) => r.deviceId === deviceFilter) : firewallQuery.data),
+    [firewallQuery.data, deviceFilter]
+  );
 
   const columns: DataTableColumn<FirewallRuleRow>[] = [
     {
@@ -281,6 +299,26 @@ export default function Firewall() {
       {/* Live connection-state overview — hidden until a device reports session data. */}
       <SessionsSection />
 
+      {/* Device filter — narrow the rule table to one firewall (device). */}
+      {firewallQuery.data && ruleDevices.length > 0 && (
+        <div className="mb-3 flex items-center gap-2">
+          <label htmlFor="fw-device-filter" className="text-xs font-medium text-secondary">Firewall</label>
+          <select
+            id="fw-device-filter"
+            value={deviceFilter}
+            onChange={(e) => setDeviceFilter(e.target.value)}
+            className="w-64 rounded-md border border-border bg-background px-2 py-1.5 text-sm"
+          >
+            <option value="">All firewalls ({ruleDevices.length})</option>
+            {ruleDevices.map(([id, name]) => (
+              <option key={id} value={id}>
+                {name}
+              </option>
+            ))}
+          </select>
+        </div>
+      )}
+
       {firewallQuery.isLoading && <p className="text-sm text-muted-foreground">Loading firewall rules...</p>}
       {firewallQuery.isError && (
         <p className="text-sm text-danger-fg">Failed to load firewall rules: {(firewallQuery.error as Error).message}</p>
@@ -288,7 +326,7 @@ export default function Firewall() {
       {firewallQuery.data && (
         <DataTable
           columns={columns}
-          rows={firewallQuery.data}
+          rows={visibleRows ?? []}
           rowKey={(row) => `${row.deviceId}|${row.pluginId}|${row.ruleType}|${row.vendorRuleId}`}
           storageKey="firewall-rules"
           autoRefresh={{ intervalMs: 30_000, queries: [firewallQuery] }}
