@@ -234,3 +234,166 @@ describe('collectFrrViaRest — full collection', () => {
     expect(r!.v4RoutesLearned).toBe(0);
   });
 });
+
+// --- BGP fixtures (v0.11.0) ------------------------------------------------------
+
+/** Live shape on OPNSENSE01 when bgpd is not running: configd returns nothing → the PHP controller's `?? []` fallback. */
+const BG_SUMMARY_EMPTY = { response: [] };
+const BG_ROUTES_EMPTY = { response: { rows: [], total: 0 } };
+
+/** FRR `show bgp summary json` shape — AFI-keyed sections, each with a peers map. */
+const BG_SUMMARY_DATA = {
+  response: {
+    ipv4Unicast: {
+      routerId: '10.25.0.1',
+      as: 65001,
+      peers: {
+        '10.1.1.97': { remoteAs: 65002, state: 'Established', pfxRcd: 12 },
+        '10.1.1.101': { remoteAs: 65003, state: 'Active' },
+      },
+    },
+    ipv6Unicast: {
+      as: 65001,
+      peers: {
+        // Same peer also appears in the v4 section → deduped by address.
+        '10.1.1.97': { remoteAs: 65002, state: 'Established', pfxRcd: 3 },
+        'fd00::2': { remoteAs: 65002, state: 'Established', pfxRcd: 4 },
+      },
+    },
+  },
+};
+
+/** BGP learned-route recordset rows (route merged with ONE nexthop per row). */
+const BG_ROUTES_V4 = {
+  response: {
+    rows: [
+      // Multi-path prefix — appears twice, deduped to one row.
+      { network: '192.0.2.0/24', ip: '10.1.1.97', interfaceName: 'wg0', pathFrom: 'external' },
+      { network: '192.0.2.0/24', ip: '10.1.1.101', interfaceName: 'wg1', pathFrom: 'internal' },
+      // iBGP route with an empty nexthop (recurses into the connected table).
+      { network: '198.51.100.0/24', ip: '', interfaceName: 'wg2', pathFrom: 'internal' },
+    ],
+    total: 3,
+  },
+};
+
+const BG_ROUTES_V6 = {
+  response: {
+    rows: [{ network: '2001:db8::/48', ip: 'fd00::2', interfaceName: 'wg7', pathFrom: 'external' }],
+    total: 1,
+  },
+};
+
+const BGP_ROUTES = {
+  '/api/quagga/service/status': { status: 'running' },
+  // No OSPF on this box — both overviews come back as the empty `[]` fallback.
+  '/api/quagga/diagnostics/ospfoverview': BG_SUMMARY_EMPTY,
+  '/api/quagga/diagnostics/ospfv3overview': BG_SUMMARY_EMPTY,
+  '/api/quagga/diagnostics/bgpsummary': BG_SUMMARY_DATA,
+  '/api/quagga/diagnostics/searchBgproute4': BG_ROUTES_V4,
+  '/api/quagga/diagnostics/searchBgproute6': BG_ROUTES_V6,
+};
+
+// --- BGP collection (v0.11.0) ------------------------------------------------------
+
+describe('collectFrrViaRest — BGP', () => {
+  it('parses peers (deduped across AFIs), local AS and learned routes on a BGP-only box', async () => {
+    const r = await collectFrrViaRest(makeClient(BGP_ROUTES));
+    expect(r).not.toBeNull();
+    // No OSPF data → ospfConfigured=false, but FRR IS reachable (BGP has data).
+    expect(r!.ospfConfigured).toBe(false);
+    expect(r!.frrReachable).toBe(true);
+    expect(r!.routerId).toBe('10.25.0.1'); // from the BGP summary
+
+    const bgp = r!.bgp!;
+    expect(bgp.configured).toBe(true);
+    expect(bgp.localAs).toBe(65001);
+    // 3 unique peers: 10.1.1.97 (deduped across AFIs), 10.1.1.101, fd00::2.
+    expect(bgp.peers).toHaveLength(3);
+    expect(bgp.peers.filter((p) => p.established)).toHaveLength(2);
+    const a97 = bgp.peers.find((p) => p.neighborId === '10.1.1.97')!;
+    expect(a97).toMatchObject({ remoteAs: 65002, state: 'Established', established: true });
+    expect(bgp.peers.find((p) => p.neighborId === '10.1.1.101')).toMatchObject({ state: 'Active', established: false });
+
+    // BGP learned routes: deduped per destination, protocol 'bgp', egress in extra.peer.
+    expect(bgp.v4RoutesLearned).toBe(2);
+    expect(bgp.v6RoutesLearned).toBe(1);
+    const bg = r!.routes.filter((x) => x.protocol === 'bgp');
+    expect(bg).toHaveLength(3);
+    const p1 = bg.find((x) => x.destination === '192.0.2.0/24')!;
+    expect(p1).toMatchObject({ gateway: '10.1.1.97', protocol: 'bgp', status: 'active' });
+    expect(p1.extra).toEqual({ peer: 'wg0', pathFrom: 'external' });
+    const p2 = bg.find((x) => x.destination === '198.51.100.0/24')!;
+    expect(p2.gateway).toBe(''); // empty nexthop → ''
+
+    // Exactly one warning for the Active peer — and this box has NO OSPF, which
+    // used to short-circuit deriveFrrConditions before any BGP check could run.
+    const conds = deriveFrrConditions(r, 'GWST01');
+    expect(conds).toHaveLength(1);
+    expect(conds[0]).toMatchObject({ severity: 'warning', dedupeKey: 'bgp-peer:10.1.1.101' });
+  });
+
+  it('escalates to critical when every BGP session is down', async () => {
+    const client = makeClient({
+      '/api/quagga/service/status': { status: 'running' },
+      '/api/quagga/diagnostics/ospfoverview': BG_SUMMARY_EMPTY,
+      '/api/quagga/diagnostics/bgpsummary': {
+        response: {
+          ipv4Unicast: {
+            as: 65001,
+            peers: { '10.1.1.97': { remoteAs: 65002, state: 'Connect' }, '10.1.1.101': { remoteAs: 65003, state: 'Active' } },
+          },
+        },
+      },
+    });
+    const r = await collectFrrViaRest(client);
+    expect(r!.bgp?.configured).toBe(true);
+    const conds = deriveFrrConditions(r, 'GWST02');
+    // Per-peer warnings + the all-down critical.
+    expect(conds.filter((c) => c.severity === 'warning')).toHaveLength(2);
+    const crit = conds.find((c) => c.severity === 'critical')!;
+    expect(crit.dedupeKey).toBe('bgp-all-down:GWST02');
+  });
+
+  it('stays silent for BGP when FRR runs but no peers are configured (live OPNSENSE01 shape)', async () => {
+    const client = makeClient({
+      ...RUNNING_ROUTES, // OSPF present → the box is in scope via OSPF…
+      '/api/quagga/diagnostics/bgpsummary': BG_SUMMARY_EMPTY, // …but BGP returns the empty `[]` fallback.
+      '/api/quagga/diagnostics/searchBgproute4': BG_ROUTES_EMPTY,
+      '/api/quagga/diagnostics/searchBgproute6': BG_ROUTES_EMPTY,
+    });
+    const r = await collectFrrViaRest(client);
+    expect(r!.bgp?.configured).toBe(false);
+    expect(r!.bgp?.peers).toEqual([]);
+    // No BGP conditions — only the known Down-neighbor warning from the OSPF fixtures.
+    const conds = deriveFrrConditions(r, 'OPNSENSE01');
+    expect(conds.map((c) => c.dedupeKey)).toEqual(['ospf-neighbor:ospf:wg2:10.1.1.106']);
+  });
+
+  it('falls back to the bgpneighbors endpoint when the summary carries no peers', async () => {
+    const client = makeClient({
+      '/api/quagga/service/status': { status: 'running' },
+      '/api/quagga/diagnostics/ospfoverview': BG_SUMMARY_EMPTY,
+      '/api/quagga/diagnostics/bgpsummary': BG_SUMMARY_EMPTY,
+      '/api/quagga/diagnostics/bgpneighbors': { response: { '10.1.1.97': { remoteAs: 65002, state: 'Established', pfxRcd: 7 } } },
+    });
+    const r = await collectFrrViaRest(client);
+    expect(r!.bgp?.configured).toBe(true);
+    expect(r!.bgp?.peers).toHaveLength(1);
+    expect(r!.bgp?.peers[0]).toMatchObject({ neighborId: '10.1.1.97', established: true, prefixesReceived: 7 });
+  });
+
+  it('treats a flat per-AFI summary layout (no AFI sections) as configured', async () => {
+    const client = makeClient({
+      '/api/quagga/service/status': { status: 'running' },
+      '/api/quagga/diagnostics/ospfoverview': BG_SUMMARY_EMPTY,
+      '/api/quagga/diagnostics/bgpsummary': {
+        response: { routerId: '10.9.9.1', localAS: 65001, totalPeers: 1, peers: { '172.16.0.2': { remoteAs: 64512, state: 'Established', pfxRcd: 3 } } },
+      },
+    });
+    const r = await collectFrrViaRest(client);
+    expect(r!.bgp?.configured).toBe(true);
+    expect(r!.bgp?.localAs).toBe(65001);
+    expect(r!.routerId).toBe('10.9.9.1'); // BGP summary is the router-ID source here
+  });
+});

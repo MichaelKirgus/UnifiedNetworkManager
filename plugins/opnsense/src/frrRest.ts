@@ -14,8 +14,12 @@
  *   'disabled'  → os-frr absent or intentionally off → out of scope (silent skip)
  *   'stopped'   → installed + enabled but NOT running = the blackhole case →
  *                 frrReachable=false → CRITICAL condition (GWST03 scenario)
- *   'running'   → collect overview/neighbors/routes for both families; empty
- *                 overviews mean "FRR up, OSPF not configured" → silent skip
+ *   'running'   → collect OSPF overview/neighbors/routes for both families AND
+ *                 BGP summary/peers/route tables in one parallel batch. "No data"
+ *                 means the protocol is not configured on this box: ALL of them
+ *                 empty (no OSPF overviews, no BGP peers/localAS) → silent skip;
+ *                 any one with data → frrReachable=true and that protocol's
+ *                 section is populated.
  *
  * Contract: returns null ONLY when the quagga REST surface is unavailable
  * (older firmware without the API area, ACL-blocked) — callers then fall back to
@@ -26,7 +30,8 @@
 
 import type { AxiosInstance } from 'axios';
 import * as quagga from './client/quagga';
-import { type FrrOspfResult, type OspfNeighborRow, type OspfRouteRow } from './frrOspf';
+import type { OpnsenseApiResult } from './client/http';
+import { type BgpPeerRow, type FrrBgpSection, type FrrOspfResult, type OspfNeighborRow, type OspfRouteRow } from './frrOspf';
 
 /** Reads a string field, trimmed; '' when absent/non-string. */
 function str(row: Record<string, unknown>, key: string): string {
@@ -57,10 +62,137 @@ function overviewHasData(ov: Record<string, unknown> | null): boolean {
   return typeof ov['routerId'] === 'string' || (ov['areas'] !== undefined && ov['areas'] !== null);
 }
 
+/** True for a plain object (not an array / null). */
+function isObj(v: unknown): v is Record<string, unknown> {
+  return v !== null && typeof v === 'object' && !Array.isArray(v);
+}
+
 /**
- * Collects FRR/OSPF state via REST. Returns null when the quagga REST surface is
- * unavailable (caller falls back to SSH); otherwise a full result — including
- * frrReachable=false for a stopped FRR, which IS the alert case.
+ * Extracts BGP peer rows from a /api/quagga/diagnostics/bgpsummary payload.
+ * Tolerates both FRR layouts (envelope differences across versions):
+ *   - `show bgp summary json`:  { ipv4Unicast: {peers: {...}}, ipv6Unicast: {...} }
+ *   - flat per-AFI:             { as|localAS, routerId, peers: {...}, totalPeers }
+ * Returns [] for empty payloads — when bgpd is not running configd returns
+ * nothing and the PHP controller's `json_decode(...) ?? []` fallback yields an
+ * array (verified live on a box with FRR up but no BGP). Peers appearing in
+ * several AFI sections are deduped by address, preferring the more informative
+ * entry (established / non-empty state wins).
+ */
+export function parseBgpSummary(payload: Record<string, unknown> | null): BgpPeerRow[] {
+  if (!isObj(payload)) return []; // `[]` fallback or garbage → no BGP data
+  const peerMaps: Record<string, unknown>[] = [];
+  if (isObj(payload['peers'])) peerMaps.push(payload['peers']);
+  for (const v of Object.values(payload)) {
+    // One level down: AFI sections (ipv4Unicast/ipv6Unicast) or a vrf wrapper.
+    if (isObj(v) && isObj(v['peers'])) peerMaps.push(v['peers']);
+  }
+  const byId = new Map<string, BgpPeerRow>();
+  for (const map of peerMaps) {
+    for (const [id, raw] of Object.entries(map)) {
+      if (!isObj(raw)) continue;
+      const state = str(raw, 'state');
+      const pfxRcd = num(raw, 'pfxRcd');
+      const row: BgpPeerRow = {
+        neighborId: id,
+        remoteAs: num(raw, 'remoteAs'),
+        state,
+        // Established when FRR says so — or (older layouts) when it reports a
+        // prefix count without a state string.
+        established: /^established/i.test(state) || (state === '' && pfxRcd !== null),
+        ...(pfxRcd !== null ? { prefixesReceived: pfxRcd } : {}),
+      };
+      const existing = byId.get(id);
+      if (!existing || (!existing.established && row.established)) byId.set(id, row);
+    }
+  }
+  return [...byId.values()];
+}
+
+/** Reads the local AS from a bgpsummary payload (top level or one AFI down). */
+export function parseBgpLocalAs(payload: Record<string, unknown> | null): number | null {
+  if (!isObj(payload)) return null;
+  const candidates = [payload, ...Object.values(payload).filter(isObj)];
+  for (const c of candidates) {
+    const v = num(c, 'localAS') ?? num(c, 'as');
+    if (v !== null && v > 0) return v;
+  }
+  return null;
+}
+
+/** Reads the router ID from a bgpsummary payload (top level or one AFI down). */
+export function parseBgpRouterId(payload: Record<string, unknown> | null): string | null {
+  if (!isObj(payload)) return null;
+  const candidates = [payload, ...Object.values(payload).filter(isObj)];
+  for (const c of candidates) {
+    const v = str(c, 'routerId');
+    if (v !== '') return v;
+  }
+  return null;
+}
+
+/**
+ * Fallback peer source from /api/quagga/diagnostics/bgpneighbors — used only
+ * when the summary carried no peers. The payload is an object keyed by peer
+ * address (possibly under a `neighbors` key); entries without a usable state
+ * are still kept (state '' → treated as not established).
+ */
+export function parseBgpNeighborsFallback(payload: Record<string, unknown> | null): BgpPeerRow[] {
+  if (!isObj(payload)) return [];
+  const map = isObj(payload['neighbors']) ? payload['neighbors'] : payload;
+  const rows: BgpPeerRow[] = [];
+  for (const [id, raw] of Object.entries(map)) {
+    if (!isObj(raw)) continue; // skip scalar metadata keys (routerId, localAS, ...)
+    const state = str(raw, 'state');
+    rows.push({
+      neighborId: id,
+      remoteAs: num(raw, 'remoteAs'),
+      state,
+      established: /^established/i.test(state),
+      ...(num(raw, 'pfxRcd') !== null ? { prefixesReceived: num(raw, 'pfxRcd') } : {}),
+    });
+  }
+  return rows;
+}
+
+/**
+ * Parses one BGP learned-route recordset (searchBgproute4/6) into route rows.
+ * Each row is a route merged with ONE of its nexthops by the PHP controller:
+ * destination under `network` (defensively also `destination`), next-hop IP in
+ * `ip`, egress interface in `interfaceName`, iBGP/eBGP origin in `pathFrom`.
+ * Multi-path prefixes appear once per path — deduped to one row per destination.
+ */
+export function parseBgpRouteRows(res: OpnsenseApiResult | undefined): OspfRouteRow[] {
+  const rows: OspfRouteRow[] = [];
+  if (!res) return rows;
+  const seen = new Set<string>();
+  for (const row of quagga.rowsOf(res)) {
+    // FRR's per-path JSON carries the prefix as "network"; keep fallbacks in
+    // case a firmware version renames it. Rows without ANY parseable
+    // destination are skipped — peer monitoring is unaffected either way.
+    const dest = str(row, 'network') || str(row, 'destination') || str(row, 'prefix');
+    if (!dest || seen.has(dest)) continue;
+    seen.add(dest);
+    const gw = str(row, 'ip') || str(row, 'via');
+    rows.push({
+      destination: dest,
+      gateway: gw === '' || /^directly attached/i.test(gw) ? '' : gw,
+      protocol: 'bgp',
+      status: 'active',
+      extra: {
+        // The webapp Routes page renders extra.peer for non-OSPF rows (the egress
+        // interface — which tunnel carries that prefix).
+        ...(str(row, 'interfaceName') ? { peer: str(row, 'interfaceName') } : {}),
+        ...(str(row, 'pathFrom') ? { pathFrom: str(row, 'pathFrom') } : {}),
+      },
+    });
+  }
+  return rows;
+}
+
+/**
+ * Collects FRR routing-protocol state (OSPF + BGP) via REST. Returns null when
+ * the quagga REST surface is unavailable (caller falls back to SSH); otherwise a
+ * full result — including frrReachable=false for a stopped FRR, which IS the alert case.
  */
 export async function collectFrrViaRest(client: AxiosInstance): Promise<FrrOspfResult | null> {
   // 1) Service state — the single source of truth for installed/running.
@@ -87,13 +219,18 @@ export async function collectFrrViaRest(client: AxiosInstance): Promise<FrrOspfR
     return { frrInstalled: true, frrInspectable: true, ospfConfigured: true, frrReachable: false, neighbors: [], routes: [] };
   }
 
-  // 2) status === 'running' → collect both families in parallel (all best-effort).
-  const [v4ovRes, v6ovRes, v4neighRes, v4routeRes, v6routeRes] = await Promise.all([
+  // 2) status === 'running' → collect OSPF (both families) + BGP in ONE parallel
+  // batch — all best-effort; a single failing endpoint must not sink the rest.
+  const [v4ovRes, v6ovRes, v4neighRes, v4routeRes, v6routeRes, bgpSumRes, bgpNeighRes, bgpRoute4Res, bgpRoute6Res] = await Promise.all([
     quagga.getOspfOverview(client).catch(() => undefined),
     quagga.getOspfv3Overview(client).catch(() => undefined),
     quagga.searchOspfNeighbors(client).catch(() => undefined),
     quagga.searchOspfRoutes(client).catch(() => undefined),
     quagga.searchOspfv3Routes(client).catch(() => undefined),
+    quagga.getBgpSummary(client).catch(() => undefined),
+    quagga.getBgpNeighbors(client).catch(() => undefined),
+    quagga.searchBgpRoutesV4(client).catch(() => undefined),
+    quagga.searchBgpRoutesV6(client).catch(() => undefined),
   ]);
 
   const v4ov = v4ovRes ? quagga.responseOf(v4ovRes) : null;
@@ -101,10 +238,21 @@ export async function collectFrrViaRest(client: AxiosInstance): Promise<FrrOspfR
   const v4HasData = overviewHasData(v4ov);
   const v6HasData = overviewHasData(v6ov);
 
-  if (!v4HasData && !v6HasData) {
-    // FRR is running but reports no OSPF state at all → OSPF not configured on
-    // this box (or the diagnostics plugin itself is broken). Out of scope — stay
-    // silent rather than raise a false "FRR down" critical.
+  // BGP (v0.11.0): the summary is the source of truth for "does this box run
+  // BGP" — peers reported, or at least a local AS / router ID present. The
+  // neighbors endpoint is only a fallback peer source when the summary is empty.
+  const bgpSummaryPayload = bgpSumRes ? quagga.responseOf(bgpSumRes) : null;
+  let bgpPeers = parseBgpSummary(bgpSummaryPayload);
+  if (bgpPeers.length === 0 && bgpNeighRes) {
+    bgpPeers = parseBgpNeighborsFallback(quagga.responseOf(bgpNeighRes));
+  }
+  const bgpLocalAs = parseBgpLocalAs(bgpSummaryPayload);
+  const bgpConfigured = bgpPeers.length > 0 || bgpLocalAs !== null;
+
+  if (!v4HasData && !v6HasData && !bgpConfigured) {
+    // FRR is running but reports NO routing-protocol state at all (no OSPF
+    // overviews, no BGP peers/localAS) → nothing configured on this box. Out of
+    // scope — stay silent rather than raise a false "FRR down" critical.
     return { frrInstalled: true, frrInspectable: true, ospfConfigured: false, frrReachable: false, neighbors: [], routes: [] };
   }
 
@@ -168,18 +316,33 @@ export async function collectFrrViaRest(client: AxiosInstance): Promise<FrrOspfR
     }
   }
 
+  // 6) BGP learned routes (v0.11.0) — one row per destination per family.
+  const bgpRoutesV4 = parseBgpRouteRows(bgpRoute4Res);
+  const bgpRoutesV6 = parseBgpRouteRows(bgpRoute6Res);
+
+  // Router ID: OSPF overviews first, BGP summary as fallback (BGP-only boxes).
   const routerId = (v4ov && typeof v4ov['routerId'] === 'string' ? v4ov['routerId'] : '') ||
-    (v6ov && typeof v6ov['routerId'] === 'string' ? v6ov['routerId'] : null);
+    (v6ov && typeof v6ov['routerId'] === 'string' ? v6ov['routerId'] : '') ||
+    parseBgpRouterId(bgpSummaryPayload) || null;
+
+  const bgp: FrrBgpSection = {
+    configured: bgpConfigured,
+    peers: bgpPeers,
+    ...(bgpLocalAs !== null ? { localAs: bgpLocalAs } : {}),
+    v4RoutesLearned: bgpRoutesV4.length,
+    v6RoutesLearned: bgpRoutesV6.length,
+  };
 
   return {
     frrInstalled: true,
     frrInspectable: true, // configd runs vtysh as root server-side — no permission lockout possible
-    ospfConfigured: true,
+    ospfConfigured: v4HasData || v6HasData,
     frrReachable: true,
-    routerId: routerId || null,
+    routerId,
     neighbors,
     v4RoutesLearned: seenV4.size,
     v6RoutesLearned: seenV6.size,
-    routes: [...routes, ...seenV6.values()],
+    routes: [...routes, ...seenV6.values(), ...bgpRoutesV4, ...bgpRoutesV6],
+    bgp,
   };
 }

@@ -166,7 +166,17 @@ const identity = resolvePluginIdentity({
   // or intentionally off → silent; stopped = installed but down → CRITICAL;
   // running → full neighbor/route collection). The vtysh-over-SSH path remains as
   // an automatic fallback for firmware without the quagga REST area.
-  version: '0.10.0',
+  // 0.11.0 — BGP monitoring joins OSPF on the same REST data path: the quagga
+  // diagnostics API also exposes bgpsummary (per-AFI peer sessions with state +
+  // pfxRcd), bgpneighbors and searchBgproute4/6 learned-route recordsets — all
+  // core code in CE + BE. The FRR check now collects BOTH protocols in one
+  // parallel batch: BGP peers surface as routing.bgp.* metrics + a bgpPeers
+  // table, BGP-learned prefixes merge into the Routes page with protocol 'bgp'
+  // (egress interface in extra.peer), and conditions fire per non-Established
+  // peer (warning) plus "all BGP sessions down" (critical — on a gateway that
+  // usually means the WAN default route is gone). A box running FRR with NEITHER
+  // OSPF nor BGP configured stays silent; the legacy SSH fallback remains OSPF-only.
+  version: '0.11.0',
   vendors: ['opnsense'],
   // 'planning' advertises the /plan endpoint (multi-device intents) so the API
   // can offer bulk rollout + tunnel provisioning flows in the webapp.
@@ -1176,6 +1186,22 @@ function descriptorsFromMetrics(metrics: Record<string, unknown>): MetricDescrip
   if (Array.isArray(metrics['ospfNeighbors']) && (metrics['ospfNeighbors'] as unknown[]).length > 0) {
     push({ key: 'ospfNeighbors', label: 'OSPF Neighbors', type: 'string', visualization: 'table', group: 'Routing', columns: ['version', 'neighborId', 'interfaceName', 'state', 'status'], intervalMs: INVENTORY_INTERVAL_MS });
   }
+  // BGP (v0.11.0) — only present on boxes that actually run BGP.
+  if (typeof metrics['routing.bgp.peersTotal'] === 'number') {
+    push({ key: 'routing.bgp.peersTotal', label: 'BGP Peers', type: 'number', visualization: 'text', group: 'Routing', intervalMs: INVENTORY_INTERVAL_MS });
+  }
+  if (typeof metrics['routing.bgp.peersEstablished'] === 'number') {
+    push({ key: 'routing.bgp.peersEstablished', label: 'BGP Peers Established', type: 'number', visualization: 'text', group: 'Routing', intervalMs: INVENTORY_INTERVAL_MS });
+  }
+  if (typeof metrics['routing.bgp.routesV4'] === 'number') {
+    push({ key: 'routing.bgp.routesV4', label: 'BGP Routes v4', type: 'number', visualization: 'text', group: 'Routing', intervalMs: INVENTORY_INTERVAL_MS });
+  }
+  if (typeof metrics['routing.bgp.routesV6'] === 'number') {
+    push({ key: 'routing.bgp.routesV6', label: 'BGP Routes v6', type: 'number', visualization: 'text', group: 'Routing', intervalMs: INVENTORY_INTERVAL_MS });
+  }
+  if (Array.isArray(metrics['bgpPeers']) && (metrics['bgpPeers'] as unknown[]).length > 0) {
+    push({ key: 'bgpPeers', label: 'BGP Peers', type: 'string', visualization: 'table', group: 'Routing', columns: ['neighborId', 'remoteAs', 'state'], intervalMs: INVENTORY_INTERVAL_MS });
+  }
 
   // Fallback: any other numeric metric becomes a text card so nothing is lost.
   for (const [key, value] of Object.entries(metrics)) {
@@ -1227,13 +1253,13 @@ const PLUGIN_OPTIONS: PluginOptionDescriptor[] = [
   },
   {
     key: 'frrMonitorIntervalSec',
-    label: 'FRR/OSPF check interval (seconds)',
+    label: 'FRR routing-protocol check interval (seconds)',
     type: 'integer' as const,
     default: DEFAULT_FRR_MONITOR_INTERVAL_SEC,
     min: 0,
     max: 86400,
     description:
-      'How often the plugin checks FRR/OSPF routing-protocol state — via the appliance\'s own REST diagnostics API (the same data path as its Diagnostics → Routing screen: configd runs vtysh as root on the box, so NO SSH slot is required and it works in both Community and Business Edition), falling back to vtysh over a bound SSH slot only on firmware without the quagga REST area. Catches a dead or flapping FRR daemon that silently drops OSPF-learned routes — traffic to routed segments then blackholes while the box still answers ping and REST. The optional os-frr package\'s state is reflected: not installed / disabled → silent, stopped → critical alert. 0 disables.',
+      'How often the plugin checks FRR routing-protocol state (OSPF + BGP) — via the appliance\'s own REST diagnostics API (the same data path as its Diagnostics → Routing screen: configd runs vtysh as root on the box, so NO SSH slot is required and it works in both Community and Business Edition), falling back to vtysh over a bound SSH slot only on firmware without the quagga REST area (that legacy path covers OSPF only). Catches a dead or flapping FRR daemon that silently drops learned routes — traffic to routed segments then blackholes while the box still answers ping and REST. The optional os-frr package\'s state is reflected: not installed / disabled → silent, stopped → critical alert; per-protocol data (OSPF adjacencies, BGP sessions + learned prefixes) appears only for protocols actually configured on the box. 0 disables.',
   },
   {
     key: 'enableInventoryCache',
@@ -2064,18 +2090,22 @@ async function collectAndPushHostStates(
 
 const updateSearches = new Map<string, UpdateSearchEntry>(); // key = management address
 
-// --- FRR/OSPF monitoring (routing-protocol health, REST-first) --------------
-// A dead FRR daemon silently drops every OSPF-learned route while the box keeps
+// --- FRR routing-protocol monitoring (OSPF + BGP, REST-first) ---------------
+// A dead FRR daemon silently drops every learned route while the box keeps
 // answering ping + REST (the 2026-11-15 GWST03 mail blackhole). The check runs
 // INLINE at its own cadence (option `frrMonitorIntervalSec`, default 5 min, 0
 // disables). PRIMARY path since v0.10.0: the appliance's REST diagnostics API
 // (/api/quagga/* — configd runs vtysh as root server-side; no SSH slot or frr
-// group membership needed, CE + BE alike). Fallback for firmware without that
-// area: vtysh over a bound SSH slot (frrOspf.ts) with per-vtysh `timeout 3`
-// guards. A FRR-down result is a successful run (it IS the alert case), so it
-// re-checks on schedule; only a total failure (null from both paths) does not
-// advance the cadence and retries on the next beat. The last successful result
-// is cached per host and re-emitted between collections (absent = keep previous).
+// group membership needed, CE + BE alike). Since v0.11.0 one parallel batch
+// collects BOTH protocols: OSPF overviews/neighbors/routes (v4+v6) and BGP
+// summary/peers/route tables — a protocol with no data is simply not configured
+// on that box (silent, metric-free). Fallback for firmware without the quagga
+// REST area: vtysh over a bound SSH slot (frrOspf.ts, OSPF-only) with per-vtysh
+// `timeout 3` guards. A FRR-down result is a successful run (it IS the alert
+// case), so it re-checks on schedule; only a total failure (null from both
+// paths) does not advance the cadence and retries on the next beat. The last
+// successful result is cached per host and re-emitted between collections
+// (absent = keep previous).
 
 const frrEntries = new Map<string, FrrOspfEntry>(); // key = management address
 const frrCache = new Map<string, FrrOspfResult>(); // last successful result per host
@@ -2322,14 +2352,29 @@ app.post('/monitoring', async (req, res) => {
           status: n.full ? 'up' : 'down',
         }));
       }
+      // BGP (v0.11.0, REST path only) — boxes without BGP stay metric-free.
+      if (frrResult.bgp?.configured) {
+        metrics['routing.bgp.peersTotal'] = frrResult.bgp.peers.length;
+        metrics['routing.bgp.peersEstablished'] = frrResult.bgp.peers.filter((p) => p.established).length;
+        if (typeof frrResult.bgp.v4RoutesLearned === 'number') metrics['routing.bgp.routesV4'] = frrResult.bgp.v4RoutesLearned;
+        if (typeof frrResult.bgp.v6RoutesLearned === 'number') metrics['routing.bgp.routesV6'] = frrResult.bgp.v6RoutesLearned;
+        if (frrResult.bgp.peers.length > 0) {
+          metrics['bgpPeers'] = frrResult.bgp.peers.map((p) => ({
+            neighborId: p.neighborId,
+            remoteAs: p.remoteAs ?? null,
+            state: p.state || (p.established ? 'Established' : 'down'),
+          }));
+        }
+      }
     }
 
-    // OSPF-learned routes → cross-device Routes page. Merged into the SAME
+    // OSPF + BGP learned routes → cross-device Routes page. Merged into the SAME
     // `routes` metric only when this poll emits it (inventory-due polls — on
     // metrics-only beats the key is absent and the API must not touch the
-    // table). protocol 'ospf' keeps these rows distinct from static/connected
-    // ones in the PK; a FRR that is DOWN yields no rows, so stale OSPF routes
-    // are wiped at ingest (they left the kernel RIB too — exactly what we want).
+    // table). protocol 'ospf'/'bgp' keeps these rows distinct from static/
+    // connected ones in the PK; a FRR that is DOWN yields no rows, so stale
+    // learned routes are wiped at ingest (they left the kernel RIB too — exactly
+    // what we want).
     if (frrResult !== null && frrResult.frrReachable && Array.isArray(metrics['routes']) && frrResult.routes.length > 0) {
       metrics['routes'] = [...(metrics['routes'] as unknown[]), ...frrResult.routes];
     }

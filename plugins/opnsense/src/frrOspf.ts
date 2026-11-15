@@ -19,6 +19,12 @@
  * state to user/group `frr`, so the SSH fallback needs a root slot (or a member
  * of group frr) — see deriveFrrConditions' permission warning.
  *
+ * Protocol scope: since v0.11.0 BGP monitoring (peers + learned routes) exists
+ * ONLY on the REST path (frrRest.ts reads /api/quagga/diagnostics/bgpsummary,
+ * bgpneighbors and searchBgproute4/6). This SSH fallback stays OSPF-only — a box
+ * that needs the legacy path AND runs BGP simply gets no `bgp` section in its
+ * result (deriveFrrConditions treats an absent section as "BGP not reported").
+ *
  * Data collected in ONE SSH exec (section markers, same style as zfsSsh.ts):
  *   - FRR installed?        [ -d /usr/local/etc/frr ] (permission-free) + ls listing
  *                           (read access only — OPNsense locks the dir to frr:frr,
@@ -62,22 +68,50 @@ export interface OspfNeighborRow {
   address?: string | null;
 }
 
-/** One OSPF-learned route entry as parsed from `show ip[v6] route ospf[6]`.
- * Field names match the API's cross-device `routes` table contract exactly, so
- * rows can be merged into the plugin's `routes` metric verbatim (protocol
- * 'ospf' keeps them distinct from static/connected rows in the PK). */
+/** One learned route entry (OSPF or BGP) as parsed from the quagga diagnostics
+ * API or vtysh. Field names match the API's cross-device `routes` table contract
+ * exactly, so rows can be merged into the plugin's `routes` metric verbatim —
+ * protocol 'ospf'/'bgp' keeps them distinct from static/connected rows in the PK. */
 export interface OspfRouteRow {
   /** Destination network as CIDR ("10.25.10.0/24", "fe80::/64"). */
   destination: string;
   /** Next-hop gateway address ('' = summary / directly connected / unknown). */
   gateway: string;
-  protocol: 'ospf';
+  protocol: 'ospf' | 'bgp';
   /** Administrative distance from the "[dist/metric]" token (null when absent). */
   distance?: number | null;
   /** Route metric/cost from the "[dist/metric]" token (null when absent). */
   metric?: number | null;
   status: 'active';
   extra?: Record<string, unknown>;
+}
+
+/** One BGP peer session as reported by the quagga diagnostics API (v0.11.0). */
+export interface BgpPeerRow {
+  /** Peer address — the key of FRR's `peers` map (IP or neighbor name). */
+  neighborId: string;
+  /** Remote AS number, when reported. */
+  remoteAs?: number | null;
+  /** Raw session state ('Established', 'Active', 'Connect', ...); '' when absent. */
+  state: string;
+  /** True when the session is fully established. */
+  established: boolean;
+  /** Prefixes received from this peer (only meaningful when established). */
+  prefixesReceived?: number | null;
+}
+
+/** BGP section of an FRR collection result (v0.11.0, REST path only — the legacy
+ * SSH fallback remains OSPF-only). Absent on results that came from the SSH path. */
+export interface FrrBgpSection {
+  /** At least one peer is reported (or a local AS / router ID is present) = BGP runs here. */
+  configured: boolean;
+  /** All BGP sessions across address families, deduped by peer. */
+  peers: BgpPeerRow[];
+  /** Count of BGP-learned routes in the FRR RIB per family (0 when none). */
+  v4RoutesLearned?: number | null;
+  v6RoutesLearned?: number | null;
+  /** This box's local AS, when reported. */
+  localAs?: number | null;
 }
 
 /** One complete FRR/OSPF collection for a host. */
@@ -99,9 +133,11 @@ export interface FrrOspfResult {
   /** Count of OSPF-learned routes in the FRR RIB (null = not parseable / unreachable). */
   v4RoutesLearned?: number | null;
   v6RoutesLearned?: number | null;
-  /** All OSPF-learned route entries (v4 + v6 combined, each family head-capped
-   * at 400 rows), empty when FRR is unreachable. */
+  /** All learned route entries — OSPF (both families) plus BGP (v0.11.0, REST
+   * path only), each family head-capped — empty when FRR is unreachable. */
   routes: OspfRouteRow[];
+  /** BGP state (v0.11.0) — present on REST-path results; absent on the legacy SSH fallback. */
+  bgp?: FrrBgpSection;
 }
 
 /** One actionable FRR/OSPF condition (drives health reasons + notification mirroring). */
@@ -477,39 +513,67 @@ export function deriveFrrConditions(result: FrrOspfResult | null, hostname?: str
     return conditions;
   }
 
-  // FRR installed but OSPF never configured: nothing to monitor here (the box
-  // doesn't participate in the routing domain).
-  if (!result.ospfConfigured) return [];
+  // FRR installed but NO routing protocol configured (neither OSPF nor BGP):
+  // nothing to monitor here — the box doesn't participate in a routing domain.
+  if (!result.ospfConfigured && !result.bgp?.configured) return [];
 
   if (!result.frrReachable) {
     conditions.push({
       severity: 'critical',
-      message: `${label}: OSPF not responding via vtysh (FRR down?)`,
+      message: `${label}: FRR routing daemons not responding (down?)`,
       detail:
-        'OSPF-learned routes are likely missing from the kernel table — traffic to routed segments can blackhole while the box still answers ping. Check FRR on the appliance.',
+        'Routing-protocol state (OSPF/BGP) is unreachable — learned routes are likely missing from the kernel table and traffic to routed segments can blackhole while the box still answers ping. Check FRR on the appliance.',
       dedupeKey: `frr-ospf:${label}`,
     });
-    return conditions; // no adjacency data to evaluate while unreachable
+    return conditions; // no adjacency/peer data to evaluate while unreachable
   }
 
-  for (const n of result.neighbors) {
-    if (n.full) continue;
-    conditions.push({
-      severity: 'warning',
-      message: `${label}: OSPF${n.version === 'ospfv6' ? 'v6' : ''} neighbor ${n.neighborId} on ${n.interfaceName} is ${n.state} (not Full)`,
-      detail: `Adjacency not fully established — routes via ${n.interfaceName} are at risk. Check the link and OSPF configuration.`,
-      dedupeKey: `ospf-neighbor:${n.version}:${n.interfaceName}:${n.neighborId}`,
-    });
+  // OSPF block — only when this box participates in an OSPF domain.
+  if (result.ospfConfigured) {
+    for (const n of result.neighbors) {
+      if (n.full) continue;
+      conditions.push({
+        severity: 'warning',
+        message: `${label}: OSPF${n.version === 'ospfv6' ? 'v6' : ''} neighbor ${n.neighborId} on ${n.interfaceName} is ${n.state} (not Full)`,
+        detail: `Adjacency not fully established — routes via ${n.interfaceName} are at risk. Check the link and OSPF configuration.`,
+        dedupeKey: `ospf-neighbor:${n.version}:${n.interfaceName}:${n.neighborId}`,
+      });
+    }
+
+    const fullCount = result.neighbors.filter((n) => n.full).length;
+    if (fullCount > 0 && (result.v4RoutesLearned ?? 0) === 0 && (result.v6RoutesLearned ?? 0) === 0) {
+      conditions.push({
+        severity: 'warning',
+        message: `${label}: OSPF adjacencies up but zero routes learned`,
+        detail: 'All adjacencies are Full yet no routes were learned — check area membership, authentication and network statements.',
+        dedupeKey: `ospf-routes-zero:${label}`,
+      });
+    }
   }
 
-  const fullCount = result.neighbors.filter((n) => n.full).length;
-  if (fullCount > 0 && (result.v4RoutesLearned ?? 0) === 0 && (result.v6RoutesLearned ?? 0) === 0) {
-    conditions.push({
-      severity: 'warning',
-      message: `${label}: OSPF adjacencies up but zero routes learned`,
-      detail: 'All adjacencies are Full yet no routes were learned — check area membership, authentication and network statements.',
-      dedupeKey: `ospf-routes-zero:${label}`,
-    });
+  // BGP block (v0.11.0) — only when this box runs BGP (REST path).
+  const bgp = result.bgp;
+  if (bgp?.configured && bgp.peers.length > 0) {
+    for (const p of bgp.peers) {
+      if (p.established) continue;
+      conditions.push({
+        severity: 'warning',
+        message: `${label}: BGP peer ${p.neighborId} is ${p.state || 'down'} (not Established)`,
+        detail: `BGP session not established — routes via this peer are at risk. Check reachability, AS numbers and peering configuration.`,
+        dedupeKey: `bgp-peer:${p.neighborId}`,
+      });
+    }
+
+    const estCount = bgp.peers.filter((p) => p.established).length;
+    if (estCount === 0) {
+      conditions.push({
+        severity: 'critical',
+        message: `${label}: all ${bgp.peers.length} BGP session(s) down`,
+        detail:
+          'No BGP session is established — BGP-learned routes (often the WAN default route) are missing from the kernel table. Traffic can blackhole while the box still answers ping.',
+        dedupeKey: `bgp-all-down:${label}`,
+      });
+    }
   }
 
   return conditions;

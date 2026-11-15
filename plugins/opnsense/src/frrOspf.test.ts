@@ -411,6 +411,22 @@ describe('deriveFrrConditions', () => {
     expect(deriveFrrConditions({ ...base, ospfConfigured: false })).toEqual([]);
   });
 
+  it('still evaluates BGP conditions on a box with NO OSPF (v0.11.0 restructure)', () => {
+    const conds = deriveFrrConditions(
+      {
+        ...base,
+        ospfConfigured: false,
+        neighbors: [],
+        bgp: { configured: true, peers: [{ neighborId: '10.1.1.97', state: 'Active', established: false }] },
+      },
+      'GWST04'
+    );
+    // Per-peer warning + the all-down critical — none of this ran before v0.11
+    // because !ospfConfigured short-circuited the function.
+    expect(conds).toHaveLength(2);
+    expect(conds.map((c) => c.dedupeKey)).toEqual(['bgp-peer:10.1.1.97', 'bgp-all-down:GWST04']);
+  });
+
   it('raises a permission warning when FRR is installed but not inspectable by the bound user', () => {
     const conds = deriveFrrConditions(
       { ...base, frrInspectable: false, frrReachable: false, neighbors: [], routerId: null },
@@ -429,7 +445,9 @@ describe('deriveFrrConditions', () => {
     const conds = deriveFrrConditions({ ...base, frrReachable: false, neighbors: [], routerId: null }, 'GWST03');
     expect(conds).toHaveLength(1);
     expect(conds[0]).toMatchObject({ severity: 'critical', dedupeKey: 'frr-ospf:GWST03' });
-    expect(conds[0].message).toBe('GWST03: OSPF not responding via vtysh (FRR down?)');
+    // Protocol-neutral since v0.11.0 — the box may run BGP instead of (or in
+    // addition to) OSPF, and a stopped FRR takes both down at once.
+    expect(conds[0].message).toBe('GWST03: FRR routing daemons not responding (down?)');
     expect(conds[0].detail).toBeTruthy();
   });
 

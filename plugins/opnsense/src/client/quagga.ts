@@ -24,9 +24,20 @@ import { get, OpnsenseApiResult } from './http';
  *   GET /api/quagga/diagnostics/searchOspfroute       → v4 learned-route recordset rows[]
  *   GET /api/quagga/diagnostics/ospfv3overview        → v6 overview (routerId, running time)
  *   GET /api/quagga/diagnostics/searchOspfv3route     → v6 learned-route recordset rows[]
+ *   GET /api/quagga/diagnostics/bgpsummary            → BGP session summary (per-AFI peers: state/pfxRcd/remoteAs)
+ *   GET /api/quagga/diagnostics/bgpneighbors          → BGP neighbor detail (fallback peer source)
+ *   GET /api/quagga/diagnostics/searchBgproute4       → v4 BGP learned-route recordset rows[]
+ *   GET /api/quagga/diagnostics/searchBgproute6       → v6 BGP learned-route recordset rows[]
  *
  * There is NO per-neighbor-state endpoint for OSPFv6 — v6 adjacency detail comes
  * from the route nextHops (interfaceName) and the overview's area interfaces.
+ *
+ * BGP note: when bgpd is not running, configd returns nothing and the PHP
+ * controller's `json_decode(...) ?? []` fallback yields `{response: []}` / an
+ * empty recordset — that IS the "BGP not configured" signal (verified live on
+ * a box with FRR up but no BGP peers). The summary payload mirrors FRR's own
+ * `show bgp summary json` shape (AFI-keyed sections, each with a `peers` map),
+ * so parsers must tolerate both the multi-AFI and the flat per-AFI layouts.
  */
 
 /** Page size for the search endpoints — far above any realistic neighbor/route count on one appliance. */
@@ -88,6 +99,26 @@ export function getOspfv3Overview(client: AxiosInstance): Promise<OpnsenseApiRes
 /** GET /api/quagga/diagnostics/searchOspfv3route — v6 OSPF learned-route recordset. */
 export function searchOspfv3Routes(client: AxiosInstance): Promise<OpnsenseApiResult> {
   return get(client, '/api/quagga/diagnostics/searchOspfv3route', { current: 1, rowCount: SEARCH_ROW_COUNT });
+}
+
+/** GET /api/quagga/diagnostics/bgpsummary — BGP session summary (per-AFI peers). */
+export function getBgpSummary(client: AxiosInstance): Promise<OpnsenseApiResult> {
+  return get(client, '/api/quagga/diagnostics/bgpsummary');
+}
+
+/** GET /api/quagga/diagnostics/bgpneighbors — BGP neighbor detail (fallback peer source). */
+export function getBgpNeighbors(client: AxiosInstance): Promise<OpnsenseApiResult> {
+  return get(client, '/api/quagga/diagnostics/bgpneighbors');
+}
+
+/** GET /api/quagga/diagnostics/searchBgproute4 — v4 BGP learned-route recordset. */
+export function searchBgpRoutesV4(client: AxiosInstance): Promise<OpnsenseApiResult> {
+  return get(client, '/api/quagga/diagnostics/searchBgproute4', { current: 1, rowCount: SEARCH_ROW_COUNT });
+}
+
+/** GET /api/quagga/diagnostics/searchBgproute6 — v6 BGP learned-route recordset. */
+export function searchBgpRoutesV6(client: AxiosInstance): Promise<OpnsenseApiResult> {
+  return get(client, '/api/quagga/diagnostics/searchBgproute6', { current: 1, rowCount: SEARCH_ROW_COUNT });
 }
 
 /**
