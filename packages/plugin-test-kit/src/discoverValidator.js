@@ -13,7 +13,7 @@ const CAPABILITIES = new Set([
   'monitoring', 'inventory', 'configuration', 'planning', 'deviceState',
   'ssh', 'filesystem', 'probe', 'sshConsole', 'updates', 'securityChecks',
   'quickActions', 'identityProvider', 'secretsProvider', 'fileRepo',
-  'webFetch', 'inventorySync', 'logIngestion', 'radius',
+  'webFetch', 'inventorySync', 'logIngestion', 'radius', 'notificationSender',
 ]);
 
 const METRIC_TYPES = new Set(['number', 'string', 'boolean', 'enum']);
