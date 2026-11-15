@@ -139,7 +139,16 @@ const identity = resolvePluginIdentity({
   // FRR escalates device health to critical with status-badge reasons, mirrors
   // into the notification center (stable dedupe keys, resolve on recovery) and
   // surfaces a Routing metric group. No SSH slot bound → skipped silently.
-  version: '0.7.0',
+  // 0.8.0 — OSPF-learned routes on the cross-device Routes page: the FRR/OSPF
+  // check now also captures the actual learned route entries (vtysh "show ip
+  // route ospf" / "show ipv6 route ospf6", head-capped at 400 rows per family)
+  // and merges them into the `routes` metric with protocol 'ospf' — every
+  // OSPF-learned prefix now shows up on the Routes page next to static/
+  // connected routes, carrying distance/metric plus the egress interface in
+  // extra. A FRR that is DOWN yields no rows → stale OSPF routes are wiped at
+  // ingest (they left the kernel RIB too). The learned-route COUNT metrics stay
+  // format-agnostic (awk over the raw table) so alerting never depends on parsing.
+  version: '0.8.0',
   vendors: ['opnsense'],
   // 'planning' advertises the /plan endpoint (multi-device intents) so the API
   // can offer bulk rollout + tunnel provisioning flows in the webapp.
@@ -2276,6 +2285,16 @@ app.post('/monitoring', async (req, res) => {
           status: n.full ? 'up' : 'down',
         }));
       }
+    }
+
+    // OSPF-learned routes → cross-device Routes page. Merged into the SAME
+    // `routes` metric only when this poll emits it (inventory-due polls — on
+    // metrics-only beats the key is absent and the API must not touch the
+    // table). protocol 'ospf' keeps these rows distinct from static/connected
+    // ones in the PK; a FRR that is DOWN yields no rows, so stale OSPF routes
+    // are wiped at ingest (they left the kernel RIB too — exactly what we want).
+    if (frrResult !== null && frrResult.frrReachable && Array.isArray(metrics['routes']) && frrResult.routes.length > 0) {
+      metrics['routes'] = [...(metrics['routes'] as unknown[]), ...frrResult.routes];
     }
 
     // Actionable conditions from the (possibly cached) result — drive both the

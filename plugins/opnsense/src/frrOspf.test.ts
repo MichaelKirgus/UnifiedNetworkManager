@@ -11,6 +11,8 @@ import {
   parseOspfV6Neighbors,
   parseRouterId,
   parseRouteCount,
+  splitRouteSection,
+  parseOspfRouteTable,
   decideFrrCollection,
   deriveFrrConditions,
   DEFAULT_FRR_MONITOR_INTERVAL_SEC,
@@ -54,6 +56,22 @@ const ROUTER_ID_SECTION = [
   ' OSPF Routing Process, Router ID: 10.1.1.94',
 ].join('\n');
 
+/** `show ip route ospf` — real table layout: flag chars (">", "*"), [dist/metric],
+ * "via <gw>, <iface>, <age>" with trailing commas, plus a summary row without next hop. */
+const V4_ROUTE_TABLE = [
+  NOISE,
+  'Codes: C - connected, S - static, R - RIP, O - OSPF, B - BGP,',
+  'O>* 10.25.10.0/24 [110/2] via 10.1.1.78, wg0, 00:43:11',
+  'O>* 10.25.20.0/24 [110/4] via 10.1.1.98, wg2, 01:12:05',
+  'O    10.25.0.0/16 [110/1] is a summary, 02:00:00',
+].join('\n');
+
+/** `show ipv6 route ospf6` — same shape with v6 addresses. */
+const V6_ROUTE_TABLE = [
+  NOISE,
+  'O>* fe80::/64 [110/1] via fe80::1, wg4, 00:43:11',
+].join('\n');
+
 /** The full combined script output for a healthy box (all sections). */
 const HEALTHY_COMBINED = [
   '__FRR_INSTALLED__',
@@ -65,10 +83,13 @@ const HEALTHY_COMBINED = [
   V4_NEIGH_FULL,
   '__V6_NEIGH__',
   V6_NEIGH_FULL,
+  // Route sections carry the awk count line FIRST, then the (capped) table.
   '__V4_ROUTES__',
-  '128',
+  '3',
+  V4_ROUTE_TABLE,
   '__V6_ROUTES__',
-  '0',
+  '1',
+  V6_ROUTE_TABLE,
   '__ROUTER_ID__',
   ROUTER_ID_SECTION,
 ].join('\n');
@@ -101,8 +122,10 @@ describe('splitFrrSections', () => {
     expect(s.ospfConfigured).toContain('/usr/local/etc/frr/frr.conf');
     expect(s.v4Neigh).toContain('10.25.0.1');
     expect(s.v6Neigh).toContain('10.25.0.2');
-    expect(s.v4Routes.trim()).toBe('128');
-    expect(s.v6Routes.trim()).toBe('0');
+    // Route sections = awk count line + table rows (the new layout).
+    expect(s.v4Routes.split('\n')[0]).toBe('3');
+    expect(s.v4Routes).toContain('O>* 10.25.10.0/24 [110/2] via 10.1.1.78, wg0, 00:43:11');
+    expect(s.v6Routes.split('\n')[0]).toBe('1');
     expect(s.routerId).toContain('Router ID: 10.1.1.94');
   });
 
@@ -229,6 +252,86 @@ describe('parseRouterId / parseRouteCount', () => {
   });
 });
 
+// --- OSPF route-table parsing (Routes page rows) --------------------------------
+
+describe('splitRouteSection', () => {
+  it('splits the awk count line from the remaining table rows', () => {
+    const s = splitRouteSection(`3\n${V4_ROUTE_TABLE}`);
+    expect(s.countLine).toBe('3');
+    expect(s.table).toBe(V4_ROUTE_TABLE);
+  });
+
+  it('returns empty parts for an empty section', () => {
+    expect(splitRouteSection('')).toEqual({ countLine: '', table: '' });
+  });
+});
+
+describe('parseOspfRouteTable', () => {
+  it('parses v4 route rows (flag chars, [dist/metric], via gw + interface with trailing commas)', () => {
+    const rows = parseOspfRouteTable(V4_ROUTE_TABLE, 'ospf');
+    expect(rows).toHaveLength(3);
+    expect(rows[0]).toEqual({
+      destination: '10.25.10.0/24',
+      gateway: '10.1.1.78',
+      protocol: 'ospf',
+      distance: 110,
+      metric: 2,
+      status: 'active',
+      extra: { version: 'ospf', interfaceName: 'wg0' },
+    });
+    expect(rows[1]).toMatchObject({
+      destination: '10.25.20.0/24',
+      gateway: '10.1.1.98',
+      metric: 4,
+      extra: { version: 'ospf', interfaceName: 'wg2' },
+    });
+  });
+
+  it('parses summary routes (no next hop) and does NOT mistake the age token for an interface', () => {
+    const rows = parseOspfRouteTable(V4_ROUTE_TABLE, 'ospf');
+    expect(rows[2]).toEqual({
+      destination: '10.25.0.0/16',
+      gateway: '',
+      protocol: 'ospf',
+      distance: 110,
+      metric: 1,
+      status: 'active',
+      extra: { version: 'ospf' }, // "is a summary, 02:00:00" — age rejected as interface
+    });
+  });
+
+  it('parses v6 route rows with the ospfv6 version tag', () => {
+    const rows = parseOspfRouteTable(V6_ROUTE_TABLE, 'ospfv6');
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toEqual({
+      destination: 'fe80::/64',
+      gateway: 'fe80::1',
+      protocol: 'ospf',
+      distance: 110,
+      metric: 1,
+      status: 'active',
+      extra: { version: 'ospfv6', interfaceName: 'wg4' },
+    });
+  });
+
+  it('skips noise lines and the Codes header (non-O first tokens)', () => {
+    const rows = parseOspfRouteTable([NOISE, 'Codes: C - connected, S - static, O - OSPF', 'garbage line'].join('\n'), 'ospf');
+    expect(rows).toEqual([]);
+  });
+
+  it('omits distance/metric when the [d/m] token is absent', () => {
+    const rows = parseOspfRouteTable('O>* 10.9.9.0/24 via 10.1.1.78, wg0, 00:01:00\n', 'ospf');
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toEqual({
+      destination: '10.9.9.0/24',
+      gateway: '10.1.1.78',
+      protocol: 'ospf',
+      status: 'active',
+      extra: { version: 'ospf', interfaceName: 'wg0' },
+    });
+  });
+});
+
 // --- decideFrrCollection (cadence gate) ----------------------------------------
 
 describe('decideFrrCollection', () => {
@@ -290,6 +393,7 @@ describe('deriveFrrConditions', () => {
     ],
     v4RoutesLearned: 128,
     v6RoutesLearned: 0,
+    routes: [],
   };
 
   it('returns [] for no fresh data (caller must not touch known-sets)', () => {

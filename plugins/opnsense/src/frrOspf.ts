@@ -16,7 +16,10 @@
  *   - OSPF configured?      grep '^router (ospf|ospfv3)' over the frr confs
  *   - v4 neighbors          vtysh "show ip ospf neighbor"
  *   - v6 neighbors          vtysh "show ipv6 ospf6 neighbor"
- *   - learned route counts  vtysh "show ip route ospf" | grep -c '^O' (v4 + v6)
+ *   - learned routes        vtysh "show ip route ospf" / "show ipv6 route ospf6":
+ *                           a format-agnostic line count (awk, drives the alerting)
+ *                           PLUS the actual table rows (head-capped at 400 per
+ *                           family — display detail for the Routes page)
  *   - router ID             vtysh "show ip ospf"
  *
  * Contract:
@@ -49,6 +52,24 @@ export interface OspfNeighborRow {
   address?: string | null;
 }
 
+/** One OSPF-learned route entry as parsed from `show ip[v6] route ospf[6]`.
+ * Field names match the API's cross-device `routes` table contract exactly, so
+ * rows can be merged into the plugin's `routes` metric verbatim (protocol
+ * 'ospf' keeps them distinct from static/connected rows in the PK). */
+export interface OspfRouteRow {
+  /** Destination network as CIDR ("10.25.10.0/24", "fe80::/64"). */
+  destination: string;
+  /** Next-hop gateway address ('' = summary / directly connected / unknown). */
+  gateway: string;
+  protocol: 'ospf';
+  /** Administrative distance from the "[dist/metric]" token (null when absent). */
+  distance?: number | null;
+  /** Route metric/cost from the "[dist/metric]" token (null when absent). */
+  metric?: number | null;
+  status: 'active';
+  extra?: Record<string, unknown>;
+}
+
 /** One complete FRR/OSPF collection for a host. */
 export interface FrrOspfResult {
   /** /usr/local/etc/frr exists with config files — false = box has no FRR at all (out of scope, silent). */
@@ -64,6 +85,9 @@ export interface FrrOspfResult {
   /** Count of OSPF-learned routes in the FRR RIB (null = not parseable / unreachable). */
   v4RoutesLearned?: number | null;
   v6RoutesLearned?: number | null;
+  /** All OSPF-learned route entries (v4 + v6 combined, each family head-capped
+   * at 400 rows), empty when FRR is unreachable. */
+  routes: OspfRouteRow[];
 }
 
 /** One actionable FRR/OSPF condition (drives health reasons + notification mirroring). */
@@ -105,10 +129,20 @@ const FRR_SSH_COMMAND = [
   'timeout 3 vtysh -c "show ip ospf neighbor" 2>&1',
   'echo __V6_NEIGH__',
   'timeout 3 vtysh -c "show ipv6 ospf6 neighbor" 2>&1',
+  // One vtysh call per family into a temp file, then read it twice: an awk
+  // line count (format-agnostic — drives the alerting) and the table itself
+  // (head-capped at 400 rows — display detail for the Routes page). Keeping
+  // exactly two route vtysh calls preserves today's worst-case time budget.
   'echo __V4_ROUTES__',
-  'timeout 3 vtysh -c "show ip route ospf" 2>/dev/null | grep -cE "^O"',
+  'timeout 3 vtysh -c "show ip route ospf" 2>/dev/null > /tmp/unm_frr_v4.txt',
+  "awk 'BEGIN{n=0} /^O/{n++} END{print n}' /tmp/unm_frr_v4.txt 2>/dev/null || echo 0",
+  'head -400 /tmp/unm_frr_v4.txt 2>/dev/null',
+  'rm -f /tmp/unm_frr_v4.txt',
   'echo __V6_ROUTES__',
-  'timeout 3 vtysh -c "show ipv6 route ospf6" 2>/dev/null | grep -cE "^O"',
+  'timeout 3 vtysh -c "show ipv6 route ospf6" 2>/dev/null > /tmp/unm_frr_v6.txt',
+  "awk 'BEGIN{n=0} /^O/{n++} END{print n}' /tmp/unm_frr_v6.txt 2>/dev/null || echo 0",
+  'head -400 /tmp/unm_frr_v6.txt 2>/dev/null',
+  'rm -f /tmp/unm_frr_v6.txt',
   'echo __ROUTER_ID__',
   'timeout 3 vtysh -c "show ip ospf" 2>&1 | head -4',
 ].join('\n');
@@ -232,11 +266,81 @@ export function parseRouterId(section: string): string | null {
   return m ? m[1] : null;
 }
 
-/** Parses a route-count section (single integer from `grep -c`). */
+/** Parses a route-count line (single integer from the script's awk count). */
 export function parseRouteCount(section: string): number | null {
   const s = section.trim();
   if (!/^\d+$/.test(s)) return null;
   return parseInt(s, 10);
+}
+
+/** Splits a combined route section into its awk count line and the remaining
+ * table rows. The script emits the count FIRST (before `head` of the vtysh
+ * output), so the first non-empty line is always the count — even when the
+ * table itself starts with FRR log noise. */
+export function splitRouteSection(section: string): { countLine: string; table: string } {
+  const lines = section.split('\n');
+  for (let i = 0; i < lines.length; i++) {
+    if (lines[i].trim() !== '') return { countLine: lines[i], table: lines.slice(i + 1).join('\n') };
+  }
+  return { countLine: '', table: '' };
+}
+
+/** Parses one OSPF route-table section into rows. Accepts raw vtysh output of
+ * "show ip route ospf" / "show ipv6 route ospf6":
+ *   O>* 10.25.10.0/24 [110/2] via 10.1.1.78, wg0, 00:43:11
+ *   O    10.25.0.0/16 [110/1] is a summary, 02:00:00
+ * Route lines start with the protocol code "O" plus optional flag chars (">",
+ * "*"). After the destination CIDR comes an optional "[dist/metric]" token and
+ * either "via <gw>, <iface>, <age>" or "is a summary"/"is directly connected".
+ * The "Codes: …" header, FRR log noise and any non-CIDR line are skipped. */
+export function parseOspfRouteTable(section: string, version: 'ospf' | 'ospfv6'): OspfRouteRow[] {
+  const rows: OspfRouteRow[] = [];
+  for (const rawLine of section.split('\n')) {
+    if (!rawLine.trim() || isNoiseLine(rawLine)) continue;
+    const t = rawLine.trim().split(/\s+/);
+    // Route lines start with the protocol code "O" plus optional flag chars.
+    if (!/^O[>*]*$/.test(t[0])) continue;
+    const destination = (t[1] ?? '').replace(/,+$/, '');
+    if (!destination.includes('/')) continue; // require a CIDR — rejects header noise
+    let distance: number | null = null;
+    let metric: number | null = null;
+    for (const tok of t) {
+      const m = tok.match(/^\[(\d+)\/(\d+)\]$/);
+      if (m) {
+        distance = parseInt(m[1], 10);
+        metric = parseInt(m[2], 10);
+        break;
+      }
+    }
+    let gateway = '';
+    let interfaceName: string | undefined;
+    const viaIdx = t.indexOf('via');
+    if (viaIdx >= 0) {
+      // "via <gw>, <iface>, <age>" — FRR prints trailing commas on the tokens.
+      const gwTok = (t[viaIdx + 1] ?? '').replace(/,+$/, '');
+      if (isIpLike(gwTok)) gateway = gwTok;
+      const ifaceTok = (t[viaIdx + 2] ?? '').replace(/,+$/, '').replace(/[()]/g, '');
+      // Interface names start with a letter — this rejects the age token when
+      // no interface is printed ("via <gw>, <age>").
+      if (ifaceTok !== '' && !/^\d/.test(ifaceTok)) interfaceName = ifaceTok;
+    } else {
+      // "O <cidr> [d/m] is a summary, 02:00:00" / "is directly connected, wg0".
+      // The token after the comma may be an interface OR an age — interface
+      // names start with a letter, ages with a digit.
+      const m = rawLine.match(/is (?:a summary|directly connected)\s*,\s*([\w.\-]+)/i);
+      if (m && !/^\d/.test(m[1])) interfaceName = m[1];
+    }
+    rows.push({
+      destination,
+      gateway,
+      protocol: 'ospf',
+      ...(distance !== null ? { distance } : {}),
+      ...(metric !== null ? { metric } : {}),
+      status: 'active',
+      extra: { version, ...(interfaceName ? { interfaceName } : {}) },
+    });
+  }
+  return rows;
 }
 
 /**
@@ -276,14 +380,23 @@ export async function collectFrrOspfViaSsh(
     ...parseOspfV6Neighbors(sections.v6Neigh),
   ];
 
+  // Route sections carry the awk count line FIRST, then the (head-capped)
+  // table. The count is format-agnostic and drives alerting; the parsed rows
+  // feed the cross-device Routes page via the plugin's `routes` metric.
+  const v4RouteSection = splitRouteSection(sections.v4Routes);
+  const v6RouteSection = splitRouteSection(sections.v6Routes);
+
   return {
     frrInstalled,
     ospfConfigured,
     frrReachable,
     routerId: parseRouterId(sections.routerId) ?? null,
     neighbors,
-    v4RoutesLearned: frrReachable ? parseRouteCount(sections.v4Routes) : null,
-    v6RoutesLearned: frrReachable ? parseRouteCount(sections.v6Routes) : null,
+    v4RoutesLearned: frrReachable ? parseRouteCount(v4RouteSection.countLine) : null,
+    v6RoutesLearned: frrReachable ? parseRouteCount(v6RouteSection.countLine) : null,
+    routes: frrReachable
+      ? [...parseOspfRouteTable(v4RouteSection.table, 'ospf'), ...parseOspfRouteTable(v6RouteSection.table, 'ospfv6')]
+      : [],
   };
 }
 
