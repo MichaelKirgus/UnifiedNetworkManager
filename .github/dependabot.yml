@@ -88,6 +88,15 @@ updates:
         update-types: ["minor", "patch"]
 
   - package-ecosystem: "npm"
+    directory: "/plugins/basic-notifications"
+    schedule: { interval: weekly }
+    open-pull-requests-limit: 5
+    groups:
+      dependencies:
+        # no dependency-type → groups production AND development deps together
+        update-types: ["minor", "patch"]
+
+  - package-ecosystem: "npm"
     directory: "/plugins/basic-auth"
     schedule: { interval: weekly }
     open-pull-requests-limit: 5

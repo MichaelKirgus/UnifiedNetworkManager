@@ -23,6 +23,7 @@ import {
   FilesystemRequestBody,
   FilesystemResponseBody,
   MetricDescriptor,
+  NotificationChannelDescriptor,
   PluginOptionDescriptor,
   ProbeRequestBody,
   QuickAction,
@@ -65,7 +66,12 @@ export interface DiscoveryExtras {
    *  informational for the webapp's repo picker. */
   fileRepo?: Record<string, unknown>;  /** Ready-made automation rule drafts (see automations.ts) — advertised in
    *  /discover and served by GET /automations/templates alongside built-ins. */
-  automationTemplates?: AutomationTemplate[];}
+  automationTemplates?: AutomationTemplate[];
+  /** Notification-sender plugins: the channel catalog this plugin can deliver
+   *  to (capability 'notificationSender'). The API persists it on the plugin row
+   *  and renders per-channel config forms from `fields`; delivery goes through
+   *  POST /notify with a rendered title+body. */
+  notificationChannels?: NotificationChannelDescriptor[];}
 
 export interface PluginServerOptions {
   identity: PluginIdentity;
@@ -150,6 +156,9 @@ export function buildDiscoverPayload(identity: PluginIdentity, extras?: Discover
     ...(e.fileRepo !== undefined ? { fileRepo: e.fileRepo } : {}),
     ...(Array.isArray(e.automationTemplates) && e.automationTemplates.length > 0
       ? { automationTemplates: e.automationTemplates }
+      : {}),
+    ...(Array.isArray(e.notificationChannels) && e.notificationChannels.length > 0
+      ? { notificationChannels: e.notificationChannels }
       : {}),
   };
 }

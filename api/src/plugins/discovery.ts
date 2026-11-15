@@ -53,6 +53,8 @@ export interface PluginIdentity {
   deviceSupport?: DeviceSupport;
   /** Ready-made automation rule drafts advertised in /discover (validated at normalization). */
   automationTemplates?: AutomationTemplate[];
+  /** Notification channel catalog of a notification-sender plugin (validated at normalization). */
+  notificationChannels?: unknown[];
   /** mTLS state — true when this discovery pass reached the plugin over https. */
   tlsLive?: boolean;
 }
@@ -103,6 +105,52 @@ function strArray(raw: unknown): string[] | undefined {
 function strOrNull(raw: unknown): string | undefined {
   if (typeof raw !== 'string' || raw.trim() === '') return undefined;
   return raw.trim();
+}
+
+/**
+ * Defensively normalizes a raw `notificationChannels` catalog from /discover:
+ * keeps only entries with a non-empty string type + label and a fields array,
+ * coerces each field to the expected shape (dropping malformed ones), and drops
+ * duplicate channel types. Returns undefined when nothing valid remains — an
+ * invalid catalog must never fail discovery.
+ */
+function normalizeNotificationChannels(raw: unknown): unknown[] | undefined {
+  if (!Array.isArray(raw)) return undefined;
+  const out: unknown[] = [];
+  const seen = new Set<string>();
+  for (const item of raw) {
+    if (!item || typeof item !== 'object') continue;
+    const e = item as Record<string, unknown>;
+    const type = strOrNull(e.type);
+    const label = strOrNull(e.label);
+    if (!type || !label || seen.has(type)) continue;
+    const fields: unknown[] = [];
+    if (Array.isArray(e.fields)) {
+      for (const f of e.fields) {
+        if (!f || typeof f !== 'object') continue;
+        const fe = f as Record<string, unknown>;
+        const name = strOrNull(fe.name);
+        const flabel = strOrNull(fe.label);
+        const input = ['text', 'number', 'select', 'boolean'].includes(String(fe.input)) ? String(fe.input) : undefined;
+        if (!name || !flabel || !input) continue;
+        const field: Record<string, unknown> = { name, label: flabel, input };
+        if (fe.required === true) field.required = true;
+        const options = strArray(fe.options);
+        if (options && input === 'select') field.options = options;
+        const placeholder = strOrNull(fe.placeholder);
+        if (placeholder) field.placeholder = placeholder;
+        fields.push(field);
+      }
+    }
+    seen.add(type);
+    const entry: Record<string, unknown> = { type, label, fields };
+    const description = strOrNull(e.description);
+    if (description) entry.description = description;
+    const secretTypes = strArray(e.secretTypes);
+    if (secretTypes) entry.secretTypes = secretTypes;
+    out.push(entry);
+  }
+  return out.length > 0 ? out : undefined;
 }
 
 /** Normalizes one gating condition object, dropping empty fields. */
@@ -356,6 +404,7 @@ interface RawDiscover {
   credentialSlots?: unknown;
   deviceSupport?: unknown;
   automationTemplates?: unknown;
+  notificationChannels?: unknown;
 }
 
 /**
@@ -390,6 +439,7 @@ export function normalizeDiscoverPayload(raw: RawDiscover, sourceEndpoint: strin
     credentialSlots: normalizeCredentialSlots(raw.credentialSlots),
     deviceSupport: normalizeDeviceSupport(raw.deviceSupport as DeviceSupport | undefined),
     automationTemplates: normalizeAutomationTemplates(raw.automationTemplates),
+    notificationChannels: normalizeNotificationChannels(raw.notificationChannels),
   };
 }
 
@@ -483,6 +533,10 @@ async function upsertPlugin(identity: PluginIdentity): Promise<void> {
   // already dropped invalid entries, so a non-undefined value is safe to store.
   const hasTemplates = Array.isArray(identity.automationTemplates) && identity.automationTemplates.length > 0;
   const automationTemplatesJson = hasTemplates ? JSON.stringify(identity.automationTemplates) : null;
+  // Notification channel catalog: same guard — the mDNS TXT path carries none,
+  // so a TXT upsert must never wipe the catalog set by the HTTP polling path.
+  const hasChannels = Array.isArray(identity.notificationChannels) && identity.notificationChannels.length > 0;
+  const notificationChannelsJson = hasChannels ? JSON.stringify(identity.notificationChannels) : null;
   // mTLS state: only the HTTP-polling path knows it (mDNS TXT carries none),
   // so an undefined value must never wipe what a probe established.
   const hasTlsLive = typeof identity.tlsLive === 'boolean';
@@ -514,6 +568,7 @@ async function upsertPlugin(identity: PluginIdentity): Promise<void> {
         ...(hasSlots ? { credentialSlots: credentialSlotsJson } : {}),
         ...(deviceSupportJson !== null ? { deviceSupport: deviceSupportJson } : {}),
         ...(automationTemplatesJson !== null ? { automationTemplates: automationTemplatesJson } : {}),
+        ...(notificationChannelsJson !== null ? { notificationChannels: notificationChannelsJson } : {}),
         ...(hasBuildTag ? { buildTag: identity.buildTag } : {}),
         ...(hasTlsLive ? { tlsLive: identity.tlsLive ?? false } : {}),
         lastSeenAt: now,
@@ -538,6 +593,7 @@ async function upsertPlugin(identity: PluginIdentity): Promise<void> {
       credentialSlots: credentialSlotsJson,
       deviceSupport: deviceSupportJson,
       automationTemplates: automationTemplatesJson,
+      notificationChannels: notificationChannelsJson,
       buildTag: hasBuildTag ? identity.buildTag : null,
       ...(hasTlsLive ? { tlsLive: identity.tlsLive ?? false } : {}),
       createdAt: now,

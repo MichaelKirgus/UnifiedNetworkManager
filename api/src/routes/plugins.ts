@@ -69,6 +69,17 @@ function serializePlugin(row: any) {
     deviceModels,
     credentialSlots: parseCredentialSlots(row.credentialSlots),
     deviceSupport: parseDeviceSupport(row.deviceSupport),
+    // Notification channel catalog (capability 'notificationSender') — the webapp's
+    // channel-creation form renders fields from it. Null for non-sender plugins.
+    notificationChannels: (() => {
+      if (typeof row.notificationChannels !== 'string' || row.notificationChannels.length === 0) return null;
+      try {
+        const parsed = JSON.parse(row.notificationChannels);
+        return Array.isArray(parsed) ? parsed : null;
+      } catch {
+        return null;
+      }
+    })(),
     // Number of metric descriptors the plugin declared in /discover — the
     // "how many metrics can this plugin emit" figure for the Plugins page.
     declaredMetricCount: (() => {

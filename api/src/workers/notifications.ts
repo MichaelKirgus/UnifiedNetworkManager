@@ -1,7 +1,7 @@
 import { initWorker, trackBeat } from './stats';
 import { LEADER_KEYS } from './leader';
 import { getEffectiveSettingValue } from '../systemSettings';
-import { autoResolveStaleCertificateNotifications, autoResolveStaleDeviceNotifications, closeStaleRecoveryNotes, pruneOldNotifications } from '../notifications';
+import { autoResolveStaleCertificateNotifications, autoResolveStaleDeviceNotifications, closeStaleRecoveryNotes, pruneOldDeliveries, pruneOldNotifications } from '../notifications';
 
 /**
  * Notifications worker (leader-gated).
@@ -66,6 +66,14 @@ export function startNotificationsWorker(): () => void {
       if (pruned > 0) {
         // eslint-disable-next-line no-console
         console.log(`[notifications] pruned ${pruned} terminal notification(s)`);
+      }
+
+      // 5. Delivery audit retention — keep the last two weeks of send attempts.
+      const deliveryCutoff = new Date(Date.now() - 14 * 24 * 60 * 60 * 1000).toISOString();
+      const prunedDeliveries = await pruneOldDeliveries(deliveryCutoff);
+      if (prunedDeliveries > 0) {
+        // eslint-disable-next-line no-console
+        console.log(`[notifications] pruned ${prunedDeliveries} old delivery record(s)`);
       }
     }).catch((err) => {
       // eslint-disable-next-line no-console

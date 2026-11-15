@@ -34,6 +34,9 @@ import threatIntelRouter from './routes/threatIntel';
 import topologyRouter from './routes/topology';
 import logsRouter from './routes/logs';
 import notificationsRouter from './routes/notifications';
+// Notification senders — delivery channels + rules (self-defining paths).
+import notificationChannelsRouter from './routes/notificationChannels';
+import notificationRulesRouter from './routes/notificationRules';
 import systemRouter from './routes/system';
 import settingsRouter from './routes/settings';
 import caRouter from './routes/ca';
@@ -314,6 +317,10 @@ async function main(): Promise<void> {
   api.use(logsRouter);
   // Notification center (bell badge, panel, full page with filters + prefs).
   api.use(notificationsRouter);
+  // Notification senders — delivery channels (CRUD + test) and rules
+  // (filter → templates → channels), plus the delivery audit trail.
+  api.use(notificationChannelsRouter);
+  api.use(notificationRulesRouter);
   // System/HA observability + runtime tuning (/system/status, /system/settings).
   api.use(systemRouter);
   // Central system settings (the Settings page) — app-wide knobs.

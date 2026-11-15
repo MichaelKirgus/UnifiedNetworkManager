@@ -1,0 +1,27 @@
+{
+  "name": "unm-plugin-basic-notifications",
+  "version": "0.1.0",
+  "license": "EUPL-1.2",
+  "private": true,
+  "description": "UNM Basic Notification Plugin (capability `notificationSender`) — stateless transport for rendered UNM notifications over the three most common easy-to-implement channels: email (SMTP), generic webhooks and Telegram bot messages. The API owns rules/channels/templates; this plugin only delivers one already-rendered title+body per channel type.",
+  "main": "dist/src/index.js",
+  "scripts": {
+    "dev": "ts-node-dev --respawn src/index.ts",
+    "build": "tsc",
+    "start": "node dist/src/index.js"
+  },
+  "dependencies": {
+    "@unm/plugin-sdk": "file:../../packages/plugin-sdk",
+    "axios": "^1.6.0",
+    "nodemailer": "^6.9.0"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.6",
+    "@types/cors": "^2.8.17",
+    "@types/node": "^20.10.0",
+    "@types/nodemailer": "^6.4.0",
+    "typescript": "^5.3.2",
+    "ts-node-dev": "^2.0.0",
+    "ts-node": "^10.9.2"
+  }
+}

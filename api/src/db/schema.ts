@@ -462,6 +462,11 @@ export const plugins = pgTable('plugins', {
   // templates alongside the API's built-in templates; the webapp opens the rule
   // builder pre-filled from one. NULL = none advertised.
   automationTemplates: text('automationTemplates'),
+  // Notification channel catalog declared by a notification-sender plugin in
+  // /discover (JSON array of { type, label, description?, fields[], secretTypes?
+  // }). Drives the webapp's channel-creation form (fields rendered dynamically)
+  // and API-side config validation. NULL = not a sender / no catalog.
+  notificationChannels: text('notificationChannels'),
   // mTLS state (Stage 1): true when discovery last confirmed this plugin is
   // serving TLS with a CA-signed leaf on its conventional port. The API's
   // pluginHttp factory uses https+client-cert for these, plain http otherwise.
@@ -2475,6 +2480,97 @@ export const notificationPrefs = pgTable(
     // A severity absent from a source's list is hidden for that user.
     visibility: text('visibility').notNull().default('{}'),
     updatedAt: text('updatedAt').notNull(),
+  }
+);
+
+// Notification SENDER channels — one row per configured delivery endpoint
+// (an SMTP account, a webhook URL, a Telegram chat, …). The API owns ALL of
+// this metadata; the actual transport is a notification-sender plugin
+// (capability 'notificationSender') resolved via `pluginId`. `config` holds
+// the NON-SECRET fields declared by the plugin's channel catalog (validated
+// against it on write); credentials live in the pluggable secrets provider,
+// referenced by `secretId` and decrypted on demand at dispatch time — never
+// stored here. See notificationDispatch.ts for the delivery path.
+export const notificationChannels = pgTable(
+  'notification_channels',
+  {
+    id: text('id').primaryKey(),
+    // User-facing name (e.g. "Ops team email") — shown in rule pickers + UI.
+    name: text('name').notNull(),
+    // The notification-sender plugin that delivers this channel type.
+    pluginId: text('pluginId').notNull(),
+    // Channel-type id from the plugin's catalog (e.g. 'smtp', 'webhook').
+    channelType: text('channelType').notNull(),
+    enabled: boolean('enabled').notNull().default(true),
+    // JSON object of non-secret config fields (validated against the
+    // plugin-declared field schema at write time).
+    config: text('config').notNull().default('{}'),
+    // Bound secret id (secrets table) carrying this channel's credentials,
+    // or NULL when the channel type needs none.
+    secretId: text('secretId'),
+    createdAt: text('createdAt').notNull(),
+    updatedAt: text('updatedAt').notNull(),
+  },
+  (table) => {
+    return {
+      idxNotificationChannelsPlugin: index('idx_notification_channels_plugin').on(table.pluginId),
+    };
+  }
+);
+
+// Notification RULES — which notifications fire where. A rule is a filter over
+// the notification center (severity, source, device tags/vendors/types,
+// title/message regex) plus the target channels and the message templates.
+// Evaluation happens in JS at dispatch time (notificationDispatch.ts), so the
+// filter is stored as one JSON document — same shape convention as automations'
+// trigger/action blocks. `channelIds` references notification_channels rows;
+// a rule with no matching channel simply never delivers.
+export const notificationRules = pgTable(
+  'notification_rules',
+  {
+    id: text('id').primaryKey(),
+    name: text('name').notNull(),
+    enabled: boolean('enabled').notNull().default(true),
+    // JSON filter document (see NotificationRuleFilter in notificationDispatch.ts):
+    // { severities?, sources?, deviceTags?, vendors?, deviceTypes?, titleRegex?,
+    // messageRegex? } — all optional; absent = no constraint on that dimension.
+    filter: text('filter').notNull().default('{}'),
+    // JSON string array of notification_channels ids this rule delivers to.
+    channelIds: text('channelIds').notNull().default('[]'),
+    // {{token}} templates rendered per firing (see renderNotificationTemplate).
+    titleTemplate: text('titleTemplate').notNull(),
+    bodyTemplate: text('bodyTemplate').notNull().default(''),
+    // Minimum seconds between two deliveries of THIS rule (any severity) —
+    // checked against notification_deliveries. 0 = no cooldown.
+    cooldownSec: integer('cooldownSec').notNull().default(300),
+    createdAt: text('createdAt').notNull(),
+    updatedAt: text('updatedAt').notNull(),
+  }
+);
+
+// Notification DELIVERY audit log — one row per (rule, channel) delivery
+// attempt. Powers the UI's "last delivery" status, the rule cooldown check,
+// and debugging of failed senders. Pruned by age like other logs.
+export const notificationDeliveries = pgTable(
+  'notification_deliveries',
+  {
+    id: text('id').primaryKey(),
+    // NULL for manual "Send test" deliveries (no rule involved).
+    ruleId: text('ruleId'),
+    channelId: text('channelId').notNull(),
+    // The notification row that triggered this delivery (null for test sends).
+    notificationId: text('notificationId'),
+    // sent | failed
+    status: text('status').notNull(),
+    // Human-readable failure reason (plugin error / transport error), null on success.
+    error: text('error'),
+    sentAt: text('sentAt').notNull(),
+  },
+  (table) => {
+    return {
+      idxNotificationDeliveriesRule: index('idx_notification_deliveries_rule').on(table.ruleId, table.sentAt),
+      idxNotificationDeliveriesChannel: index('idx_notification_deliveries_channel').on(table.channelId, table.sentAt),
+    };
   }
 );
 

@@ -4,6 +4,8 @@ import clsx from 'clsx';
 import { BellRing, CheckCheck, Info, OctagonX, Settings2, TriangleAlert, X } from 'lucide-react';
 import { Layout } from '../components/Layout';
 import { DataTable, DataTableColumn } from '../components/DataTable';
+import { NotificationChannelsTab } from '../components/NotificationChannelsTab';
+import { NotificationRulesTab } from '../components/NotificationRulesTab';
 import { api, Notification, NotificationSeverity, NotificationSource } from '../api/client';
 import { can } from '../auth/permissions';
 import { useTimeFormat } from '../utils/time';
@@ -68,6 +70,7 @@ export default function Notifications() {
   const [deviceId, setDeviceId] = useState('');
   const [search, setSearch] = useState('');
   const [showSettings, setShowSettings] = useState(false);
+  const [tab, setTab] = useState<'inbox' | 'rules' | 'channels'>('inbox');
 
   const queryClient = useQueryClient();
   const devicesQuery = useQuery({ queryKey: ['devices'], queryFn: api.devices });
@@ -257,7 +260,31 @@ export default function Notifications() {
         )
       }
     >
+      {/* Inbox | Rules | Channels — the inbox is the notification center;
+          rules + channels configure where matching notifications get delivered. */}
+      <div className="mb-4 flex w-fit gap-1 rounded-md border border-border bg-card p-0.5">
+        {(
+          [
+            { id: 'inbox', label: 'Inbox' },
+            { id: 'rules', label: 'Rules' },
+            { id: 'channels', label: 'Channels' },
+          ] as const
+        ).map((t) => (
+          <button
+            key={t.id}
+            type="button"
+            onClick={() => setTab(t.id)}
+            className={clsx(
+              'rounded px-3 py-1.5 text-sm font-medium transition-colors',
+              tab === t.id ? 'bg-primary text-white' : 'text-secondary hover:bg-muted'
+            )}
+          >
+            {t.label}
+          </button>
+        ))}
+      </div>
 
+      {tab === 'inbox' && (<>
         {showSettings && can('notifications:write') && (
           <VisibilitySettings onDone={() => setShowSettings(false)} />
         )}
@@ -334,6 +361,10 @@ export default function Notifications() {
             },
           ]}
         />
+      </>)}
+
+      {tab === 'rules' && <NotificationRulesTab />}
+      {tab === 'channels' && <NotificationChannelsTab />}
     </Layout>
   );
 }

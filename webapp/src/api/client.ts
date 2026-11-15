@@ -1728,6 +1728,105 @@ export interface NotificationPrefs {
   visibility: Record<string, NotificationSeverity[]>;
 }
 
+// --- Notification senders (rules + channels) ---------------------------------
+
+/** One non-secret config field of a channel descriptor (drives dynamic forms). */
+export interface NotificationChannelField {
+  name: string;
+  label: string;
+  input: 'text' | 'number' | 'select' | 'boolean';
+  required?: boolean;
+  options?: string[];
+  placeholder?: string;
+}
+
+/** One deliverable channel type a sender plugin supports (its catalog). */
+export interface NotificationChannelDescriptor {
+  type: string;
+  label: string;
+  description?: string;
+  fields: NotificationChannelField[];
+  /** Secret types acceptable as this channel's bound credential. Empty = none needed. */
+  secretTypes?: string[];
+}
+
+/** One configured delivery endpoint (see GET /notification-channels). */
+export interface NotificationChannel {
+  id: string;
+  name: string;
+  pluginId: string;
+  channelType: string;
+  enabled: boolean;
+  config: Record<string, unknown>;
+  secretId?: string | null;
+  createdAt: string;
+  updatedAt: string;
+  pluginName?: string | null;
+  typeLabel?: string | null;
+  lastDelivery?: { status: 'sent' | 'failed'; sentAt: string; error: string | null } | null;
+}
+
+/** Create/update payload for a channel. */
+export interface NotificationChannelInput {
+  name: string;
+  pluginId: string;
+  channelType: string;
+  enabled?: boolean;
+  config?: Record<string, unknown>;
+  secretId?: string | null;
+}
+
+/** Rule filter — all fields optional (empty = matches everything). */
+export interface NotificationRuleFilter {
+  severities?: NotificationSeverity[];
+  sources?: NotificationSource[];
+  deviceTags?: string[];
+  vendors?: string[];
+  deviceTypes?: string[];
+  titleRegex?: string | null;
+  messageRegex?: string | null;
+}
+
+/** One notification rule (see GET /notification-rules). */
+export interface NotificationRule {
+  id: string;
+  name: string;
+  enabled: boolean;
+  filter: NotificationRuleFilter;
+  channelIds: string[];
+  titleTemplate: string;
+  bodyTemplate: string;
+  cooldownSec: number;
+  createdAt: string;
+  updatedAt: string;
+  channelNames?: string[];
+}
+
+/** Create/update payload for a rule. */
+export interface NotificationRuleInput {
+  name: string;
+  enabled?: boolean;
+  filter?: NotificationRuleFilter;
+  channelIds?: string[];
+  titleTemplate: string;
+  bodyTemplate?: string;
+  cooldownSec?: number;
+}
+
+/** One delivery attempt (audit trail; see GET /notification-deliveries). */
+export interface NotificationDelivery {
+  id: string;
+  ruleId?: string | null;
+  ruleName?: string | null;
+  channelId: string;
+  channelName?: string | null;
+  channelType?: string | null;
+  notificationId?: string | null;
+  status: 'sent' | 'failed';
+  error?: string | null;
+  sentAt: string;
+}
+
 /** Which nav items can carry a badge count (mirrors the API's /counts keys). */
 export type NavCountKey = 'notifications' | 'plans' | 'certificates' | 'updates' | 'securityChecks';
 
@@ -2941,6 +3040,8 @@ export interface Plugin {
   credentialSlots?: CredentialSlotDescriptor[] | null;
   /** Device support metadata — license/help/docs + supported-device matrix (null = not advertised). */
   deviceSupport?: DeviceSupport | null;
+  /** Channel catalog of a notification-sender plugin (null for non-senders). */
+  notificationChannels?: NotificationChannelDescriptor[] | null;
   /** Number of metric descriptors declared in /discover (how many metrics it can emit); null when unknown. */
   declaredMetricCount?: number | null;
   lastSeenAt?: string | null;
@@ -4579,6 +4680,34 @@ export const api = {
   notificationPrefs: () => apiFetch<NotificationPrefs>('/notifications/prefs'),
   setNotificationPrefs: (visibility: Record<string, NotificationSeverity[]>) =>
     apiFetch<NotificationPrefs>('/notifications/prefs', { method: 'PUT', body: JSON.stringify({ visibility }) }),
+
+  // Notification senders — channels + rules + delivery audit trail.
+  notificationChannels: () => apiFetch<NotificationChannel[]>('/notification-channels'),
+  createNotificationChannel: (input: NotificationChannelInput) =>
+    apiFetch<NotificationChannel>('/notification-channels', { method: 'POST', body: JSON.stringify(input) }),
+  updateNotificationChannel: (id: string, input: Partial<NotificationChannelInput>) =>
+    apiFetch<NotificationChannel>(`/notification-channels/${id}`, { method: 'PUT', body: JSON.stringify(input) }),
+  deleteNotificationChannel: (id: string) =>
+    apiFetch<void>(`/notification-channels/${id}`, { method: 'DELETE' }),
+  testNotificationChannel: (id: string) =>
+    apiFetch<{ sent: boolean }>(`/notification-channels/${id}/test`, { method: 'POST' }),
+
+  notificationRules: () => apiFetch<NotificationRule[]>('/notification-rules'),
+  createNotificationRule: (input: NotificationRuleInput) =>
+    apiFetch<NotificationRule>('/notification-rules', { method: 'POST', body: JSON.stringify(input) }),
+  updateNotificationRule: (id: string, input: Partial<NotificationRuleInput>) =>
+    apiFetch<NotificationRule>(`/notification-rules/${id}`, { method: 'PUT', body: JSON.stringify(input) }),
+  deleteNotificationRule: (id: string) =>
+    apiFetch<void>(`/notification-rules/${id}`, { method: 'DELETE' }),
+
+  notificationDeliveries: (params?: { ruleId?: string; channelId?: string; limit?: number }) => {
+    const q = new URLSearchParams();
+    if (params?.ruleId) q.set('ruleId', params.ruleId);
+    if (params?.channelId) q.set('channelId', params.channelId);
+    if (params?.limit) q.set('limit', String(params.limit));
+    const suffix = q.toString() ? `?${q.toString()}` : '';
+    return apiFetch<NotificationDelivery[]>(`/notification-deliveries${suffix}`);
+  },
   // Per-user navigation preferences (order + hidden pages) — self-service.
   getNavPrefs: () => apiFetch<NavPreferences>('/auth/me/preferences'),
   setNavPrefs: (prefs: Partial<NavPreferences>) =>

@@ -135,6 +135,16 @@ export const CAPABILITIES = [
   // config from settings + CA state into a shared volume. Advertise when /discover
   // carries radius-management actions in `actions`.
   'radius',
+  // Delivers UNM notifications to external endpoints (email, webhooks, chat
+  // messengers, …). The API owns WHAT gets sent and TO WHOM (notification rules
+  // + channels in Postgres); the plugin is a stateless TRANSPORT that serves
+  // POST /notify with an already-rendered title+body. A plugin advertises its
+  // channel catalog via `notificationChannels` in /discover — each entry
+  // declares the non-secret config fields (rendered by the webapp) and which
+  // bound secret types it accepts for credentials. Adding a new service later =
+  // another catalog entry here or another plugin with this capability; no API
+  // or webapp changes needed. See NotificationChannelDescriptor + NotifyRequestBody.
+  'notificationSender',
 ] as const;
 export type PluginCapability = (typeof CAPABILITIES)[number];
 
@@ -1033,4 +1043,65 @@ export interface InventoryHostsQuery {
 /** Response of the API's internal GET /plugin/inventory/hosts endpoint. */
 export interface InventoryHostsResponse {
   snapshot: InventorySnapshot;
+}
+
+// ---------------------------------------------------------------------------
+// Notification senders (capability 'notificationSender') — plugins that deliver
+// UNM notifications to external endpoints. The API owns the notification RULES
+// (which events fire) and CHANNELS (where they go, incl. bound secrets); it
+// renders title/body from templates and brokers POST /notify here. The plugin
+// is a stateless transport: it knows how to deliver one rendered message over
+// one channel type, nothing about UNM's notification model.
+// ---------------------------------------------------------------------------
+
+/** One non-secret config field of a notification channel (webapp-rendered form). */
+export interface NotificationChannelField {
+  /** Stable key inside the channel's `config` object. */
+  name: string;
+  /** Human label for the form. */
+  label: string;
+  /** 'text' | 'number' | 'select' | 'boolean'. */
+  input: 'text' | 'number' | 'select' | 'boolean';
+  required?: boolean;
+  /** Closed value set — only meaningful with input 'select'. */
+  options?: string[];
+  placeholder?: string;
+}
+
+/** One deliverable channel type a sender plugin supports (its catalog). */
+export interface NotificationChannelDescriptor {
+  /** Stable channel-type id, e.g. 'smtp' | 'webhook' | 'telegram'. Unique per plugin. */
+  type: string;
+  /** Human label for the webapp's channel picker, e.g. "Email (SMTP)". */
+  label: string;
+  description?: string;
+  /** Non-secret config fields — rendered by the webapp, validated by the API. */
+  fields: NotificationChannelField[];
+  /** Secret types acceptable as this channel's bound credential (webapp filters
+   * the secret picker). Empty/absent = the channel needs no credentials. */
+  secretTypes?: string[];
+}
+
+/** Body of POST /notify as sent by the API to a notification-sender plugin. */
+export interface NotifyRequestBody {
+  /** Channel type from this plugin's catalog (the API validated it exists). */
+  channelType: string;
+  /** Non-secret config fields, already validated against the descriptor. */
+  config: Record<string, unknown>;
+  /** Decrypted credential fields of the bound secret (empty object when none). */
+  credentials: Record<string, string>;
+  severity: 'info' | 'warning' | 'critical';
+  /** Rendered by the API from the rule's title template. */
+  title: string;
+  /** Rendered by the API from the rule's body template (plain text). */
+  body: string;
+}
+
+/** Response of POST /notify — success or a human-readable delivery error. */
+export interface NotifyResponseBody {
+  success: boolean;
+  /** Human-readable failure reason (absent on success). */
+  error?: string;
+  /** Free-form details for the API's delivery audit log (e.g. message-id). */
+  details?: Record<string, unknown>;
 }

@@ -2,6 +2,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { and, eq, ilike, inArray, or, sql } from 'drizzle-orm';
 import { db, pool } from './db';
 import * as schema from './db/schema';
+import { dispatchNotification } from './notificationDispatch';
 
 /**
  * Notification center — shared service used by the API workers (device status
@@ -157,6 +158,11 @@ export async function emitNotification(input: EmitNotificationInput): Promise<st
         occurrences: 1,
         status: 'open',
       });
+      // External delivery (notification rules → sender plugins) — fire-and-forget.
+      // Only NEW rows dispatch: dedupe upserts above refresh an ongoing condition
+      // without re-sending; the race-fallback path below returns a row another
+      // replica already dispatched. dispatchNotification never throws.
+      void dispatchNotification(id);
       return id;
     } catch (err) {
       // Lost a dedupe race (another replica inserted the same key first) —
@@ -436,6 +442,15 @@ export async function autoResolveStaleDeviceNotifications(): Promise<number> {
 export async function pruneOldNotifications(cutoffIso: string): Promise<number> {
   const result = await pool.query(
     `DELETE FROM notifications WHERE "status" IN ('resolved', 'closed') AND "createdAt" < $1`,
+    [cutoffIso]
+  );
+  return result.rowCount ?? 0;
+}
+
+/** Retention sweep for the delivery audit log: drop send attempts older than the cutoff. */
+export async function pruneOldDeliveries(cutoffIso: string): Promise<number> {
+  const result = await pool.query(
+    `DELETE FROM notification_deliveries WHERE "sentAt" < $1`,
     [cutoffIso]
   );
   return result.rowCount ?? 0;

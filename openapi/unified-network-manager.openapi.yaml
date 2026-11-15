@@ -7688,6 +7688,254 @@ paths:
         '403':
           description: Missing notifications:write permission
 
+  /notification-channels:
+    get:
+      tags: [Notifications]
+      summary: List notification sender channels (with plugin name, type label and last delivery)
+      responses:
+        '200':
+          description: Channels, newest first
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/NotificationChannel'
+        '401':
+          description: Authentication required
+        '403':
+          description: Missing notifications:read permission
+    post:
+      tags: [Notifications]
+      summary: Create a notification sender channel
+      description: >-
+        The config object is validated against the selected plugin's declared
+        channel catalog (required fields, select options); unknown keys are
+        dropped. `secretId` binds a secret from the pluggable secrets provider;
+        its type must be accepted by the channel descriptor. Requires
+        `notifications:write`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/NotificationChannelInput'
+      responses:
+        '201':
+          description: The created channel
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NotificationChannel'
+        '400':
+          description: Validation error (unknown plugin/type, missing required field, bad secret type)
+        '401':
+          description: Authentication required
+        '403':
+          description: Missing notifications:write permission
+
+  /notification-channels/{id}:
+    parameters:
+      - in: path
+        name: id
+        required: true
+        schema: { type: string }
+    get:
+      tags: [Notifications]
+      summary: Get one notification sender channel
+      responses:
+        '200':
+          description: The channel
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NotificationChannel'
+        '401':
+          description: Authentication required
+        '403':
+          description: Missing notifications:read permission
+    put:
+      tags: [Notifications]
+      summary: Update a notification sender channel (partial)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/NotificationChannelInput'
+      responses:
+        '200':
+          description: The updated channel
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NotificationChannel'
+        '400':
+          description: Validation error
+        '401':
+          description: Authentication required
+        '403':
+          description: Missing notifications:write permission
+    delete:
+      tags: [Notifications]
+      summary: Delete a notification sender channel (and its delivery history)
+      responses:
+        '204':
+          description: Deleted
+        '401':
+          description: Authentication required
+        '403':
+          description: Missing notifications:write permission
+
+  /notification-channels/{id}/test:
+    post:
+      tags: [Notifications]
+      summary: Send a fixed test message through the channel
+      description: >-
+        Renders no rule — sends "[UNM] Test notification" straight to this
+        channel and records a delivery row (ruleId null). A transport failure
+        returns 502 with the plugin's error text. Requires `notifications:write`.
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Test message delivered
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [sent]
+                properties:
+                  sent: { type: boolean, enum: [true] }
+        '401':
+          description: Authentication required
+        '403':
+          description: Missing notifications:write permission
+        '502':
+          description: The channel's transport failed (error text in body)
+
+  /notification-rules:
+    get:
+      tags: [Notifications]
+      summary: List notification rules (with bound channel names)
+      responses:
+        '200':
+          description: Rules, newest first
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/NotificationRule'
+        '401':
+          description: Authentication required
+        '403':
+          description: Missing notifications:read permission
+    post:
+      tags: [Notifications]
+      summary: Create a notification rule
+      description: >-
+        A rule matches incoming notifications against its filter (all fields
+        optional — an empty filter matches everything), renders the title/body
+        templates and delivers to every bound channel. `cooldownSec` suppresses
+        re-firing within that window after the last delivery for this rule.
+        Requires `notifications:write`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/NotificationRuleInput'
+      responses:
+        '201':
+          description: The created rule
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NotificationRule'
+        '400':
+          description: Validation error (bad enum, invalid regex, unknown channel id)
+        '401':
+          description: Authentication required
+        '403':
+          description: Missing notifications:write permission
+
+  /notification-rules/{id}:
+    parameters:
+      - in: path
+        name: id
+        required: true
+        schema: { type: string }
+    put:
+      tags: [Notifications]
+      summary: Update a notification rule (partial)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/NotificationRuleInput'
+      responses:
+        '200':
+          description: The updated rule
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NotificationRule'
+        '400':
+          description: Validation error
+        '401':
+          description: Authentication required
+        '403':
+          description: Missing notifications:write permission
+    delete:
+      tags: [Notifications]
+      summary: Delete a notification rule (and its delivery history)
+      responses:
+        '204':
+          description: Deleted
+        '401':
+          description: Authentication required
+        '403':
+          description: Missing notifications:write permission
+
+  /notification-deliveries:
+    get:
+      tags: [Notifications]
+      summary: List notification delivery attempts (audit trail, newest first)
+      parameters:
+        - in: query
+          name: ruleId
+          required: false
+          schema: { type: string }
+          description: Filter to one rule
+        - in: query
+          name: channelId
+          required: false
+          schema: { type: string }
+          description: Filter to one channel
+        - in: query
+          name: limit
+          required: false
+          schema: { type: integer, default: 100, maximum: 500 }
+          description: Max rows (default 100, hard cap 500)
+      responses:
+        '200':
+          description: Delivery attempts, newest first
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/NotificationDelivery'
+        '401':
+          description: Authentication required
+        '403':
+          description: Missing notifications:read permission
+
   /users:
     get:
       tags: [Users]
@@ -10070,6 +10318,161 @@ components:
             items:
               type: string
               enum: [info, warning, critical]
+
+    NotificationChannelField:
+      type: object
+      description: >-
+        One config field of a channel descriptor as declared by the sender
+        plugin (drives dynamic form rendering in the UI).
+      required: [name, label, input]
+      properties:
+        name: { type: string }
+        label: { type: string }
+        input: { type: string, enum: [text, number, select, boolean] }
+        required: { type: boolean }
+        options:
+          type: array
+          items: { type: string }
+          description: Allowed values for `select` inputs
+        placeholder: { type: string }
+
+    NotificationChannelDescriptor:
+      type: object
+      description: >-
+        A channel type a sender plugin can deliver to (e.g. smtp, webhook,
+        telegram). Discovered via the plugin's /discover payload and stored on
+        the plugins row; config is validated against `fields` at write time.
+      required: [type, label, fields]
+      properties:
+        type: { type: string }
+        label: { type: string }
+        description: { type: string }
+        fields:
+          type: array
+          items:
+            $ref: '#/components/schemas/NotificationChannelField'
+        secretTypes:
+          type: array
+          items: { type: string }
+          description: Secret types accepted for this channel (empty = no secret needed)
+
+    NotificationChannel:
+      type: object
+      required: [id, name, pluginId, channelType, enabled, config, createdAt, updatedAt]
+      properties:
+        id: { type: string }
+        name: { type: string }
+        pluginId: { type: string }
+        channelType: { type: string, description: "Key into the plugin's channel catalog (smtp/webhook/telegram/...)" }
+        enabled: { type: boolean }
+        config: { type: object, additionalProperties: true, description: "Plugin-declared fields, validated against the descriptor" }
+        secretId: { type: [string, 'null'], description: "Bound secret (credentials) from the secrets provider; null when the channel needs none" }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+        pluginName: { type: [string, 'null'] }
+        typeLabel: { type: [string, 'null'], description: "Human label of the channelType from the catalog" }
+        lastDelivery:
+          type: object
+          nullable: true
+          properties:
+            status: { type: string, enum: [sent, failed] }
+            sentAt: { type: string, format: date-time }
+            error: { type: [string, 'null'] }
+
+    NotificationChannelInput:
+      type: object
+      required: [name, pluginId, channelType]
+      properties:
+        name: { type: string, minLength: 1, maxLength: 200 }
+        pluginId: { type: string }
+        channelType: { type: string }
+        enabled: { type: boolean }
+        config: { type: object, additionalProperties: true }
+        secretId: { type: [string, 'null'] }
+
+    NotificationRuleFilter:
+      type: object
+      description: >-
+        All fields optional — an empty filter matches every notification.
+        List fields are OR within the field (any match); different fields are
+        ANDed together. `deviceTags`/`vendors`/`deviceTypes` only apply to
+        device-sourced notifications (a rule with those set never matches a
+        system/plugin row). Regexes are case-insensitive; an invalid regex is
+        treated as unconstrained at dispatch time.
+      properties:
+        severities:
+          type: array
+          items: { type: string, enum: [info, warning, critical] }
+        sources:
+          type: array
+          items: { type: string, enum: [system, device, plugin] }
+        deviceTags:
+          type: array
+          items: { type: string }
+        vendors:
+          type: array
+          items: { type: string }
+        deviceTypes:
+          type: array
+          items: { type: string }
+        titleRegex: { type: [string, 'null'] }
+        messageRegex: { type: [string, 'null'] }
+
+    NotificationRule:
+      type: object
+      required: [id, name, enabled, filter, channelIds, titleTemplate, bodyTemplate, cooldownSec, createdAt, updatedAt]
+      properties:
+        id: { type: string }
+        name: { type: string }
+        enabled: { type: boolean }
+        filter:
+          $ref: '#/components/schemas/NotificationRuleFilter'
+        channelIds:
+          type: array
+          items: { type: string }
+        titleTemplate:
+          type: string
+          description: "Mustache-style template ({{notification.title}}, {{device.name}}, ...)"
+        bodyTemplate:
+          type: string
+          description: "Mustache-style template; empty = the raw notification message"
+        cooldownSec: { type: integer, minimum: 0, default: 300 }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+        channelNames:
+          type: array
+          items: { type: string }
+
+    NotificationRuleInput:
+      type: object
+      required: [name, titleTemplate]
+      properties:
+        name: { type: string, minLength: 1, maxLength: 200 }
+        enabled: { type: boolean }
+        filter:
+          $ref: '#/components/schemas/NotificationRuleFilter'
+        channelIds:
+          type: array
+          items: { type: string }
+        titleTemplate: { type: string, minLength: 1 }
+        bodyTemplate: { type: string }
+        cooldownSec: { type: integer, minimum: 0 }
+
+    NotificationDelivery:
+      type: object
+      description: One delivery attempt of a rule (or test send) to one channel.
+      required: [id, channelId, status, sentAt]
+      properties:
+        id: { type: string }
+        ruleId: { type: [string, 'null'], description: "Null for test sends" }
+        ruleName: { type: [string, 'null'] }
+        channelId: { type: string }
+        channelName: { type: [string, 'null'] }
+        channelType: { type: [string, 'null'] }
+        notificationId: { type: [string, 'null'], description: "The triggering notification row (null for test sends)" }
+        status: { type: string, enum: [sent, failed] }
+        error: { type: [string, 'null'] }
+        sentAt: { type: string, format: date-time }
 
     PluginSelfMetricsSample:
       type: object
