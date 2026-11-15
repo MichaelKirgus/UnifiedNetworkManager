@@ -1027,12 +1027,23 @@ function descriptorsFromMetrics(metrics: Record<string, unknown>): MetricDescrip
   if (typeof metrics['memory.total'] === 'number') {
     push({ key: 'memory.total', label: 'Memory Total', unit: 'bytes', format: 'bytes', type: 'number', visualization: 'text', group: 'System', intervalMs: LIVE_INTERVAL_MS });
   }
-  // Firewall state table (Sessions section) — live on every beat.
+  // Firewall state table (Sessions section) — live on every beat. Rendered as a
+  // CAPACITY gauge "current / max": the pf state-table limit is the ceiling, so
+  // showMax makes the bar scale against it and prints both numbers. Without a
+  // known limit the gauge auto-scales like any unbounded one.
   if (typeof metrics['firewall.states.total'] === 'number') {
-    push({ key: 'firewall.states.total', label: 'Active Sessions', type: 'number', visualization: 'plot', group: 'Firewall', summary: true, intervalMs: LIVE_INTERVAL_MS });
-  }
-  if (typeof metrics['firewall.states.limit'] === 'number') {
-    push({ key: 'firewall.states.limit', label: 'State Limit', type: 'number', visualization: 'text', group: 'Firewall', intervalMs: LIVE_INTERVAL_MS });
+    const statesLimit = metrics['firewall.states.limit'];
+    push({
+      key: 'firewall.states.total',
+      label: 'Active Sessions',
+      type: 'number',
+      visualization: 'gauge',
+      group: 'Firewall',
+      summary: true,
+      intervalMs: LIVE_INTERVAL_MS,
+      min: 0,
+      ...(typeof statesLimit === 'number' && statesLimit > 0 ? { max: statesLimit, showMax: true } : {}),
+    });
   }
   if (typeof metrics['firewall.states.oldestAgeSec'] === 'number') {
     push({ key: 'firewall.states.oldestAgeSec', label: 'Oldest Session Age', unit: 's', format: 'duration', type: 'number', visualization: 'plot', group: 'Firewall', intervalMs: LIVE_INTERVAL_MS });

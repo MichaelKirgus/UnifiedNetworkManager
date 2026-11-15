@@ -13253,6 +13253,9 @@ components:
         group: { type: string, description: "Optional section grouping" }
         min: { type: number }
         max: { type: number }
+        showMax:
+          type: boolean
+          description: "For 'gauge' with an explicit max: render the value as \"current / max\" (capacity gauges like state tables). Not for percentage gauges whose max of 100 is self-evident."
         color: { type: string }
         rows:
           type: array

@@ -46,17 +46,23 @@ function Gauge({ descriptor, value }: { descriptor: MetricDescriptor; value?: un
   // Explicit max wins. Otherwise auto-scale to a "nice" bound above the current
   // value so unbounded gauges (e.g. bandwidth in bits/sec) render a meaningful bar.
   const num = typeof value === 'number' ? value : 0;
-  const max = descriptor.max ?? Math.max(niceCeil(num), min + 1);
+  const explicitMax = descriptor.max ?? null;
+  const max = explicitMax ?? Math.max(niceCeil(num), min + 1);
   const clamped = Math.max(min, Math.min(max, num));
   const pct = max > min ? ((clamped - min) / (max - min)) * 100 : 0;
   // Default gauge hue — centralized status token (blue).
   const color = descriptor.color ?? 'rgb(var(--status-info))';
+  // Capacity gauges (showMax + explicit max) render "current / max".
+  const valueText =
+    descriptor.showMax === true && explicitMax !== null
+      ? `${formatValue(value, descriptor.unit, descriptor.format)} / ${formatValue(explicitMax, descriptor.unit, descriptor.format)}`
+      : formatValue(value, descriptor.unit, descriptor.format);
 
   return (
     <div className="rounded-md border border-border bg-card p-4 shadow-sm">
       <div className="flex items-baseline justify-between">
         <p className="text-xs uppercase tracking-wide text-faint">{descriptor.label}</p>
-        <p className="text-lg font-semibold text-foreground">{formatValue(value, descriptor.unit, descriptor.format)}</p>
+        <p className="text-lg font-semibold text-foreground">{valueText}</p>
       </div>
       <div className="mt-3 h-2.5 w-full overflow-hidden rounded-full bg-muted">
         <div

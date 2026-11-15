@@ -218,6 +218,7 @@ function summaryMetricsFor(telemetry: { metrics: unknown; metricDescriptors: unk
     visualization: string;
     min?: number;
     max?: number;
+    showMax?: boolean;
     color?: string;
   }[] = [];
   for (const d of descriptors) {
@@ -231,6 +232,7 @@ function summaryMetricsFor(telemetry: { metrics: unknown; metricDescriptors: unk
       visualization: d.visualization,
       min: d.min,
       max: d.max,
+      showMax: d.showMax === true ? true : undefined,
       color: d.color,
     });
   }

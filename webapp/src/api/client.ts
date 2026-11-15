@@ -2978,6 +2978,8 @@ export interface MetricDescriptor {
   group?: string;
   min?: number;
   max?: number;
+  /** Gauge with explicit max renders the value as "current / max". */
+  showMax?: boolean;
   color?: string;
   rows?: string[];
   /** Column field names for `table` visualizations (see MetricView). */
@@ -2996,6 +2998,8 @@ export interface SummaryMetric {
   visualization: 'gauge' | 'plot' | 'text' | 'table';
   min?: number;
   max?: number;
+  /** Gauge with explicit max renders the value as "current / max". */
+  showMax?: boolean;
   color?: string;
 }
 

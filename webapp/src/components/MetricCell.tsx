@@ -47,11 +47,18 @@ function MiniGauge({ metric }: { metric: SummaryMetric }) {
   // Explicit max wins; otherwise auto-scale to a "nice" bound above the current
   // value so unbounded gauges (e.g. bandwidth in bits/sec) render a meaningful bar.
   const num = typeof metric.value === 'number' ? metric.value : 0;
-  const max = metric.max ?? Math.max(niceCeil(num), min + 1);
+  const explicitMax = metric.max ?? null;
+  const max = explicitMax ?? Math.max(niceCeil(num), min + 1);
   const clamped = Math.max(min, Math.min(max, num));
   const pct = max > min ? ((clamped - min) / (max - min)) * 100 : 0;
   // Default gauge hue — centralized status token (blue).
   const color = metric.color ?? 'rgb(var(--status-info))';
+  // Capacity gauges (showMax + explicit max) render "current / max" so the
+  // ceiling is visible data, not just bar scale.
+  const valueText =
+    metric.showMax === true && explicitMax !== null
+      ? `${formatValue(metric.value, metric.unit, metric.format)} / ${formatValue(explicitMax, metric.unit, metric.format)}`
+      : formatValue(metric.value, metric.unit, metric.format);
   return (
     <div className="flex min-w-[120px] flex-col gap-1">
       {/* Label and value are stacked, NOT on one line: with justify-between a
@@ -62,7 +69,7 @@ function MiniGauge({ metric }: { metric: SummaryMetric }) {
         {metric.label}
       </span>
       <span className="text-xs font-semibold text-foreground">
-        {formatValue(metric.value, metric.unit, metric.format)}
+        {valueText}
       </span>
       <div className="h-1.5 w-full overflow-hidden rounded-full bg-muted">
         <div className="h-full rounded-full" style={{ width: `${pct}%`, backgroundColor: color }} />

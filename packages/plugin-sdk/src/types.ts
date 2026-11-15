@@ -224,6 +224,14 @@ export interface MetricDescriptor {
   group?: string;
   min?: number;
   max?: number;
+  /**
+   * For 'gauge' with an explicit `max`: render the value as "current / max"
+   * (e.g. "1234 / 65536") in both the detail view and the overview table's
+   * Metrics column. Use for capacity gauges where the ceiling is meaningful
+   * data (state tables, quotas) — not for percentage gauges whose max of 100
+   * is self-evident.
+   */
+  showMax?: boolean;
   color?: string;
   /** For 'table': the row keys (e.g. interface names). */
   rows?: string[];
