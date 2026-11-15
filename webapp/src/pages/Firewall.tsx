@@ -258,8 +258,31 @@ export default function Firewall() {
       width: 160,
       render: (row) => <span className="text-xs text-secondary">{orDash(row.scope)}</span>,
     },
-    {
-      // Live hit counters — both vendors report them now (OPNsense pf rule_stats
+    {      // Hit counter — packets matched by this rule since the counters were last
+      // reset (OPNsense pf rule_stats keyed by rule uuid; RouterOS inline).
+      // Zero = never used → a cleanup candidate for firewall optimization, so it
+      // gets an explicit warning highlight. '—' when the vendor exposes no
+      // per-rule counter (NAT rules). Sortable: unreported rows sort last.
+      header: 'Hits',
+      key: 'hits',
+      width: 90,
+      sortAccessor: (row) => row.packets ?? -1,
+      exportValue: (row) => row.packets ?? '',
+      render: (row) => {
+        if (typeof row.packets !== 'number') return <span className="text-faint">—</span>;
+        return row.packets === 0 ? (
+          <span
+            title="Never matched since counters were last reset — candidate for removal"
+            className="rounded bg-warning/20 px-1.5 py-0.5 font-mono text-xs font-semibold text-warning-fg"
+          >
+            0
+          </span>
+        ) : (
+          <span className="font-mono text-secondary">{row.packets.toLocaleString()}</span>
+        );
+      },
+    },
+    {      // Live hit counters — both vendors report them now (OPNsense pf rule_stats
       // is keyed by the rule's own uuid; RouterOS carries packets/bytes inline).
       // NAT rules have no per-rule stats endpoint, so they show '—'.
       header: 'Stats',
