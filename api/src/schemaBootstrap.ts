@@ -9,20 +9,19 @@
  *   - FRESH database (no core tables): run `drizzle-kit push --force` with retries
  *     until Postgres accepts connections and the schema lands. Nothing exists yet,
  *     so there is no data to lose — --force only suppresses confirmation prompts.
- *   - EXISTING database: run a plain `drizzle-kit push` (NO --force) once per boot.
- *     Additive changes (new tables / columns — the normal upgrade case) apply
- *     automatically, exactly like dev's setup.sh does on every start. A data-loss
- *     change is REFUSED in non-interactive mode without --force, so it can never
- *     silently destroy production data; we log a loud warning and continue startup
- *     (the existing schema stays usable) until an operator reviews and runs the
- *     destructive push manually.
- *
- *     KNOWN GOTCHA: drizzle-kit also ABORTS (still exiting 0!) when it finds tables in
- *     the database that are absent from src/db/schema.ts at the same time as new items —
- *     its rename-detection then demands an interactive prompt, impossible without a TTY.
- *     This deployment has such tables by design (raw-SQL objects + flow partition
- *     children), so every additive push aborts this way inside containers; we detect the
- *     marker in the CLI output and warn loudly instead of claiming "schema up to date".
+ *   - EXISTING database: run the ADDITIVE SCHEMA SYNC (src/schemaSync.ts) once per boot.
+ *     It renders the current code's DDL via `drizzle-kit generate` and applies only what is
+ *     missing — new tables, new columns on existing tables, indexes, foreign keys. This
+ *     replaces the old plain `drizzle-kit push`, which could NOT run unattended here: this
+ *     database holds objects deliberately absent from src/db/schema.ts (raw-SQL tables such as
+ *     radacct / radius_monitor_state and the monthly flow-aggregation partition children), and
+ *     whenever new items AND "missing" items coexist, drizzle-kit's rename-detection demands an
+ *     interactive prompt — impossible without a TTY. It then ABORTS before applying anything
+ *     while still exiting 0, so every image-tag upgrade silently skipped its migrations
+ *     (notification_*, security_events, threat_iocs, …). The additive sync never sees those
+ *     DB-only objects and can therefore never hit the prompt; it also never drops or alters
+ *     existing structures, so data loss is impossible. Structural changes (dropping/renaming
+ *     columns or tables) remain manual DDL, exactly as a refused drizzle push used to be.
  *
  * drizzle-kit therefore ships in the runtime image (api/Dockerfile excludes it from
  * the dev prune). A Postgres advisory lock serializes concurrent boots (HA replicas)
@@ -33,6 +32,7 @@ import { spawn } from 'node:child_process';
 import path from 'node:path';
 import type { PoolClient } from 'pg';
 import { pool } from './db';
+import { applyAdditiveSchema } from './schemaSync';
 
 /** Tables whose existence proves the schema was created (any one suffices). */
 const CORE_TABLES = ['users', 'telemetry', 'devices'];
@@ -74,31 +74,11 @@ async function detectCoreTablesPresent(): Promise<boolean> {
   throw new Error(`could not reach the database to check schema state: ${(lastErr as Error)?.message ?? 'unknown'}`);
 }
 
-/**
- * Marker drizzle-kit prints when it detects destructive statements. NOTE: in non-interactive
- * mode a refused data-loss push still EXITS 0 (it throws on the missing TTY but swallows it),
- * so the exit code alone cannot tell "applied" from "refused" — we must inspect the output.
- */
-const DATA_LOSS_MARKER = /Found data-loss statements/;
-
-/**
- * Marker drizzle-kit prints when its rename-detection prompt cannot run without a TTY. In that
- * case push ABORTS before applying ANYTHING — yet still exits 0 — so logging "schema up to date"
- * would be a lie. This deployment triggers it on every ADDITIVE push: the database holds tables
- * that are deliberately not declared in src/db/schema.ts (raw-SQL objects such as radacct,
- * radius_monitor_state, flow_security_findings and the monthly flow-aggregation partition
- * children), which drizzle-kit always reports as "missing from schema". Whenever newItems AND
- * missingItems are both non-empty it asks an interactive rename question — unanswerable in a
- * container. Detecting this marker turns the silent no-op into a loud, actionable warning.
- */
-const PROMPT_TTY_MARKER = /Interactive prompts require a TTY/;
-
-/** Runs `drizzle-kit push` once, streaming its output to our stdout and returning it for analysis. */
-function runPush(force: boolean): Promise<{ output: string }> {
+/** Runs `drizzle-kit push --force` once (fresh-database bootstrap only), streaming output to stdout. */
+function runFreshPush(): Promise<{ output: string }> {
   const bin = path.join(process.cwd(), 'node_modules', '.bin', 'drizzle-kit');
   return new Promise((resolve, reject) => {
-    const args = [bin, 'push'];
-    if (force) args.push('--force');
+    const args = [bin, 'push', '--force'];
     const child = spawn(process.execPath, args, {
       cwd: process.cwd(),
       stdio: ['ignore', 'pipe', 'pipe'],
@@ -152,38 +132,34 @@ async function withAdvisoryLock<T>(fn: () => Promise<T>): Promise<T> {
  * Ensures the schema matches src/db/schema.ts before initDb() runs. No-op (fast) on a
  * steady-state deployment; bootstraps a fresh database; and applies additive upgrades
  * automatically. Throws only when a FRESH database cannot be brought up (at which point
- * startup would have crashed anyway). Never throws for an existing database — a refused
- * data-loss change is logged, not fatal.
+ * startup would have crashed anyway). Never throws for an existing database — sync
+ * failures are logged, not fatal.
  */
 export async function ensureSchemaBootstrapped(): Promise<void> {
   const coreTablesPresent = await detectCoreTablesPresent();
 
   if (coreTablesPresent) {
-    // Existing deployment: sync additive changes (new tables/columns). Non-fatal by design —
-    // a pending data-loss change is refused without --force and must be applied manually.
+    // Existing deployment: apply additive changes automatically — new tables/columns/indexes
+    // from this image's schema.ts land here on first boot after a tag change. Additive-only and
+    // non-fatal by design; see src/schemaSync.ts for the mechanics and safety properties.
     try {
-      const { output } = await withAdvisoryLock(() => runPush(false));
-      if (DATA_LOSS_MARKER.test(output)) {
-        console.warn(
-          `[api] schema sync REFUSED a data-loss change — review it and apply manually ` +
-            `(docker exec <api> sh -c "cd /app/api && node_modules/.bin/drizzle-kit push --force"). Continuing with the existing schema.`
-        );
-      } else if (PROMPT_TTY_MARKER.test(output)) {
-        console.warn(
-          `[api] schema sync ABORTED — drizzle-kit hit an interactive rename prompt it cannot answer ` +
-            `without a TTY, so NO pending changes were applied. This happens whenever the database holds tables that are ` +
-            `not declared in src/db/schema.ts (raw-SQL objects such as radacct and the flow-aggregation partition children) ` +
-            `at the same time as new tables/columns are added to the schema. Apply the pending changes manually: run ` +
-            `\`drizzle-kit push\` on a host with a TTY (dev: from the repo root, where Postgres is reachable on localhost:5432) ` +
-            `and answer "no" to every rename question — or apply the DDL by hand. Continuing with the existing schema.`
-        );
-      } else {
+      const summary = await withAdvisoryLock(() => applyAdditiveSchema(pool));
+      if (summary.createdTables.length === 0 && summary.addedColumns.length === 0) {
         console.log('[api] schema up to date.');
+      } else {
+        console.log(
+          `[api] schema sync applied: ${summary.createdTables.length} table(s) [${summary.createdTables.join(', ')}], ` +
+            `${summary.addedColumns.length} column(s), ${summary.ensuredIndexes} index(es) ensured, ` +
+            `${summary.appliedForeignKeys} foreign key(s).`
+        );
+      }
+      if (summary.errors.length > 0) {
+        console.warn(`[api] schema sync completed with ${summary.errors.length} error(s): ${summary.errors.join(' | ')}`);
       }
     } catch (err) {
       console.warn(
-        `[api] schema sync failed — if this is a data-loss change, review it and apply manually ` +
-          `(docker exec <api> sh -c "cd /app/api && node_modules/.bin/drizzle-kit push --force"). Continuing with the existing schema. Cause: ${(err as Error).message}`
+        `[api] schema sync failed — new tables/columns from this release may be missing; check the logs and ` +
+          `re-run after fixing the cause. Continuing with the existing schema. Cause: ${(err as Error).message}`
       );
     }
     return;
@@ -194,7 +170,7 @@ export async function ensureSchemaBootstrapped(): Promise<void> {
   await withAdvisoryLock(async () => {
     for (let attempt = 1; attempt <= ATTEMPTS; attempt++) {
       try {
-        await runPush(true);
+        await runFreshPush();
         if (await hasCoreTables()) {
           console.log(`[api] schema bootstrap complete (attempt ${attempt}) — core tables present.`);
           return;
