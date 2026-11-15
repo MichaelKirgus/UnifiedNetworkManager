@@ -13,7 +13,7 @@
   "dependencies": {
     "@unm/plugin-sdk": "file:../../packages/plugin-sdk",
     "axios": "^1.6.0",
-    "nodemailer": "^6.9.0"
+    "nodemailer": "^10.5.0"
   },
   "devDependencies": {
     "@types/express": "^5.0.6",
