@@ -16,7 +16,7 @@
     "bonjour-service": "^1.2.1",
     "express": "^5.2.1",
     "cors": "^2.8.5",
-    "tar": "^7.5.22",
+    "tar": "^7.5.23",
     "unzipper": "^0.12.3"
   },
   "devDependencies": {
