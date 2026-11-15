@@ -1,7 +1,7 @@
 /**
  * E2E check for the lancom-lx web-UI (ubus) configuration transport.
  *
- * Drives the live stack against AP_Wohnzimmer (10.25.1.2, production device):
+ * Drives the live stack against an access point (203.0.113.2, production device):
  *   login (2FA) → verify /discover catalog v0.5.0 (actions + `web` slot)
  *   → bind the web credential slot to the assignment (UNM-side only)
  *   → GET /devices/:id/state (Config page document — sections + items)
@@ -21,7 +21,7 @@ import { createRequire } from 'node:module';
 
 const API = process.env.API_BASE ?? 'http://localhost:3000/v1';
 const LX_PLUGIN_ID = '00000000-0000-4000-8000-000000000004';
-// AP_Wohnzimmer — production LX-6500, WLC-managed.
+// an access point — production LX-6500, WLC-managed.
 const DEVICE_ID = process.env.LX_DEVICE_ID ?? '22e43103-368f-4bbe-a9fe-bac44d0151eb';
 // Unbound usernamePassword secret "LANCOM LCOS/LX root user".
 const WEB_SECRET_ID = process.env.LX_WEB_SECRET_ID ?? '3352ee33-1577-4849-a7ae-9ecf4c67d104';

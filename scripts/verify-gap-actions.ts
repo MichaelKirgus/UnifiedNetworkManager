@@ -1,9 +1,9 @@
 /**
  * Live verification of the gap-fill actions (2026-10-03):
- *  - OPNsense config.backup.download on OPNSENSE01 (READONLY — safe) + GWBN01
- *  - OPNsense system.users.read on OPNSENSE01 (readonly key, read-only action)
- *  - LCOS firewall.rules.read / routing.static.read / dhcp.networks.read on WLC01
- *  - OPNsense config.restore round-trip on GWBN01 ONLY (restore the SAME backup
+ *  - OPNsense config.backup.download on the main OPNsense box (READONLY — safe) + the write-test box
+ *  - OPNsense system.users.read on the main OPNsense box (readonly key, read-only action)
+ *  - LCOS firewall.rules.read / routing.static.read / dhcp.networks.read on vRouter
+ *  - OPNsense config.restore round-trip on the write-test box ONLY (restore the SAME backup
  *    we just downloaded — no net change; exercises staging + rc.reload_all).
  * Usage: tsx scripts/verify-gap-actions.ts
  */
@@ -81,15 +81,15 @@ async function main() {
     return step;
   };
 
-  // --- 1. OPNsense backup download on OPNSENSE01 (READONLY — safe) --------------
+  // --- 1. OPNsense backup download on the main OPNsense box (READONLY — safe) --------------
   const osBackup = await runPlan('OPNSENSE01 backup', OPNSENSE_PLUGIN, 'config.backup.download', OPNSENSE01, {});
   check('OPNSENSE01: config.backup.download succeeded', osBackup?.status === 'succeeded' || (osBackup?.result as Record<string, unknown>)?.['success'] !== false, osBackup?.result);
 
-  // --- 2. OPNsense users read on OPNSENSE01 (readonly key) ----------------------
+  // --- 2. OPNsense users read on the main OPNsense box (readonly key) ----------------------
   const osUsers = await runPlan('OPNSENSE01 users', OPNSENSE_PLUGIN, 'system.users.read', OPNSENSE01, {});
   check('OPNSENSE01: system.users.read succeeded', (osUsers?.result as Record<string, unknown>)?.['success'] === true || osUsers?.status === 'succeeded', osUsers?.result);
 
-  // --- 3. LCOS gap reads on WLC01 ------------------------------------------------
+  // --- 3. LCOS gap reads on vRouter ------------------------------------------------
   const lcFw = await runPlan('WLC01 firewall rules', LCOS_PLUGIN, 'firewall.rules.read', WLC01, {});
   check('WLC01: firewall.rules.read succeeded', (lcFw?.result as Record<string, unknown>)?.['success'] === true || lcFw?.status === 'succeeded', lcFw?.result);
 
@@ -99,14 +99,14 @@ async function main() {
   const lcDhcp = await runPlan('WLC01 dhcp networks', LCOS_PLUGIN, 'dhcp.networks.read', WLC01, {});
   check('WLC01: dhcp.networks.read succeeded', (lcDhcp?.result as Record<string, unknown>)?.['success'] === true || lcDhcp?.status === 'succeeded', lcDhcp?.result);
 
-  // --- 4. GWBN01 backup → restore round-trip (SAME file — no net change) --------
+  // --- 4. write-test box backup → restore round-trip (SAME file — no net change)
   const gwBackup = await runPlan('GWBN01 backup', OPNSENSE_PLUGIN, 'config.backup.download', GWBN01, {});
   const gwDetails = ((gwBackup?.result as Record<string, unknown>)?.['details'] ?? {}) as Record<string, unknown>;
   const repoFileId = gwDetails['repoFileId'];
   check('GWBN01: backup produced a repoFileId', typeof repoFileId === 'string' && (repoFileId as string).length > 0, gwBackup?.result);
 
   // The downloaded file is the appliance's LATEST LOCAL backup — restoring it
-  // rolls GWBN01 back to that instant. For a TRUE zero-net-change round trip we
+    // rolls the box back to that instant. For a TRUE zero-net-change round trip we
   // instead fetch the CURRENT /conf/config.xml over SSH (root slot) and restore
   // THAT inline: same code path, no rollback of recent changes at all.
   const source = String(gwDetails['source'] ?? '');

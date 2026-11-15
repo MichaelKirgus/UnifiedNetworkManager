@@ -11,7 +11,7 @@
  *
  *   UNM_TOKEN=unm_...  (optional — when absent the script does the full
  *                       admin+TOTP login flow, which POST /plans requires) \
- *   WLED_ADDRESS=10.40.1.62 \
+ *   WLED_ADDRESS=203.0.113.62 \
  *   tsx scripts/e2e-wled-flash.ts
  */
 

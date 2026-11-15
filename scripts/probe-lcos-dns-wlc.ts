@@ -1,7 +1,7 @@
 /**
- * READ-ONLY probe of WLC01 (10.25.0.20, LCOS vRouter test device) to dump the
- * Setup/DNS group + DNS-List table layout. GW_Ralf (1803VAW-5G, 10.94) shows
- * [Host-name,Rtg-tag,IP-Address,IPV6-Address] — but WLC01 may run a different
+ * READ-ONLY probe of vRouter (203.0.113.20, LCOS vRouter test device) to dump the
+ * Setup/DNS group + DNS-List table layout. prod box (1803VAW-5G, 10.94) shows
+ * [Host-name,Rtg-tag,IP-Address,IPV6-Address] — but vRouter may run a different
  * LCOS build with a different column set, which would explain the live
  * `add "NAME" 0 <ip> ""` rejection ("Value invalid: )").
  *
@@ -13,7 +13,7 @@ import fs from 'node:fs';
 import { createRequire } from 'node:module';
 
 const API = process.env.API_BASE ?? 'http://localhost:3000/v1';
-const HOST = process.argv[2] ?? '10.25.0.20'; // WLC01 — test device, writes allowed but this probe is read-only
+const HOST = process.argv[2] ?? '10.25.0.20'; // vRouter — test device, writes allowed but this probe is read-only
 const PORT = Number(process.env.LCOS_SSH_PORT ?? 22);
 const SECRET_ID = process.env.LCOS_WEB_SECRET_ID ?? '3352ee33-1577-4849-a7ae-9ecf4c67d104';
 

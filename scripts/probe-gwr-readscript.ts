@@ -1,5 +1,5 @@
 /**
- * Captures `readscript -d` from GW_Ralf (10.28.0.1, physical LANCOM 1803VAW-5G)
+ * Captures `readscript -d` from prod box (203.0.113.1, physical LANCOM 1803VAW-5G)
  * into /tmp/gwr_readscript_d.txt — the authoritative CLI grammar for a device
  * WITH local WLAN radios (SSID creation table layout). READ-ONLY: readscript
  * only prints the config as a script; nothing is written to the router.
@@ -9,7 +9,7 @@ import fs from 'node:fs';
 import { createRequire } from 'node:module';
 
 const API = process.env.API_BASE ?? 'http://localhost:3000/v1';
-const HOST = process.argv[2] ?? '10.28.0.1'; // GW_Ralf — PRODUCTION, read-only probe
+const HOST = process.argv[2] ?? '10.28.0.1'; // prod box — PRODUCTION, read-only probe
 const PORT = Number(process.env.LCOS_SSH_PORT ?? 22);
 const SECRET_ID = process.env.LCOS_WEB_SECRET_ID ?? '3352ee33-1577-4849-a7ae-9ecf4c67d104';
 const OUT_FILE = '/tmp/gwr_readscript_d.txt';

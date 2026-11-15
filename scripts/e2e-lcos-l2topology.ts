@@ -2,18 +2,18 @@
  * E2E check for Phase I — LCOS L2 abstraction (l2.topology.read + per-device
  * attach-point resolution). FULLY READ-ONLY: no plan writes any device.
  *
- *   1. l2.topology.read on WLC01 (vRouter, NO bridges) and GW_Ralf (physical,
+ *   1. l2.topology.read on vRouter (vRouter, NO bridges) and prod box (physical,
  *      BRG-2 over LAN-1..4 + BUNDLE-1/2 LACP). Assert the parsed hierarchy:
  *        - physical port assignments (ETH-x → LAN-x),
- *        - bridge groups with members (GW_Ralf: BRG-2 ⊇ LAN-1..4),
+ *        - bridge groups with members (prod box: BRG-2 ⊇ LAN-1..4),
  *        - bundles with members + operating flag,
- *        - l3Interfaces map (ifc → network names; GW_Ralf: BRG-2 carries the
- *          LAN networks, WLC01: plain LAN-1).
+ *        - l3Interfaces map (ifc → network names; prod box: BRG-2 carries the
+ *          LAN networks, vRouter: plain LAN-1).
  *   2. Preflight network.create on BOTH devices and assert the resolved
  *      attach point per device:
- *        - GW_Ralf → interface=BRG-2 (high confidence) + vlanPorts convention
+ *        - prod box → interface=BRG-2 (high confidence) + vlanPorts convention
  *          list copied from an existing VLAN network's Ports column,
- *        - WLC01   → interface=LAN-1 (plain port carrying L3 directly — the
+ *        - vRouter   → interface=LAN-1 (plain port carrying L3 directly — the
  *          disabled BUNDLE-1 over it must NOT win).
  *
  * Usage (from the repo root): ./node_modules/.bin/tsx scripts/e2e-lcos-l2topology.ts
@@ -23,9 +23,9 @@ import { createRequire } from 'node:module';
 
 const API = process.env.API_BASE ?? 'http://localhost:3000/v1';
 const LCOS_PLUGIN_ID = '00000000-0000-4000-8000-000000000006';
-// WLC01 — 10.25.0.20, LANCOM vRouter (TEST device, no bridges configured).
+// vRouter — 203.0.113.20, LANCOM vRouter (TEST device, no bridges configured).
 const DEVICE_WLC = '38cf30d7-e53e-47ae-9545-c79af2270751';
-// GW_Ralf — 10.28.0.1, LANCOM 1803VAW-5G (PRODUCTION — reads only).
+// prod box — 203.0.113.1, LANCOM 1803VAW-5G (PRODUCTION — reads only).
 const DEVICE_GWR = 'fb2f6114-f169-4ca0-b145-f741fec55f11';
 
 const apiRequire = createRequire(path.resolve(process.cwd(), 'api', 'package.json'));

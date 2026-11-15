@@ -1,8 +1,8 @@
 /**
  * OPNsense L2 topology — the device's interface layering, read-only.
  *
- * OPNsense layers interfaces in three steps (verified live on OPNSENSE01,
- * 26.4.2p2):
+ * OPNsense layers interfaces in three steps (verified live on a 26.4
+ * appliance, 26.4.2p2):
  *   1. PHYSICAL: `interfaces_info` rows with is_physical=true (igc0..3, ax0/ax1,
  *      vtnet0..). A physical port's "assignment" is IMPLICIT — it is the parent
  *      of a VLAN row or a member of a LAGG; otherwise it is idle.

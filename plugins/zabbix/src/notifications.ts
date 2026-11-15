@@ -40,7 +40,7 @@ export interface ZabbixProblem {
   eventid: string | null;
   /** Problem object type code: '0' host, '1' item, '2' trigger, … */
   object: string;
-  /** Human-readable problem text (e.g. "CPU load is too high on gwbn01"). */
+  /** Human-readable problem text (e.g. "CPU load is too high on router-01"). */
   name: string;
   /** Zabbix severity code 0..5. */
   severity: number;

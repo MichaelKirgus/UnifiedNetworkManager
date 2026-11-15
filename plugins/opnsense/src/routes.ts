@@ -17,7 +17,7 @@ import { searchRoutes, getGatewayStatus, searchGateways } from './client/routes'
  */
 
 export interface RouteRow {
-  /** Destination network as CIDR ("10.25.0.0/16", "0.0.0.0/0" for default). */
+  /** Destination network as CIDR ("198.51.100.0/16", "0.0.0.0/0" for default). */
   destination: string;
   /** Next-hop gateway name or address ('' = unknown / directly connected). */
   gateway?: string;

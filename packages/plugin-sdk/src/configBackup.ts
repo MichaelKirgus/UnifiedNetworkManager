@@ -10,7 +10,7 @@
  *
  *   <device>__config-backup-<YYYYMMDD-HHMMSS>.<ext>
  *
- * e.g. `KIRGUSBANDE__config-backup-20260926-134502.db`,
+ * e.g. `TRUENAS01__config-backup-20260926-134502.db`,
  *      `swos-leaf-01__config-backup-20260926-134502.swb`.
  *
  * The device part is the UNM DEVICE NAME when the API provides one, else the

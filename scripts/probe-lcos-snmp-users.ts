@@ -1,5 +1,5 @@
 /**
- * READ-ONLY probe of WLC01 (test device, 10.25.0.20): discover the LCOS CLI
+ * READ-ONLY probe of vRouter (test device, 203.0.113.20): discover the LCOS CLI
  * syntax for managing SNMPv3 users so we can add a user matching UNM's stored
  * "LANCOM SNMPv3 public/private" credential. Only help/listing commands are sent.
  */
@@ -8,7 +8,7 @@ import fs from 'node:fs';
 import { createRequire } from 'node:module';
 
 const API = process.env.API_BASE ?? 'http://localhost:3000/v1';
-const HOST = process.argv[2] ?? '10.25.0.20'; // WLC01 — test device
+const HOST = process.argv[2] ?? '10.25.0.20'; // vRouter — test device
 const PORT = Number(process.env.LCOS_SSH_PORT ?? 22);
 const SECRET_ID = process.env.LCOS_WEB_SECRET_ID ?? '3352ee33-1577-4849-a7ae-9ecf4c67d104';
 

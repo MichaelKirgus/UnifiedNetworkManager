@@ -1,7 +1,7 @@
 /**
  * Verifies the container-lifecycle settle+refresh plan tail (ix-truenas 0.28.0):
  *   1. logs in via the real auth flow (TOTP minted from the seeded admin secret)
- *   2. creates a containers.restart plan for chrony05 on KIRGUSBANDE WITHOUT executing it
+ *   2. creates a containers.restart plan for a container on the TrueNAS box WITHOUT executing it
  *   3. asserts the plan ends with unm.wait {ms:15000} + unm.inventory.refresh {}
  *   4. deletes the draft plan again (cleanup)
  *
@@ -13,7 +13,7 @@ import path from 'node:path';
 import { createRequire } from 'node:module';
 
 const API = process.env.API_BASE ?? 'http://localhost:3000/v1';
-const DEVICE_ID = process.env.DEVICE_ID ?? 'd124978b-2c22-40b5-a17c-b35e7de9d937'; // KIRGUSBANDE
+const DEVICE_ID = process.env.DEVICE_ID ?? 'd124978b-2c22-40b5-a17c-b35e7de9d937'; // the TrueNAS box
 const PLUGIN_ID = '00000000-0000-4000-8000-000000000009'; // ix-truenas (primary)
 const CONTAINER = process.env.CONTAINER ?? 'chrony05';
 // The admin password is NOT the dev default on this stack — override via env.

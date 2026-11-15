@@ -1,5 +1,5 @@
 /**
- * PROBE (WLC01 test device only): can SNMP SET create a row in the LCOS
+ * PROBE (vRouter test device only): can SNMP SET create a row in the LCOS
  * TCP-IP Network-list table (lcsSetup family 1.2.7.30)?
  *
  *   1. GET 1.2.7.30.<row>.<col> for existing rows → is the table SNMP-readable?
@@ -17,7 +17,7 @@ import path from 'node:path';
 import { createRequire } from 'node:module';
 
 const API = process.env.API_BASE ?? 'http://localhost:3000/v1';
-const HOST = process.argv[2] ?? '10.25.0.20'; // WLC01 — TEST device only
+const HOST = process.argv[2] ?? '10.25.0.20'; // vRouter — TEST device only
 const SNMP_SECRET_ID = process.env.LCOS_SNMPV3_SECRET_ID ?? 'adeb8556-7245-43c4-b67e-20941bc8a10b';
 const SSH_SECRET_ID = process.env.LCOS_WEB_SECRET_ID ?? '3352ee33-1577-4849-a7ae-9ecf4c67d104';
 

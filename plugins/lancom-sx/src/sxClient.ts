@@ -107,7 +107,7 @@ export interface SxNeighbor {
 
 /** One route entry from the switch's routing tables (4.x only). */
 export interface SxRoute {
-  destination: string; // CIDR ("10.25.0.0/16") or bare address as reported
+  destination: string; // CIDR ("198.51.100.0/16") or bare address as reported
   gateway: string;     // '' = directly connected / unknown
   protocol: 'static' | 'connected'; // matched against the static config table
   distance: number | null; // admin distance from the config table (null for connected)
@@ -532,7 +532,7 @@ function parseSx4(out: Map<string, SnmpValue>, get: (oid: string) => SnmpValue):
   // static config table tells us which destinations are statically configured
   // (and their admin distance). A status row matching a config entry → 'static',
   // everything else → 'connected'. Matching is on the BARE network address so it
-  // works whether the agent reports "10.25.0.0" or "10.25.0.0/16".
+  // works whether the agent reports "198.51.100.0" or "198.51.100.0/16".
   const bareNet = (s: string): string => s.split('/')[0].trim();
 
   // Static route config (index int) — network + maskLength + distance per entry.

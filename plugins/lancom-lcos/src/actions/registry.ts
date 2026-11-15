@@ -57,7 +57,7 @@ async function sftpSession(ctx: ActionContext, creds: SshCredentials) {
   });
 }
 
-/** LCOS configs are tens of KB (WLC01 live: ~327 KB) — bound the payload anyway. */
+/** LCOS configs are tens of KB (observed live: ~327 KB) — bound the payload anyway. */
 const MAX_CONFIG_BYTES = 4 * 1024 * 1024;
 
 /** Decodes a base64 file payload from plan input (same contract as SwOS/TrueNAS restore actions). */
@@ -336,7 +336,7 @@ const configBackupDownload: ActionDescriptor = {
   id: 'config.backup.download',
   label: 'Download configuration backup',
   description:
-    "Downloads the router's complete running configuration from the LCOS virtual `/config` SFTP file (the same LCF document `readconfig` prints — verified live on WLC01) and stores it in UNM's central file repository, downloadable/archivable from the Files page. Named with the shared convention (<device>__config-backup-<UTC-ts>.cfg). Read-only on the device; use as a rollback point before risky changes — reference it later via details.repoFileId (restore it with config.restore). Requires a bound `ssh` credential slot.",
+    "Downloads the router's complete running configuration from the LCOS virtual `/config` SFTP file (the same LCF document `readconfig` prints — verified live on a vRouter) and stores it in UNM's central file repository, downloadable/archivable from the Files page. Named with the shared convention (<device>__config-backup-<UTC-ts>.cfg). Read-only on the device; use as a rollback point before risky changes — reference it later via details.repoFileId (restore it with config.restore). Requires a bound `ssh` credential slot.",
   module: 'System',
   riskLevel: 'read',
   deviceCount: 1,

@@ -1,5 +1,5 @@
 /**
- * READ-ONLY probe of the LCOS TCP-IP setup tree (WLC01, 10.25.0.20).
+ * READ-ONLY probe of the LCOS TCP-IP setup tree (vRouter, 203.0.113.20).
  *
  * Goal: find how IPv6 L3 addresses are represented — separate table vs. same
  * Network-list with v6 columns. Only `cd` / `dir -a` / `print` commands are

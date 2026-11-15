@@ -1,5 +1,5 @@
 /**
- * WRITE probe on WLC01 (10.25.0.20, LCOS vRouter TEST device — writes allowed)
+ * WRITE probe on vRouter (203.0.113.20, LCOS vRouter TEST device — writes allowed)
  * to determine the correct `add` grammar for Setup/DNS/DNS-List. The live E2E
  * rejected `add "NAME" 0 <ip> ""` with `Value invalid: ")"`. This tries a few
  * candidate grammars in sequence and dumps `dir -a DNS-List` after each; it
@@ -12,7 +12,7 @@ import fs from 'node:fs';
 import { createRequire } from 'node:module';
 
 const API = process.env.API_BASE ?? 'http://localhost:3000/v1';
-const HOST = process.argv[2] ?? '10.25.0.20'; // WLC01 — TEST device, writes OK
+const HOST = process.argv[2] ?? '10.25.0.20'; // vRouter — TEST device, writes OK
 const PORT = Number(process.env.LCOS_SSH_PORT ?? 22);
 const SECRET_ID = process.env.LCOS_WEB_SECRET_ID ?? '3352ee33-1577-4849-a7ae-9ecf4c67d104';
 

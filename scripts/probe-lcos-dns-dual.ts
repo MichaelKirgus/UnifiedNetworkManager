@@ -1,5 +1,5 @@
 /**
- * WRITE probe on WLC01 — how does Setup/DNS/DNS-List handle v4 AND v6 for one
+ * WRITE probe on vRouter — how does Setup/DNS/DNS-List handle v4 AND v6 for one
  * name? The table is single-keyed by Host-name with columns
  * (Host-name, Rtg-tag, IP-Address[v4], IPV6-Address[v6]). Known grammar:
  *   add "NAME" 0 <v4>            → v4-only row (v6 defaults to ::)
@@ -17,7 +17,7 @@ import fs from 'node:fs';
 import { createRequire } from 'node:module';
 
 const API = process.env.API_BASE ?? 'http://localhost:3000/v1';
-const HOST = process.argv[2] ?? '10.25.0.20'; // WLC01 — TEST device, writes OK
+const HOST = process.argv[2] ?? '10.25.0.20'; // vRouter — TEST device, writes OK
 const PORT = Number(process.env.LCOS_SSH_PORT ?? 22);
 const SECRET_ID = process.env.LCOS_WEB_SECRET_ID ?? '3352ee33-1577-4849-a7ae-9ecf4c67d104';
 

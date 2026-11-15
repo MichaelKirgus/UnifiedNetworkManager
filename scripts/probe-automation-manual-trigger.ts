@@ -13,7 +13,7 @@ import { createRequire } from 'node:module';
 
 const API = process.env.API_BASE ?? 'http://localhost:3000/v1';
 const REAL_RULE_ID = process.argv[2] ?? '5666aed9-7003-4a76-b0c5-1ee915a6630b';
-const DEVICE_ID = 'd124978b-2c22-40b5-a17c-b35e7de9d937'; // KIRGUSBANDE
+const DEVICE_ID = 'd124978b-2c22-40b5-a17c-b35e7de9d937'; // the TrueNAS box
 const PLUGIN_ID = '00000000-0000-4000-8000-000000000009'; // TrueNAS Plugin
 
 const apiRequire = createRequire(path.resolve(process.cwd(), 'api', 'package.json'));

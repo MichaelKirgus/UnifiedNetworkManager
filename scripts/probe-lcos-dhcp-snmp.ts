@@ -14,7 +14,7 @@ import fs from 'node:fs';
 import { createRequire } from 'node:module';
 
 const API = process.env.API_BASE ?? 'http://localhost:3000/v1';
-const HOSTS = (process.argv[2] ? [process.argv[2]] : ['10.25.0.20', '10.28.0.1']); // WLC01, GW_Ralf — read-only!
+const HOSTS = (process.argv[2] ? [process.argv[2]] : ['10.25.0.20', '10.28.0.1']); // vRouter, prod box — read-only!
 const SNMP_SECRET_ID = process.env.LCOS_SNMPV3_SECRET_ID ?? 'adeb8556-7245-43c4-b67e-20941bc8a10b';
 
 const apiRequire = createRequire(path.resolve(process.cwd(), 'api', 'package.json'));

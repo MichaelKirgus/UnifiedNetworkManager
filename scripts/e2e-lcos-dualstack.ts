@@ -2,9 +2,9 @@
  * E2E check for Phase H — dual-stack (v4+v6) network rollout on LCOS.
  *
  *   1. POST /plans/network-check with cidrV6 → v6 overlap warning against the
- *      live ULA subnet on GW_Ralf + nextFreeSubnetV6 suggestion present.
+ *      live ULA subnet on prod box + nextFreeSubnetV6 suggestion present.
  *   2. Preflight with cidrV6 → `cidrV6` hint value (no existing rows yet).
- *   3. Create + execute a dual-stack plan on WLC01 (test device): v4 CIDR +
+ *   3. Create + execute a dual-stack plan on vRouter (test device): v4 CIDR +
  *      v6 ULA CIDR, VLAN 398. Step details must report both L3 addresses and
  *      the two separate Setup/IPv6 tables written.
  *   4. Verify via ipv6.networks.read (v6 rows) + vlan.networks.read (v4 row).
@@ -20,13 +20,13 @@ import { createRequire } from 'node:module';
 
 const API = process.env.API_BASE ?? 'http://localhost:3000/v1';
 const LCOS_PLUGIN_ID = '00000000-0000-4000-8000-000000000006';
-// WLC01 — 10.25.0.20, LANCOM vRouter (TEST device).
+// vRouter — 203.0.113.20, LANCOM vRouter (TEST device).
 const DEVICE_WLC = '38cf30d7-e53e-47ae-9545-c79af2270751';
 
 const NET_NAME = 'UNM_E2E_V6';
 const VLAN_ID = 398;
 const CIDR = '10.248.0.2/24';
-// ULA prefix that does NOT collide with GW_Ralf's live fdf8:f53b:7*::/64 rows.
+// ULA prefix that does NOT collide with prod box's live fdf8:f53b:7*::/64 rows.
 const CIDR_V6 = 'fd00:beef::1/64';
 
 const apiRequire = createRequire(path.resolve(process.cwd(), 'api', 'package.json'));
@@ -96,11 +96,11 @@ async function main(): Promise<void> {
 
   // --- 1. network-check with cidrV6 --------------------------------------------
   console.log('\n[1] POST /plans/network-check (dual-stack inputs)');
-  // Deliberate v6 overlap: exactly GW_Ralf's live NET_INTRANET subnet (from the
+  // Deliberate v6 overlap: exactly prod box's live NET_INTRANET subnet (from the
   // Status/IPv6 Prefix table). NOTE: fdf8:f53b:70e4::1/64 would NOT collide —
   // it is a DIFFERENT /64 than …70e4:1::/64.
   const chk = await authed('POST', '/plans/network-check', {
-    inputs: { name: NET_NAME, vlanId: VLAN_ID, cidr: CIDR, cidrV6: 'fdf8:f53b:70e4:1::/64' }, // deliberate v6 overlap with GW_Ralf's NET_INTRANET
+    inputs: { name: NET_NAME, vlanId: VLAN_ID, cidr: CIDR, cidrV6: 'fdf8:f53b:70e4:1::/64' }, // deliberate v6 overlap with prod box's NET_INTRANET
     deviceIds: [DEVICE_WLC],
   });
   // Read the body ONCE — check() evaluates its args eagerly, so an inline
@@ -141,7 +141,7 @@ async function main(): Promise<void> {
     }
   }
 
-  // --- 3. create + execute dual-stack plan on WLC01 ------------------------------
+  // --- 3. create + execute dual-stack plan on vRouter ------------------------------
   console.log('\n[3] create + execute dual-stack plan (WLC01)');
   const created = await authed('POST', '/plans', { pluginId: LCOS_PLUGIN_ID, intentActionId: 'network.create', inputs: sharedInputs, devices: [{ deviceId: DEVICE_WLC }] });
   // Read the body ONCE — check() evaluates its args eagerly (see section [1]).

@@ -13,7 +13,7 @@
  * State machine (from GET /api/quagga/service/status):
  *   'disabled'  → os-frr absent or intentionally off → out of scope (silent skip)
  *   'stopped'   → installed + enabled but NOT running = the blackhole case →
- *                 frrReachable=false → CRITICAL condition (GWST03 scenario)
+ *                 frrReachable=false → CRITICAL condition (the FRR-down scenario)
  *   'running'   → collect OSPF overview/neighbors/routes for both families AND
  *                 BGP summary/peers/route tables in one parallel batch. "No data"
  *                 means the protocol is not configured on this box: ALL of them
@@ -50,7 +50,7 @@ function num(row: Record<string, unknown>, key: string): number | null {
   return null;
 }
 
-/** Strips the ':address' suffix configd appends to ifaceName ("wg0:10.1.1.97" → "wg0"). */
+/** Strips the ':address' suffix configd appends to ifaceName ("wg0:203.0.113.97" → "wg0"). */
 function cleanIface(name: string): string {
   const i = name.indexOf(':');
   return (i >= 0 ? name.slice(0, i) : name).trim();
@@ -214,7 +214,7 @@ export async function collectFrrViaRest(client: AxiosInstance): Promise<FrrOspfR
     // Installed + enabled but not running = the blackhole case. REST cannot read
     // the config file to check whether OSPF was configured, so we assume it was:
     // a firewall whose FRR service is stopped has lost its routing-protocol state —
-    // exactly what this feature exists to catch (GWST03). deriveFrrConditions turns
+    // exactly what this feature exists to catch. deriveFrrConditions turns
     // frrReachable=false into the CRITICAL condition.
     return { frrInstalled: true, frrInspectable: true, ospfConfigured: true, frrReachable: false, neighbors: [], routes: [] };
   }

@@ -1,5 +1,5 @@
 /**
- * READ-ONLY check of the canonical intents' read path on GW_Ralf (production,
+ * READ-ONLY check of the canonical intents' read path on prod box (production,
  * physical LANCOM 1803VAW-5G). Runs vlan.networks.read via a plan and prints
  * the decoded rows — proves the SNMP status walk works on hardware too.
  * NO writes are executed.
@@ -10,7 +10,7 @@ import { createRequire } from 'node:module';
 
 const API = process.env.API_BASE ?? 'http://localhost:3000/v1';
 const LCOS_PLUGIN_ID = '00000000-0000-4000-8000-000000000006';
-// GW_Ralf — 10.28.0.1, LANCOM 1803VAW-5G (PRODUCTION).
+// prod box — 203.0.113.1, LANCOM 1803VAW-5G (PRODUCTION).
 const DEVICE_GW = 'fb2f6114-f169-4ca0-b145-f741fec55f11';
 
 const apiRequire = createRequire(path.resolve(process.cwd(), 'api', 'package.json'));

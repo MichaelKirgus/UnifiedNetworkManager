@@ -3,12 +3,12 @@
  * fleet intents (l2.topology.read / network.create preflight). FULLY READ-ONLY:
  * no plan writes any device.
  *
- *   1. l2.topology.read on OPNSENSE01 (primary router — reads only) via a real
+ *   1. l2.topology.read on the main OPNsense box (primary router — reads only) via a real
  *      plan step. Assert the parsed hierarchy: physical ports, the lagg0 LACP
  *      bundle (ax0+ax1), and the l3Interfaces map (lan carries L3).
- *   2. Preflight network.create on OPNSENSE01 — assert attach-point suggestion
+ *   2. Preflight network.create on the main OPNsense box — assert attach-point suggestion
  *      + write-path hint (≤26.4 without a bound ssh slot → "no write path").
- *   3. Same two checks against ROUTEROS01. The router is currently OFFLINE
+ *   3. Same two checks against RouterOS box. The router is currently OFFLINE
  *      (health=critical since Sep 27) — when unreachable the script reports
  *      SKIP for those checks instead of failing; when it comes back they run
  *      full assertions (ether1 physical port, L3 on ether1).
@@ -21,9 +21,9 @@ import { createRequire } from 'node:module';
 const API = process.env.API_BASE ?? 'http://localhost:3000/v1';
 const OPN_PLUGIN_ID = 'b0e6c8a2-4f1e-4a3d-9c7b-1a2b3c4d5e6f'; // OPNsense Plugin
 const ROS_PLUGIN_ID = '00000000-0000-4000-8000-00000000000a'; // MikroTik RouterOS Plugin
-// OPNSENSE01 — 10.25.5.1, OPNsense 26.4.2p2 (PRIMARY ROUTER — reads only).
+// the main OPNsense box — 203.0.113.1, OPNsense 26.4.2p2 (PRIMARY ROUTER — reads only).
 const DEVICE_OPN = '2eb40794-fd9c-4139-a381-184197b4f97a';
-// ROUTEROS01 — 10.25.2.1, RouterOS (offline since Sep 27 → SKIP path).
+// RouterOS box — 203.0.113.1, RouterOS (offline since Sep 27 → SKIP path).
 const DEVICE_ROS = '5c6e5d9a-1ad4-4ddd-82f3-508991d3ce15';
 
 const apiRequire = createRequire(path.resolve(process.cwd(), 'api', 'package.json'));
@@ -132,7 +132,7 @@ async function main(): Promise<void> {
   check('OPNsense → attach point suggested', Boolean(opnIface && opnIface.value), opnIface);
   check('OPNsense → attach confidence high (carries L3)', opnIface?.confidence === 'high', opnIface);
   const opnWritePath = opnPf?.values.find((v) => v.key === '_writePath');
-  // OPNSENSE01 is ≤26.4 with NO bound ssh slot → the resolver must report "no write path".
+  // the main OPNsense box is ≤26.4 with NO bound ssh slot → the resolver must report "no write path".
   check('OPNsense → write-path hint present', Boolean(opnWritePath), opnPf?.values);
   if (opnWritePath) {
     const noPath = opnWritePath.value === null && /no write path/i.test(String(opnWritePath.note ?? ''));

@@ -2,8 +2,8 @@
  * End-to-end verification for FRR/OSPF routing-protocol monitoring (opnsense plugin ≥ 0.7.0).
  *
  * Validates against the deployed stack (API on :3000):
- *   1. Finds a real OPNsense device with an SSH slot bound — GWST03 by default,
- *      override with DEVICE_NAME (substring) or DEVICE_ADDRESS (mgmt IP).
+ *   1. Finds a real OPNsense device with an SSH slot bound (one of four lab
+ *      boxes by default), override with DEVICE_NAME (substring) or DEVICE_ADDRESS.
  *   2. Forces an immediate re-poll (POST /devices/refresh) and reads the latest
  *      telemetry row + the rolled-up device healthReasons.
  *   3. Asserts the routing-protocol metrics are present: FRR reachable, router ID,
@@ -77,7 +77,7 @@ async function main(): Promise<void> {
 
   const nameHint = process.env.DEVICE_NAME ?? 'GWST03';
   const addrHint = process.env.DEVICE_ADDRESS ?? null;
-  // Exact name match first (there are several GWST* boxes), then substring.
+  // Exact name match first (there are several such boxes), then substring.
   const device =
     (addrHint ? devices.find((d) => d.managementAddress === addrHint) : undefined) ??
     devices.find((d) => d.name === nameHint) ??

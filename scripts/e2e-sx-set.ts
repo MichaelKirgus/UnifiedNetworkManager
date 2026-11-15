@@ -13,7 +13,7 @@ import { createRequire } from 'node:module';
 
 const API = process.env.API_BASE ?? 'http://localhost:3000/v1';
 const SX_PLUGIN_ID = '00000000-0000-4000-8000-000000000007';
-// Switch01.management.kirgus.intra — port 1 "Intranet" is link-down.
+// example.lan — port 1 "Intranet" is link-down.
 const DEVICE_ID = '9e32e21c-44af-4535-8d5f-91efc11ac66c';
 
 const apiRequire = createRequire(path.resolve(process.cwd(), 'api', 'package.json'));

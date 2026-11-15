@@ -6,7 +6,7 @@
  *
  *   UNM_API_URL=http://localhost:3000/v1 \
  *   UNM_TOKEN=unm_... \
- *   WLED_ADDRESS=10.40.1.62 \
+ *   WLED_ADDRESS=203.0.113.62 \
  *   tsx scripts/e2e-wled.ts [create|verify|cleanup]
  *
  * Phases (default = create + verify):

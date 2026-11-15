@@ -1,13 +1,13 @@
 /**
  * e2e-dns-writes.ts — live write test of the canonical dns.set / dns.delete
- * intents on SAFE TEST DEVICES ONLY (never GW_Ralf, which is production):
- *   - WLC01  (10.25.0.20) via the LCOS plugin: set → refresh → assert in
+ * intents on SAFE TEST DEVICES ONLY (never prod box, which is production):
+ *   - vRouter  (203.0.113.20) via the LCOS plugin: set → refresh → assert in
  *     GET /dns → idempotent re-set → delete → refresh → assert gone. This also
  *     live-verifies the LCOS CLI add grammar (`add "NAME" 0 <ip>` — an empty
  *     quoted v6 value is rejected by LCOS, see plugins/lancom-lcos docs).
- *   - ROUTEROS01 (10.25.2.1, QEMU test router) via the RouterOS plugin: same
+ *   - RouterOS box (203.0.113.1, QEMU test router) via the RouterOS plugin: same
  *     cycle over REST /ip/dns/static. Skipped when the device is unreachable.
- * OPNsense has no safe write target in this lab (OPNSENSE01 is the primary
+ * OPNsense has no safe write target in this lab (the main OPNsense box is the primary
  * router — reads only), so it is intentionally not exercised here.
  *
  * Every write is paired with its cleanup counterpart; on success the devices
@@ -21,10 +21,10 @@ import { createRequire } from 'node:module';
 
 const API = process.env.API_BASE ?? 'http://localhost:3000/v1';
 
-// WLC01 — LCOS vRouter test device (writes OK).
+// vRouter — LCOS vRouter test device (writes OK).
 const LCOS_DEVICE_ID = process.env.LCOS_DEVICE_ID ?? '38cf30d7-e53e-47ae-9545-c79af2270751';
 const LCOS_PLUGIN_ID = process.env.LCOS_PLUGIN_ID ?? '00000000-0000-4000-8000-000000000006';
-// ROUTEROS01 — QEMU x86_64 test router (writes OK).
+// RouterOS box — QEMU x86_64 test router (writes OK).
 const ROS_DEVICE_ID = process.env.ROS_DEVICE_ID ?? '5c6e5d9a-1ad4-4ddd-82f3-508991d3ce15';
 const ROS_PLUGIN_ID = process.env.ROS_PLUGIN_ID ?? '00000000-0000-4000-8000-00000000000a';
 
@@ -255,11 +255,11 @@ async function main(): Promise<void> {
     check('entry gone from GET /dns after delete', await waitForDns(deviceId, false, 90_000, pluginId));
   }
 
-  // --- LCOS on WLC01 -----------------------------------------------------------
+  // --- LCOS on vRouter -----------------------------------------------------------
   console.log('\n== LCOS dns.set/dns.delete (WLC01) ==');
   await dnsCycle('LCOS @ WLC01', LCOS_PLUGIN_ID, LCOS_DEVICE_ID);
 
-  // --- RouterOS on ROUTEROS01 (skip when the test router is down) ---------------
+  // --- RouterOS on RouterOS box (skip when the test router is down) ---------------
   console.log('\n== RouterOS dns.set/dns.delete (ROUTEROS01) ==');
   const rosHealth = await authed('GET', `/devices/${ROS_DEVICE_ID}`);
   const rosDev = ((await rosHealth.json()) as { status?: string }) ?? {};

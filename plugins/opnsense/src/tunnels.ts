@@ -78,10 +78,10 @@ export function extractRows(data: unknown): Record<string, unknown>[] {
 }
 
 /**
- * A CIDR field may arrive three ways: a plain string ("10.1.1.62/30"), an object
+ * A CIDR field may arrive three ways: a plain string ("203.0.113.5/30"), an object
  * ({ value, selected }), or a map keyed by the CIDR itself (the wireguard client
  * shape { "0.0.0.0/0": { value, selected } }). Strings may be comma-joined
- * ("fd42::1/127,fe80::1/64" — v4+v6 tunnel addresses) and are split apart.
+ * ("2001:db8::1/127,fe80::1/64" — v4+v6 tunnel addresses) and are split apart.
  * Returns all candidate strings.
  */
 function cidrCandidates(v: unknown): string[] {

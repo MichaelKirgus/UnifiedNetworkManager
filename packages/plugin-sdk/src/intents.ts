@@ -156,8 +156,8 @@ export function suggestL2AttachPoint(topo: L2Topology, preferred?: string): { at
   }
   // 3. A plain interface directly carrying L3 networks — no bridge in front of
   //    it and not part of an ACTIVE bundle (a port inside a configured-but-
-  //    inactive bundle is just a standalone port; LCOS-verified: WLC01 carries
-  //    its LAN on LAN-1 while BUNDLE-1 over it has Operating=No).
+  //    inactive bundle is just a standalone port; LCOS-verified: the test vRouter
+  //    carries its LAN on LAN-1 while BUNDLE-1 over it has Operating=No).
   const inActiveAgg = (ifc: string) =>
     topo.bridges.some((b) => b.name === ifc || b.members.includes(ifc)) ||
     topo.bundles.some((bu) => bu.operating !== false && (bu.name === ifc || bu.members.includes(ifc)));

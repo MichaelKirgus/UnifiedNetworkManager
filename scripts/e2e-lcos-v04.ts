@@ -3,11 +3,11 @@
  *
  * Drives REAL actions end-to-end through the live stack:
  *   discovery (v0.4.0, new action ids present, wlan.ssid.state.set removed)
- *   → GW_Ralf (production, dual radio): wlan.networks.read + wlan.radios.read  [SNMP reads — safe]
- *   → WLC01 (test, no radio): wlan.radio.channel.set negative test             [must fail cleanly]
- *   → GW_Ralf: config.backup.download soft check                               [documents the empty-/config finding]
+ *   → prod box (production, dual radio): wlan.networks.read + wlan.radios.read  [SNMP reads — safe]
+ *   → vRouter (test, no radio): wlan.radio.channel.set negative test             [must fail cleanly]
+ *   → prod box: config.backup.download soft check                               [documents the empty-/config finding]
  *
- * NO WiFi writes are executed on GW_Ralf. The only write-path exercise is the
+ * NO WiFi writes are executed on prod box. The only write-path exercise is the
  * expected-FAIL channel set on the radio-less test device.
  *
  * Usage (from the repo root): ./node_modules/.bin/tsx scripts/e2e-lcos-v04.ts
@@ -17,9 +17,9 @@ import { createRequire } from 'node:module';
 
 const API = process.env.API_BASE ?? 'http://localhost:3000/v1';
 const LCOS_PLUGIN_ID = '00000000-0000-4000-8000-000000000006';
-// GW_Ralf — 10.28.0.1, LANCOM 1803VAW-5G (dual-radio WiFi, PRODUCTION).
+// prod box — 203.0.113.1, LANCOM 1803VAW-5G (dual-radio WiFi, PRODUCTION).
 const DEVICE_GW = 'fb2f6114-f169-4ca0-b145-f741fec55f11';
-// WLC01 — 10.25.0.20, LANCOM vRouter (no WLAN radio, TEST device).
+// vRouter — 203.0.113.20, LANCOM vRouter (no WLAN radio, TEST device).
 const DEVICE_WLC = '38cf30d7-e53e-47ae-9545-c79af2270751';
 
 const apiRequire = createRequire(path.resolve(process.cwd(), 'api', 'package.json'));
@@ -95,7 +95,7 @@ async function main(): Promise<void> {
   }
   check('catalog no longer has wlan.ssid.state.set (runtime-only state)', !actions.some((a) => a.id === 'wlan.ssid.state.set'));
 
-  // --- 2. GW_Ralf: WLAN reads --------------------------------------------------
+  // --- 2. prod box: WLAN reads --------------------------------------------------
   console.log('\n[2] wlan.networks.read on GW_Ralf');
   const nets = await runStep(DEVICE_GW, 'wlan.networks.read', {});
   check('networks-read plan succeeded', nets.status === 'succeeded', { status: nets.status, error: nets.error });
@@ -110,14 +110,14 @@ async function main(): Promise<void> {
   check('at least one radio reported (dual-radio model)', radioList.length >= 1, { count: radioList.length });
   check('radio rows carry a channel value', radioList.some((r) => typeof r.channel === 'number'), radioList);
 
-  // --- 4. WLC01 negative: channel set on a radio-less device --------------------
+  // --- 4. vRouter negative: channel set on a radio-less device --------------------
   console.log('\n[4] wlan.radio.channel.set negative test on WLC01 (no WLAN radio)');
   const ch = await runStep(DEVICE_WLC, 'wlan.radio.channel.set', { ifc: 'WLAN-1', channel: 6 });
   check('channel-set failed cleanly (expected — no radio)', ch.status === 'failed' || Boolean(ch.error), { status: ch.status, error: ch.error });
 
-  // --- 5. GW_Ralf soft check: config.backup.download ----------------------------
+  // --- 5. prod box soft check: config.backup.download ----------------------------
   // KNOWN FINDING: physical LCOS devices expose an EMPTY SFTP /config file (opens,
-  // never delivers data) — only the vRouter WLC01 serves the real LCF document.
+  // never delivers data) — only the vRouter vRouter serves the real LCF document.
   // This documents the behavior; it does not fail the E2E.
   console.log('\n[5] config.backup.download on GW_Ralf (soft check — empty-/config finding)');
   const backup = await runStep(DEVICE_GW, 'config.backup.download', {});

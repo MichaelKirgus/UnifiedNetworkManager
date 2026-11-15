@@ -1,9 +1,9 @@
 /**
  * Unit tests for the REST-first FRR/OSPF collection (frrRest.ts).
- * Pure logic — no appliance, no network. The fixtures are REAL captured data
- * from OPNSENSE01's configd quagga diagnostics (26.10 BE): ospfoverview,
- * searchOspfneighbor rows, searchOspfroute rows and the multi-path
- * searchOspfv3route recordset.
+ * Pure logic — no appliance, no network. The fixtures mirror real captured data
+ * from an OPNsense 26.x appliance's configd quagga diagnostics (addresses
+ * anonymized): ospfoverview, searchOspfneighbor rows, searchOspfroute rows and
+ * the multi-path searchOspfv3route recordset.
  */
 import type { AxiosInstance } from 'axios';
 import { collectFrrViaRest } from './frrRest';
@@ -22,11 +22,11 @@ function makeClient(routes: Record<string, unknown>): AxiosInstance {
   } as unknown as AxiosInstance;
 }
 
-// --- Real captured fixtures (OPNSENSE01, configd quagga diagnostics) ------------
+// --- Captured-style fixtures (configd quagga diagnostics, addresses anonymized) -
 
 const V4_OVERVIEW = {
   response: {
-    routerId: '10.25.0.1',
+    routerId: '203.0.113.1',
     tosRoutesOnly: true,
     maximumPaths: 64,
     preference: 110,
@@ -40,9 +40,9 @@ const V4_OVERVIEW = {
 const V4_NEIGHBORS = {
   response: {
     rows: [
-      { neighborid: '10.1.1.98', nbrState: 'Full/-', role: 'DROther', upTimeInMsec: 9710877, ifaceAddress: '10.1.1.98', ifaceName: 'wg0:10.1.1.97' },
-      { neighborid: '10.1.1.102', nbrState: 'Full/-', role: 'DROther', upTimeInMsec: 9710854, ifaceAddress: '10.1.1.102', ifaceName: 'wg1:10.1.1.101' },
-      { neighborid: '10.1.1.106', nbrState: 'Down/WaitingInfo', role: 'DROther', upTimeInMsec: 0, ifaceAddress: '10.1.1.105', ifaceName: 'wg2:10.1.1.104' },
+      { neighborid: '203.0.113.98', nbrState: 'Full/-', role: 'DROther', upTimeInMsec: 9710877, ifaceAddress: '203.0.113.98', ifaceName: 'wg0:203.0.113.97' },
+      { neighborid: '203.0.113.102', nbrState: 'Full/-', role: 'DROther', upTimeInMsec: 9710854, ifaceAddress: '203.0.113.102', ifaceName: 'wg1:203.0.113.101' },
+      { neighborid: '203.0.113.106', nbrState: 'Down/WaitingInfo', role: 'DROther', upTimeInMsec: 0, ifaceAddress: '203.0.113.105', ifaceName: 'wg2:203.0.113.104' },
     ],
     total: 3,
   },
@@ -52,25 +52,25 @@ const V4_ROUTES = {
   response: {
     rows: [
       // Point-to-point /30s — the "via" field is a bare space (PHP !empty(' ') = true).
-      { type: 'N', network: '10.1.1.32/30', cost: 20, area: '0.0.0.0', via: ' ', viainterface: 'wg35' },
+      { type: 'N', network: '198.51.100.32/30', cost: 20, area: '0.0.0.0', via: ' ', viainterface: 'wg35' },
       // A learned external route with a real next hop.
-      { type: 'E2', network: '10.9.8.0/24', cost: 100, area: '', via: '10.1.1.97', viainterface: 'wg0' },
+      { type: 'E2', network: '198.51.100.8/24', cost: 100, area: '', via: '203.0.113.97', viainterface: 'wg0' },
     ],
     total: 2,
   },
 };
 
 const V6_OVERVIEW = {
-  response: { routerId: '10.25.0.2', running: '18:28:08', numberOfAreaInRouter: 1 },
+  response: { routerId: '203.0.113.2', running: '18:28:08', numberOfAreaInRouter: 1 },
 };
 
 /** Multi-path recordset: the /127 prefix appears TWICE (best + non-best path). */
 const V6_ROUTES = {
   response: {
     rows: [
-      { network: 'fd42:1:1:1::/127', isBestRoute: true, destinationType: 'N', pathType: 'IA', duration: '18:28:00', nextHop: '::', interfaceName: 'wg7' },
-      { network: 'fd42:1:1:1::/127', isBestRoute: false, destinationType: 'N', pathType: 'IA', duration: '00:23:00', nextHop: 'fe80:0:1:2::1', interfaceName: 'wg6' },
-      { network: 'fd42:1:1:1::1/128', isBestRoute: true, destinationType: 'N', pathType: 'INTRA', duration: '00:23:00', nextHop: 'fe80:0:1:2::1', interfaceName: 'wg6' },
+      { network: '2001:db8:1:1::/127', isBestRoute: true, destinationType: 'N', pathType: 'IA', duration: '18:28:00', nextHop: '::', interfaceName: 'wg7' },
+      { network: '2001:db8:1:1::/127', isBestRoute: false, destinationType: 'N', pathType: 'IA', duration: '00:23:00', nextHop: 'fe80:0:1:2::1', interfaceName: 'wg6' },
+      { network: '2001:db8:1:1::1/128', isBestRoute: true, destinationType: 'N', pathType: 'INTRA', duration: '00:23:00', nextHop: 'fe80:0:1:2::1', interfaceName: 'wg6' },
     ],
     total: 3,
   },
@@ -119,10 +119,10 @@ describe('collectFrrViaRest — service-state machine', () => {
     expect(r!.ospfConfigured).toBe(true);
     expect(r!.frrReachable).toBe(false);
     // And deriveFrrConditions turns that into the critical condition.
-    const conds = deriveFrrConditions(r, 'GWST03');
+    const conds = deriveFrrConditions(r, 'router-a');
     expect(conds).toHaveLength(1);
     expect(conds[0].severity).toBe('critical');
-    expect(conds[0].dedupeKey).toBe('frr-ospf:GWST03');
+    expect(conds[0].dedupeKey).toBe('frr-ospf:router-a');
   });
 
   it('maps "running" with empty overviews to OSPF-not-configured (silent)', async () => {
@@ -142,7 +142,7 @@ describe('collectFrrViaRest — service-state machine', () => {
   });
 });
 
-// --- Full collection (real OPNSENSE01 data) --------------------------------------
+// --- Full collection (captured-style fixtures) -----------------------------------
 
 describe('collectFrrViaRest — full collection', () => {
   it('parses neighbors, routes and router ID from the real fixtures', async () => {
@@ -152,29 +152,29 @@ describe('collectFrrViaRest — full collection', () => {
     expect(r!.frrInspectable).toBe(true);
     expect(r!.ospfConfigured).toBe(true);
     expect(r!.frrReachable).toBe(true);
-    expect(r!.routerId).toBe('10.25.0.1'); // v4 overview wins
+    expect(r!.routerId).toBe('203.0.113.1'); // v4 overview wins
 
     // Neighbors: ifaceName suffix stripped, Full detection, uptime in seconds.
     expect(r!.neighbors).toHaveLength(3);
     const [a, b, c] = r!.neighbors;
-    expect(a).toMatchObject({ version: 'ospf', neighborId: '10.1.1.98', interfaceName: 'wg0', state: 'Full/-', full: true, upTimeSeconds: 9711, address: '10.1.1.98' });
+    expect(a).toMatchObject({ version: 'ospf', neighborId: '203.0.113.98', interfaceName: 'wg0', state: 'Full/-', full: true, upTimeSeconds: 9711, address: '203.0.113.98' });
     expect(b.interfaceName).toBe('wg1');
-    expect(c).toMatchObject({ neighborId: '10.1.1.106', interfaceName: 'wg2', state: 'Down/WaitingInfo', full: false, upTimeSeconds: 0 });
+    expect(c).toMatchObject({ neighborId: '203.0.113.106', interfaceName: 'wg2', state: 'Down/WaitingInfo', full: false, upTimeSeconds: 0 });
 
     // v4 routes: the bare-space "via" becomes '' (directly attached), cost → metric.
-    const v4 = r!.routes.filter((x) => x.destination.startsWith('10.'));
+    const v4 = r!.routes.filter((x) => x.destination.startsWith('198.51.100.'));
     expect(v4).toHaveLength(2);
-    expect(v4[0]).toMatchObject({ destination: '10.1.1.32/30', gateway: '', protocol: 'ospf', metric: 20, status: 'active' });
+    expect(v4[0]).toMatchObject({ destination: '198.51.100.32/30', gateway: '', protocol: 'ospf', metric: 20, status: 'active' });
     expect(v4[0].extra).toEqual({ area: '0.0.0.0', routeType: 'N' });
-    expect(v4[1]).toMatchObject({ destination: '10.9.8.0/24', gateway: '10.1.1.97', metric: 100 });
+    expect(v4[1]).toMatchObject({ destination: '198.51.100.8/24', gateway: '203.0.113.97', metric: 100 });
 
     // v6 routes: multi-path deduped per destination, best route wins ('::' → '').
-    const v6 = r!.routes.filter((x) => x.destination.startsWith('fd42'));
+    const v6 = r!.routes.filter((x) => x.destination.startsWith('2001:db8'));
     expect(v6).toHaveLength(2);
-    const p127 = v6.find((x) => x.destination === 'fd42:1:1:1::/127')!;
+    const p127 = v6.find((x) => x.destination === '2001:db8:1:1::/127')!;
     expect(p127.gateway).toBe(''); // best path's nextHop was '::'
     expect(p127.extra).toEqual({ interfaceName: 'wg7', pathType: 'IA' });
-    const p128 = v6.find((x) => x.destination === 'fd42:1:1:1::1/128')!;
+    const p128 = v6.find((x) => x.destination === '2001:db8:1:1::1/128')!;
     expect(p128.gateway).toBe('fe80:0:1:2::1');
 
     // Learned-route counts drive the zero-routes alerting.
@@ -182,11 +182,11 @@ describe('collectFrrViaRest — full collection', () => {
     expect(r!.v6RoutesLearned).toBe(2);
 
     // Healthy box → no conditions (all Full neighbors counted, routes > 0).
-    const conds = deriveFrrConditions(r, 'OPNSENSE01');
+    const conds = deriveFrrConditions(r, 'router-b');
     // The one Down neighbor IS reported.
     expect(conds).toHaveLength(1);
     expect(conds[0].severity).toBe('warning');
-    expect(conds[0].dedupeKey).toBe('ospf-neighbor:ospf:wg2:10.1.1.106');
+    expect(conds[0].dedupeKey).toBe('ospf-neighbor:ospf:wg2:203.0.113.106');
   });
 
   it('accepts top-level (unwrapped) response envelopes', async () => {
@@ -199,7 +199,7 @@ describe('collectFrrViaRest — full collection', () => {
     const r = await collectFrrViaRest(client);
     expect(r).not.toBeNull();
     expect(r!.frrReachable).toBe(true);
-    expect(r!.routerId).toBe('10.25.0.1');
+    expect(r!.routerId).toBe('203.0.113.1');
     expect(r!.neighbors).toHaveLength(3);
     expect(r!.v4RoutesLearned).toBe(2);
   });
@@ -214,7 +214,7 @@ describe('collectFrrViaRest — full collection', () => {
     const r = await collectFrrViaRest(client);
     expect(r).not.toBeNull();
     expect(r!.frrReachable).toBe(true);
-    expect(r!.routerId).toBe('10.25.0.2');
+    expect(r!.routerId).toBe('203.0.113.2');
     expect(r!.neighbors).toHaveLength(0); // no v6 neighbor endpoint exists
     expect(r!.v4RoutesLearned).toBe(0);
     expect(r!.v6RoutesLearned).toBe(2);
@@ -229,7 +229,7 @@ describe('collectFrrViaRest — full collection', () => {
     const r = await collectFrrViaRest(client);
     expect(r).not.toBeNull();
     expect(r!.frrReachable).toBe(true);
-    expect(r!.routerId).toBe('10.25.0.1');
+    expect(r!.routerId).toBe('203.0.113.1');
     expect(r!.neighbors).toHaveLength(0);
     expect(r!.v4RoutesLearned).toBe(0);
   });
@@ -237,7 +237,7 @@ describe('collectFrrViaRest — full collection', () => {
 
 // --- BGP fixtures (v0.11.0) ------------------------------------------------------
 
-/** Live shape on OPNSENSE01 when bgpd is not running: configd returns nothing → the PHP controller's `?? []` fallback. */
+/** Live shape when bgpd is not running: configd returns nothing → the PHP controller's `?? []` fallback. */
 const BG_SUMMARY_EMPTY = { response: [] };
 const BG_ROUTES_EMPTY = { response: { rows: [], total: 0 } };
 
@@ -245,19 +245,19 @@ const BG_ROUTES_EMPTY = { response: { rows: [], total: 0 } };
 const BG_SUMMARY_DATA = {
   response: {
     ipv4Unicast: {
-      routerId: '10.25.0.1',
+      routerId: '203.0.113.1',
       as: 65001,
       peers: {
-        '10.1.1.97': { remoteAs: 65002, state: 'Established', pfxRcd: 12 },
-        '10.1.1.101': { remoteAs: 65003, state: 'Active' },
+        '203.0.113.97': { remoteAs: 65002, state: 'Established', pfxRcd: 12 },
+        '203.0.113.101': { remoteAs: 65003, state: 'Active' },
       },
     },
     ipv6Unicast: {
       as: 65001,
       peers: {
         // Same peer also appears in the v4 section → deduped by address.
-        '10.1.1.97': { remoteAs: 65002, state: 'Established', pfxRcd: 3 },
-        'fd00::2': { remoteAs: 65002, state: 'Established', pfxRcd: 4 },
+        '203.0.113.97': { remoteAs: 65002, state: 'Established', pfxRcd: 3 },
+        '2001:db8::2': { remoteAs: 65002, state: 'Established', pfxRcd: 4 },
       },
     },
   },
@@ -268,8 +268,8 @@ const BG_ROUTES_V4 = {
   response: {
     rows: [
       // Multi-path prefix — appears twice, deduped to one row.
-      { network: '192.0.2.0/24', ip: '10.1.1.97', interfaceName: 'wg0', pathFrom: 'external' },
-      { network: '192.0.2.0/24', ip: '10.1.1.101', interfaceName: 'wg1', pathFrom: 'internal' },
+      { network: '192.0.2.0/24', ip: '203.0.113.97', interfaceName: 'wg0', pathFrom: 'external' },
+      { network: '192.0.2.0/24', ip: '203.0.113.101', interfaceName: 'wg1', pathFrom: 'internal' },
       // iBGP route with an empty nexthop (recurses into the connected table).
       { network: '198.51.100.0/24', ip: '', interfaceName: 'wg2', pathFrom: 'internal' },
     ],
@@ -279,7 +279,7 @@ const BG_ROUTES_V4 = {
 
 const BG_ROUTES_V6 = {
   response: {
-    rows: [{ network: '2001:db8::/48', ip: 'fd00::2', interfaceName: 'wg7', pathFrom: 'external' }],
+    rows: [{ network: '2001:db8::/48', ip: '2001:db8::2', interfaceName: 'wg7', pathFrom: 'external' }],
     total: 1,
   },
 };
@@ -303,17 +303,17 @@ describe('collectFrrViaRest — BGP', () => {
     // No OSPF data → ospfConfigured=false, but FRR IS reachable (BGP has data).
     expect(r!.ospfConfigured).toBe(false);
     expect(r!.frrReachable).toBe(true);
-    expect(r!.routerId).toBe('10.25.0.1'); // from the BGP summary
+    expect(r!.routerId).toBe('203.0.113.1'); // from the BGP summary
 
     const bgp = r!.bgp!;
     expect(bgp.configured).toBe(true);
     expect(bgp.localAs).toBe(65001);
-    // 3 unique peers: 10.1.1.97 (deduped across AFIs), 10.1.1.101, fd00::2.
+    // 3 unique peers: 203.0.113.97 (deduped across AFIs), 203.0.113.101, 2001:db8::2.
     expect(bgp.peers).toHaveLength(3);
     expect(bgp.peers.filter((p) => p.established)).toHaveLength(2);
-    const a97 = bgp.peers.find((p) => p.neighborId === '10.1.1.97')!;
+    const a97 = bgp.peers.find((p) => p.neighborId === '203.0.113.97')!;
     expect(a97).toMatchObject({ remoteAs: 65002, state: 'Established', established: true });
-    expect(bgp.peers.find((p) => p.neighborId === '10.1.1.101')).toMatchObject({ state: 'Active', established: false });
+    expect(bgp.peers.find((p) => p.neighborId === '203.0.113.101')).toMatchObject({ state: 'Active', established: false });
 
     // BGP learned routes: deduped per destination, protocol 'bgp', egress in extra.peer.
     expect(bgp.v4RoutesLearned).toBe(2);
@@ -321,16 +321,16 @@ describe('collectFrrViaRest — BGP', () => {
     const bg = r!.routes.filter((x) => x.protocol === 'bgp');
     expect(bg).toHaveLength(3);
     const p1 = bg.find((x) => x.destination === '192.0.2.0/24')!;
-    expect(p1).toMatchObject({ gateway: '10.1.1.97', protocol: 'bgp', status: 'active' });
+    expect(p1).toMatchObject({ gateway: '203.0.113.97', protocol: 'bgp', status: 'active' });
     expect(p1.extra).toEqual({ peer: 'wg0', pathFrom: 'external' });
     const p2 = bg.find((x) => x.destination === '198.51.100.0/24')!;
     expect(p2.gateway).toBe(''); // empty nexthop → ''
 
     // Exactly one warning for the Active peer — and this box has NO OSPF, which
     // used to short-circuit deriveFrrConditions before any BGP check could run.
-    const conds = deriveFrrConditions(r, 'GWST01');
+    const conds = deriveFrrConditions(r, 'router-c');
     expect(conds).toHaveLength(1);
-    expect(conds[0]).toMatchObject({ severity: 'warning', dedupeKey: 'bgp-peer:10.1.1.101' });
+    expect(conds[0]).toMatchObject({ severity: 'warning', dedupeKey: 'bgp-peer:203.0.113.101' });
   });
 
   it('escalates to critical when every BGP session is down', async () => {
@@ -341,21 +341,21 @@ describe('collectFrrViaRest — BGP', () => {
         response: {
           ipv4Unicast: {
             as: 65001,
-            peers: { '10.1.1.97': { remoteAs: 65002, state: 'Connect' }, '10.1.1.101': { remoteAs: 65003, state: 'Active' } },
+            peers: { '203.0.113.97': { remoteAs: 65002, state: 'Connect' }, '203.0.113.101': { remoteAs: 65003, state: 'Active' } },
           },
         },
       },
     });
     const r = await collectFrrViaRest(client);
     expect(r!.bgp?.configured).toBe(true);
-    const conds = deriveFrrConditions(r, 'GWST02');
+    const conds = deriveFrrConditions(r, 'router-d');
     // Per-peer warnings + the all-down critical.
     expect(conds.filter((c) => c.severity === 'warning')).toHaveLength(2);
     const crit = conds.find((c) => c.severity === 'critical')!;
-    expect(crit.dedupeKey).toBe('bgp-all-down:GWST02');
+    expect(crit.dedupeKey).toBe('bgp-all-down:router-d');
   });
 
-  it('stays silent for BGP when FRR runs but no peers are configured (live OPNSENSE01 shape)', async () => {
+  it('stays silent for BGP when FRR runs but no peers are configured (the live empty-state shape)', async () => {
     const client = makeClient({
       ...RUNNING_ROUTES, // OSPF present → the box is in scope via OSPF…
       '/api/quagga/diagnostics/bgpsummary': BG_SUMMARY_EMPTY, // …but BGP returns the empty `[]` fallback.
@@ -366,8 +366,8 @@ describe('collectFrrViaRest — BGP', () => {
     expect(r!.bgp?.configured).toBe(false);
     expect(r!.bgp?.peers).toEqual([]);
     // No BGP conditions — only the known Down-neighbor warning from the OSPF fixtures.
-    const conds = deriveFrrConditions(r, 'OPNSENSE01');
-    expect(conds.map((c) => c.dedupeKey)).toEqual(['ospf-neighbor:ospf:wg2:10.1.1.106']);
+    const conds = deriveFrrConditions(r, 'router-b');
+    expect(conds.map((c) => c.dedupeKey)).toEqual(['ospf-neighbor:ospf:wg2:203.0.113.106']);
   });
 
   it('falls back to the bgpneighbors endpoint when the summary carries no peers', async () => {
@@ -375,12 +375,12 @@ describe('collectFrrViaRest — BGP', () => {
       '/api/quagga/service/status': { status: 'running' },
       '/api/quagga/diagnostics/ospfoverview': BG_SUMMARY_EMPTY,
       '/api/quagga/diagnostics/bgpsummary': BG_SUMMARY_EMPTY,
-      '/api/quagga/diagnostics/bgpneighbors': { response: { '10.1.1.97': { remoteAs: 65002, state: 'Established', pfxRcd: 7 } } },
+      '/api/quagga/diagnostics/bgpneighbors': { response: { '203.0.113.97': { remoteAs: 65002, state: 'Established', pfxRcd: 7 } } },
     });
     const r = await collectFrrViaRest(client);
     expect(r!.bgp?.configured).toBe(true);
     expect(r!.bgp?.peers).toHaveLength(1);
-    expect(r!.bgp?.peers[0]).toMatchObject({ neighborId: '10.1.1.97', established: true, prefixesReceived: 7 });
+    expect(r!.bgp?.peers[0]).toMatchObject({ neighborId: '203.0.113.97', established: true, prefixesReceived: 7 });
   });
 
   it('treats a flat per-AFI summary layout (no AFI sections) as configured', async () => {
@@ -388,12 +388,12 @@ describe('collectFrrViaRest — BGP', () => {
       '/api/quagga/service/status': { status: 'running' },
       '/api/quagga/diagnostics/ospfoverview': BG_SUMMARY_EMPTY,
       '/api/quagga/diagnostics/bgpsummary': {
-        response: { routerId: '10.9.9.1', localAS: 65001, totalPeers: 1, peers: { '172.16.0.2': { remoteAs: 64512, state: 'Established', pfxRcd: 3 } } },
+        response: { routerId: '203.0.113.9', localAS: 65001, totalPeers: 1, peers: { '172.16.0.2': { remoteAs: 64512, state: 'Established', pfxRcd: 3 } } },
       },
     });
     const r = await collectFrrViaRest(client);
     expect(r!.bgp?.configured).toBe(true);
     expect(r!.bgp?.localAs).toBe(65001);
-    expect(r!.routerId).toBe('10.9.9.1'); // BGP summary is the router-ID source here
+    expect(r!.routerId).toBe('203.0.113.9'); // BGP summary is the router-ID source here
   });
 });

@@ -1,7 +1,7 @@
 /**
- * E2E for the OPNsense ≤26.4 SSH write path on GWBN01 (the device that now has
- * a bound `ssh` slot). Unblocks the Phase J item "GWBN01 write E2E blocked
- * pending SSH slot binding".
+ * E2E for the OPNsense ≤26.4 SSH write path on the 26.4 write-test box (the
+ * device that now has a bound `ssh` slot). Unblocks the Phase J item "≤26.4
+ * write E2E blocked pending SSH slot binding".
  *
  *   1. Preflight network.create → _writePath must be 'ssh' (was null /
  *      "no write path" before the slot was bound).
@@ -12,14 +12,14 @@
  *      A delete that finds nothing reports `skipped` — so a successful
  *      non-skipped delete proves the create actually landed on-device.
  *
- * SAFETY: GWBN01's WAN is vtnet0 (DHCP /22) and its LAN is vtnet1. The attach
+ * SAFETY: this box's WAN is vtnet0 (DHCP /22) and its LAN is vtnet1. The attach
  * point is therefore pinned to `interface: 'vtnet1'` — never left to the
  * suggestion, which on this device would pick vtnet0 alphabetically and risk
  * breaking the appliance's own uplink (and our management path). The VLAN id
  * 3999 (schema max is 4094) keeps the test off any real traffic; delete tears
  * down assignment + orphaned VLAN.
  *
- * GWBN01 is the designated write-test device (OPNSENSE01 stays reads-only).
+ * This box is the designated write-test device (the main OPNsense box stays reads-only).
  * The network created here is ephemeral and removed in step 3; if anything
  * fails mid-way, clean up manually with a network.delete plan for name
  * 'e2e-ssh-net'.
@@ -31,7 +31,7 @@ import { createRequire } from 'node:module';
 
 const API = process.env.API_BASE ?? 'http://localhost:3000/v1';
 const OPN_PLUGIN_ID = 'b0e6c8a2-4f1e-4a3d-9c7b-1a2b3c4d5e6f'; // OPNsense Plugin
-// GWBN01 — 10.1.1.46, OPNsense 26.4.1p2 (WRITE-TEST device; ssh slot bound).
+// The write-test box — 203.0.113.46, OPNsense 26.4.1p2 (WRITE-TEST device; ssh slot bound).
 const DEVICE_GWBN = '0add51bf-165f-461c-ad38-935b5f9eb1b3';
 const NET_NAME = 'e2e-ssh-net';
 // Pinned attach point: the LAN port. vtnet0 is WAN — NEVER an attach target.

@@ -1,8 +1,8 @@
 /**
  * Unit tests for the FRR/OSPF monitoring module (frrOspf.ts).
- * Pure logic — no appliance, no network. The vtysh fixtures are REAL captured
- * output from an OPNsense 26.x box running FRR (GWST03), including FRR's own
- * log-noise lines that vtysh prints into every call and must be filtered.
+ * Pure logic — no appliance, no network. The vtysh fixtures mirror real captured
+ * output from an OPNsense 26.x box running FRR (addresses anonymized), including
+ * FRR's own log-noise lines that vtysh prints into every call and must be filtered.
  */
 import {
   splitFrrSections,
@@ -19,7 +19,7 @@ import {
   type FrrOspfResult,
 } from './frrOspf';
 
-// --- Real captured vtysh fixtures (OPNsense 26.1 / FRR on GWST03) -------------
+// --- Captured-style vtysh fixtures (OPNsense 26.x + FRR, addresses anonymized) -
 
 /** Every vtysh call starts with FRR's own log noise — must never become a row. */
 const NOISE = '2026-11-15 17:05:02 [H0DHT-S9KF2][EC 100663299] setsockopt_so_recvbuf: fd 8: Operation not permitted';
@@ -28,15 +28,15 @@ const NOISE = '2026-11-15 17:05:02 [H0DHT-S9KF2][EC 100663299] setsockopt_so_rec
 const V4_NEIGH_FULL = [
   NOISE,
   'Neighbor ID     Pri State           Up Time         Dead Time Address         Interface',
-  '10.25.0.1       1   Full/-          43m16s          29.153s  10.1.1.93       wg0:10.1.1.94                        0     0     0',
+  '203.0.113.1     1   Full/-          43m16s          29.153s  203.0.113.93    wg0:203.0.113.94                   0     0     0',
 ].join('\n');
 
 /** `show ip ospf neighbor` — one Full + one Down adjacency (the flap case). */
 const V4_NEIGH_MIXED = [
   NOISE,
   'Neighbor ID     Pri State           Up Time         Dead Time Address         Interface',
-  '10.25.0.1       1   Full/-          43m16s          29.153s  10.1.1.93       wg0:10.1.1.94                        0     0     0',
-  '10.25.0.9       1   Down/WaitingInfo -              30s      10.1.1.97       wg1:10.1.1.98                        0     0     0',
+  '203.0.113.1     1   Full/-          43m16s          29.153s  203.0.113.93    wg0:203.0.113.94                   0     0     0',
+  '203.0.113.9     1   Down/WaitingInfo -              30s      203.0.113.97    wg1:203.0.113.98                   0     0     0',
 ].join('\n');
 
 /** `show ip ospf neighbor` with zero neighbors — header only (still reachable). */
@@ -46,14 +46,14 @@ const V4_NEIGH_EMPTY = [NOISE, 'Neighbor ID     Pri State           Up Time     
 const V6_NEIGH_FULL = [
   NOISE,
   'Neighbor ID     Pri   DeadTime      State/IfState    Duration   I/F',
-  '10.25.0.2       1     00:00:09      Full/PointToPoint 00:43:11  wg4[PointToPoint]',
+  '203.0.113.2     1     00:00:09      Full/PointToPoint 00:43:11  wg4[PointToPoint]',
 ].join('\n');
 
 /** `show ip ospf` head — carries the router ID line. */
 const ROUTER_ID_SECTION = [
   NOISE,
   'OSPF process running as',
-  ' OSPF Routing Process, Router ID: 10.1.1.94',
+  ' OSPF Routing Process, Router ID: 203.0.113.94',
 ].join('\n');
 
 /** `show ip route ospf` — real table layout: flag chars (">", "*"), [dist/metric],
@@ -61,9 +61,9 @@ const ROUTER_ID_SECTION = [
 const V4_ROUTE_TABLE = [
   NOISE,
   'Codes: C - connected, S - static, R - RIP, O - OSPF, B - BGP,',
-  'O>* 10.25.10.0/24 [110/2] via 10.1.1.78, wg0, 00:43:11',
-  'O>* 10.25.20.0/24 [110/4] via 10.1.1.98, wg2, 01:12:05',
-  'O    10.25.0.0/16 [110/1] is a summary, 02:00:00',
+  'O>* 198.51.100.10/24 [110/2] via 203.0.113.78, wg0, 00:43:11',
+  'O>* 198.51.100.20/24 [110/4] via 203.0.113.98, wg2, 01:12:05',
+  'O    198.51.100.0/16 [110/1] is a summary, 02:00:00',
 ].join('\n');
 
 /** `show ipv6 route ospf6` — same shape with v6 addresses. */
@@ -122,13 +122,13 @@ describe('splitFrrSections', () => {
     const s = splitFrrSections(HEALTHY_COMBINED);
     expect(s.frrInstalled).toContain('frr.conf');
     expect(s.ospfConfigured).toContain('/usr/local/etc/frr/frr.conf');
-    expect(s.v4Neigh).toContain('10.25.0.1');
-    expect(s.v6Neigh).toContain('10.25.0.2');
+    expect(s.v4Neigh).toContain('203.0.113.1');
+    expect(s.v6Neigh).toContain('203.0.113.2');
     // Route sections = awk count line + table rows (the new layout).
     expect(s.v4Routes.split('\n')[0]).toBe('3');
-    expect(s.v4Routes).toContain('O>* 10.25.10.0/24 [110/2] via 10.1.1.78, wg0, 00:43:11');
+    expect(s.v4Routes).toContain('O>* 198.51.100.10/24 [110/2] via 203.0.113.78, wg0, 00:43:11');
     expect(s.v6Routes.split('\n')[0]).toBe('1');
-    expect(s.routerId).toContain('Router ID: 10.1.1.94');
+    expect(s.routerId).toContain('Router ID: 203.0.113.94');
   });
 
   it('leaves sections empty when their marker is absent', () => {
@@ -187,12 +187,12 @@ describe('parseOspfV4Neighbors', () => {
     expect(rows).toHaveLength(1);
     expect(rows[0]).toEqual({
       version: 'ospf',
-      neighborId: '10.25.0.1',
-      interfaceName: 'wg0', // "wg0:10.1.1.94" → local-ip suffix stripped
+      neighborId: '203.0.113.1',
+      interfaceName: 'wg0', // "wg0:203.0.113.94" → local-ip suffix stripped
       state: 'Full/-',
       full: true,
       upTimeSeconds: 2596,
-      address: '10.1.1.93',
+      address: '203.0.113.93',
     });
   });
 
@@ -201,7 +201,7 @@ describe('parseOspfV4Neighbors', () => {
     expect(rows).toHaveLength(2);
     expect(rows[0].full).toBe(true);
     expect(rows[1]).toMatchObject({
-      neighborId: '10.25.0.9',
+      neighborId: '203.0.113.9',
       interfaceName: 'wg1',
       state: 'Down/WaitingInfo',
       full: false,
@@ -225,7 +225,7 @@ describe('parseOspfV6Neighbors', () => {
     expect(rows).toHaveLength(1);
     expect(rows[0]).toEqual({
       version: 'ospfv6',
-      neighborId: '10.25.0.2',
+      neighborId: '203.0.113.2',
       interfaceName: 'wg4', // "wg4[PointToPoint]" → bracket state stripped
       state: 'Full/PointToPoint',
       full: true,
@@ -242,7 +242,7 @@ describe('parseOspfV6Neighbors', () => {
 
 describe('parseRouterId / parseRouteCount', () => {
   it('extracts the router ID from a show ip ospf head', () => {
-    expect(parseRouterId(ROUTER_ID_SECTION)).toBe('10.1.1.94');
+    expect(parseRouterId(ROUTER_ID_SECTION)).toBe('203.0.113.94');
     expect(parseRouterId("Can't open /var/run/frr/vtysh: No such file or directory")).toBeNull();
   });
 
@@ -273,8 +273,8 @@ describe('parseOspfRouteTable', () => {
     const rows = parseOspfRouteTable(V4_ROUTE_TABLE, 'ospf');
     expect(rows).toHaveLength(3);
     expect(rows[0]).toEqual({
-      destination: '10.25.10.0/24',
-      gateway: '10.1.1.78',
+      destination: '198.51.100.10/24',
+      gateway: '203.0.113.78',
       protocol: 'ospf',
       distance: 110,
       metric: 2,
@@ -282,8 +282,8 @@ describe('parseOspfRouteTable', () => {
       extra: { version: 'ospf', interfaceName: 'wg0' },
     });
     expect(rows[1]).toMatchObject({
-      destination: '10.25.20.0/24',
-      gateway: '10.1.1.98',
+      destination: '198.51.100.20/24',
+      gateway: '203.0.113.98',
       metric: 4,
       extra: { version: 'ospf', interfaceName: 'wg2' },
     });
@@ -292,7 +292,7 @@ describe('parseOspfRouteTable', () => {
   it('parses summary routes (no next hop) and does NOT mistake the age token for an interface', () => {
     const rows = parseOspfRouteTable(V4_ROUTE_TABLE, 'ospf');
     expect(rows[2]).toEqual({
-      destination: '10.25.0.0/16',
+      destination: '198.51.100.0/16',
       gateway: '',
       protocol: 'ospf',
       distance: 110,
@@ -322,11 +322,11 @@ describe('parseOspfRouteTable', () => {
   });
 
   it('omits distance/metric when the [d/m] token is absent', () => {
-    const rows = parseOspfRouteTable('O>* 10.9.9.0/24 via 10.1.1.78, wg0, 00:01:00\n', 'ospf');
+    const rows = parseOspfRouteTable('O>* 198.51.100.9/24 via 203.0.113.78, wg0, 00:01:00\n', 'ospf');
     expect(rows).toHaveLength(1);
     expect(rows[0]).toEqual({
-      destination: '10.9.9.0/24',
-      gateway: '10.1.1.78',
+      destination: '198.51.100.9/24',
+      gateway: '203.0.113.78',
       protocol: 'ospf',
       status: 'active',
       extra: { version: 'ospf', interfaceName: 'wg0' },
@@ -390,9 +390,9 @@ describe('deriveFrrConditions', () => {
     frrInspectable: true,
     ospfConfigured: true,
     frrReachable: true,
-    routerId: '10.1.1.94',
+    routerId: '203.0.113.94',
     neighbors: [
-      { version: 'ospf', neighborId: '10.25.0.1', interfaceName: 'wg0', state: 'Full/-', full: true, upTimeSeconds: 2596, address: '10.1.1.93' },
+      { version: 'ospf', neighborId: '203.0.113.1', interfaceName: 'wg0', state: 'Full/-', full: true, upTimeSeconds: 2596, address: '203.0.113.93' },
     ],
     v4RoutesLearned: 128,
     v6RoutesLearned: 0,
@@ -417,23 +417,23 @@ describe('deriveFrrConditions', () => {
         ...base,
         ospfConfigured: false,
         neighbors: [],
-        bgp: { configured: true, peers: [{ neighborId: '10.1.1.97', state: 'Active', established: false }] },
+        bgp: { configured: true, peers: [{ neighborId: '203.0.113.97', state: 'Active', established: false }] },
       },
-      'GWST04'
+      'router-c'
     );
     // Per-peer warning + the all-down critical — none of this ran before v0.11
     // because !ospfConfigured short-circuited the function.
     expect(conds).toHaveLength(2);
-    expect(conds.map((c) => c.dedupeKey)).toEqual(['bgp-peer:10.1.1.97', 'bgp-all-down:GWST04']);
+    expect(conds.map((c) => c.dedupeKey)).toEqual(['bgp-peer:203.0.113.97', 'bgp-all-down:router-c']);
   });
 
   it('raises a permission warning when FRR is installed but not inspectable by the bound user', () => {
     const conds = deriveFrrConditions(
       { ...base, frrInspectable: false, frrReachable: false, neighbors: [], routerId: null },
-      'OPNSENSE01'
+      'router-b'
     );
     expect(conds).toHaveLength(1);
-    expect(conds[0]).toMatchObject({ severity: 'warning', dedupeKey: 'frr-permissions:OPNSENSE01' });
+    expect(conds[0]).toMatchObject({ severity: 'warning', dedupeKey: 'frr-permissions:router-b' });
     expect(conds[0].message).toContain('not inspectable');
   });
 
@@ -442,12 +442,12 @@ describe('deriveFrrConditions', () => {
   });
 
   it('raises a critical condition when vtysh does not answer (the blackhole case)', () => {
-    const conds = deriveFrrConditions({ ...base, frrReachable: false, neighbors: [], routerId: null }, 'GWST03');
+    const conds = deriveFrrConditions({ ...base, frrReachable: false, neighbors: [], routerId: null }, 'router-a');
     expect(conds).toHaveLength(1);
-    expect(conds[0]).toMatchObject({ severity: 'critical', dedupeKey: 'frr-ospf:GWST03' });
+    expect(conds[0]).toMatchObject({ severity: 'critical', dedupeKey: 'frr-ospf:router-a' });
     // Protocol-neutral since v0.11.0 — the box may run BGP instead of (or in
     // addition to) OSPF, and a stopped FRR takes both down at once.
-    expect(conds[0].message).toBe('GWST03: FRR routing daemons not responding (down?)');
+    expect(conds[0].message).toBe('router-a: FRR routing daemons not responding (down?)');
     expect(conds[0].detail).toBeTruthy();
   });
 
@@ -465,20 +465,20 @@ describe('deriveFrrConditions', () => {
       ...base,
       neighbors: [
         base.neighbors[0],
-        { version: 'ospf', neighborId: '10.25.0.9', interfaceName: 'wg1', state: 'Down/WaitingInfo', full: false },
-        { version: 'ospfv6', neighborId: '10.25.0.3', interfaceName: 'wg4', state: 'PointToPoint/Down', full: false },
+        { version: 'ospf', neighborId: '203.0.113.9', interfaceName: 'wg1', state: 'Down/WaitingInfo', full: false },
+        { version: 'ospfv6', neighborId: '203.0.113.3', interfaceName: 'wg4', state: 'PointToPoint/Down', full: false },
       ],
-    }, 'GWST03');
+    }, 'router-a');
     expect(conds).toHaveLength(2);
-    expect(conds[0]).toMatchObject({ severity: 'warning', dedupeKey: 'ospf-neighbor:ospf:wg1:10.25.0.9' });
-    expect(conds[0].message).toContain('GWST03'); // label-prefixed by the caller's hostname
-    expect(conds[1]).toMatchObject({ severity: 'warning', dedupeKey: 'ospf-neighbor:ospfv6:wg4:10.25.0.3' });
+    expect(conds[0]).toMatchObject({ severity: 'warning', dedupeKey: 'ospf-neighbor:ospf:wg1:203.0.113.9' });
+    expect(conds[0].message).toContain('router-a'); // label-prefixed by the caller's hostname
+    expect(conds[1]).toMatchObject({ severity: 'warning', dedupeKey: 'ospf-neighbor:ospfv6:wg4:203.0.113.3' });
   });
 
   it('raises a zero-routes warning when adjacencies are Full but nothing was learned', () => {
-    const conds = deriveFrrConditions({ ...base, v4RoutesLearned: 0, v6RoutesLearned: null }, 'GWST03');
+    const conds = deriveFrrConditions({ ...base, v4RoutesLearned: 0, v6RoutesLearned: null }, 'router-a');
     expect(conds).toHaveLength(1);
-    expect(conds[0]).toMatchObject({ severity: 'warning', dedupeKey: 'ospf-routes-zero:GWST03' });
+    expect(conds[0]).toMatchObject({ severity: 'warning', dedupeKey: 'ospf-routes-zero:router-a' });
   });
 
   it('does NOT raise the zero-routes warning when v4 routes exist (v6 may legitimately be 0)', () => {

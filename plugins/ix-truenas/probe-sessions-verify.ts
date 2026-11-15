@@ -7,7 +7,7 @@
  *   nfs.get_nfs3_clients([])          -> Nfs3Session[] {ip, export}
  *   nfs.get_nfs4_clients([])          -> [{info: Nfs4Session['info']}]
  *
- * Usage: TRUENAS_HOST=10.25.0.10 TRUENAS_API_KEY=<id>-<material> npx tsx probe-sessions.ts verify
+ * Usage: TRUENAS_HOST=203.0.113.10 TRUENAS_API_KEY=<id>-<material> npx tsx probe-sessions.ts verify
  */
 import { TruenasClient, TruenasCredentials } from './src/client/truenasClient';
 

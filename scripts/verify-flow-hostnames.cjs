@@ -4,7 +4,7 @@
  *
  *   1. /flows/ports in all param shapes (no-ip, ip drilldown, siteId)
  *   2. /flows/top-talkers — internal IPs carry hosts-inventory hostnames
- *      (container/VM names like torserver01) + networkName/vlanId
+ *      (container/VM names from the hosts inventory) + networkName/vlanId
  *   3. /flows/networks — real inventoried networks, not just "(unknown)"
  *   4. /flows/pairs — busiest host on each side of a device pair
  *

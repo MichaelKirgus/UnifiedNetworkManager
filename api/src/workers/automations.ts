@@ -1270,7 +1270,7 @@ export async function manualTriggerRule(rule: Automation): Promise<void> {
 export interface SimulatedFiring {
   /** The trigger block this firing is for. */
   trigger: TriggerBlock;
-  /** Human label — e.g. "update web09" or "schedule". */
+  /** Human label — e.g. "update router-01" or "schedule". */
   label: string;
   actions: SimulatedAction[];
 }

@@ -7,7 +7,7 @@
  *      from an existing live network row) → expect a 'subnet' warning; with a
  *      live network NAME and no CIDR → expect a 'name' warning. Per-device
  *      status must be present for the requested device.
- *   3. POST /plans/preflight on WLC01 (test device, read-only) → each result
+ *   3. POST /plans/preflight on vRouter (test device, read-only) → each result
  *      carries `check` { deployed: boolean, warnings[] }.
  *   4. Blocking mode: PUT /settings/rolloutOverlapMode=block → POST /plans with
  *      the overlapping network.create must be REJECTED (409). Revert to warn →
@@ -20,7 +20,7 @@ import { createRequire } from 'node:module';
 
 const API = process.env.API_BASE ?? 'http://localhost:3000/v1';
 const LCOS_PLUGIN_ID = '00000000-0000-4000-8000-000000000006';
-// WLC01 — 10.25.0.20, LANCOM vRouter (TEST device).
+// vRouter — 203.0.113.20, LANCOM vRouter (TEST device).
 const DEVICE_WLC = '38cf30d7-e53e-47ae-9545-c79af2270751';
 
 const apiRequire = createRequire(path.resolve(process.cwd(), 'api', 'package.json'));

@@ -621,7 +621,7 @@ export interface SubnetHostStats {
 /** One documented network (user-maintained inventory) with live discovery info. */
 export interface DocumentedNetwork {
   id: string;
-  /** Primary label / identity ("VLAN 30", "10.40.0.0/16", "Mgmt LAN"). Unique case-insensitively. */
+  /** Primary label / identity ("VLAN 30", "198.51.100.0/16", "Mgmt LAN"). Unique case-insensitively. */
   name: string;
   /** Canonicalized CIDR blocks, IPv4 first (may be empty for name-only rows). */
   subnets: string[];
@@ -667,7 +667,7 @@ export interface DocumentedNetwork {
 /** Create/update payload for a documented network. */
 export interface DocumentedNetworkRequest {
   name: string;
-  /** CIDR blocks ("10.40.0.0/16", "fd00::/64"); may be empty (name-only row). */
+  /** CIDR blocks ("198.51.100.0/16", "fd00::/64"); may be empty (name-only row). */
   subnets?: string[];
   vlanId?: number | null;
   gateways?: string[];
@@ -1578,7 +1578,7 @@ export interface RouteRow {
   siteName?: string | null;
   /** Display name of the reporting plugin instance (e.g. "OPNsense Plugin"). */
   pluginName?: string | null;
-  /** Destination network as CIDR ("10.25.0.0/16", "0.0.0.0/0" for default). */
+  /** Destination network as CIDR ("198.51.100.0/16", "0.0.0.0/0" for default). */
   destination: string;
   /** Next-hop gateway address or name ('' = directly connected / unknown). */
   gateway?: string;

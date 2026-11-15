@@ -1,5 +1,5 @@
 /**
- * WRITE probe (round 2) on WLC01 — v6 add grammar for Setup/DNS/DNS-List.
+ * WRITE probe (round 2) on vRouter — v6 add grammar for Setup/DNS/DNS-List.
  * Round 1 established: `add "NAME" 0 <v4>` works; `""` as a value is rejected.
  * Now determine how to write an IPv6-only entry (columns: Host-name Rtg-tag
  * IP-Address IPV6-Address). Always cleans up afterwards.
@@ -11,7 +11,7 @@ import fs from 'node:fs';
 import { createRequire } from 'node:module';
 
 const API = process.env.API_BASE ?? 'http://localhost:3000/v1';
-const HOST = process.argv[2] ?? '10.25.0.20'; // WLC01 — TEST device, writes OK
+const HOST = process.argv[2] ?? '10.25.0.20'; // vRouter — TEST device, writes OK
 const PORT = Number(process.env.LCOS_SSH_PORT ?? 22);
 const SECRET_ID = process.env.LCOS_WEB_SECRET_ID ?? '3352ee33-1577-4849-a7ae-9ecf4c67d104';
 

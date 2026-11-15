@@ -1,5 +1,5 @@
 /**
- * READ-ONLY probe of the LCOS CLI on GW_Ralf (10.28.0.1, production) to locate
+ * READ-ONLY probe of the LCOS CLI on prod box (203.0.113.1, production) to locate
  * and dump the static DNS host-entry table (hostname → IP mappings).
  *
  * The user confirmed LCOS has a static DNS entries table; repo evidence only
@@ -16,7 +16,7 @@ import fs from 'node:fs';
 import { createRequire } from 'node:module';
 
 const API = process.env.API_BASE ?? 'http://localhost:3000/v1';
-const HOST = process.argv[2] ?? '10.28.0.1'; // GW_Ralf — PRODUCTION, read-only probe
+const HOST = process.argv[2] ?? '10.28.0.1'; // prod box — PRODUCTION, read-only probe
 const PORT = Number(process.env.LCOS_SSH_PORT ?? 22);
 const SECRET_ID = process.env.LCOS_WEB_SECRET_ID ?? '3352ee33-1577-4849-a7ae-9ecf4c67d104';
 

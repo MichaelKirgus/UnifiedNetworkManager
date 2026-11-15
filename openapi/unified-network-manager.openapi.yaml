@@ -10832,7 +10832,7 @@ components:
         id: { type: string }
         name:
           type: string
-          description: "Primary label / identity (\"VLAN 30\", \"10.40.0.0/16\", \"Mgmt LAN\"); unique case-insensitively"
+          description: "Primary label / identity (\"VLAN 30\", \"198.51.100.0/16\", \"Mgmt LAN\"); unique case-insensitively"
         subnets:
           type: array
           items: { type: string }
@@ -10971,7 +10971,7 @@ components:
           type: array
           items: { type: string }
           default: []
-          description: "CIDR blocks (\"10.40.0.0/16\", \"fd00::/64\"); canonicalized + deduped server-side; may be empty"
+          description: "CIDR blocks (\"198.51.100.0/16\", \"fd00::/64\"); canonicalized + deduped server-side; may be empty"
         vlanId:
           type: [integer, 'null']
           minimum: 0
@@ -11518,7 +11518,7 @@ components:
         siteName: { type: [string, 'null'] }
         pluginId: { type: string, description: "Plugin instance id that reported this route" }
         pluginName: { type: [string, 'null'], description: "Display name of the reporting plugin instance" }
-        destination: { type: string, description: "Destination network as CIDR (e.g. 10.25.0.0/16, 0.0.0.0/0 for default)" }
+        destination: { type: string, description: "Destination network as CIDR (e.g. 198.51.100.0/16, 0.0.0.0/0 for default)" }
         gateway: { type: string, description: "Next-hop gateway address or name; '' = directly connected / unknown" }
         protocol:
           type: string
@@ -14528,7 +14528,7 @@ components:
       required: [trigger, label, actions]
       properties:
         trigger: { $ref: '#/components/schemas/AutomationTriggerBlock' }
-        label: { type: string, description: "Human label — e.g. 'update web09 (KIRGUSBANDE)' or 'schedule (dailyAt)'." }
+        label: { type: string, description: "Human label — e.g. 'update router-01' or 'schedule (dailyAt)'." }
         actions:
           type: array
           items: { $ref: '#/components/schemas/SimulatedAction' }

@@ -1,5 +1,5 @@
 /**
- * SAFE probe of LCOS table-row creation grammar on WLC01 (TEST device).
+ * SAFE probe of LCOS table-row creation grammar on vRouter (TEST device).
  * Every command is either read-only or a valueless `set` that cannot commit
  * anything — the goal is to learn how a NEW row in a table is created
  * (by name? by {position}? via an ACTION?) from LCOS's error text.
@@ -9,7 +9,7 @@ import fs from 'node:fs';
 import { createRequire } from 'node:module';
 
 const API = process.env.API_BASE ?? 'http://localhost:3000/v1';
-const HOST = process.argv[2] ?? '10.25.0.20'; // WLC01 — test device
+const HOST = process.argv[2] ?? '10.25.0.20'; // vRouter — test device
 const PORT = Number(process.env.LCOS_SSH_PORT ?? 22);
 const SECRET_ID = process.env.LCOS_WEB_SECRET_ID ?? '3352ee33-1577-4849-a7ae-9ecf4c67d104';
 
@@ -121,7 +121,7 @@ async function main(): Promise<void> {
   console.log(`connected to ${HOST}:${PORT} as ${creds.username}`);
 
   // Round 10: CREATE a throwaway v3 user (dummy creds) + RW mapping row, then
-  // verify via SNMPv3. WLC01 is the test device; both rows are deleted after.
+  // verify via SNMPv3. vRouter is the test device; both rows are deleted after.
   const groupsA: Array<[string[], string]> = [
     [['cd Setup/SNMP/Communities', 'add ?'], 'wlc_comm_add_help.txt'],
   ];

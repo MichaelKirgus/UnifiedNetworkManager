@@ -10,7 +10,7 @@ import path from 'node:path';
 import fs from 'node:fs';
 import { createRequire } from 'node:module';
 
-const HOST = process.argv[2] ?? '10.25.0.20'; // WLC01 — test device
+const HOST = process.argv[2] ?? '10.25.0.20'; // vRouter — test device
 const SECRET_ID = process.env.LCOS_SNMPV3_SECRET_ID ?? 'adeb8556-7245-43c4-b67e-20941bc8a10b';
 
 const apiRequire = createRequire(path.resolve(process.cwd(), 'api', 'package.json'));

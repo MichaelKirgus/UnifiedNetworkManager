@@ -32,7 +32,7 @@ export interface ResolvedFirewallHost {
 export interface FirewallAddressResolution {
   /** Known subnets the address covers ("192.168.1.0/24"), IPv4 first. */
   subnets: string[];
-  /** Interfaces on which those subnets are configured (e.g. "OPNSENSE01: lan"). */
+  /** Interfaces on which those subnets are configured (e.g. "router-a: lan"). */
   interfaces: string[];
   /** Number of discovered hosts inside the address (may exceed hosts.length). */
   hostCount: number;

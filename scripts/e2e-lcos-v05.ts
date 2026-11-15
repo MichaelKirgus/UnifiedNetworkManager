@@ -1,7 +1,7 @@
 /**
  * E2E check for the lancom-lcos plugin v0.5.0 (canonical fleet network intents).
  *
- * Drives REAL writes end-to-end on WLC01 (test device, LANCOM vRouter):
+ * Drives REAL writes end-to-end on vRouter (test device, LANCOM vRouter):
  *   discovery (network.create / network.delete / vlan.networks.read in catalog)
  *   → baseline read: UNM_E2E_NET must not exist yet
  *   → network.create {name, vlanId 399, cidr}            [VLAN + L3 rows via CLI]
@@ -13,7 +13,7 @@
  *   → verify gone
  *   → negative: vlanId out of range must be rejected
  *
- * NO writes on GW_Ralf (production).
+ * NO writes on prod box (production).
  *
  * Usage (from the repo root): ./node_modules/.bin/tsx scripts/e2e-lcos-v05.ts
  */
@@ -22,7 +22,7 @@ import { createRequire } from 'node:module';
 
 const API = process.env.API_BASE ?? 'http://localhost:3000/v1';
 const LCOS_PLUGIN_ID = '00000000-0000-4000-8000-000000000006';
-// WLC01 — 10.25.0.20, LANCOM vRouter (no WLAN radio, TEST device).
+// vRouter — 203.0.113.20, LANCOM vRouter (no WLAN radio, TEST device).
 const DEVICE_WLC = '38cf30d7-e53e-47ae-9545-c79af2270751';
 
 const NET_A = 'UNM_E2E_NET';   // vlan 399, L3 only

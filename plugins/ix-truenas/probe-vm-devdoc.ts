@@ -3,7 +3,7 @@
  * attributes per dtype) + iommu_enabled. Settles the exact attribute names for
  * PCI / USB / DISPLAY passthrough devices before writing the attach actions.
  *
- * Usage: TRUENAS_HOST=10.25.0.10 TRUENAS_API_KEY=<key> npx tsx probe-vm-devdoc.ts
+ * Usage: TRUENAS_HOST=203.0.113.10 TRUENAS_API_KEY=<key> npx tsx probe-vm-devdoc.ts
  */
 import { TruenasClient, type TruenasCredentials } from './src/client/truenasClient';
 

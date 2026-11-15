@@ -65,7 +65,7 @@ function hasExistingV6Rows(name: string, lanIfcRows: string[], addrRows: string[
  * tables and both Setup/IPv6 tables (v6 existence hint). LCOS vRouters drop
  * concurrent SSH connections AND each fresh session costs a full login + 2.5s
  * banner settle — five separate sessions would blow the API's 45s preflight
- * budget on WLC01, so everything rides one batched `dir -a` run (~15-20s).
+ * budget on the test vRouter, so everything rides one batched `dir -a` run (~15-20s).
  */
 async function readPreflightTables(ctx: ActionContext): Promise<{
   vlanRows: Array<{ name: string; vlanId: number | null; ports: string[] }>;

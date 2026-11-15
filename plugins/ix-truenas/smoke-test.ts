@@ -180,7 +180,7 @@ wss.on('connection', (ws: WebSocket) => {
       case 'interface.query':
         if (!authenticated) return reply(null, { code: -32001, message: 'ENOTAUTHENTICATED' });
         return reply([
-          { name: 'vnet0', description: 'NET_MANAGEMENT', state: { link_state: 'LINK_STATE_UP', link_address: 'aa:bb:cc:dd:ee:01' }, aliases: [JSON.stringify({ type: 'INET', address: '10.25.0.10', netmask: 16 })] },
+          { name: 'vnet0', description: 'NET_MANAGEMENT', state: { link_state: 'LINK_STATE_UP', link_address: 'aa:bb:cc:dd:ee:01' }, aliases: [JSON.stringify({ type: 'INET', address: '203.0.113.10', netmask: 16 })] },
           { name: 'vnet1', description: 'LAN', state: { link_state: 'LINK_STATE_DOWN', link_address: 'aa:bb:cc:dd:ee:02' }, aliases: [JSON.stringify({ type: 'INET', address: '192.168.50.1', netmask: 24 })], vlan_tag: 50 },
         ]);
       case 'alert.list':
@@ -195,7 +195,7 @@ wss.on('connection', (ws: WebSocket) => {
           { id: 'a3', klass: 'SMARTSpareBlockCountAlert', severity: 'CRITICAL', dismissed: true, args: { name: 'da0', serial: 'WD-ABC123' }, text: 'dismissed — must not affect health' },
         ]);
       case 'staticroute.query':
-        return reply([{ id: 1, destination: '0.0.0.0/0', gateway: '10.25.0.1', description: 'default' }]);
+        return reply([{ id: 1, destination: '0.0.0.0/0', gateway: '203.0.113.1', description: 'default' }]);
       case 'pool.dataset.query':
         if (!authenticated) return reply(null, { code: -32001, message: 'ENOTAUTHENTICATED' });
         // MODERN shape (25.10+/26): properties FLATTENED to top-level keys; size
@@ -554,7 +554,7 @@ async function main(): Promise<void> {
   check('pools table has 2 rows', pools.length === 2, `count=${pools.length}`);
   check('pool usage gauge computed', typeof m['storage.poolUsedPct'] === 'number' && (m['storage.poolUsedPct'] as number) > 0, m['storage.poolUsedPct']);
   const networks = (m['networks'] ?? []) as Record<string, unknown>[];
-  check('networks inventory emitted (one row per IP alias)', networks.length === 2 && networks.some((r) => r.name === 'NET_MANAGEMENT' && r.ip === '10.25.0.10'), networks);
+  check('networks inventory emitted (one row per IP alias)', networks.length === 2 && networks.some((r) => r.name === 'NET_MANAGEMENT' && r.ip === '203.0.113.10'), networks);
   const ports = (m['ports'] ?? []) as Record<string, unknown>[];
   check('ports[] inventory emitted with live state + MAC', ports.length === 2 && ports.some((p) => p.name === 'NET_MANAGEMENT' && p.status === 'up' && (p.extra as Record<string, unknown>)?.mac === 'aa:bb:cc:dd:ee:01'), ports);
   check('ports[] carries vlanId for VLAN interfaces', ports.some((p) => p.name === 'LAN' && p.vlanId === 50), ports);
@@ -715,11 +715,11 @@ async function main(): Promise<void> {
   check('success true with updated=1 (pull job + verification)', cfgImg.status === 200 && cfgImgJson.success === true && JSON.stringify((cfgImgJson.result?.details as Record<string, unknown>)?.updated) === JSON.stringify(['zabbix/zabbix-agent2:alpine-7.0']), cfgImgJson);
 
   // --- /config (config.backup.download → job + token + HTTP file fetch → UNM file repo) --
-  const cfgBackup = await post('/config', { deviceId: 'dev-tnas', deviceName: 'KIRGUSBANDE', managementAddress: ADDR, credentials: creds, actionId: 'config.backup.download', input: {} });
+  const cfgBackup = await post('/config', { deviceId: 'dev-tnas', deviceName: 'TRUENAS01', managementAddress: ADDR, credentials: creds, actionId: 'config.backup.download', input: {} });
   const cfgBackupJson = (await cfgBackup.json()) as { success?: boolean; result?: Record<string, unknown> };
   console.log('\n== /config config.backup.download ==');
   check('success true with repoFileId in details', cfgBackup.status === 200 && cfgBackupJson.success === true && typeof (cfgBackupJson.result?.details as Record<string, unknown>)?.repoFileId === 'string' && ((cfgBackupJson.result?.details as Record<string, unknown>)?.repoFileId as string).length > 0, { size: (cfgBackupJson.result?.details as Record<string, unknown>)?.sizeBytes });
-  check('backup file name follows the shared convention', /^KIRGUSBANDE__config-backup-\d{8}-\d{6}\.db$/.test(String((cfgBackupJson.result?.details as Record<string, unknown>)?.fileName ?? '')), (cfgBackupJson.result?.details as Record<string, unknown>)?.fileName);
+  check('backup file name follows the shared convention', /^TRUENAS01__config-backup-\d{8}-\d{6}\.db$/.test(String((cfgBackupJson.result?.details as Record<string, unknown>)?.fileName ?? '')), (cfgBackupJson.result?.details as Record<string, unknown>)?.fileName);
   const bakUpload = repoUploads[repoUploads.length - 1];
   check('mock UNM API received the backup upload (config-backup category)', !!bakUpload && bakUpload.category === 'config-backup' && bakUpload.data.equals(MOCK_BACKUP_BYTES), { name: bakUpload?.name, len: bakUpload?.data.length });
   const bakRepoFileId = String((cfgBackupJson.result?.details as Record<string, unknown>)?.repoFileId ?? '');

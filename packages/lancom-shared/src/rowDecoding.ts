@@ -8,7 +8,7 @@
  *                                          in every LCOS table (`::= { <table> 1 }`).
  * and encodes OCTET STRING indices as LENGTH-PREFIXED decimal octets:
  *   "WLAN-1" → 6.87.76.65.78.45.49       (len=6, then ASCII bytes)
- * IP-address indices are the raw four decimal octets ("10.25.1.1" → 10.25.1.1);
+ * IP-address indices are the raw four decimal octets ("203.0.113.1" → 203.0.113.1);
  * MAC-address indices are the raw six decimal octets (no length prefix):
  *   00:A0:57:7F:7E:51 → 0.160.87.127.126.81
  * Index columns are not-accessible, so row keys can ONLY be recovered from the
@@ -144,7 +144,7 @@ export function decodeStationIndex(idx: string[]): string | null {
 
 /**
  * Decodes an IP_ADDR index [ifnameText, version, source, addrLiteral…]. The
- * literal carries a CIDR prefix ("10.25.1.1/16") which is stripped — the
+ * literal carries a CIDR prefix ("203.0.113.1/16") which is stripped — the
  * generic inventory contract expects bare addresses. `versionMap` maps the raw
  * version sub-identifier to '4'/'6' (defaults to the standard {1:'4', 2:'6'}).
  */

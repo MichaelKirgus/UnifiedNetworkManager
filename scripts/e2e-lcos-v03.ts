@@ -1,11 +1,11 @@
 /**
  * E2E check for the lancom-lcos plugin v0.3.0 (SSH/SFTP + CLI transports).
  *
- * Drives REAL actions end-to-end through the live stack against WLC01:
+ * Drives REAL actions end-to-end through the live stack against vRouter:
  *   login (2FA) → discover catalog (v0.3.0, new action ids present)
  *   → plan config.backup.download  (SFTP /config read — READ-ONLY on device)
  *   → plan cli.param.read          (`set Time/Timezone ?` — READ-ONLY)
- *   → plan wlan.ssid.state.set     (negative: WLC01 has no WLAN radio, must fail cleanly)
+ *   → plan wlan.ssid.state.set     (negative: vRouter has no WLAN radio, must fail cleanly)
  *
  * NO writes that could make the device unreachable are executed.
  *
@@ -16,7 +16,7 @@ import { createRequire } from 'node:module';
 
 const API = process.env.API_BASE ?? 'http://localhost:3000/v1';
 const LCOS_PLUGIN_ID = '00000000-0000-4000-8000-000000000006';
-// WLC01.management.kirgus.intra — 10.25.0.20, LANCOM vRouter (no WLAN radio).
+// example.lan — 203.0.113.20, LANCOM vRouter (no WLAN radio).
 const DEVICE_ID = '38cf30d7-e53e-47ae-9545-c79af2270751';
 
 const apiRequire = createRequire(path.resolve(process.cwd(), 'api', 'package.json'));
@@ -120,7 +120,7 @@ async function main(): Promise<void> {
   const out = String(param.details?.output ?? '');
   check('param output mentions Timezone input set', /Timezone/i.test(out) && /(e0|eplus|eminus|\(0\)|Yes)/i.test(out), out.slice(0, 300));
 
-  // --- 4. wlan.ssid.state.set (negative — WLC01 has no radio) -------------------
+  // --- 4. wlan.ssid.state.set (negative — vRouter has no radio) -------------------
   console.log('\n[3] wlan.ssid.state.set negative test on WLC01 (no WLAN radio)');
   const wlan = await runStep('wlan.ssid.state.set', { ifc: 'WLAN-1', enabled: true });
   check('wlan step failed cleanly (expected — no radio)', wlan.status === 'failed' || Boolean(wlan.error), { status: wlan.status, error: wlan.error });

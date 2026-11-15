@@ -1,6 +1,6 @@
 /**
  * verify-lcos-dns-dual.ts — LIVE verification of the merge-aware LCOS dns.set /
- * dns.delete intents on WLC01 (the safe test vRouter, 10.25.0.20):
+ * dns.delete intents on vRouter (the safe test vRouter, 203.0.113.20):
  *   1. dns.set with BOTH `ip` (v4) and `ipv6` → one DNS-List row carrying both
  *      families; GET /dns must show the name with BOTH addresses.
  *   2. Idempotent re-set of the same v4 (no ipv6) → clean skip — the intent's
@@ -13,7 +13,7 @@
  *   5. Cleanup: dns.delete without `ip` removes the whole row; entry gone.
  *
  * Addresses are RFC 5737 / ULA documentation ranges — they never collide with
- * real fleet entries, and WLC01 is a test device (writes OK). Every write has
+ * real fleet entries, and vRouter is a test device (writes OK). Every write has
  * its cleanup counterpart; on success the device ends in its pre-test state.
  *
  * Usage (from the repo root): ./node_modules/.bin/tsx scripts/verify-lcos-dns-dual.ts
@@ -24,7 +24,7 @@ import { createRequire } from 'node:module';
 
 const API = process.env.API_BASE ?? 'http://localhost:3000/v1';
 
-// WLC01 — LCOS vRouter test device (writes OK).
+// vRouter — LCOS vRouter test device (writes OK).
 const DEVICE_ID = process.env.LCOS_DEVICE_ID ?? '38cf30d7-e53e-47ae-9545-c79af2270751';
 const PLUGIN_ID = process.env.LCOS_PLUGIN_ID ?? '00000000-0000-4000-8000-000000000006';
 

@@ -1,5 +1,5 @@
 /**
- * Live verification for dhcp.staticMapping.set (Kea backend) on OPNSENSE01.
+ * Live verification for dhcp.staticMapping.set (Kea backend) on the main OPNsense box.
  *
  * Runs an IDEMPOTENT no-op edit: picks one existing Kea reservation and re-saves
  * the SAME mac/ip/hostname through a plan (dhcp.staticMapping.set +
@@ -67,7 +67,7 @@ async function main(): Promise<void> {
     return { status: res.status, json: async () => (await res.json()) as unknown };
   }
 
-  // --- Pick a real Kea reservation on OPNSENSE01 ---------------------------------
+  // --- Pick a real Kea reservation on the main OPNsense box ---------------------------------
   async function getJson(urlPath: string): Promise<unknown> {
     const r = await authed('GET', urlPath);
     return r.json();

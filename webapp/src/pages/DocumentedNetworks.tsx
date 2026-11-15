@@ -490,7 +490,7 @@ function NetworkFormCard({ initial, sites, layers, liveNameOptions, onClose, onS
               list="documented-network-name-options"
               value={form.name}
               onChange={(e) => patch({ name: e.target.value })}
-              placeholder={'VLAN 30, 10.40.0.0/16, Mgmt LAN…'}
+              placeholder={'VLAN 30, 198.51.100.0/16, Mgmt LAN…'}
               className="w-full rounded-md border border-border bg-background px-2 py-1.5 text-sm"
             />
             <datalist id="documented-network-name-options">
@@ -521,7 +521,7 @@ function NetworkFormCard({ initial, sites, layers, liveNameOptions, onClose, onS
                     <input
                       value={s}
                       onChange={(e) => setSubnet(i, e.target.value)}
-                      placeholder={'10.40.0.0/16 or fd00::/64'}
+                      placeholder={'198.51.100.0/16 or fd00::/64'}
                       className="w-full rounded-md border border-border bg-background px-2 py-1.5 font-mono text-sm"
                     />
                     {form.subnets.length > 1 && (
@@ -569,7 +569,7 @@ function NetworkFormCard({ initial, sites, layers, liveNameOptions, onClose, onS
                 <input
                   value={nextFreeBase}
                   onChange={(e) => setNextFreeBase(e.target.value)}
-                  placeholder={'Optional base range, e.g. 10.40.0.0/16 or fd00::/48 (empty = whole space)'}
+                  placeholder={'Optional base range, e.g. 198.51.100.0/16 or fd00::/48 (empty = whole space)'}
                   className="min-w-[220px] flex-1 rounded-md border border-border bg-background px-2 py-0.5 font-mono text-xs"
                 />
               </div>
@@ -601,7 +601,7 @@ function NetworkFormCard({ initial, sites, layers, liveNameOptions, onClose, onS
                       <input
                         value={v}
                         onChange={(e) => setIpRow(kind, i, e.target.value)}
-                        placeholder={'10.40.0.1'}
+                        placeholder={'198.51.100.1'}
                         className="w-full rounded-md border border-border bg-background px-2 py-1.5 font-mono text-sm"
                       />
                       <button type="button" aria-label={`Remove ${kind === 'gateways' ? 'gateway' : kind === 'dnsServers' ? 'DNS server' : 'NTP server'} ${v || i + 1}`} onClick={() => removeIpRow(kind, i)} className="rounded p-1 text-faint hover:bg-muted">

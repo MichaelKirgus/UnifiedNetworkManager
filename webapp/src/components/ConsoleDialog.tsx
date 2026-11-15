@@ -35,7 +35,7 @@ export interface ConsoleDialogProps {
   pluginId?: string;
   /** Plugin-owned context naming what to attach to (host shell / container exec). */
   context: Record<string, unknown>;
-  /** Dialog title (e.g. "Shell — KIRGUSBANDE" or "Console — mysql"). */
+  /** Dialog title (e.g. "Shell — truenas-01" or "Console — mysql"). */
   title: string;
   /** Subtitle shown under the title (device address, container name hint, …). */
   subtitle?: string;

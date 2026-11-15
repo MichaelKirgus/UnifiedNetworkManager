@@ -134,8 +134,8 @@ const identity = resolvePluginIdentity({
   // default 5 min, 0 disables): OPNsense's REST API exposes NO routing-protocol
   // state, and a dead FRR daemon silently drops every OSPF-learned route while
   // the box keeps answering ping + REST — forwarded traffic to routed segments
-  // then blackholes via the WAN default route (the 2026-11-15 GWST03 mail
-  // outage). The plugin now checks FRR over a bound SSH slot at its own cadence:
+  // then blackholes via the WAN default route (a real-world incident: transit
+  // mail timed out for hours while ping kept working). The plugin now checks FRR over a bound SSH slot at its own cadence:
   // vtysh neighbor states (v4 + v6), learned-route counts and router ID. A down
   // FRR escalates device health to critical with status-badge reasons, mirrors
   // into the notification center (stable dedupe keys, resolve on recovery) and
@@ -487,13 +487,13 @@ async function collectDhcpConfig(
         const idRaw = sn['id'] ?? sn['subnet_id'];
         return typeof idRaw === 'string' && idRaw.trim() !== '' ? idRaw : typeof idRaw === 'number' ? String(idRaw) : undefined;
       })();
-      // The subnet's own `subnet` field is a CIDR ("10.25.0.0/16") — surface it.
+      // The subnet's own `subnet` field is a CIDR ("198.51.100.0/16") — surface it.
       const cidr = (pickString(sn, ['subnet']) ?? '').match(/^\d{1,3}(?:\.\d{1,3}){3}\/\d{1,2}$/)?.[0] ?? null;
       // Display name: the recordset carries a human `description` ("NET_GUEST");
       // fall back to the numeric id so unnamed subnets still render distinctly.
       const name = pickString(sn, ['description', 'name']) ?? refId ?? 'kea-subnet';
       // Pool entries are canonically ONE "start-end" STRING in the recordset
-      // (`pools: "10.25.2.1-10.25.2.255"`); some releases surface an array of
+      // (`pools: "198.51.100.1-198.51.100.254"`); some releases surface an array of
       // strings or objects — normalize all three to a record list before the
       // multi-key reads below.
       const rawPools = sn['pools'];
@@ -2092,7 +2092,8 @@ const updateSearches = new Map<string, UpdateSearchEntry>(); // key = management
 
 // --- FRR routing-protocol monitoring (OSPF + BGP, REST-first) ---------------
 // A dead FRR daemon silently drops every learned route while the box keeps
-// answering ping + REST (the 2026-11-15 GWST03 mail blackhole). The check runs
+// answering ping + REST — forwarded traffic to routed segments then blackholes
+// via the WAN default route. The check runs
 // INLINE at its own cadence (option `frrMonitorIntervalSec`, default 5 min, 0
 // disables). PRIMARY path since v0.10.0: the appliance's REST diagnostics API
 // (/api/quagga/* — configd runs vtysh as root server-side; no SSH slot or frr

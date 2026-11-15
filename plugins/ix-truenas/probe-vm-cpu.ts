@@ -4,7 +4,7 @@
  * Threads columns get their data. NEVER mutates: vm.query + core.get_methods only.
  *
  * Usage (from this folder):
- *   TRUENAS_HOST=10.25.0.10 TRUENAS_API_KEY=<id>-<material> npx tsx probe-vm-cpu.ts
+ *   TRUENAS_HOST=203.0.113.10 TRUENAS_API_KEY=<id>-<material> npx tsx probe-vm-cpu.ts
  */
 import { TruenasClient, type TruenasCredentials } from './src/client/truenasClient';
 

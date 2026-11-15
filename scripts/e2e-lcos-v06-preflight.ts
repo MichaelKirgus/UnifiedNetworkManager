@@ -1,14 +1,14 @@
 /**
  * E2E check for Phase E — smart preflight + per-device input overrides.
  *
- *   1. POST /plans/preflight on WLC01 (test device) with network.create inputs
- *      → expect values incl. `interface` suggestion (WLC01 L3 ifcs = LAN-1, high
+ *   1. POST /plans/preflight on vRouter (test device) with network.create inputs
+ *      → expect values incl. `interface` suggestion (vRouter L3 ifcs = LAN-1, high
  *        confidence) and a vlanId hint; read-only — nothing written yet.
- *   2. POST /plans/preflight on GW_Ralf (PRODUCTION, reads only) → expect HTTP
+ *   2. POST /plans/preflight on prod box (PRODUCTION, reads only) → expect HTTP
  *      200 with either values or a degraded entry (never an error status).
  *   3. POST /plans with deviceInputs override (interface LAN-2) → GET plan and
  *      assert the persisted step input contains the merged override.
- *   4. Execute on WLC01, verify the network row exists, then clean up via
+ *   4. Execute on vRouter, verify the network row exists, then clean up via
  *      network.delete (idempotent).
  *   5. Optional vlanId: preflight + create an L3-only network (no VLAN ID) —
  *      expect no dedicated L2 VLAN row and the L3 row bound to default VLAN 1;
@@ -21,9 +21,9 @@ import { createRequire } from 'node:module';
 
 const API = process.env.API_BASE ?? 'http://localhost:3000/v1';
 const LCOS_PLUGIN_ID = '00000000-0000-4000-8000-000000000006';
-// WLC01 — 10.25.0.20, LANCOM vRouter (no WLAN radio, TEST device).
+// vRouter — 203.0.113.20, LANCOM vRouter (no WLAN radio, TEST device).
 const DEVICE_WLC = '38cf30d7-e53e-47ae-9545-c79af2270751';
-// GW_Ralf — 10.28.0.1, LANCOM 1803VAW-5G (PRODUCTION — preflight reads only).
+// prod box — 203.0.113.1, LANCOM 1803VAW-5G (PRODUCTION — preflight reads only).
 const DEVICE_GWRALF = 'fb2f6114-f169-4ca0-b145-f741fec55f11';
 
 const NET_NAME = 'UNM_E2E_NET';
@@ -73,7 +73,7 @@ async function main(): Promise<void> {
 
   const sharedInputs = { name: NET_NAME, vlanId: VLAN_ID, cidr: CIDR };
 
-  // --- 1. preflight on WLC01 ---------------------------------------------------
+  // --- 1. preflight on vRouter ---------------------------------------------------
   console.log('\n[1] preflight WLC01 (read-only)');
   const pfWlc = await authed('POST', '/plans/preflight', { pluginId: LCOS_PLUGIN_ID, intentActionId: 'network.create', inputs: sharedInputs, deviceIds: [DEVICE_WLC] });
   check('preflight WLC01 → HTTP 200', pfWlc.status === 200);
@@ -100,7 +100,7 @@ async function main(): Promise<void> {
     check('preflight WLC01 → vlanId hint present', Boolean(vlanHint), wlcR.values.map((v) => v.key));
   }
 
-  // --- 2. preflight on GW_Ralf (production, reads only) -------------------------
+  // --- 2. preflight on prod box (production, reads only) -------------------------
   console.log('\n[2] preflight GW_Ralf (read-only, production)');
   const pfGw = await authed('POST', '/plans/preflight', { pluginId: LCOS_PLUGIN_ID, intentActionId: 'network.create', inputs: sharedInputs, deviceIds: [DEVICE_GWRALF] });
   check('preflight GW_Ralf → HTTP 200 (never an error status)', pfGw.status === 200);
@@ -170,7 +170,7 @@ async function main(): Promise<void> {
     return { status: c.status, planStatus: String(detail?.status), details: step.result?.result?.details, error: step.result?.result?.error };
   };
 
-  // --- 4. execute on WLC01 + verify + cleanup -----------------------------------
+  // --- 4. execute on vRouter + verify + cleanup -----------------------------------
   console.log('\n[4] execute on WLC01 (test device)');
   const exec = await authed('POST', `/plans/${plan.id}/execute`);
   check('execute → HTTP 2xx', exec.status === 200 || exec.status === 202, exec.status);
@@ -184,7 +184,7 @@ async function main(): Promise<void> {
   }
   check('plan succeeded', planStatus === 'succeeded', { status: planStatus });
 
-  // Verify the network row exists on WLC01 via a read action.
+  // Verify the network row exists on vRouter via a read action.
   const verify = await runStep('vlan.networks.read', {});
   const rows = ((verify.details?.networks as Array<Record<string, unknown>>) ?? []);
   const netRow = rows.find((r) => String(r.name).toUpperCase() === NET_NAME);

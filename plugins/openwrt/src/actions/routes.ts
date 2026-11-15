@@ -77,7 +77,7 @@ export const ROUTES_ACTIONS: ActionDescriptor[] = [
     staged: true,
     inputSchema: {
       name: { type: 'string', required: true, description: 'Interface section name the route is bound to' },
-      network: { type: 'string', required: true, description: 'Destination CIDR (e.g. 10.28.0.0/16)' },
+      network: { type: 'string', required: true, description: 'Destination CIDR (e.g. 198.51.100.0/16)' },
     },
     execute: async (ctx, input) => {
       if (!sshAvailable(ctx)) return noSshResult();

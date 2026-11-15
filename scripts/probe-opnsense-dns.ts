@@ -1,5 +1,5 @@
 /**
- * probe-opnsense-dns.ts — READ-ONLY live probe of OPNSENSE01's DNS backends.
+ * probe-opnsense-dns.ts — READ-ONLY live probe of the main OPNsense box's DNS backends.
  *
  * Answers the question "why does GET /v1/dns show no OPNsense entries?":
  *   1. Fetches the device's apiKey/apiSecret via the API (GET /secrets/:id,

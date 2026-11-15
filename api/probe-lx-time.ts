@@ -195,7 +195,7 @@ async function main(): Promise<void> {
     const device = await db.query.devices.findFirst({ where: eq(schema.devices.id, row.deviceId) });
     if (!device) continue;
     const fields = row.secretId ? secrets[row.secretId] : undefined;
-    // The literal may carry a CIDR prefix ("10.25.1.1/16") — strip it.
+    // The literal may carry a CIDR prefix ("203.0.113.1/16") — strip it.
     const host = (device.managementAddress ?? '').split('/')[0];
     if (!fields) { console.log(`\n=== ${device.name} (${host}): no decrypted secret`); continue; }
     const community: string | undefined = fields.community ?? fields.readCommunity;

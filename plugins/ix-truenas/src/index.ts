@@ -1327,7 +1327,7 @@ interface NetworkRow {
 /**
  * Maps interface.query rows to networks-inventory rows — one row per IP alias.
  * v26 encodes each alias as a JSON STRING inside the `aliases` array
- * ({"type":"INET","address":"10.25.0.10","netmask":16}); older releases used
+ * ({"type":"INET","address":"203.0.113.10","netmask":16}); older releases used
  * plain objects — both are handled. Interfaces without IPs contribute nothing
  * (the inventory is about addressable networks, not raw NICs).
  */

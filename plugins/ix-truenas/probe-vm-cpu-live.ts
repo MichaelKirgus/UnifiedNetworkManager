@@ -4,7 +4,7 @@
  * custom TrueNAS SCALE socket detection. NEVER mutates anything.
  *
  * Usage (from this folder):
- *   TRUENAS_HOST=10.25.0.10 SSH_PRIVATE_KEY='...' npx tsx probe-vm-cpu-live.ts
+ *   TRUENAS_HOST=203.0.113.10 SSH_PRIVATE_KEY='...' npx tsx probe-vm-cpu-live.ts
  */
 import { createSshPool, dynamicSshHostVerifier } from '@unm/plugin-sdk';
 

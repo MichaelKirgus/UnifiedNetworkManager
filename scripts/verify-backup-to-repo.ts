@@ -2,7 +2,7 @@
  * Live end-to-end verification that config backups land in UNM's central file
  * repository (the plugin → API broker → file-repo-plugin path):
  *   1. logs in via the real auth flow (TOTP minted from the seeded admin secret)
- *   2. creates a plan with intent `config.backup.download` for KIRGUSBANDE
+ *   2. creates a plan with intent `config.backup.download` for the TrueNAS box
  *      (read-only on the appliance — config.save just produces a backup file)
  *   3. executes it and waits for completion
  *   4. asserts the step result carries details.repoFileId + a convention name

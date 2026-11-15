@@ -1,5 +1,5 @@
 /**
- * LIVE probe (test device WLC01 only): figure out the exact `add` grammar of
+ * LIVE probe (test device vRouter only): figure out the exact `add` grammar of
  * /Setup/TCP-IP/Network-list on LCOS 10.94 vRouter, where `add ?` prints no
  * help and a 9-value add fails with: Value invalid: "10.399.0.2)
  *

@@ -14,7 +14,7 @@ import fs from 'node:fs';
 import { createRequire } from 'node:module';
 
 const API = process.env.API_BASE ?? 'http://localhost:3000/v1';
-const HOST = process.argv[2] ?? '10.28.0.1'; // GW_Ralf (dual-radio WiFi, production) — read-only probe only
+const HOST = process.argv[2] ?? '10.28.0.1'; // prod box (dual-radio WiFi, production) — read-only probe only
 const PORT = Number(process.env.LCOS_SSH_PORT ?? 22);
 const SECRET_ID = process.env.LCOS_WEB_SECRET_ID ?? '3352ee33-1577-4849-a7ae-9ecf4c67d104';
 

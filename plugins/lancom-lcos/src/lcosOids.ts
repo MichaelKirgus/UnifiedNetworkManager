@@ -173,7 +173,7 @@ export const DHCP = {
 /* ------------------------------------------------------------------ *
  * DNS setup mirror — 11.2.17 (Setup/DNS group)
  *
- * The Setup/DNS config subtree IS SNMP-readable (verified live on GW_Ralf,
+ * The Setup/DNS config subtree IS SNMP-readable (verified live on a physical box,
  * LCOS 10.x, 2026-10): .2.17.5 is the static DNS host-entry table
  * (CLI `cd /Setup/DNS/DNS-List` — banner OID [1.3.6.1.4.1.2356.11][2.17.5]).
  * Column-first, index = length-prefixed hostname text (case preserved).
@@ -193,8 +193,8 @@ export const DNS_LIST = {
 /* ------------------------------------------------------------------ *
  * DHCP setup mirror — 11.2.10 (Setup/DHCP group)
  *
- * The Setup/DHCP config subtree IS SNMP-readable (verified live on WLC01 +
- * GW_Ralf, LCOS 10.94, 2026-10): .2.10.9 is the static-host table
+ * The Setup/DHCP config subtree IS SNMP-readable (verified live on a vRouter and
+ * a physical box, LCOS 10.94, 2026-10): .2.10.9 is the static-host table
  * (CLI `cd /Setup/DHCP/Hosts` — banner OID [1.3.6.1.4.1.2356.11][2.10.9]),
  * i.e. DHCP reservations (MAC → fixed IP, scoped to a network/pool).
  * Column-first; index = COMPOSITE [MAC text, network-name text], both length-

@@ -5,7 +5,7 @@
  * core.get_methods (catalog introspection).
  *
  * Usage (from this folder):
- *   TRUENAS_HOST=10.25.0.10 TRUENAS_API_KEY=<id>-<material> npx tsx probe-vm.ts
+ *   TRUENAS_HOST=203.0.113.10 TRUENAS_API_KEY=<id>-<material> npx tsx probe-vm.ts
  */
 import { TruenasClient, TruenasCredentials } from './src/client/truenasClient';
 

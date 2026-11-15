@@ -37,7 +37,7 @@ function isIpLiteral(value: string): boolean {
 }
 
 /**
- * Normalizes a CIDR block ("10.40.0.5/23" → "10.40.0.0/23", host bits cleared).
+ * Normalizes a CIDR block ("198.51.100.5/23" → "198.51.100.4/23", host bits cleared).
  * Returns null when the value is not a valid CIDR (bare IPs are rejected —
  * subnets must carry an explicit prefix, mirroring the live inventory's rows).
  */
@@ -45,7 +45,7 @@ function normalizeCidr(value: string): string | null {
   const s = splitCidr(value);
   if (!s) return null;
   if (!isIpLiteral(s.net)) return null;
-  // Canonicalize — clear host bits so "10.40.0.5/23" and "10.40.0.0/23" dedupe.
+  // Canonicalize — clear host bits so "198.51.100.5/23" and "198.51.100.4/23" dedupe.
   const canonical = subnetOf(s.net, s.prefix);
   if (!canonical) return null;
   return canonical;

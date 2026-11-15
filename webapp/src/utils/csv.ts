@@ -161,7 +161,7 @@ export type NetworkCsvImportField =
 /** Human labels + hints for each mappable field (shown in the mapping UI). */
 export const NETWORK_CSV_IMPORT_FIELDS: { field: NetworkCsvImportField; label: string; hint: string }[] = [
   { field: 'name', label: 'Name', hint: 'Primary label / identity of the network — required, unique' },
-  { field: 'subnets', label: 'Subnet(s)', hint: 'One or more CIDR blocks (10.40.0.0/16), comma- or space-separated within one cell' },
+  { field: 'subnets', label: 'Subnet(s)', hint: 'One or more CIDR blocks (198.51.100.0/16), comma- or space-separated within one cell' },
   { field: 'vlanId', label: 'VLAN id', hint: 'Integer 0–4095 when the network lives in a VLAN' },
   { field: 'gateways', label: 'Gateway(s)', hint: 'One or more gateway IP addresses, comma- or space-separated within one cell' },
   { field: 'dnsServers', label: 'DNS server(s)', hint: 'One or more DNS server IP addresses, comma- or space-separated within one cell' },

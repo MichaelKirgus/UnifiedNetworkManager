@@ -3056,7 +3056,7 @@ const vmsCdromAttachAction: ActionDescriptor<TruenasActionContext> = {
         const ru = await dispatchWrite(ctx, 'vm.device.update', [cdromId, { attributes: { dtype: 'CDROM', path } }], { timeoutMs: 120_000, verify: cdromVerify });
         if (ru.note) rpcError = ru.note;
       } else {
-        // Observed live (KIRGUSBANDE, 26.0.0-BETA.2): vm.device.create for a CDROM takes
+        // Observed live on a 26.0.0-BETA.2 appliance: vm.device.create for a CDROM takes
         // ~60s EVEN VIA THE WEB UI — the appliance-side work is just slow there, and the
         // Web UI only survives it because its WS session has no per-call timeout. Give
         // this call 120s of headroom; if it still times out we fall through to re-read.

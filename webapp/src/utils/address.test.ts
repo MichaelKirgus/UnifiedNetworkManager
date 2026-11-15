@@ -82,7 +82,7 @@ describe('ipScope / ipScopeGroup', () => {
   });
 
   it('ignores the CIDR prefix and uses only the network address', () => {
-    expect(ipScope('10.40.0.0/16')).toBe('private');
+    expect(ipScope('172.16.0.0/16')).toBe('private');
     expect(ipScopeGroup('2606:4700:4700::/48')).toBe('public');
   });
 });

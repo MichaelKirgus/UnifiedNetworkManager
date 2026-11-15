@@ -726,7 +726,7 @@ function parseLcosStatus(out: Map<string, SnmpValue>): LcosRouterSnapshot {
  * shows. Absent on models/firmware without the subtree → empty array (the
  * combined walk treats missing subtrees as empty, never an error).
  *
- * FIRMWARE QUIRK (verified live on LCOS 10.94, GW_Ralf): every row OID of THIS
+ * FIRMWARE QUIRK (verified live on LCOS 10.94, physical box): every row OID of THIS
  * table carries a trailing `.0` sub-identifier after the hostname index —
  *   .11.2.17.5.1.<col>.<len><hostname-bytes>.0
  * while all other LCOS tables (NET_LIST, DHCP, …) end right after the index.
@@ -755,7 +755,7 @@ function parseDnsList(out: Map<string, SnmpValue>): LcosDnsEntry[] {
     switch (row.col) {
       case DNS_LIST.COL_NAME: break; // echoes the index — nothing to store
       // '0.0.0.0' in the v4 column is LCOS's placeholder for a v6-only row
-      // (verified live on WLC01 2026-10) — normalize it away like '::'.
+      // (verified live on the test vRouter, 2026-10) — normalize it away like '::'.
       case DNS_LIST.COL_IP: e.ip = String(value).trim() === '0.0.0.0' ? '' : String(value).trim(); break;
       case DNS_LIST.COL_IPV6: e.ipv6 = String(value).trim(); break;
       case DNS_LIST.COL_RTG_TAG: e.rtgTag = toInt(value); break;
@@ -773,7 +773,7 @@ function parseDnsList(out: Map<string, SnmpValue>): LcosDnsEntry[] {
  * Parses the DHCP static-host table (11.2.10.9 — Setup/DHCP/Hosts). Column-first,
  * index = COMPOSITE [MAC text, network-name text], both length-prefixed — the MAC
  * is BARE lowercase hex ("00a0574c1acf", no colons) and the trailing network part
- * mirrors column 5 (verified live on LCOS 10.94, GW_Ralf + WLC01, 2026-10). The
+ * mirrors column 5 (verified live on LCOS 10.94, physical box + vRouter, 2026-10). The
  * table is a CONFIG mirror: it lists exactly what `cd /Setup/DHCP/Hosts` shows.
  * Absent or empty on devices without reservations → empty array (the combined
  * walk treats missing subtrees as empty, never an error). Exported — the
@@ -812,7 +812,7 @@ export function parseDhcpHosts(out: Map<string, SnmpValue>): LcosDhcpHost[] {
 /**
  * Parses the DHCP pool table (11.2.10.20 — Setup/DHCP/Network-list). Column-first,
  * index = length-prefixed network-name text (upper-cased by LCOS; verified live on
- * GW_Ralf, 2026-10: NET_MANAGEMENT → 10.28.1.0–10.28.1.255). Pools are the scope
+ * a physical box, 2026-10). Pools are the scope
  * a static host must fall inside — LCOS rejects `add` with "Value invalid" when
  * the reservation IP is outside every pool of its network name, so this table is
  * what the dhcp.staticMapping.add action reports in that failure case.
@@ -845,7 +845,7 @@ export function parseDhcpPools(out: Map<string, SnmpValue>): LcosDhcpPool[] {
 
 /**
  * Decodes the network-list interface enum. Verified live from the CLI table
- * help (`cd /Setup/TCP-IP/Network-list` + `set ?`, LCOS 10.94, GW_Ralf):
+ * help (`cd /Setup/TCP-IP/Network-list` + `set ?`, LCOS 10.94, physical box):
  *   LAN-1(256)…LAN-16(271)          eLan1…eLan16 (models expose a subset)
  *   WLAN-1(512)/WLAN-2(513)         main radios
  *   WLAN-1-N(1024..1029), WLAN-2-N(1031..1036)  SSID sub-slots (1030 gapped)

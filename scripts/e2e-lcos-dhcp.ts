@@ -2,17 +2,17 @@
  * E2E for LCOS DHCP static-host (reservation) support — dhcp.staticMapping.add /
  * delete on the lancom-lcos plugin.
  *
- * Flow (WLC01 = test device; GW_Ralf is touched READ-ONLY via GET /dhcp):
+ * Flow (vRouter = test device; prod box is touched READ-ONLY via GET /dhcp):
  *   1. catalog: both actions advertised by the LCOS plugin
- *   2. baseline: WLC01 has no reservation for the test MAC; GW_Ralf rows present
- *   3. SSH setup on WLC01: temporary DHCP pool NET_MANAGEMENT 10.25.0.90–99
+ *   2. baseline: vRouter has no reservation for the test MAC; prod box rows present
+ *   3. SSH setup on vRouter: temporary DHCP pool NET_MANAGEMENT 203.0.113.90–99
  *      (only if not pre-existing — LCOS validates reservation IPs against pools)
  *   4. dhcp.staticMapping.add {mac, ip} — interface omitted → resolved from the IP
  *   5. idempotent re-add → skipped
  *   6. edit via deleteAdd: add same MAC with a different IP (no set action exists)
  *   7. negative: add an IP outside every pool → clean failure naming the pools
  *   8. dhcp.staticMapping.delete {mac} → removed; second delete → skipped
- *   9. cleanup: temp pool deleted if we created it; WLC01 Hosts table empty (SNMP)
+ *   9. cleanup: temp pool deleted if we created it; vRouter Hosts table empty (SNMP)
  *
  * Usage (from repo root): ./node_modules/.bin/tsx scripts/e2e-lcos-dhcp.ts
  */
@@ -22,7 +22,7 @@ import { createRequire } from 'node:module';
 
 const API = process.env.API_BASE ?? 'http://localhost:3000/v1';
 const LCOS_PLUGIN_ID = '00000000-0000-4000-8000-000000000006';
-const DEVICE_WLC = process.env.WLC_DEVICE_ID ?? '38cf30d7-e53e-47ae-9545-c79af2270751'; // WLC01 (vRouter)
+const DEVICE_WLC = process.env.WLC_DEVICE_ID ?? '38cf30d7-e53e-47ae-9545-c79af2270751'; // vRouter
 const HOST_WLC = '10.25.0.20';
 const SSH_SECRET_ID = process.env.LCOS_SSH_SECRET_ID ?? '3352ee33-1577-4849-a7ae-9ecf4c67d104';
 const SNMP_SECRET_ID = process.env.LCOS_SNMPV3_SECRET_ID ?? 'adeb8556-7245-43c4-b67e-20941bc8a10b';
@@ -219,7 +219,7 @@ async function main(): Promise<void> {
   const wlcResvBefore = (base.reservations ?? []).filter((r) => String(r['deviceId']) === DEVICE_WLC);
   check('WLC01 has no reservation for the test MAC', !wlcResvBefore.some((r) => String(r['mac']).toLowerCase() === BARE_MAC), wlcResvBefore);
 
-  // --- 3. SSH setup: temp pool on WLC01 (only if not pre-existing) -------------------
+  // --- 3. SSH setup: temp pool on vRouter (only if not pre-existing) -------------------
   console.log('\n[3] SSH setup — temporary DHCP pool on WLC01');
   const ssh = await getSecretFields(SSH_SECRET_ID);
   if (!ssh.username || !ssh.password) throw new Error('unexpected SSH secret shape');
@@ -281,7 +281,7 @@ async function main(): Promise<void> {
     console.log(`  (pool ${POOL} pre-existed on WLC01 — left in place)`);
   }
 
-  // GW_Ralf sanity: its real reservations are visible through the same endpoint.
+  // prod box sanity: its real reservations are visible through the same endpoint.
   const gwResv = (after.reservations ?? []).filter((r) => String(r['hostname']) === 'Switch01');
   check('GW_Ralf reservation visible via GET /dhcp (read-only sanity)', gwResv.length >= 1, gwResv);
 

@@ -2,7 +2,7 @@
  * READ-ONLY probe — is the LCOS static DNS table (Setup/DNS/DNS-List, CLI OID
  * banner [1.3.6.1.4.1.2356.11][2.17.5]) exposed via SNMP?
  *
- * Walks the whole .11.2.17 subtree on a device (default GW_Ralf 10.28.0.1 —
+ * Walks the whole .11.2.17 subtree on a device (default prod box 203.0.113.1 —
  * PRODUCTION, read-only) and prints every OID + value so we can see:
  *   - which DNS tables exist in the SNMP config mirror (DNS-List = .5?)
  *   - the row index encoding (length-prefixed hostname text? int?)
@@ -15,7 +15,7 @@ import fs from 'node:fs';
 import { createRequire } from 'node:module';
 
 const API = process.env.API_BASE ?? 'http://localhost:3000/v1';
-const HOST = process.argv[2] ?? '10.28.0.1'; // GW_Ralf — PRODUCTION, read-only!
+const HOST = process.argv[2] ?? '10.28.0.1'; // prod box — PRODUCTION, read-only!
 const SNMP_SECRET_ID = process.env.LCOS_SNMPV3_SECRET_ID ?? 'adeb8556-7245-43c4-b67e-20941bc8a10b';
 
 const apiRequire = createRequire(path.resolve(process.cwd(), 'api', 'package.json'));

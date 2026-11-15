@@ -2,15 +2,15 @@
  * Probe of the LCOS DHCP static-host (reservation) table — Setup/DHCP/Hosts.
  *
  * Phase A (READ-ONLY, both devices): `dir -a` on Hosts to see how real rows are
- * rendered (MAC format!), plus `add ?` help on WLC01 for the column syntax.
+ * rendered (MAC format!), plus `add ?` help on vRouter for the column syntax.
  *
- * Phase B (WRITE, WLC01 ONLY — pass --write): adds ONE test reservation with a
+ * Phase B (WRITE, vRouter ONLY — pass --write): adds ONE test reservation with a
  * fake MAC (00:de:ad:be:ef:01), verifies it appears in CLI + SNMP (.2.10.9),
  * then deletes it and verifies it is gone. Safe to re-run; leaves no trace.
  *
  * Usage (from repo root):
  *   ./node_modules/.bin/tsx scripts/probe-lcos-dhcp-write.ts            # read-only, both devices
- *   ./node_modules/.bin/tsx scripts/probe-lcos-dhcp-write.ts --write    # + write cycle on WLC01
+ *   ./node_modules/.bin/tsx scripts/probe-lcos-dhcp-write.ts --write    # + write cycle on vRouter
  */
 import path from 'node:path';
 import fs from 'node:fs';
@@ -170,7 +170,7 @@ async function main(): Promise<void> {
       fs.writeFileSync('/tmp/lcos-dhcp-probe/wlc01_hosts_add_help.txt', out);
       console.log(out.split('\n').slice(-60).join('\n'));
 
-      // Which network names exist on WLC01 (for a valid Network-name value)?
+      // Which network names exist on vRouter (for a valid Network-name value)?
       console.log(`\n########## WLC01 — TCP-IP/Network-list ##########`);
       out = await runCommand(creds, host, ['cd Setup/TCP-IP/Network-list', 'dir -a .']);
       fs.writeFileSync('/tmp/lcos-dhcp-probe/wlc01_tcpip_netlist.txt', out);
@@ -188,7 +188,7 @@ async function main(): Promise<void> {
     return;
   }
 
-  // --- Phase B — write cycle on WLC01 only ----------------------------------
+  // --- Phase B — write cycle on vRouter only ----------------------------------
   const host = '10.25.0.20';
   const MAC = '00:de:ad:be:ef:01';
   const IP = process.env.RESV_IP ?? '10.25.0.95'; // mid-pool; boundary IPs are rejected
@@ -199,7 +199,7 @@ async function main(): Promise<void> {
 
   const BARE = MAC.replace(/:/g, ''); // LCOS stores/accepts bare lowercase hex (12 chars)
 
-  // WLC01 has NO DHCP pools — and LCOS validates the reservation IP against a
+  // vRouter has NO DHCP pools — and LCOS validates the reservation IP against a
   // configured pool ("Value invalid: <ip>"). Create a temporary test pool on
   // NET_MANAGEMENT first; it is deleted again at the end.
   // LCOS validates the pool name against EXISTING network names (TCP-IP/Network-list) —

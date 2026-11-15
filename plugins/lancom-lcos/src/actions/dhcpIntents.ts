@@ -3,11 +3,11 @@
  * `dhcp.staticMapping.delete`.
  *
  * Reservations live in the Setup/DHCP/Hosts table (CLI: `cd /Setup/DHCP/Hosts`;
- * SNMP config mirror: 11.2.10.9, verified live on GW_Ralf + WLC01, LCOS 10.94,
- * 2026-10). The READ path is SNMP (the primary credential — no SSH slot needed
+ * SNMP config mirror: 11.2.10.9, verified live on a physical box and a vRouter,
+ * LCOS 10.94, 2026-10). The READ path is SNMP (the primary credential — no SSH slot needed
  * for idempotency checks); the WRITE path is the interactive CLI over SSH PTY
  * (SNMP SET cannot create rows in this table — same limitation as every other
- * LCOS setup table, see networkIntents.ts). Verified live on WLC01 2026-10:
+ * LCOS setup table, see networkIntents.ts). Verified live on the test vRouter 2026-10:
  *   add <bareMac> <NetworkName> <ip> "" ""     (TAB-HEADER column order!)
  *   del Setup/DHCP/Hosts/<bareMac>             (single-key table, from root prompt)
  * Key facts that shape the actions below:

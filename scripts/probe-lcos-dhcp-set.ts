@@ -2,9 +2,9 @@
  * Probe: does LCOS support IN-PLACE editing of a DHCP Hosts row via targeted
  * column sets (the WLAN-slot pattern: `cd <table-parent>` + `set <Table> <rowkey> <Column> <value>`)?
  *
- * WLC01 only. Creates the temp pool + reservation first, then tries:
+ * vRouter only. Creates the temp pool + reservation first, then tries:
  *   cd Setup/DHCP
- *   set Hosts 00deadbeef01 IP-Address 10.25.0.96
+ *   set Hosts 00deadbeef01 IP-Address 203.0.113.96
  * and verifies via dir -a + SNMP (.2.10.9). Cleans up everything afterwards.
  *
  * Usage: ./node_modules/.bin/tsx scripts/probe-lcos-dhcp-set.ts
@@ -14,7 +14,7 @@ import fs from 'node:fs';
 import { createRequire } from 'node:module';
 
 const API = process.env.API_BASE ?? 'http://localhost:3000/v1';
-const HOST = '10.25.0.20'; // WLC01 — test device only!
+const HOST = '10.25.0.20'; // vRouter — test device only!
 const SSH_SECRET_ID = process.env.LCOS_SSH_SECRET_ID ?? '3352ee33-1577-4849-a7ae-9ecf4c67d104';
 
 const sdkRequire = createRequire(path.resolve(process.cwd(), 'packages', 'plugin-sdk', 'package.json'));

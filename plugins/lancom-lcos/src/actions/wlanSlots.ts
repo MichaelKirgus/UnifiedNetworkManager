@@ -11,7 +11,7 @@
  * line) and only write back when every field parsed cleanly. Any parse doubt
  * → hard error, no write.
  *
- * Verified against GW_Ralf (LANCOM 1803VAW-5G, LCOS 10.94):
+ * Verified against a physical dual-radio box (LANCOM 1803VAW-5G, LCOS 10.94):
  *   Interfaces/WLAN/Network    — 28 visible columns in tab order:
  *     Ifc Operating Network-Name UTF-8-Network-Name MAC-Filter RADIUS-Accounting
  *     Accounting-Server Accounting-Start-Condition Dyn-Auth Closed-Network

@@ -1,5 +1,5 @@
 /**
- * Creates the SNMPv3 user `root` on a LANCOM LCOS device (WLC01, 10.25.0.20 —
+ * Creates the SNMPv3 user `root` on a LANCOM LCOS device (vRouter, 203.0.113.20 —
  * TEST device) so UNM's stored "LANCOM SNMPv3 public/private" secret works:
  *   1. SFTP-read /config and remove any orphaned `probeuser` Groups row left by
  *      earlier probes (CLI del cannot address multi-key rows; LCF edit is the
@@ -7,7 +7,7 @@
  *   2. CLI: cd Setup/SNMP/Users + add root HMAC-SHA <auth> "" AES128 <priv> "" active
  *      (validated grammar: bare enum names, tab-header column order).
  *   3. CLI: cd Setup/SNMP/Groups + add SNMPv3(USM) "root" SNMPv3-ReadWrite active
- *      (WLC01 already ships the SNMPv3-ReadWrite profile — verified via readscript).
+ *      (vRouter already ships the SNMPv3-ReadWrite profile — verified via readscript).
  *   4. Verify with the STORED secret's fields: snmpGet DNS default + no-op SET of
  *      the same value (proves authPriv READ and WRITE access, changes nothing).
  *
@@ -22,7 +22,7 @@ import fs from 'node:fs';
 import { createRequire } from 'node:module';
 
 const API = process.env.API_BASE ?? 'http://localhost:3000/v1';
-// Physical LCOS devices (e.g. GW_Ralf, 10.94) expose an EMPTY SFTP /config file
+// Physical LCOS devices (e.g. prod box, 10.94) expose an EMPTY SFTP /config file
 // (opens but never delivers data) — pass --cli-only to skip all SFTP steps and
 // detect rows via CLI `dir -a` output instead. --verify-only skips creation.
 const ARGS = process.argv.slice(2);
@@ -265,7 +265,7 @@ function removeRows(lines: string[], family: string, rowIndices: number[]): { li
 async function cliTableHasRow(creds: { username: string; password: string }, dir: string, needle: string): Promise<boolean> {
   const out = await runCommand(creds, [`cd ${dir}`, 'dir -a']);
   // Data rows start at column 0 (no leading spaces); header/separator lines are indented or '='/'-'.
-  // Prompt lines (`root@GW_Ralf:/…`) also start at col 0 — exclude anything containing '@'.
+  // Prompt lines (`root@prod box:/…`) also start at col 0 — exclude anything containing '@'.
   return out.split('\n').some((l) => l.length > 0 && !/^\s/.test(l) && !l.includes('@') && !/^[=|-]+$/.test(l.trim()) && l.includes(needle));
 }
 

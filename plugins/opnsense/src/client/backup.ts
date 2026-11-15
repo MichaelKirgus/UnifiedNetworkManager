@@ -59,8 +59,8 @@ export function revertBackup(client: AxiosInstance, backup: string): Promise<Opn
 //   GET /api/core/backup/backups/{host}     → { items: [{ time, time_iso, description, username, filesize, id }] } (newest first; id = filename)
 //   GET /api/core/backup/download/{host}[/{id}]  → raw config XML (application/octet-stream); empty id = latest
 // None of the three are read-only-gated (only delete/revert call throwReadOnly),
-// so a readonly API key can list AND download — verified live on OPNSENSE01
-// (26.4.2p2) and GWBN01 (26.4.1p2).
+// so a readonly API key can list AND download — verified live on two 26.4.x
+// appliances.
 
 /** One backup provider entry from /api/core/backup/providers. */
 export interface BackupProvider {

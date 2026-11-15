@@ -1,5 +1,5 @@
 /**
- * READ-ONLY probe of the LCOS router CLI over SSH (WLC01, 10.25.0.20).
+ * READ-ONLY probe of the LCOS router CLI over SSH (vRouter, 203.0.113.20).
  *
  * The web UI locked out repeated failed POSTs ("Access Forbidden"), so this
  * probes the interactive CLI instead: discovers the command syntax for config

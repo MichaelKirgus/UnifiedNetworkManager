@@ -78,7 +78,7 @@ export async function resolveAssignmentRemovePath(client: AxiosInstance, credent
  * Whether the assignment REST model can hold an L3 ADDRESS (not just create a
  * node). The endpoint exists on all of 26.7+, but the 26.7.x NetworkInterface
  * model only carries `descr/identifier/if/lock` — no type4/ipaddr/subnet fields
- * (verified against tag 26.7.1 source AND live on GWST04: set_item with an IP
+ * (verified against tag 26.7.1 source AND live on a 26.7.x appliance: set_item with an IP
  * returns {"result":"saved"} yet the address never reaches config.xml). The full
  * model landed on master only. Detection is field-based, not version-based:
  * read one existing assignment row and look for an IP-related field.

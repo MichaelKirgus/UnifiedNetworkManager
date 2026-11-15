@@ -229,7 +229,7 @@ const ipInterfacesRead: ActionDescriptor<LxActionContext> = {
         vlanId: (tableCell(p, '13.2.70.6', '3', idx) === '0' ? null : tableCell(p, '13.2.70.6', '3', idx)) ?? null,
         ipv4SourceIndex: tableCell(p, '13.2.70.6', '4', idx) ?? '', // numeric enum (observed on this platform: 2 = static) — pass back unchanged to keep it
         ipv6SourceIndex: tableCell(p, '13.2.70.6', '5', idx) ?? '', // numeric enum (observed: 1 = auto/SLAAC)
-        staticIpv4: tableCell(p, '13.2.70.6', '6', idx) || null, // CIDR notation, e.g. "10.25.1.2/16"
+        staticIpv4: tableCell(p, '13.2.70.6', '6', idx) || null, // CIDR notation, e.g. "203.0.113.2/16"
         staticIpv6: (tableCell(p, '13.2.70.6', '7', idx) ?? '').replace(/^:+$/, '') || null,
         comment: tableCell(p, '13.2.70.6', '9', idx) || null,
         parameters: paramsByName.get(name) ?? null,
@@ -820,7 +820,7 @@ const ipInterfaceSet: ActionDescriptor<LxActionContext> = {
   inputSchema: {
     interface: { type: 'string', required: true, description: 'Interface name (row index; e.g. INTRANET — see ip.interfaces.read)' },
     ipv4SourceIndex: { type: 'number', min: 0, max: 255, description: 'IPv4 address source enum index (observed: 2 = static); pass back the read value to keep it' },
-    staticIpv4: { type: 'string', minLength: 7, maxLength: 18, pattern: '^\\d{1,3}(\\.\\d{1,3}){3}(\\/\\d{1,2})?$', description: 'Static IPv4 address in CIDR notation (e.g. 10.25.1.2/16)' },
+    staticIpv4: { type: 'string', minLength: 7, maxLength: 18, pattern: '^\\d{1,3}(\\.\\d{1,3}){3}(\\/\\d{1,2})?$', description: 'Static IPv4 address in CIDR notation (e.g. 203.0.113.2/16)' },
     ipv6SourceIndex: { type: 'number', min: 0, max: 255, description: 'IPv6 address source enum index (observed: 1 = auto); pass back the read value to keep it' },
     staticIpv6: { type: 'string', minLength: 3, maxLength: 80, description: 'Static IPv6 address in CIDR notation (e.g. 2003:e9::5/64)' },
   },

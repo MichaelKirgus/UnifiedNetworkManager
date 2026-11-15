@@ -2,11 +2,11 @@
  * Canonical fleet intents for LCOS routers — `dns.set` / `dns.delete`.
  *
  * Static DNS host entries live in the Setup/DNS/DNS-List table (CLI:
- * `cd /Setup/DNS/DNS-List`; SNMP config mirror: 11.2.17.5, verified live on
- * GW_Ralf 2026-10). The READ path is SNMP (the primary credential — no SSH
+ * `cd /Setup/DNS/DNS-List`; SNMP config mirror: 11.2.17.5, verified live on a
+ * physical box, 2026-10). The READ path is SNMP (the primary credential — no SSH
  * slot needed for idempotency checks); the WRITE path is the interactive CLI
  * over SSH PTY (SNMP SET cannot create rows in this table — same limitation as
- * the network tables, see networkIntents.ts). Verified live on WLC01 2026-10:
+ * the network tables, see networkIntents.ts). Verified live on the test vRouter 2026-10:
  *   add "NAME" 0 <v4>            (3 values; v6 column defaults to ::)
  *   add "NAME" 0 0.0.0.0 <v6>    (explicit zero-v4 placeholder for v6-only rows)
  *   del Setup/DNS/DNS-List/<name>        (single-key table — removes the whole row)
@@ -46,8 +46,8 @@ interface DnsRow {
 async function readDnsRows(ctx: ActionContext): Promise<DnsRow[] | null> {
   try {
     // GetBulk multi-walk, NOT snmpWalk: the LCOS agent's getNext path returns
-    // nothing for this table (verified live on GW_Ralf — subtree() yields 0 OIDs
-    // while a single-base GetBulk walk yields all rows).
+    // nothing for this table (verified live on a physical box — subtree()
+    // yields 0 OIDs while a single-base GetBulk walk yields all rows).
     const out = await snmpWalkMulti(ctx.host, ctx.credentials.snmp, [DNS_LIST.base], ctx.opts);
     const byName = new Map<string, DnsRow>();
     for (const [oid, value] of out) {
@@ -59,7 +59,7 @@ async function readDnsRows(ctx: ActionContext): Promise<DnsRow[] | null> {
       if (!e) { e = { name, ip: '', ipv6: '' }; byName.set(name, e); }
       switch (row.col) {
         // '0.0.0.0' in the v4 column = LCOS's placeholder for a v6-only row
-        // (verified live on WLC01 2026-10) — normalize away like '::'.
+        // (verified live on a vRouter, 2026-10) — normalize away like '::'.
         case DNS_LIST.COL_IP: e.ip = String(value).trim() === '0.0.0.0' ? '' : String(value).trim(); break;
         case DNS_LIST.COL_IPV6: e.ipv6 = String(value).trim() === '::' ? '' : String(value).trim(); break;
         default: break; // COL_NAME echoes the index, COL_RTG_TAG is not needed for writes
@@ -89,7 +89,7 @@ function cliRowMatches(rows: string[], name: string, ip: string | null): boolean
 /**
  * Builds the CLI `add` value list for a DNS-List row from its two address
  * columns. Column order: Host-name Rtg-tag IP-Address(v4) IPV6-Address(v6).
- * Verified live on WLC01 (LCOS vRouter 10.94, 2026-10): an EMPTY quoted value
+ * Verified live on a vRouter (LCOS 10.94, 2026-10): an EMPTY quoted value
  * is rejected (`Value invalid: "`), so the unset family is expressed per shape —
  *   both:    add "NAME" 0 <v4> <v6>        (dual row in ONE command)
  *   v4-only: add "NAME" 0 <v4>             (v6 column defaults to ::)
@@ -140,7 +140,7 @@ export const dnsSetAction: ActionDescriptor = {
     // 2. Build the DESIRED row from the requested address(es), preserving any
     // sibling family already on the device. The DNS-List table is single-keyed
     // by name with one v4 + one v6 column; a second `add` for an existing name
-    // REPLACES the whole row (verified live on WLC01 2026-10), so we must write
+    // REPLACES the whole row (verified live on a vRouter, 2026-10), so we must write
     // both families in ONE command or the untouched family is wiped.
     const desired: { v4: string | null; v6: string | null } = ip.includes(':') ? { v4: null, v6: ip } : { v4: ip, v6: null };
     const extra = typeof input.ipv6 === 'string' ? input.ipv6.trim() : '';

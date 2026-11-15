@@ -1,7 +1,7 @@
 /**
  * Live verification for the automation dry run + nextUpdateRun feature.
  * SAFE: a dry run has zero side effects by design (no plans kept, no state
- * touched) — this probe only asserts that on KIRGUSBANDE's real rule:
+ * touched) — this probe only asserts that on the TrueNAS box's real rule:
  *   1. POST /automations/:id/dry-run returns one simulated firing per live row,
  *      each intent action 'would-run' with a concrete plan (steps + devices).
  *   2. No plans are left behind and no run rows are written by the dry run.

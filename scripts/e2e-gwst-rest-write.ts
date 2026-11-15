@@ -1,6 +1,6 @@
 /**
- * E2E for the OPNsense 26.7.x SSH-FALLBACK write path on GWST04 (runs
- * 26.7.1-amd64; has BOTH an apiKey and a bound `ssh` slot). Companion to
+ * E2E for the OPNsense 26.7.x SSH-FALLBACK write path on the 26.7.x write-test
+ * box (runs 26.7.1-amd64; has BOTH an apiKey and a bound `ssh` slot). Companion to
  * e2e-gwbn-ssh-write.ts (≤26.4 / SSH, no REST endpoint at all).
  *
  * WHY THIS IS THE GOLD: the assignment REST endpoint EXISTS on 26.7.x but its
@@ -22,8 +22,8 @@
  *      the delete detail may say "via REST" — that mixed-path outcome is
  *      expected and correct: create over SSH fallback, delete over REST.
  *
- * SAFETY: GWST04's WAN is vtnet0 (public /22) — NEVER an attach target. The
- * attach point is pinned to `interface: 'vtnet1'` (LAN 10.3.1.5/24). VLAN id
+ * SAFETY: this box's WAN is vtnet0 (public /22) — NEVER an attach target. The
+ * attach point is pinned to `interface: 'vtnet1'` (the LAN port's /24). VLAN id
  * 3998 (schema max 4094) + CIDR 10.43.98.0/28 keep the test off any real
  * traffic; delete tears down assignment + orphaned VLAN. The network created
  * here is ephemeral and removed in step 3; if anything fails mid-way, clean up
@@ -36,7 +36,7 @@ import { createRequire } from 'node:module';
 
 const API = process.env.API_BASE ?? 'http://localhost:3000/v1';
 const OPN_PLUGIN_ID = 'b0e6c8a2-4f1e-4a3d-9c7b-1a2b3c4d5e6f'; // OPNsense Plugin
-// GWST04 — 10.1.1.98, OPNsense 26.7.1-amd64 (WRITE-TEST device; ssh slot bound).
+// The 26.7.x write-test box — 203.0.113.98, OPNsense 26.7.1-amd64 (WRITE-TEST device; ssh slot bound).
 const DEVICE_GWST = 'd1f67933-f383-4cbc-83d8-531bd31af6be';
 const NET_NAME = 'e2e-rest-net';
 // Pinned attach point: the LAN port. vtnet0 is WAN (public /22) — NEVER an attach target.

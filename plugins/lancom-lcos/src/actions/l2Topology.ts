@@ -1,8 +1,8 @@
 /**
  * LCOS L2 topology — the device's interface layering, read-only.
  *
- * LCOS layers interfaces in four steps (verified live on WLC01 vRouter and
- * GW_Ralf 1803VAW-5G, LCOS 10.94):
+ * LCOS layers interfaces in four steps (verified live on a vRouter and a
+ * physical LANCOM 1803VAW-5G, LCOS 10.94):
  *   1. PHYSICAL → LOGICAL: `Setup/Interfaces/Ethernet-Ports` maps ETH-x / WAN /
  *      SFP-x onto logical ifcs via the Assignment column (e.g. ETH-4→LAN-1,
  *      WAN→LAN-5; "Idle" = unassigned).
@@ -111,8 +111,8 @@ async function readL3Interfaces(ctx: ActionContext): Promise<Record<string, stri
  *
  * The three CLI reads run in ONE session (`cliTableRowsBatch`) on purpose: LCOS
  * vRouters drop a second concurrent SSH connection (`CONNECTION_LOST` / "No
- * response from server") — verified live on WLC01 (physical hardware tolerates
- * it, but the fleet must work on both) — and each fresh session costs a full
+ * response from server") — verified live on a vRouter (physical hardware
+ * tolerates it, but the fleet must work on both) — and each fresh session costs a full
  * login + 2.5s banner settle, so batching is also ~3× faster. Only the SNMP
  * walk overlaps with them.
  */

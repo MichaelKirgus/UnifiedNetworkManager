@@ -128,7 +128,7 @@ interface EnrichmentMap {
   /** IPv4 CIDR entries from the networks inventory (longest-prefix match). */
   cidrs: NetworkEntry[];
   /** Per-IP hostnames from the live hosts inventory — identifies WHICH host on a
-   *  device an IP belongs to (e.g. container "torserver01" on KIRGUSBANDE), not
+   *  device an IP belongs to (e.g. a container on the TrueNAS host), not
    *  just which device. Newest lastSeenAt wins per ip. */
   hostnames: Map<string, string>;
 }

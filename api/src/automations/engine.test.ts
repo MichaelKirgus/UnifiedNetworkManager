@@ -426,13 +426,13 @@ describe('renderTemplate / templateVarsFor', () => {
   it('substitutes known tokens and leaves unknown ones literal', () => {
     const vars = templateVarsFor('Nightly check', {
       triggerType: 'metric',
-      device: { name: 'GWBN01', address: '192.168.1.1' },
+      device: { name: 'router-01', address: '192.168.1.1' },
       metricKey: 'cpu.load',
       metricValue: 97,
       firedAtIso: '2026-10-18T12:00:00Z',
     });
     const out = renderTemplate('{{device.name}} at {{metric.value}}% ({{automation.name}}, {{trigger.type}}) — {{run.at}} [{{unknown.token}}]', vars);
-    expect(out).toBe('GWBN01 at 97% (Nightly check, metric) — 2026-10-18T12:00:00Z [{{unknown.token}}]');
+    expect(out).toBe('router-01 at 97% (Nightly check, metric) — 2026-10-18T12:00:00Z [{{unknown.token}}]');
   });
 
   it('omits device/metric/log tokens when the context has none', () => {

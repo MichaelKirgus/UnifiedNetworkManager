@@ -1116,7 +1116,7 @@ export const routes = pgTable(
   {
     deviceId: text('deviceId').notNull(),
     pluginId: text('pluginId').notNull(),
-    // Destination network as CIDR (e.g. "10.25.0.0/16", "default" → "0.0.0.0/0").
+    // Destination network as CIDR (e.g. "198.51.100.0/16", "default" → "0.0.0.0/0").
     destination: text('destination').notNull(),
     // Next-hop gateway address or name ('' = directly connected / unknown).
     gateway: text('gateway').notNull().default(''),
@@ -2590,13 +2590,13 @@ export const documentedNetworks = pgTable(
   'documented_networks',
   {
     id: text('id').primaryKey(),
-    // Primary label / identity of the network ("VLAN 30", "10.40.0.0/16",
+    // Primary label / identity of the network ("VLAN 30", "198.51.100.0/16",
     // "Mgmt LAN"). UNIQUE (case-insensitive uniqueness enforced at the API
     // layer) — makes import matching deterministic and prevents duplicate rows
     // (the merge endpoint still handles subnet-overlap duplicates that carry
     // different names).
     name: text('name').notNull(),
-    // JSON string array of validated CIDR blocks ("10.40.0.0/16", "fd00::/64").
+    // JSON string array of validated CIDR blocks ("198.51.100.0/16", "fd00::/64").
     // May be empty — a name-only row (e.g. "VLAN 30" before the subnet is
     // known) mirrors the live inventory's VLAN-only/SSID groups.
     subnets: text('subnets').notNull().default('[]'),

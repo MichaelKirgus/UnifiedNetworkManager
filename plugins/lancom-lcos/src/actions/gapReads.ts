@@ -4,7 +4,7 @@
  * These close the "thinnest config catalog" gaps identified in the cross-plugin
  * audit: LCOS had no way to READ its firewall filter rules, IP routing table, or
  * DHCP server pool configuration through UNM. All three are exposed as CLI
- * `dir -a` tables (verified live on WLC01 vRouter + GW_Ralf physical, LCOS 10.94):
+ * `dir -a` tables (verified live on a vRouter and a physical box, LCOS 10.94):
  *
  *   /Setup/IP-Router/Firewall/Rules    — filter rules (Name, Prot., Source, Dst, Action, Prio, …)
  *   /Setup/IP-Router/IP-Routing-Table  — static routes (IP, Mask, Rtg-tag, Peer, Active, …)

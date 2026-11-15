@@ -5,10 +5,9 @@
  * Why this exists: a dead or flapping FRR daemon silently drops every
  * OSPF-learned route from the kernel table while the appliance keeps answering
  * ICMP + REST — dNAT'd and transit traffic then follows the WAN default route
- * into the void (the 2026-11-15 GWST03 mail blackhole: FRR died, segment routes
- * vanished, all forwarded TCP to internal segments timed out for hours while
- * ping worked). "Device reachable" can never catch that; only adjacency/route
- * state can.
+ * into the void (a real incident: FRR died, segment routes vanished, all
+ * forwarded TCP to internal segments timed out for hours while ping worked).
+ * "Device reachable" can never catch that; only adjacency/route state can.
  *
  * Since v0.10.0 the PRIMARY data path is REST (frrRest.ts): OPNsense's own
  * Diagnostics → Routing screen proves /api/quagga/* exposes neighbor + route
@@ -73,7 +72,7 @@ export interface OspfNeighborRow {
  * exactly, so rows can be merged into the plugin's `routes` metric verbatim —
  * protocol 'ospf'/'bgp' keeps them distinct from static/connected rows in the PK. */
 export interface OspfRouteRow {
-  /** Destination network as CIDR ("10.25.10.0/24", "fe80::/64"). */
+  /** Destination network as CIDR ("198.51.100.10/24", "fe80::/64"). */
   destination: string;
   /** Next-hop gateway address ('' = summary / directly connected / unknown). */
   gateway: string;
@@ -342,8 +341,8 @@ export function splitRouteSection(section: string): { countLine: string; table: 
 
 /** Parses one OSPF route-table section into rows. Accepts raw vtysh output of
  * "show ip route ospf" / "show ipv6 route ospf6":
- *   O>* 10.25.10.0/24 [110/2] via 10.1.1.78, wg0, 00:43:11
- *   O    10.25.0.0/16 [110/1] is a summary, 02:00:00
+ *   O>* 198.51.100.10/24 [110/2] via 203.0.113.78, wg0, 00:43:11
+ *   O    198.51.100.0/16 [110/1] is a summary, 02:00:00
  * Route lines start with the protocol code "O" plus optional flag chars (">",
  * "*"). After the destination CIDR comes an optional "[dist/metric]" token and
  * either "via <gw>, <iface>, <age>" or "is a summary"/"is directly connected".

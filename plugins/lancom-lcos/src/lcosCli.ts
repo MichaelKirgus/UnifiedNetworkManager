@@ -18,7 +18,7 @@
  * second SSH implementation lives in this plugin. One PTY channel per command
  * batch; the shell's cwd persists across a batch (`cd Setup` then `set Time ?`).
  *
- * Verified live on WLC01 (LANCOM vRouter, LCOS 10.94) and GW_Ralf
+ * Verified live on a LANCOM vRouter (LCOS 10.94) and a physical box
  * (LANCOM 1803VAW-5G): `dir`, `set <path> ?`, `readconfig` (~11k lines),
  * `cd Setup/...` all work through this driver; the pager advances with Enter.
  */

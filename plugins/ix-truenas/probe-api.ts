@@ -4,13 +4,13 @@
  * appliance (the official docs don't render response schemas).
  *
  * Usage (from this folder):
- *   TRUENAS_HOST=10.25.0.10 \
+ *   TRUENAS_HOST=203.0.113.10 \
  *   TRUENAS_USER=admin TRUENAS_PASSWORD=secret \
  *   npx tsx probe-api.ts
  *
  * Or with an API key instead of username/password (TrueNAS 26+ needs the
  * owner username — TRUENAS_API_KEY_USERNAME, defaults to root):
- *   TRUENAS_HOST=10.25.0.10 TRUENAS_API_KEY=<id>-<material> npx tsx probe-api.ts
+ *   TRUENAS_HOST=203.0.113.10 TRUENAS_API_KEY=<id>-<material> npx tsx probe-api.ts
  *
  * Transport defaults to wss (self-signed accepted); set TRUENAS_TRANSPORT=http
  * for plaintext boxes. This file is NOT part of the tsc build (tsconfig only

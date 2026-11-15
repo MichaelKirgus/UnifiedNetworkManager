@@ -353,7 +353,7 @@ export class LcosWebClient {
 /**
  * Parses the GetConfig text dump into a flat OID → value map plus table rows.
  * Format (verified live against an LX-6500 v7.14 dump):
- *   `    13.2.1 = AP_Wohnzimmer`                       — scalar line
+ *   `    13.2.1 = ap-01`                               — scalar line
  *   `    <13.2.20.8>`                                  — table block start (ONE row per block)
  *   `      (13.2.20.8.1.1) = WLAN-1`                   — row cell, full OID `<table>.<col>.<idx…>`
  *   The block has NO closing tag — it ends at the next scalar line or table tag.

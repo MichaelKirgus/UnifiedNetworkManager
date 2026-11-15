@@ -5,7 +5,7 @@
  * configuration as an LCF document:
  *
  *   [TYPE: LCF; VERSION: 1.00; HASHTYPE: none; STATUS: ...]
- *       1.2.1 = WLC01.management.kirgus.intra        ← scalar (4-space indent)
+ *       1.2.1 = router-a.example.lan                 ← scalar (4-space indent)
  *       <1.2.93.3.2>                                 ← table node
  *         (1.2.93.3.2.1.1) = DEFAULT                 ← cell row (6-space indent)
  *         (1.2.93.3.2.1.2) = 0.0.0.0

@@ -1,5 +1,5 @@
 /**
- * READ-ONLY probe of the LCOS DHCP setup tree over SSH (WLC01, 10.25.0.20).
+ * READ-ONLY probe of the LCOS DHCP setup tree over SSH (vRouter, 203.0.113.20).
  * Goal: find where static MAC→IP reservations live in Setup/DHCP and learn the
  * table column layout + add/del/set syntax for them. ONLY read commands are
  * sent (cd / dir / print / ?) — no writes.
@@ -11,7 +11,7 @@ import fs from 'node:fs';
 import { createRequire } from 'node:module';
 
 const API = process.env.API_BASE ?? 'http://localhost:3000/v1';
-const HOST = process.argv[2] ?? '10.25.0.20'; // WLC01 — test device (vRouter)
+const HOST = process.argv[2] ?? '10.25.0.20'; // vRouter — TEST device
 const PORT = Number(process.env.LCOS_SSH_PORT ?? 22);
 const SECRET_ID = process.env.LCOS_WEB_SECRET_ID ?? '3352ee33-1577-4849-a7ae-9ecf4c67d104';
 

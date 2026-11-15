@@ -2,7 +2,7 @@
  * End-to-end validation of the RouterOS plugin's full action surface (v0.4.0).
  *
  * Runs against the live dev stack (API :3000) and a real RouterOS device — by
- * default ROUTEROS01, the QEMU x86_64 test router at 10.25.2.1 (RouterOS 7.21.5
+ * default RouterOS box, the QEMU x86_64 test router at 203.0.113.1 (RouterOS 7.21.5
  * LTS; override with ROS_DEVICE_ID / ROS_PLUGIN_ID env vars). For every action
  * it creates a one-device plan via POST /plans, executes it, polls to a
  * terminal state and asserts the step result. Every write is paired with its

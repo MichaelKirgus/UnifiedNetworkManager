@@ -1,5 +1,5 @@
 /**
- * Read-only probe of the LCOS router web UI (WLC01, 10.25.0.20).
+ * Read-only probe of the LCOS router web UI (vRouter, 203.0.113.20).
  *
  * Purpose: reverse-engineer the saveconf/loadconf/backup/restore endpoints and
  * the SPA's API surface so the lancom-lcos plugin can implement config backup /

@@ -4,8 +4,8 @@
  * These implement the cross-vendor contract from @unm/plugin-sdk (intents.ts):
  * one intent fans out to every router in a site/tag via the UNM plan machinery,
  * and each plugin renders it against its own config surface. On LCOS the write
- * transport is the INTERACTIVE CLI over SSH PTY — verified on both vRouter
- * (WLC01) and physical hardware (GW_Ralf):
+ * transport is the INTERACTIVE CLI over SSH PTY — verified on a vRouter and
+ * on physical hardware:
  *   - SNMP SET cannot create rows in lcsSetupTcpIpNetworkListTable (family
  *     1.2.7.30) — probed live: `NotWritable` on a new row's col .1, while the
  *     same table is also not SNMP-readable per-row. Only a handful of setup
@@ -25,7 +25,7 @@
  *                                 Adaption Cluster Max.-Lease Def.-Lease Suppress-ARP-check
  *
  * IPv6 lives in a SEPARATE config tree (NOT under TCP-IP) — verified live on
- * both devices 2026-09-29 (`cd /Setup/IPv6` + `dir -a`, write-probed on WLC01):
+ * both devices 2026-09-29 (`cd /Setup/IPv6` + `dir -a`, write-probed on the test vRouter):
  *   Setup/IPv6/LAN-Interfaces    tab Interface-Name Interface-ID VLAN-ID Rtg-tag
  *                                 Autoconf Accept-RA Identifier-Mode Interface-Status
  *                                 Forwarding MTU Firewall DaD-Attempts RS-Count ND-Proxy Comment
@@ -378,8 +378,7 @@ const networkCreate: ActionDescriptor = {
 
     // 1. L2 VLAN network (only when a vlanId was requested). The Ports column
     //    carries the member-port list (device convention), NOT the attach ifc —
-    //    on GW_Ralf e.g. "LAN-1, LAN-2, LAN-3, LAN-4" while the L3 address sits
-    //    on BRG-2.
+    //    e.g. "LAN-1, LAN-2, LAN-3, LAN-4" while the L3 address sits on BRG-2.
     if (hasVlan) {
       if (tableHasName(vlanRows, name)) {
         steps.push(`VLAN/Networks: row ${name} already exists — left untouched`);
@@ -448,7 +447,7 @@ const networkCreate: ActionDescriptor = {
       if (tableHasName(rows, name)) {
         steps.push(`DHCP/Network-list: row ${name} already exists — left untouched`);
       } else {
-        // 21 columns in tab-header order (validated against GW_Ralf readscript rows).
+        // 21 columns in tab-header order (validated against live readscript rows).
         const values = [
           q(name), pool.start, pool.end, mask, '0.0.0.0', '0.0.0.0', '0.0.0.0', '0.0.0.0',
           'Yes', 'No', '0.0.0.0', '0.0.0.0', '0.0.0.0', '0.0.0.0', q(''), 'No', 'No', 'No', '0', '0', 'No',

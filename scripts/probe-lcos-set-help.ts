@@ -1,8 +1,8 @@
 /**
  * READ-ONLY grammar probe: LCOS CLI `?` help for the tables used by the
  * canonical network intents. No writes — only column help is printed.
- *   - WLC01 (vRouter): add ? on VLAN/Networks, TCP-IP/Network-list, DHCP/Network-list
- *   - GW_Ralf (physical, WiFi): set <row> ? inside Interfaces/WLAN/Network + Encryption
+ *   - vRouter: add ? on VLAN/Networks, TCP-IP/Network-list, DHCP/Network-list
+ *   - prod box (physical, WiFi): set <row> ? inside Interfaces/WLAN/Network + Encryption
  *     to learn the targeted column-set syntax for SSID slots.
  * Usage: ./node_modules/.bin/tsx scripts/probe-lcos-set-help.ts [host]
  */
@@ -119,7 +119,7 @@ async function main() {
   const isPhysical = HOST !== '10.25.0.20';
   let cmds: string[];
   if (isPhysical) {
-    // GW_Ralf — WLAN slot set syntax (help only, no writes).
+    // prod box — WLAN slot set syntax (help only, no writes).
     cmds = [
       'cd /Setup/Interfaces/WLAN/Network',
       'set WLAN-1 ?',
@@ -129,7 +129,7 @@ async function main() {
       'set /Setup/Interfaces/WLAN/Network/WLAN-1 ?',
     ];
   } else {
-    // WLC01 — add ? column help for the three network tables.
+    // vRouter — add ? column help for the three network tables.
     cmds = [
       'cd /Setup/VLAN/Networks',
       'add ?',

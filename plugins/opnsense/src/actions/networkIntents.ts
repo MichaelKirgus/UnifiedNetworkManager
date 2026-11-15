@@ -5,7 +5,7 @@
  * config.xml (identifier lan/optN → device + descr + ipaddr/subnet [+ v6]),
  * optionally riding a dedicated 802.1q VLAN created via the vlan_settings API.
  * The write paths per appliance era (verified against stable/26.1 source and
- * live on OPNSENSE01/GWBN01, both 26.4):
+ * live on two 26.4 appliances):
  *   - VLAN CRUD: REST `vlan_settings` item controller (all versions), staged +
  *     reconfigured. The firmware AUTO-NUMBERS the new device name (vlan01,
  *     vlan02… — NOT derived from the tag; verified live on 26.4) — so after

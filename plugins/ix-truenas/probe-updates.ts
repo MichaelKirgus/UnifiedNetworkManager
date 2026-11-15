@@ -4,7 +4,7 @@
  * safe read-only candidates. NEVER calls any write/update method.
  *
  * Usage (from this folder):
- *   TRUENAS_HOST=10.25.0.10 TRUENAS_API_KEY=<key> npx tsx probe-updates.ts
+ *   TRUENAS_HOST=203.0.113.10 TRUENAS_API_KEY=<key> npx tsx probe-updates.ts
  */
 import { TruenasClient, TruenasCredentials } from './src/client/truenasClient';
 

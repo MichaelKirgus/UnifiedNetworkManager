@@ -3,7 +3,7 @@
  *   1. Waits for the telemetry worker to ingest `dnsEntries` into
  *      device_dns_entries (polls GET /v1/dns until rows appear or timeout).
  *   2. Prints the grouped response (lowercase name → ips + device chips).
- *   3. Asserts the known GW_Ralf LCOS entries are present (read-only probe —
+ *   3. Asserts the known prod box LCOS entries are present (read-only probe —
  *      never writes to production).
  *
  * Usage: npx tsx scripts/verify-dns-page.ts
@@ -49,7 +49,7 @@ async function main(): Promise<void> {
     console.log(`  ${r.name.padEnd(24)} → ${r.ips.join(' ')}   (${chips})`);
   }
 
-  // --- Known GW_Ralf LCOS entries (verified live via SSH + SNMP, read-only) -----
+  // --- Known prod box LCOS entries (verified live via SSH + SNMP, read-only) -----
   const expected: Array<{ name: string; ip: string }> = [
     { name: 'kms03', ip: '10.120.1.22' },
     { name: 'kirgusbande', ip: '192.168.178.49' },

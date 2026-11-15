@@ -397,7 +397,7 @@ export default function DnsRolloutPage() {
               </label>
               <label className="block text-sm">
                 <span className="mb-1 block font-medium text-secondary">IP address *</span>
-                <input type="text" value={ip} onChange={(e) => setIp(e.target.value)} placeholder="10.25.0.42 or fd00::42 — one family per rollout" className="w-full rounded-md border border-border px-3 py-2 font-mono text-sm" />
+                <input type="text" value={ip} onChange={(e) => setIp(e.target.value)} placeholder="203.0.113.42 or 2001:db8::42 — one family per rollout" className="w-full rounded-md border border-border px-3 py-2 font-mono text-sm" />
               </label>
             </div>
             <label className="mt-3 block text-sm">
