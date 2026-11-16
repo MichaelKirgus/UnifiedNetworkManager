@@ -1,7 +1,8 @@
 import { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
-import { Activity, Globe, Radio, ArrowLeftRight, Server, ShieldAlert, X } from 'lucide-react';
+import { Activity, Globe, Network, Radio, ArrowLeftRight, Server, ShieldAlert, X } from 'lucide-react';
 import { Layout } from '../components/Layout';
+import { PageTabs } from '../components/PageTabs';
 import { DataTable, DataTableColumn } from '../components/DataTable';
 import { TimeRangeFilter, resolveTimeRangeIso, type TimeRangeValue } from '../components/TimeRangeFilter';
 import { formatBytes, formatNumber } from '../components/formatMetric';
@@ -129,6 +130,9 @@ export default function Flows() {
   const [siteId, setSiteId] = useState('');
   // Port drilldown — click a talker IP to scope the port tables to that host.
   const [drillIp, setDrillIp] = useState<string | null>(null);
+  // Page tabs (Mail/Security pattern) — one long scroll was hard to read with
+  // live traffic; each view group gets its own tab. Filters stay global above.
+  const [tab, setTab] = useState<'traffic' | 'internet' | 'networks' | 'security' | 'collectors'>('traffic');
 
   // The `from` bound is computed at fetch time so relative presets keep sliding
   // as the page refetches; custom ranges are absolute. Rollups land every 5
@@ -565,6 +569,19 @@ export default function Flows() {
         )}
       </div>
 
+      <PageTabs
+        tabs={[
+          { id: 'traffic', label: 'Traffic', icon: <Activity className="h-3.5 w-3.5" />, count: talkersQuery.data ? talkersQuery.data.sources.length + talkersQuery.data.destinations.length : null },
+          { id: 'internet', label: 'Internet egress', icon: <Globe className="h-3.5 w-3.5" />, count: internetQuery.data?.perDevice.length ?? null },
+          { id: 'networks', label: 'Networks', icon: <Network className="h-3.5 w-3.5" />, count: networksQuery.data?.networks.length ?? null },
+          { id: 'security', label: 'Security', icon: <ShieldAlert className="h-3.5 w-3.5" />, count: securityQuery.data ? securityQuery.data.findings.length : null },
+          { id: 'collectors', label: 'Collectors', icon: <Server className="h-3.5 w-3.5" /> },
+        ]}
+        value={tab}
+        onChange={setTab}
+      />
+
+      {tab === 'traffic' && (<>
       {/* Summary strip — internet egress total, top talker, busiest pair. */}
       {internetQuery.data && (
         <div className="mb-3 flex shrink-0 flex-wrap items-center gap-x-6 gap-y-1 rounded-lg border border-border bg-card px-4 py-2 text-xs">
@@ -607,34 +624,6 @@ export default function Flows() {
           <p className="mt-1 text-sm text-faint">No internet egress in this window.</p>
         )}
       </div>
-
-      {/* Internet egress per device. */}
-      {internetQuery.data && (
-        <DataTable
-          columns={internetColumns}
-          rows={internetQuery.data.perDevice}
-          rowKey={(row) => row.deviceId}
-          storageKey="flows-internet"
-          searchPlaceholder="Search devices…"
-          emptyMessage="No internet egress recorded in this window — start the flow-collector plugin and point an sFlow or NetFlow exporter at it."
-        />
-      )}
-
-      {/* Internet egress per country — from the stored GeoIP codes (Settings →
-       *  GeoIP). Hidden entirely until a database has resolved ≥1 destination. */}
-      {internetQuery.data?.perCountry && internetQuery.data.perCountry.length > 0 && (
-        <div className="mt-3">
-          <p className="mb-2 text-xs font-medium text-secondary">Internet egress by country</p>
-          <DataTable
-            columns={countryColumns}
-            rows={internetQuery.data.perCountry}
-            rowKey={(row) => `c|${row.countryCode ?? 'unknown'}`}
-            storageKey="flows-internet-countries"
-            searchPlaceholder="Search countries…"
-            emptyMessage="No country data yet — fetch a GeoIP database (Settings → GeoIP)."
-          />
-        </div>
-      )}
 
       {/* Top talkers — sources and destinations side by side. */}
       <div className="mt-3 grid shrink-0 grid-cols-1 gap-3 xl:grid-cols-2">
@@ -695,8 +684,52 @@ export default function Flows() {
         )}
       </div>
 
+      {/* Device-to-device pairs. */}
+      {pairsQuery.data && (
+        <DataTable
+          columns={pairColumns}
+          rows={pairsQuery.data.pairs}
+          rowKey={(row) => `${row.srcDeviceId}|${row.dstDeviceId}`}
+          storageKey="flows-pairs"
+          searchPlaceholder="Search device pairs…"
+          emptyMessage="No internal device-to-device traffic recorded in this window."
+        />
+      )}
+      </>)}
+
+      {tab === 'internet' && (<>
+      {/* Internet egress per device. */}
+      {internetQuery.data && (
+        <DataTable
+          columns={internetColumns}
+          rows={internetQuery.data.perDevice}
+          rowKey={(row) => row.deviceId}
+          storageKey="flows-internet"
+          searchPlaceholder="Search devices…"
+          emptyMessage="No internet egress recorded in this window — start the flow-collector plugin and point an sFlow or NetFlow exporter at it."
+        />
+      )}
+
+      {/* Internet egress per country — from the stored GeoIP codes (Settings →
+       *  GeoIP). Hidden entirely until a database has resolved ≥1 destination. */}
+      {internetQuery.data?.perCountry && internetQuery.data.perCountry.length > 0 && (
+        <div className="mt-3">
+          <p className="mb-2 text-xs font-medium text-secondary">Internet egress by country</p>
+          <DataTable
+            columns={countryColumns}
+            rows={internetQuery.data.perCountry}
+            rowKey={(row) => `c|${row.countryCode ?? 'unknown'}`}
+            storageKey="flows-internet-countries"
+            searchPlaceholder="Search countries…"
+            emptyMessage="No country data yet — fetch a GeoIP database (Settings → GeoIP)."
+          />
+        </div>
+      )}
+      </>)}
+
+      {tab === 'networks' && (<>
       {/* Traffic per network — which documented networks the traffic lives on. */}
-      <div className="mt-3 shrink-0 rounded-lg border border-border bg-card px-4 py-2">
+      <div className="shrink-0 rounded-lg border border-border bg-card px-4 py-2">
         <p className="flex items-center gap-2 text-xs font-medium text-secondary">
           <Globe size={13} /> Traffic per network
         </p>
@@ -712,21 +745,11 @@ export default function Flows() {
           />
         )}
       </div>
-
-      {/* Device-to-device pairs. */}
-      {pairsQuery.data && (
-        <DataTable
-          columns={pairColumns}
-          rows={pairsQuery.data.pairs}
-          rowKey={(row) => `${row.srcDeviceId}|${row.dstDeviceId}`}
-          storageKey="flows-pairs"
-          searchPlaceholder="Search device pairs…"
-          emptyMessage="No internal device-to-device traffic recorded in this window."
-        />
-      )}
+      </>)}
 
       {/* Security findings — new destinations, port scans, egress baseline breaches. */}
-      <div className="mt-3 shrink-0 rounded-lg border border-border bg-card px-4 py-2">
+      {tab === 'security' && (<>
+      <div className="shrink-0 rounded-lg border border-border bg-card px-4 py-2">
         <p className="flex items-center gap-2 text-xs font-medium text-secondary">
           <ShieldAlert size={13} /> Security findings
         </p>
@@ -752,9 +775,11 @@ export default function Flows() {
           </>
         )}
       </div>
+      </>)}
 
       {/* Collector health — live plugin stats + API ingest queue. */}
-      <div className="mt-3 shrink-0 rounded-lg border border-border bg-card px-4 py-2">
+      {tab === 'collectors' && (<>
+      <div className="shrink-0 rounded-lg border border-border bg-card px-4 py-2">
         <p className="flex items-center gap-2 text-xs font-medium text-secondary">
           <Server size={13} /> Collectors &amp; ingest
         </p>
@@ -782,6 +807,7 @@ export default function Flows() {
           </p>
         )}
       </div>
+      </>)}
     </Layout>
   );
 }
