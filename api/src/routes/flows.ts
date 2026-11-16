@@ -2,7 +2,7 @@ import { Router, Request, Response } from 'express';
 import { pool } from '../db';
 import { requireAuth, requirePermission } from '../auth/middleware';
 import { pluginAxios } from '../utils/pluginHttp';
-import { reverseLookup } from '../utils/reverseDns';
+import { resolveOne } from '../utils/reverseDns';
 import { lookupGeoIp } from '../utils/geoIp';
 import { getFlowIngestStats } from '../workers/flows';
 import { getFlowSecurityStats, resetFlowSecurityBaseline, FLOW_SECURITY_KINDS } from '../workers/flowSecurity';
@@ -127,6 +127,8 @@ router.get('/flows/top-talkers', requireAuth, requirePermission('flows:read'), a
                   MAX("srcDeviceId") AS device_id, BOOL_OR("srcClass" = 'internal') AS is_internal,
                   MAX("srcNetworkName") AS network_name, MAX("srcVlanId") AS vlan_id,
                   MAX("srcHostname") AS hostname,
+                  -- Hostname attribution: an inventory name anywhere in the window wins.
+                  CASE WHEN BOOL_OR("srcHostnameSource" = 'inventory') THEN 'inventory' ELSE MAX("srcHostnameSource") END AS hostname_source,
                   -- Multi-exporter dedup: how many distinct exporters observed
                   -- this IP's flows (0/NULL = pre-dedup data or single exporter).
                   GREATEST(MAX(COALESCE("agentCount", 0)), 0)::int AS agent_count
@@ -139,6 +141,7 @@ router.get('/flows/top-talkers', requireAuth, requirePermission('flows:read'), a
                   MAX("dstDeviceId") AS device_id, BOOL_OR("dstClass" = 'internal') AS is_internal,
                   MAX("dstNetworkName") AS network_name, MAX("dstVlanId") AS vlan_id,
                   MAX("dstHostname") AS hostname,
+                  CASE WHEN BOOL_OR("dstHostnameSource" = 'inventory') THEN 'inventory' ELSE MAX("dstHostnameSource") END AS hostname_source,
                   GREATEST(MAX(COALESCE("agentCount", 0)), 0)::int AS agent_count
            FROM ${table} WHERE bucket >= $1 AND bucket < $2${siteClause}
            GROUP BY "dstIp" ORDER BY est_bytes DESC LIMIT $${params.length + 1}`,
@@ -168,10 +171,13 @@ router.get('/flows/top-talkers', requireAuth, requirePermission('flows:read'), a
       // >1 = the same flows were exported by several devices on the path and
       // deduplicated to a single best observation (see workers/flows.ts).
       observedBy: Number(r.agent_count ?? 0),
-      // Inventory hostname (hosts table — container/VM name, DHCP lease). For
-      // external talkers this is usually null and filled below via reverse DNS.
+      // Stored hostname (hosts inventory or PTR — the source tag says which).
+      // External talkers without a stored name are filled below via one live
+      // (cached) lookup through the configured resolver.
       hostname: r.hostname !== null && r.hostname !== undefined ? String(r.hostname) : null,
-      hostnameSource: r.hostname !== null && r.hostname !== undefined ? 'inventory' : null,
+      hostnameSource: r.hostname !== null && r.hostname !== undefined
+        ? (r.hostname_source === 'inventory' ? 'inventory' as const : 'reverse-dns' as const)
+        : null,
       networkName: r.network_name !== null && r.network_name !== undefined ? String(r.network_name) : null,
       vlanId: r.vlan_id === null || r.vlan_id === undefined ? null : Number(r.vlan_id),
       // Filled below for external talkers via the active GeoIP database.
@@ -183,22 +189,26 @@ router.get('/flows/top-talkers', requireAuth, requirePermission('flows:read'), a
     const sources = shape(srcRes.rows);
     const destinations = shape(dstRes.rows);
 
-    // Best-effort reverse DNS for EXTERNAL talkers WITHOUT an inventory name —
+    // Best-effort reverse DNS for EXTERNAL talkers WITHOUT a stored name —
     // internal IPs are already identified by their hosts-inventory hostname.
-    // Lookups run in parallel, each capped at 2 s; a dead resolver degrades to
-    // hostname: null and never fails the request.
+    // Gated by the rdnsEnabled master switch (off = no DNS traffic at all);
+    // every lookup goes through the shared engine, so results come from the
+    // persistent per-IP cache first and only truly fresh IPs hit the wire.
+    const LIVE_LOOKUP_CAP = 50; // bound request-path DNS bursts — the rest fill in via backfill
     const allRows = [...sources, ...destinations];
-    const externalIps = new Set(allRows.filter((r) => !r.internal && !r.deviceId && !r.hostname).map((r) => r.ip));
-    if (externalIps.size > 0) {
-      const hostnames = await Promise.all(
-        [...externalIps].map(async (ip) => [ip, await reverseLookup(ip)] as const),
-      );
-      const byIp = new Map(hostnames);
-      for (const row of allRows) {
-        if (!row.hostname && !row.internal && !row.deviceId) {
-          const h = byIp.get(row.ip) ?? null;
-          row.hostname = h;
-          if (h) row.hostnameSource = 'reverse-dns';
+    if ((await getEffectiveSettingValue('rdnsEnabled')) === true) {
+      const externalIps = new Set(allRows.filter((r) => !r.internal && !r.deviceId && !r.hostname).map((r) => r.ip));
+      if (externalIps.size > 0) {
+        const hostnames = await Promise.all(
+          [...externalIps].slice(0, LIVE_LOOKUP_CAP).map(async (ip) => [ip, await resolveOne(ip)] as const),
+        );
+        const byIp = new Map(hostnames);
+        for (const row of allRows) {
+          if (!row.hostname && !row.internal && !row.deviceId) {
+            const h = byIp.get(row.ip) ?? null;
+            row.hostname = h;
+            if (h) row.hostnameSource = 'reverse-dns';
+          }
         }
       }
     }

@@ -62,6 +62,7 @@ import { startGeoIpWorker } from './workers/geoip';
 import { startCveWorker } from './cve/worker';
 import { startFlowsWorker } from './workers/flows';
 import { startFlowSecurityWorker } from './workers/flowSecurity';
+import { startReverseDnsWorker } from './workers/reverseDns';
 import { startThreatIntelWorker } from './workers/threatIntel';
 import { startInactiveUsersWorker } from './workers/inactiveUsers';
 import { startReplicationSchedulerWorker } from './workers/replication';
@@ -452,6 +453,10 @@ async function main(): Promise<void> {
 
     // GeoIP database refresh (leader-gated; cadence from geoipFetchIntervalHours).
     void runAsLeader(LEADER_KEYS.geoip, 'geoip', () => startGeoIpWorker()).then((stop) => workerStops.push(stop));
+
+    // Reverse-DNS backfill — drains pre-existing/unresolved flow endpoint IPs
+    // through the configured resolver (budgeted per beat; gated by rdnsEnabled).
+    void runAsLeader(LEADER_KEYS.reverseDns, 'reverseDns', () => startReverseDnsWorker()).then((stop) => workerStops.push(stop));
 
     // CVE advisory fetch + device matching (Security page; cadence from cveFetchIntervalHours).
     void runAsLeader(LEADER_KEYS.cve, 'cve', () => startCveWorker()).then((stop) => workerStops.push(stop));

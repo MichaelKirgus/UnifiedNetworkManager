@@ -1901,6 +1901,20 @@ export interface TelemetryCycleStats {
   lastPollDurationMs?: number | null;
 }
 
+/** Live reverse-DNS wire-query counters (trailing-60s rate + totals). */
+export interface RdnsStats {
+  /** Live DNS requests sent since process start (cache hits excluded). */
+  totalQueries?: number;
+  /** Requests in the trailing 60 s. */
+  queriesPerMinute?: number;
+  /** Trailing-60s rate normalized to per-second. */
+  reqPerSec?: number;
+  /** ISO timestamp of the most recent wire query (null when none yet). */
+  at?: string | null;
+  /** Resolver mode used for the most recent query ('system' | 'custom' | 'doh'). */
+  mode?: 'system' | 'custom' | 'doh' | null;
+}
+
 /** Recent leadership/error event (ring buffer, newest first). */
 export interface SystemEvent {
   id: number;
@@ -1950,6 +1964,8 @@ export interface SystemStatus {
   instance: { hostname: string; pid: number; uptimeSeconds: number; nodeVersion: string };
   workers: WorkerRuntime[];
   telemetry: TelemetryCycleStats;
+  /** Live rDNS wire-query rate (absent on older API versions). */
+  rdns?: RdnsStats;
   events: SystemEvent[];
   postgres: PostgresStats;
 }

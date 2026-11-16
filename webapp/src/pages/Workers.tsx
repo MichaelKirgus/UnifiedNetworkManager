@@ -6,7 +6,7 @@ import { api, PostgresTableStat, SystemEvent, WorkerRuntime } from '../api/clien
 import { formatMs } from '../components/formatMetric';
 import { useTimeFormat } from '../utils/time';
 import { can } from '../auth/permissions';
-import { Activity, ChevronDown, ChevronRight, Cpu, Database, Gauge, Save, ServerCog, TimerReset } from 'lucide-react';
+import { Activity, ChevronDown, ChevronRight, Cpu, Database, Gauge, Globe, Save, ServerCog, TimerReset } from 'lucide-react';
 
 /** Window duration in compact form (ms → "15 min" / "2 h" / "90 s"). */
 function fmtWindow(ms?: number | null): string {
@@ -300,6 +300,39 @@ export default function Workers() {
               value={fmtWindow(effectiveInventoryWindow)}
               sub={`jitter ±${effectiveJitter}%`}
             />
+          </section>
+        )}
+
+        {/* Reverse-DNS resolver rate */}
+        {status && status.rdns && (
+          <section className="rounded-md border border-border bg-card shadow-sm">
+            <div className="flex items-center gap-2 border-b border-border px-4 py-3">
+              <Globe className="h-4 w-4 text-muted-foreground" />
+              <h2 className="text-sm font-semibold text-foreground">Reverse DNS resolver</h2>
+              <span className="ml-auto text-xs text-faint">live wire queries — cache hits are not counted</span>
+            </div>
+            <div className="grid grid-cols-2 gap-3 p-4 md:grid-cols-4">
+              <Stat
+                label="DNS rate"
+                value={`${(status.rdns.reqPerSec ?? 0).toFixed(1)}/s`}
+                sub={`trailing 60 s · ${status.rdns.mode ?? 'no queries yet'}`}
+              />
+              <Stat
+                label="Queries (60 s)"
+                value={(status.rdns.queriesPerMinute ?? 0).toLocaleString()}
+                sub="live PTR lookups sent"
+              />
+              <Stat
+                label="Total queries"
+                value={(status.rdns.totalQueries ?? 0).toLocaleString()}
+                sub="since process start"
+              />
+              <Stat
+                label="Last query"
+                value={status.rdns.at ? formatTime(status.rdns.at) : '—'}
+                sub={status.rdns.mode ? `via ${status.rdns.mode} resolver` : undefined}
+              />
+            </div>
           </section>
         )}
 

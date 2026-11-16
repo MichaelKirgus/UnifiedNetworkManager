@@ -361,6 +361,147 @@ export const SETTING_DESCRIPTORS: SettingDescriptor[] = [
       'Optional comma-separated IPv4 CIDR blocks classified as EXTERNAL (internet) even when they fall inside "Flow internal IP ranges" or an inventoried network — e.g. a public block you own but want counted as egress ("203.0.113.0/24"). Carve-outs beat the broad range/network matches, but an IP that is a known device (exact inventory hit) still counts as internal. Empty = no carve-outs.',
   },
 
+  // Reverse-DNS enrichment of flow endpoints (utils/reverseDns.ts + workers).
+  // PTR results persist in reverse_dns_cache per ADDRESS — the unit of work is
+  // the distinct IP, not the flow row — so large networks converge to "each IP
+  // resolved once per TTL" regardless of traffic volume. The rollup enriches
+  // new tuples as they land; workers/reverseDns.ts backfills history on a
+  // budgeted beat (rdnsBatchLimit caps live lookups per beat).
+  {
+    key: 'rdnsEnabled',
+    label: 'Reverse-DNS enrichment',
+    type: 'boolean',
+    category: 'Flows',
+    default: true,
+    envVar: 'UNM_RDNS_ENABLED',
+    help:
+      'Master switch for PTR lookups on flow endpoint IPs. When on, endpoints without an inventory hostname get a reverse-DNS name (stored per IP in the flow aggregates + a persistent cache). Off = no DNS traffic at all — hostnames stay as-is and nothing is looked up.',
+  },
+  {
+    key: 'rdnsScope',
+    label: 'Reverse-DNS scope',
+    type: 'string',
+    category: 'Flows',
+    default: 'external',
+    envVar: 'UNM_RDNS_SCOPE',
+    pattern: '^(external|all)$',
+    help:
+      'Which flow endpoints get PTR lookups. "external" (default) = only internet-classified IPs — internal/known-device IPs are already identified by the inventory and never queried. "all" = also reverse-resolve INTERNAL IPs that have no inventory hostname (e.g. CGNAT or unmanaged private ranges).',
+  },
+  {
+    key: 'rdnsMode',
+    label: 'Reverse-DNS resolver mode',
+    type: 'string',
+    category: 'Flows',
+    default: 'system',
+    envVar: 'UNM_RDNS_MODE',
+    pattern: '^(system|custom|doh)$',
+    help:
+      'Which resolver answers PTR queries. "system" = the container\'s default DNS (Docker DNS → host resolv.conf) — zero configuration, what UNM used before. "custom" = your own nameservers from "Reverse-DNS nameservers", queried over plain DNS/UDP with the configured strategy. "doh" = DNS-over-HTTPS against an RFC 8484 endpoint (e.g. https://dns.google/resolve) — useful where UDP/53 is blocked but HTTPS egress exists.',
+  },
+  {
+    key: 'rdnsServers',
+    label: 'Reverse-DNS nameservers',
+    type: 'string',
+    category: 'Flows',
+    default: '',
+    envVar: 'UNM_RDNS_SERVERS',
+    maxLength: 512,
+    validate: (v) => {
+      // Comma-separated "host" or "host:port"; reject bare IPv6 literals.
+      for (const raw of String(v).split(',')) {
+        const entry = raw.trim();
+        if (!entry) continue;
+        const lastColon = entry.lastIndexOf(':');
+        if (lastColon <= 0) {
+          if (entry.includes(':')) throw new Error(`invalid nameserver "${entry}" (expected "host" or "host:port")`);
+          continue; // bare hostname — fine
+        }
+        const host = entry.slice(0, lastColon);
+        const port = Number(entry.slice(lastColon + 1));
+        if (host.includes(':')) throw new Error(`IPv6 nameservers need bracket syntax — got "${entry}"`);
+        if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error(`invalid nameserver "${entry}" (expected "host" or "host:port")`);
+      }
+    },
+    help:
+      'Only used when the resolver mode is "custom". Comma-separated list of nameservers, each "host" or "host:port" (default port 53) — e.g. "10.0.0.53, 192.168.1.1:5353". Order matters for failover; with the round-robin strategy lookups rotate across them.',
+  },
+  {
+    key: 'rdnsStrategy',
+    label: 'Reverse-DNS server strategy',
+    type: 'string',
+    category: 'Flows',
+    default: 'failover',
+    envVar: 'UNM_RDNS_STRATEGY',
+    pattern: '^(failover|round-robin)$',
+    help:
+      'How multiple custom nameservers are used. "failover" = try in order, stick to the last server that answered (fastest path when one resolver is primary). "round-robin" = rotate across all servers per lookup (load-spreads queries over several resolvers).',
+  },
+  {
+    key: 'rdnsDohUrl',
+    label: 'Reverse-DNS DOH endpoint',
+    type: 'string',
+    category: 'Flows',
+    default: 'https://dns.google/resolve',
+    envVar: 'UNM_RDNS_DOH_URL',
+    maxLength: 512,
+    validate: (v) => { new URL(String(v)); }, // throws on a malformed URL → 400
+    help:
+      'Only used when the resolver mode is "doh". Base URL of an RFC 8484 DNS-over-HTTPS endpoint — UNM appends "/resolve?name=…&type=PTR" to it. Examples: https://dns.google/resolve, https://cloudflare-dns.com/dns-query, or a self-hosted blocky/pihole DOH front.',
+  },
+  {
+    key: 'rdnsPositiveTtlHours',
+    label: 'Reverse-DNS positive result TTL',
+    type: 'integer',
+    category: 'Flows',
+    unit: 'h',
+    min: 1,
+    max: 720,
+    default: 24,
+    envVar: 'UNM_RDNS_POSITIVE_TTL_HOURS',
+    help:
+      'How long a successful PTR result (an IP → hostname mapping) is reused before re-querying. Lower = fresher names but more DNS traffic; higher = less traffic but stale hostnames linger.',
+  },
+  {
+    key: 'rdnsNegativeTtlMinutes',
+    label: 'Reverse-DNS negative result TTL',
+    type: 'integer',
+    category: 'Flows',
+    unit: 'min',
+    min: 1,
+    max: 1440,
+    default: 15,
+    envVar: 'UNM_RDNS_NEGATIVE_TTL_MINUTES',
+    help:
+      'How long a FAILED or empty PTR result is cached before retrying. Kept short on purpose so a transient resolver outage (or DNS not ready right after a container start) self-heals within minutes instead of pinning "no hostname" for hours.',
+  },
+  {
+    key: 'rdnsBatchLimit',
+    label: 'Reverse-DNS lookups per beat',
+    type: 'integer',
+    category: 'Flows',
+    unit: 'lookups',
+    min: 10,
+    max: 5_000,
+    default: 200,
+    envVar: 'UNM_RDNS_BATCH_LIMIT',
+    help:
+      'Scalability cap: the maximum number of NEW live PTR lookups a single worker beat may perform. On large networks with many distinct external IPs the backlog drains over several beats instead of bursting thousands of queries at once; already-cached IPs never count against it.',
+  },
+  {
+    key: 'rdnsTimeoutMs',
+    label: 'Reverse-DNS query timeout',
+    type: 'integer',
+    category: 'Flows',
+    unit: 'ms',
+    min: 500,
+    max: 30_000,
+    default: 2_000,
+    envVar: 'UNM_RDNS_TIMEOUT_MS',
+    help:
+      'Hard cap per individual PTR query (UDP or DOH). A dead or slow resolver fails over to the next server / is cached as a negative instead of stalling the enrichment beat.',
+  },
+
   // Flow security insights (Flows page "Security" section; workers/flowSecurity.ts).
   // Deterministic heuristics over the enriched flow_agg_5m / flow_agg_1h tiers —
   // new internet destinations, horizontal port scans and sustained-egress

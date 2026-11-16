@@ -1,6 +1,7 @@
 import { pool } from '../db';
 import { getEffectiveSettingValue, getEffectiveValues } from '../systemSettings';
 import { lookupGeoIp } from '../utils/geoIp';
+import { resolveHostnames } from '../utils/reverseDns';
 import {
   classifyIp,
   ipv4CidrToNetMask,
@@ -198,6 +199,11 @@ async function refreshEnrichment(): Promise<void> {
     // eslint-disable-next-line no-console
     console.warn('[flows] enrichment refresh failed:', (err as Error).message);
   }
+}
+
+/** rDNS scope gate — 'all' covers every endpoint; otherwise only internet-classified ones. */
+function scopeAllOrInternet(scopeAll: boolean, cls: string): boolean {
+  return scopeAll || cls === 'internet';
 }
 
 /** Load the configured internal/external range lists (settings, cached). */
@@ -416,6 +422,9 @@ async function rollupTo5m(): Promise<void> {
     srcDeviceId: string | null; dstDeviceId: string | null; srcClass: string; dstClass: string;
     srcNetworkName: string | null; dstNetworkName: string | null; srcVlanId: number | null; dstVlanId: number | null;
     srcHostname: string | null; dstHostname: string | null;
+    /** Where the stored hostname came from — 'inventory' (hosts table) or
+     *  'reverse-dns' (PTR via utils/reverseDns.ts); NULL when no name known. */
+    srcHostnameSource: string | null; dstHostnameSource: string | null;
     /** Stored GeoIP country (ISO-3166 alpha-2) — enables the /flows/internet
      *  country aggregation without per-request lookups. */
     srcCountryCode: string | null; dstCountryCode: string | null;
@@ -462,9 +471,46 @@ async function rollupTo5m(): Promise<void> {
       srcNetworkName: srcNet?.name ?? null, dstNetworkName: dstNet?.name ?? null,
       srcVlanId: srcNet?.vlanId ?? null, dstVlanId: dstNet?.vlanId ?? null,
       // Which host on the device — container/VM name or DHCP lease hostname.
+      // rDNS fills the gaps below; inventory names always win (source tag).
       srcHostname: enrichment.hostnames.get(a.srcIp) ?? null, dstHostname: enrichment.hostnames.get(a.dstIp) ?? null,
+      srcHostnameSource: enrichment.hostnames.has(a.srcIp) ? 'inventory' : null,
+      dstHostnameSource: enrichment.hostnames.has(a.dstIp) ? 'inventory' : null,
       srcCountryCode: srcGeo?.countryCode ?? null, dstCountryCode: dstGeo?.countryCode ?? null,
     });
+  }
+
+  // Reverse-DNS gap-fill — endpoints WITHOUT an inventory hostname get a PTR
+  // lookup per the rdns* settings (scope external|all). Results persist in
+  // reverse_dns_cache keyed by ADDRESS, so each distinct IP is resolved once
+  // per TTL no matter how many tuples reference it; the batch limit bounds
+  // live lookups this tick (the backfill worker drains any remainder).
+  const rdnsValues = await getEffectiveValues();
+  if (rdnsValues.rdnsEnabled === true) {
+    const scopeAll = String(rdnsValues.rdnsScope ?? 'external') === 'all';
+    const candidates: string[] = [];
+    for (const r of aggRows) {
+      if (!r.srcHostname && (scopeAll || r.srcClass === 'internet')) candidates.push(r.srcIp);
+      if (!r.dstHostname && (scopeAll || r.dstClass === 'internet')) candidates.push(r.dstIp);
+    }
+    if (candidates.length > 0) {
+      const budget = Number(rdnsValues.rdnsBatchLimit) || 200;
+      try {
+        const names = await resolveHostnames(candidates, budget);
+        for (const r of aggRows) {
+          if (!r.srcHostname && scopeAllOrInternet(scopeAll, r.srcClass)) {
+            const h = names.get(r.srcIp);
+            if (h) { r.srcHostname = h; r.srcHostnameSource = 'reverse-dns'; }
+          }
+          if (!r.dstHostname && scopeAllOrInternet(scopeAll, r.dstClass)) {
+            const h = names.get(r.dstIp);
+            if (h) { r.dstHostname = h; r.dstHostnameSource = 'reverse-dns'; }
+          }
+        }
+      } catch (err) {
+        // Enrichment must never break the rollup — log and move on.
+        console.warn('[flows] reverse-DNS enrichment failed:', (err as Error).message);
+      }
+    }
   }
 
   // Chunk the INSERT — Postgres caps bind parameters at 65535 (int16) per
@@ -476,11 +522,11 @@ async function rollupTo5m(): Promise<void> {
     const params: unknown[] = [];
     let p = 1;
     const values = chunk.map((r) => {
-      params.push(r.bucket, r.srcIp, r.dstIp, r.proto, r.bytes, r.packets, r.estBytes, r.srcPort, r.dstPort, r.agentIp ?? null, Math.max(0, r.agentCount | 0), r.srcDeviceId, r.dstDeviceId, r.srcClass, r.dstClass, r.srcNetworkName, r.dstNetworkName, r.srcVlanId, r.dstVlanId, r.srcHostname, r.dstHostname, r.srcCountryCode ?? null, r.dstCountryCode ?? null);
-      return `($${p++}, $${p++}::inet, $${p++}::inet, $${p++}, $${p++}, $${p++}, $${p++}, $${p++}, $${p++}, $${p++}, $${p++}, $${p++}, $${p++}, $${p++}, $${p++}, $${p++}, $${p++}, $${p++}, $${p++}, $${p++}, $${p++}, $${p++}, $${p++})`;
+      params.push(r.bucket, r.srcIp, r.dstIp, r.proto, r.bytes, r.packets, r.estBytes, r.srcPort, r.dstPort, r.agentIp ?? null, Math.max(0, r.agentCount | 0), r.srcDeviceId, r.dstDeviceId, r.srcClass, r.dstClass, r.srcNetworkName, r.dstNetworkName, r.srcVlanId, r.dstVlanId, r.srcHostname, r.dstHostname, r.srcHostnameSource ?? null, r.dstHostnameSource ?? null, r.srcCountryCode ?? null, r.dstCountryCode ?? null);
+      return `($${p++}, $${p++}::inet, $${p++}::inet, $${p++}, $${p++}, $${p++}, $${p++}, $${p++}, $${p++}, $${p++}, $${p++}, $${p++}, $${p++}, $${p++}, $${p++}, $${p++}, $${p++}, $${p++}, $${p++}, $${p++}, $${p++}, $${p++}, $${p++}, $${p++}, $${p++})`;
     });
     await pool.query(
-      `INSERT INTO flow_agg_5m (bucket, "srcIp", "dstIp", proto, bytes, packets, "estBytes", "srcPort", "dstPort", "agentIp", "agentCount", "srcDeviceId", "dstDeviceId", "srcClass", "dstClass", "srcNetworkName", "dstNetworkName", "srcVlanId", "dstVlanId", "srcHostname", "dstHostname", "srcCountryCode", "dstCountryCode")
+      `INSERT INTO flow_agg_5m (bucket, "srcIp", "dstIp", proto, bytes, packets, "estBytes", "srcPort", "dstPort", "agentIp", "agentCount", "srcDeviceId", "dstDeviceId", "srcClass", "dstClass", "srcNetworkName", "dstNetworkName", "srcVlanId", "dstVlanId", "srcHostname", "dstHostname", "srcHostnameSource", "dstHostnameSource", "srcCountryCode", "dstCountryCode")
        VALUES ${values.join(', ')}
        ON CONFLICT (bucket, "srcIp", "dstIp", proto) DO UPDATE SET
          bytes = flow_agg_5m.bytes + EXCLUDED.bytes,
@@ -499,9 +545,14 @@ async function rollupTo5m(): Promise<void> {
          "dstNetworkName" = COALESCE(EXCLUDED."dstNetworkName", flow_agg_5m."dstNetworkName"),
          "srcVlanId" = COALESCE(EXCLUDED."srcVlanId", flow_agg_5m."srcVlanId"),
          "dstVlanId" = COALESCE(EXCLUDED."dstVlanId", flow_agg_5m."dstVlanId"),
-         -- Hostnames: fill gaps, never overwrite known values.
+         -- Hostnames: fill gaps, never overwrite known values; the source tag
+         -- travels with the name (inventory beats reverse-dns on conflict).
          "srcHostname" = COALESCE(EXCLUDED."srcHostname", flow_agg_5m."srcHostname"),
          "dstHostname" = COALESCE(EXCLUDED."dstHostname", flow_agg_5m."dstHostname"),
+         "srcHostnameSource" = CASE WHEN EXCLUDED."srcHostname" IS NOT NULL AND (flow_agg_5m."srcHostname" IS NULL OR EXCLUDED."srcHostnameSource" = 'inventory') THEN EXCLUDED."srcHostnameSource"
+                                    ELSE flow_agg_5m."srcHostnameSource" END,
+         "dstHostnameSource" = CASE WHEN EXCLUDED."dstHostname" IS NOT NULL AND (flow_agg_5m."dstHostname" IS NULL OR EXCLUDED."dstHostnameSource" = 'inventory') THEN EXCLUDED."dstHostnameSource"
+                                    ELSE flow_agg_5m."dstHostnameSource" END,
          -- Stored GeoIP country: fill gaps, never overwrite known values.
          "srcCountryCode" = COALESCE(EXCLUDED."srcCountryCode", flow_agg_5m."srcCountryCode"),
          "dstCountryCode" = COALESCE(EXCLUDED."dstCountryCode", flow_agg_5m."dstCountryCode")`,
@@ -528,7 +579,7 @@ async function rollupTo1h(): Promise<void> {
 
   const fromMs = Math.max(lastRolled1hBucketMs, nowBucketMs - ROLLUP_1H_MAX_CATCHUP_MS);
   const res = await pool.query(
-     `INSERT INTO flow_agg_1h (bucket, "srcIp", "dstIp", proto, bytes, packets, "estBytes", "srcPort", "dstPort", "agentIp", "agentCount", "srcDeviceId", "dstDeviceId", "srcClass", "dstClass", "srcNetworkName", "dstNetworkName", "srcVlanId", "dstVlanId", "srcHostname", "dstHostname", "srcCountryCode", "dstCountryCode")
+     `INSERT INTO flow_agg_1h (bucket, "srcIp", "dstIp", proto, bytes, packets, "estBytes", "srcPort", "dstPort", "agentIp", "agentCount", "srcDeviceId", "dstDeviceId", "srcClass", "dstClass", "srcNetworkName", "dstNetworkName", "srcVlanId", "dstVlanId", "srcHostname", "dstHostname", "srcHostnameSource", "dstHostnameSource", "srcCountryCode", "dstCountryCode")
      SELECT date_trunc('hour', bucket), "srcIp", "dstIp", proto,
             SUM(bytes)::bigint, SUM(packets)::bigint, SUM("estBytes")::bigint,
             MAX("srcPort"), MAX("dstPort"),
@@ -546,6 +597,10 @@ async function rollupTo1h(): Promise<void> {
             MAX("srcNetworkName"), MAX("dstNetworkName"),
             MAX("srcVlanId"), MAX("dstVlanId"),
             MAX("srcHostname"), MAX("dstHostname"),
+            -- Hostname source: an inventory name anywhere in the hour wins
+            -- (it is authoritative); otherwise carry the PTR tag if present.
+            CASE WHEN BOOL_OR("srcHostnameSource" = 'inventory') THEN 'inventory' ELSE MAX("srcHostnameSource") END,
+            CASE WHEN BOOL_OR("dstHostnameSource" = 'inventory') THEN 'inventory' ELSE MAX("dstHostnameSource") END,
             -- Stored GeoIP country: an IP's country is stable within an hour —
             -- MAX ignores NULLs, so a partially-filled hour still carries the code.
             MAX("srcCountryCode"), MAX("dstCountryCode")
@@ -568,9 +623,14 @@ async function rollupTo1h(): Promise<void> {
        "dstNetworkName" = COALESCE(flow_agg_1h."dstNetworkName", EXCLUDED."dstNetworkName"),
        "srcVlanId" = COALESCE(flow_agg_1h."srcVlanId", EXCLUDED."srcVlanId"),
        "dstVlanId" = COALESCE(flow_agg_1h."dstVlanId", EXCLUDED."dstVlanId"),
-       -- Hostnames: prefer what is already stored.
+       -- Hostnames: prefer what is already stored; the source tag follows the
+       -- same rule (inventory beats reverse-dns when both appear).
        "srcHostname" = COALESCE(flow_agg_1h."srcHostname", EXCLUDED."srcHostname"),
        "dstHostname" = COALESCE(flow_agg_1h."dstHostname", EXCLUDED."dstHostname"),
+       "srcHostnameSource" = CASE WHEN flow_agg_1h."srcHostname" IS NOT NULL AND (EXCLUDED."srcHostname" IS NULL OR flow_agg_1h."srcHostnameSource" = 'inventory') THEN flow_agg_1h."srcHostnameSource"
+                                  ELSE EXCLUDED."srcHostnameSource" END,
+       "dstHostnameSource" = CASE WHEN flow_agg_1h."dstHostname" IS NOT NULL AND (EXCLUDED."dstHostname" IS NULL OR flow_agg_1h."dstHostnameSource" = 'inventory') THEN flow_agg_1h."dstHostnameSource"
+                                  ELSE EXCLUDED."dstHostnameSource" END,
        -- Stored GeoIP country: fill gaps, never overwrite known values.
        "srcCountryCode" = COALESCE(EXCLUDED."srcCountryCode", flow_agg_1h."srcCountryCode"),
        "dstCountryCode" = COALESCE(EXCLUDED."dstCountryCode", flow_agg_1h."dstCountryCode")`,

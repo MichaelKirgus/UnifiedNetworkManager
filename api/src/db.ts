@@ -1857,6 +1857,12 @@ await pool.query(`ALTER TABLE flow_micro ADD COLUMN IF NOT EXISTS "agentCount" I
   // just which device. Filled at rollup time + backfilled for history.
   await pool.query(`ALTER TABLE flow_agg_5m ADD COLUMN IF NOT EXISTS "srcHostname" TEXT`);
   await pool.query(`ALTER TABLE flow_agg_5m ADD COLUMN IF NOT EXISTS "dstHostname" TEXT`);
+  // Where a stored hostname came from: 'inventory' (hosts table — authoritative,
+  // local) or 'reverse-dns' (PTR lookup via the configured resolver). NULL when
+  // no name is known. Lets the UI tell its own names apart from external PTR
+  // records (workers/flows.ts rollup + workers/reverseDns.ts backfill).
+  await pool.query(`ALTER TABLE flow_agg_5m ADD COLUMN IF NOT EXISTS "srcHostnameSource" TEXT`);
+  await pool.query(`ALTER TABLE flow_agg_5m ADD COLUMN IF NOT EXISTS "dstHostnameSource" TEXT`);
   // Exporter identity carried through from flow_micro (see the flow_micro
   // comment): which exporter's counters were kept + how many exporters saw it.
   await pool.query(`ALTER TABLE flow_agg_5m ADD COLUMN IF NOT EXISTS "agentIp" TEXT`);
@@ -1875,6 +1881,13 @@ await pool.query(`ALTER TABLE flow_micro ADD COLUMN IF NOT EXISTS "agentCount" I
   // indexes shrink to zero as rows get filled and stay tiny at steady state.
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_flow_agg_5m_src_geo_pending ON flow_agg_5m ("srcIp") WHERE "srcClass" = 'internet' AND "srcCountryCode" IS NULL`);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_flow_agg_5m_dst_geo_pending ON flow_agg_5m ("dstIp") WHERE "dstClass" = 'internet' AND "dstCountryCode" IS NULL`);
+  // Partial indexes over the STILL-UNNAMED external rows — let the rDNS
+  // backfill worker (workers/reverseDns.ts) discover pending PTR work with an
+  // index-only scan in 'external' mode (the default). Like the geoip pending
+  // indexes they shrink to zero as rows get filled and stay tiny at steady
+  // state. (internal/all modes fall back to a windowed BRIN scan instead.)
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_flow_agg_5m_src_rdns_pending ON flow_agg_5m ("srcIp") WHERE "srcClass" = 'internet' AND "srcHostname" IS NULL`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_flow_agg_5m_dst_rdns_pending ON flow_agg_5m ("dstIp") WHERE "dstClass" = 'internet' AND "dstHostname" IS NULL`);
   await pool.query(`CREATE INDEX IF NOT EXISTS brin_flow_agg_5m_bucket ON flow_agg_5m USING BRIN (bucket)`);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_flow_agg_5m_src_device ON flow_agg_5m ("srcDeviceId")`);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_flow_agg_5m_dst_device ON flow_agg_5m ("dstDeviceId")`);
@@ -1908,6 +1921,9 @@ await pool.query(`ALTER TABLE flow_micro ADD COLUMN IF NOT EXISTS "agentCount" I
   // Per-endpoint hostnames (see the flow_agg_5m comment above).
   await pool.query(`ALTER TABLE flow_agg_1h ADD COLUMN IF NOT EXISTS "srcHostname" TEXT`);
   await pool.query(`ALTER TABLE flow_agg_1h ADD COLUMN IF NOT EXISTS "dstHostname" TEXT`);
+  // Hostname attribution carried through from the 5-minute tier (see there).
+  await pool.query(`ALTER TABLE flow_agg_1h ADD COLUMN IF NOT EXISTS "srcHostnameSource" TEXT`);
+  await pool.query(`ALTER TABLE flow_agg_1h ADD COLUMN IF NOT EXISTS "dstHostnameSource" TEXT`);
   // Exporter identity carried through from the 5-minute tier (see there).
   await pool.query(`ALTER TABLE flow_agg_1h ADD COLUMN IF NOT EXISTS "agentIp" TEXT`);
   await pool.query(`ALTER TABLE flow_agg_1h ADD COLUMN IF NOT EXISTS "agentCount" INTEGER NOT NULL DEFAULT 0`);
@@ -1918,6 +1934,9 @@ await pool.query(`ALTER TABLE flow_micro ADD COLUMN IF NOT EXISTS "agentCount" I
   // Pending-geo partial indexes (see the flow_agg_5m comment).
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_flow_agg_1h_src_geo_pending ON flow_agg_1h ("srcIp") WHERE "srcClass" = 'internet' AND "srcCountryCode" IS NULL`);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_flow_agg_1h_dst_geo_pending ON flow_agg_1h ("dstIp") WHERE "dstClass" = 'internet' AND "dstCountryCode" IS NULL`);
+  // Pending-rDNS partial indexes (see the flow_agg_5m comment).
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_flow_agg_1h_src_rdns_pending ON flow_agg_1h ("srcIp") WHERE "srcClass" = 'internet' AND "srcHostname" IS NULL`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_flow_agg_1h_dst_rdns_pending ON flow_agg_1h ("dstIp") WHERE "dstClass" = 'internet' AND "dstHostname" IS NULL`);
   await pool.query(`CREATE INDEX IF NOT EXISTS brin_flow_agg_1h_bucket ON flow_agg_1h USING BRIN (bucket)`);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_flow_agg_1h_src_device ON flow_agg_1h ("srcDeviceId")`);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_flow_agg_1h_dst_device ON flow_agg_1h ("dstDeviceId")`);
@@ -1928,6 +1947,23 @@ await pool.query(`ALTER TABLE flow_micro ADD COLUMN IF NOT EXISTS "agentCount" I
   // only add rows for the same information that is already merged into each
   // tuple at ingest time (flow_micro's PK cannot gain ports without dropping
   // existing partitions).
+
+  // ── Reverse-DNS result cache (utils/reverseDns.ts + workers/reverseDns.ts) ─
+  // Persistent PTR results for flow endpoint IPs. One row per distinct IP —
+  // the unit of resolution is the ADDRESS, not the flow row, so a large
+  // network converges to "each unique external IP resolved once per TTL"
+  // regardless of traffic volume. hostname NULL = negative result (no PTR /
+  // lookup failed) cached for the shorter negative TTL; both kinds are
+  // re-checked after their TTL expires so transient failures self-heal.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS reverse_dns_cache (
+      ip INET PRIMARY KEY,
+      hostname TEXT,
+      "resolvedAt" TIMESTAMPTZ NOT NULL DEFAULT now()
+    )`);
+  // Pruning sweep (DELETE WHERE "resolvedAt" < cutoff) — plain btree is enough
+  // at this cardinality (bounded by the distinct-IP population).
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_reverse_dns_cache_resolved ON reverse_dns_cache ("resolvedAt")`);
 
   // ── Flow security findings (security insights on top of the flow tiers) ────
   // Low-volume EVENT log written by workers/flowSecurity.ts: one row per

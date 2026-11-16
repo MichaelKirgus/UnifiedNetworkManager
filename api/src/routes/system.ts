@@ -1,6 +1,7 @@
 import { Router, Response } from 'express';
 import { requireAuth, requirePermission } from '../auth/middleware';
 import { getWorkerRuntimes, getEvents, telemetryStats, getPostgresStats } from '../workers/stats';
+import { getRdnsStats } from '../utils/reverseDns';
 import {
   getSystemSettings,
   saveSystemSettings,
@@ -38,6 +39,7 @@ router.get(
         },
         workers: getWorkerRuntimes(),
         telemetry: telemetryStats,
+        rdns: getRdnsStats(),
         events: getEvents(50),
         postgres,
       });

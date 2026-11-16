@@ -55,6 +55,7 @@ export const LEADER_KEYS = {
   flowSecurity: 9021,
   securityEventRetention: 9022,
   threatIntel: 9023,
+  reverseDns: 9024,
 } as const;
 
 /**
