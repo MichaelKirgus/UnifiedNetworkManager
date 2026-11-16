@@ -8,6 +8,7 @@ import { DataTable, DataTableColumn } from '../components/DataTable';
 import { DeviceChip } from '../components/DeviceChip';
 import { formatBytes } from '../components/formatMetric';
 import { ReauthDialog } from '../components/ReauthDialog';
+import { PageTabs } from '../components/PageTabs';
 import { READONLY_MESSAGE, runAction, useExecutionMode, type ExecutionMode } from '../executionMode';
 import { api, ApiError, MailAliasRow, MailDomainRow, MailMailboxRow } from '../api/client';
 
@@ -1272,10 +1273,10 @@ export default function Mail() {
 
   // --- Tab bar -------------------------------------------------------------------
 
-  const tabs: { id: Tab; label: string; count: number }[] = [
-    { id: 'domains', label: 'Domains', count: allDomains.length },
-    { id: 'mailboxes', label: 'Mailboxes', count: allMailboxes.length },
-    { id: 'aliases', label: 'Aliases', count: allAliases.length },
+  const tabs = [
+    { id: 'domains' as Tab, label: 'Domains', icon: <MailIcon size={14} />, count: allDomains.length },
+    { id: 'mailboxes' as Tab, label: 'Mailboxes', icon: <MailIcon size={14} />, count: allMailboxes.length },
+    { id: 'aliases' as Tab, label: 'Aliases', icon: <MailIcon size={14} />, count: allAliases.length },
   ];
 
   const anyLoading = domainsQuery.isLoading || mailboxesQuery.isLoading || aliasesQuery.isLoading;
@@ -1288,45 +1289,33 @@ export default function Mail() {
         <p className="text-sm text-danger-fg">Failed to load mail inventory: {(domainsQuery.error ?? mailboxesQuery.error ?? aliasesQuery.error)?.message}</p>
       )}
 
-      {/* Tab bar */}
-      <div className="mb-3 flex items-center gap-1 border-b border-border">
-        {tabs.map((t) => (
-          <button
-            key={t.id}
-            type="button"
-            onClick={() => setTab(t.id)}
-            className={clsx(
-              'flex items-center gap-1.5 rounded-t-md px-3 py-2 text-sm font-medium',
-              tab === t.id ? 'border-b-2 border-primary text-foreground' : 'text-secondary hover:text-foreground',
-            )}
-          >
-            <MailIcon size={14} />
-            {t.label}
-            <span className="rounded-full bg-muted px-1.5 text-[10px] font-semibold leading-4 text-secondary">{t.count}</span>
-          </button>
-        ))}
-
-        {/* Per-tab create buttons (right-aligned) */}
-        {!isReadOnly && mailDevices.length > 0 && (
-          <div className="ml-auto flex items-center gap-1.5 pb-1">
-            {tab === 'domains' && hasAction(mailDevices[0].pluginId, ACTION_IDS.domain.create) && (
-              <button type="button" onClick={() => setDialog({ kind: 'domain', mode: 'create' })} className="inline-flex items-center gap-1 rounded-md bg-primary px-2.5 py-1 text-xs font-medium text-primary-fg hover:opacity-90">
-                <Plus size={12} /> New domain
-              </button>
-            )}
-            {tab === 'mailboxes' && hasAction(mailDevices[0].pluginId, ACTION_IDS.mailbox.create) && (
-              <button type="button" onClick={() => setDialog({ kind: 'mailbox', mode: 'create' })} className="inline-flex items-center gap-1 rounded-md bg-primary px-2.5 py-1 text-xs font-medium text-primary-fg hover:opacity-90">
-                <Plus size={12} /> New mailbox
-              </button>
-            )}
-            {tab === 'aliases' && hasAction(mailDevices[0].pluginId, ACTION_IDS.alias.create) && (
-              <button type="button" onClick={() => setDialog({ kind: 'alias', mode: 'create' })} className="inline-flex items-center gap-1 rounded-md bg-primary px-2.5 py-1 text-xs font-medium text-primary-fg hover:opacity-90">
-                <Plus size={12} /> New alias
-              </button>
-            )}
-          </div>
-        )}
-      </div>
+      {/* Tab bar (shared PageTabs design) — per-tab create buttons in the actions slot */}
+      <PageTabs
+        tabs={tabs}
+        value={tab}
+        onChange={setTab}
+        actions={
+          !isReadOnly && mailDevices.length > 0 ? (
+            <>
+              {tab === 'domains' && hasAction(mailDevices[0].pluginId, ACTION_IDS.domain.create) && (
+                <button type="button" onClick={() => setDialog({ kind: 'domain', mode: 'create' })} className="inline-flex items-center gap-1 rounded-md bg-primary px-2.5 py-1 text-xs font-medium text-primary-fg hover:opacity-90">
+                  <Plus size={12} /> New domain
+                </button>
+              )}
+              {tab === 'mailboxes' && hasAction(mailDevices[0].pluginId, ACTION_IDS.mailbox.create) && (
+                <button type="button" onClick={() => setDialog({ kind: 'mailbox', mode: 'create' })} className="inline-flex items-center gap-1 rounded-md bg-primary px-2.5 py-1 text-xs font-medium text-primary-fg hover:opacity-90">
+                  <Plus size={12} /> New mailbox
+                </button>
+              )}
+              {tab === 'aliases' && hasAction(mailDevices[0].pluginId, ACTION_IDS.alias.create) && (
+                <button type="button" onClick={() => setDialog({ kind: 'alias', mode: 'create' })} className="inline-flex items-center gap-1 rounded-md bg-primary px-2.5 py-1 text-xs font-medium text-primary-fg hover:opacity-90">
+                  <Plus size={12} /> New alias
+                </button>
+              )}
+            </>
+          ) : undefined
+        }
+      />
 
       {/* Domain filter for the mailbox/alias tabs */}
       {tab !== 'domains' && (

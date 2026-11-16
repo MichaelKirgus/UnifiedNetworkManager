@@ -4,6 +4,7 @@ import clsx from 'clsx';
 import { BellRing, CheckCheck, Info, OctagonX, Settings2, TriangleAlert, X } from 'lucide-react';
 import { Layout } from '../components/Layout';
 import { DataTable, DataTableColumn } from '../components/DataTable';
+import { PageTabs } from '../components/PageTabs';
 import { NotificationChannelsTab } from '../components/NotificationChannelsTab';
 import { NotificationRulesTab } from '../components/NotificationRulesTab';
 import { api, Notification, NotificationSeverity, NotificationSource } from '../api/client';
@@ -93,6 +94,14 @@ export default function Notifications() {
         all: true,
         limit: 500,
       }),
+    refetchInterval: 30_000,
+  });
+
+  // Open-count badge for the Inbox tab — same cached query as the bell, so no
+  // extra request is made when both are mounted.
+  const countQuery = useQuery({
+    queryKey: ['notificationCount'],
+    queryFn: api.notificationCount,
     refetchInterval: 30_000,
   });
 
@@ -262,27 +271,15 @@ export default function Notifications() {
     >
       {/* Inbox | Rules | Channels — the inbox is the notification center;
           rules + channels configure where matching notifications get delivered. */}
-      <div className="mb-4 flex w-fit gap-1 rounded-md border border-border bg-card p-0.5">
-        {(
-          [
-            { id: 'inbox', label: 'Inbox' },
-            { id: 'rules', label: 'Rules' },
-            { id: 'channels', label: 'Channels' },
-          ] as const
-        ).map((t) => (
-          <button
-            key={t.id}
-            type="button"
-            onClick={() => setTab(t.id)}
-            className={clsx(
-              'rounded px-3 py-1.5 text-sm font-medium transition-colors',
-              tab === t.id ? 'bg-primary text-white' : 'text-secondary hover:bg-muted'
-            )}
-          >
-            {t.label}
-          </button>
-        ))}
-      </div>
+      <PageTabs
+        tabs={[
+          { id: 'inbox', label: 'Inbox', count: countQuery.data?.count ?? null },
+          { id: 'rules', label: 'Rules' },
+          { id: 'channels', label: 'Channels' },
+        ]}
+        value={tab}
+        onChange={setTab}
+      />
 
       {tab === 'inbox' && (<>
         {showSettings && can('notifications:write') && (

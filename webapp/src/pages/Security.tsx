@@ -4,6 +4,7 @@ import { useState } from 'react';
 import { Layout } from '../components/Layout';
 import { DataTable, DataTableColumn } from '../components/DataTable';
 import { DeviceChip } from '../components/DeviceChip';
+import { PageTabs } from '../components/PageTabs';
 import { api, SecurityCheckRow, CveVulnerabilityRow, ThreatIntelSource } from '../api/client';
 
 /** Check-kind pill — the vocabulary is shared across all plugins (SDK contract). */
@@ -150,6 +151,10 @@ export default function Security() {
   const cveRows = cveVulnsQuery.data?.rows ?? [];
   const summary = cveSummaryQuery.data;
 
+  // Findings | Vulnerabilities (CVEs) | Threat Intel — each section is a
+  // self-contained tab so the page reads top-down instead of one long scroll.
+  const [tab, setTab] = useState<'findings' | 'vulnerabilities' | 'threat-intel'>('findings');
+
   const columns: DataTableColumn<SecurityCheckRow>[] = [
     {
       header: 'Device',
@@ -294,6 +299,17 @@ export default function Security() {
 
   return (
     <Layout title="Security">
+      <PageTabs
+        tabs={[
+          { id: 'findings', label: 'Findings', icon: <ShieldAlert className="h-3.5 w-3.5" />, count: securityQuery.data ? rows.length : null },
+          { id: 'vulnerabilities', label: 'Vulnerabilities (CVEs)', icon: <Bug className="h-3.5 w-3.5" />, count: summary?.totalMatches ?? null },
+          { id: 'threat-intel', label: 'Threat Intel', icon: <Radar className="h-3.5 w-3.5" /> },
+        ]}
+        value={tab}
+        onChange={setTab}
+      />
+
+      {tab === 'findings' && (<>
       {/* Summary strip — the badge in the sidebar is this same count. */}
       <div className="mb-4 flex items-center gap-3 text-sm">
         {rows.length === 0 ? (
@@ -336,14 +352,13 @@ export default function Security() {
           emptyMessage="No open security findings — devices report unsuccessful logins, changed important files and active rate limiting here. Assign an SSH-capable plugin (Generic SSH, OpenWRT, OPNsense) or a RouterOS plugin to start collecting."
         />
       )}
+      </>)}
 
-      {/* CVE vulnerability tracking — installed packages matched against known advisories */}
-      <div className="mt-8">
-        <div className="mb-3 flex items-center justify-between gap-3">
-          <h2 className="flex items-center gap-2 text-sm font-semibold text-foreground">
-            <Bug className="h-4 w-4" /> Vulnerabilities (CVEs)
-          </h2>
-          {summary && summary.totalMatches > 0 && (
+      {tab === 'vulnerabilities' && (
+      <div>
+        {/* Installed packages matched against known advisories — refresh right-aligned where the section header used to be */}
+        {summary && summary.totalMatches > 0 && (
+          <div className="mb-3 flex justify-end">
             <button
               type="button"
               onClick={() => void refreshAdvisories()}
@@ -353,8 +368,8 @@ export default function Security() {
             >
               {refreshingCves ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />} Refresh advisories
             </button>
-          )}
-        </div>
+          </div>
+        )}
 
         {/* Summary chips — severity distribution + worker fetch state */}
         {cveSummaryQuery.isLoading && <p className="text-sm text-muted-foreground">Loading vulnerability data…</p>}
@@ -405,9 +420,10 @@ export default function Security() {
           />
         )}
       </div>
+      )}
 
       {/* Threat intelligence — IOC feed sources + recent hits */}
-      <ThreatIntelSection />
+      {tab === 'threat-intel' && <ThreatIntelSection />}
     </Layout>
   );
 }
@@ -574,12 +590,10 @@ function ThreatIntelSection() {
   ];
 
   return (
-    <div className="mt-8">
-      <div className="mb-3 flex items-center justify-between gap-3">
-        <h2 className="flex items-center gap-2 text-sm font-semibold text-foreground">
-          <Radar className="h-4 w-4" /> Threat Intelligence
-        </h2>
-        {sources.some((s) => s.enabled) && (
+    <div>
+      {/* "Fetch now" right-aligned where the section header used to be (the tab label provides context) */}
+      {sources.some((s) => s.enabled) && (
+        <div className="mb-3 flex justify-end">
           <button
             type="button"
             onClick={() => void fetchNow()}
@@ -589,8 +603,8 @@ function ThreatIntelSection() {
           >
             {fetching ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />} Fetch now
           </button>
-        )}
-      </div>
+        </div>
+      )}
 
       {/* Summary chips — active indicator count + worker state */}
       {tiQuery.isLoading && <p className="text-sm text-muted-foreground">Loading threat intelligence…</p>}
