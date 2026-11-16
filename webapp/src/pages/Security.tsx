@@ -1,5 +1,6 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { Bug, Loader2, RefreshCw, Radar, ShieldCheck, ShieldAlert, ShieldX, Info, Trash2 } from 'lucide-react';
+import { Link } from 'react-router-dom';
 import { useState } from 'react';
 import { Layout } from '../components/Layout';
 import { DataTable, DataTableColumn } from '../components/DataTable';
@@ -614,9 +615,13 @@ function ThreatIntelSection() {
       {data && (
         <div className="mb-4 flex flex-wrap items-center gap-3 text-sm">
           {!data.enabled ? (
-            <span className="inline-flex items-center gap-1.5 rounded-md bg-muted px-2 py-1 text-xs font-medium text-secondary">
-              Threat-intel matching is disabled (Settings → Security)
-            </span>
+            <Link
+              to="/settings"
+              title="Master switch + fetch interval live in the central settings page (category Security)"
+              className="inline-flex items-center gap-1.5 rounded-md bg-muted px-2 py-1 text-xs font-medium text-secondary hover:bg-border hover:text-foreground"
+            >
+              Threat-intel matching is disabled — open Settings to enable it
+            </Link>
           ) : data.worker.iocTotal > 0 ? (
             <span className="inline-flex items-center gap-1.5 text-success-fg">
               <Radar className="h-4 w-4" /> {data.worker.iocTotal.toLocaleString()} active indicators
