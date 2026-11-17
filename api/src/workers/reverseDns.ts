@@ -11,8 +11,10 @@
  * — index-only scan; 'all' falls back to a windowed BRIN scan over the last 7
  * days), resolves them through utils/reverseDns.ts (persistent per-ADDRESS
  * cache, so already-known IPs cost one indexed lookup and no wire traffic),
- * and writes the POSITIVE results back into the rows. Negative results are only
- * cached — a row whose IP has no PTR record stays hostname-less by design.
+ * and writes the POSITIVE results back into recent history (bounded by
+ * rdnsBackfillWindowDays — new rows are enriched live by the rollup). Negative
+ * results are only cached — a row whose IP has no PTR record stays hostname-less
+ * by design.
  *
  * The flow_agg_1h tier is NOT backfilled directly: new hours inherit hostnames
  * via MAX() from the 5m tier, and top-talkers falls back to one live (cached)
@@ -107,6 +109,12 @@ async function runReverseDnsBeat(): Promise<void> {
 
   const ips = positives.map((p) => p.ip);
   const hostnames = positives.map((p) => p.hostname);
+  // Write-back is bounded to the recent window (rdnsBackfillWindowDays): new
+  // rows are enriched live by the rollup, so only history from before rDNS was
+  // enabled needs backfilling — and an unbounded UPDATE across every weekly
+  // partition is what made beats take an hour+ on large fleets.
+  const windowDays = Number(values.rdnsBackfillWindowDays) || 7;
+  const backfillFromIso = new Date(Date.now() - windowDays * 86_400_000).toISOString();
   let written = 0;
   for (const d of dirs) {
     const scopeClause = scopeAll ? '' : `AND "${d.classCol}" = 'internet'`;
@@ -114,8 +122,9 @@ async function runReverseDnsBeat(): Promise<void> {
       const res = await pool.query(
         `UPDATE flow_agg_5m f SET "${d.hostCol}" = u.hostname, "${d.sourceCol}" = 'reverse-dns'
          FROM (SELECT * FROM unnest($1::text[], $2::text[]) AS u(ip, hostname)) u
-         WHERE f."${d.ipCol}" = u.ip::inet AND f."${d.hostCol}" IS NULL ${scopeClause}`,
-        [ips, hostnames],
+         WHERE f."${d.ipCol}" = u.ip::inet AND f."${d.hostCol}" IS NULL ${scopeClause}
+           AND f.bucket >= $3`,
+        [ips, hostnames, backfillFromIso],
       );
       written += Number(res.rowCount ?? 0);
     } catch (err) {

@@ -489,6 +489,19 @@ export const SETTING_DESCRIPTORS: SettingDescriptor[] = [
       'Scalability cap: the maximum number of NEW live PTR lookups a single worker beat may perform. On large networks with many distinct external IPs the backlog drains over several beats instead of bursting thousands of queries at once; already-cached IPs never count against it.',
   },
   {
+    key: 'rdnsBackfillWindowDays',
+    label: 'Reverse-DNS backfill window',
+    type: 'integer',
+    category: 'Flows',
+    unit: 'days',
+    min: 1,
+    max: 365,
+    default: 7,
+    envVar: 'UNM_RDNS_BACKFILL_WINDOW_DAYS',
+    help:
+      'How far back the history write-back reaches. New flows are enriched live as they land; this only bounds how much OLDER flow_agg_5m history gets hostnames written in by the budgeted backfill beat. Keep it small on large fleets — an unbounded full-history UPDATE across every weekly partition is what made beats take an hour+.',
+  },
+  {
     key: 'rdnsTimeoutMs',
     label: 'Reverse-DNS query timeout',
     type: 'integer',

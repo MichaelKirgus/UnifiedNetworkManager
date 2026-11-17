@@ -65,6 +65,8 @@ let cursorBucketMs = Math.floor(Date.now() / BUCKET_MS) * BUCKET_MS;
 /** Every dst IP stored in either agg tier at load time + everything processed since. */
 let seenDstIps: Set<string> | null = null;
 let lastEgressCheckMs = 0;
+/** Overlap guard — a slow beat must not pile up unbounded concurrent scans. */
+let busy = false;
 let lastRunAt: string | null = null;
 let lastError: string | null = null;
 
@@ -390,6 +392,25 @@ async function detectEgressBaseline(windowEndMs: number): Promise<void> {
     [new Date(windowStartMs).toISOString(), new Date(windowEndMs).toISOString(), minBytes]
   );
 
+  // Baseline for ALL candidates in ONE pass over the lookback BEFORE the
+  // window (agg_1h only stores hours that had traffic — median over each pair's
+  // active hours). One hash-joined scan instead of one full partition scan per
+  // candidate: on large fleets the per-pair loop was the dominant IO source.
+  const bFromMs = windowStartMs - baselineDays * 86_400_000;
+  const baseRes = await pool.query(
+    `SELECT f."srcIp", f."dstIp", array_agg(f."estBytes") AS hours
+     FROM flow_agg_1h f
+     JOIN (SELECT * FROM unnest($1::inet[], $2::inet[]) AS u(src, dst)) u
+       ON f."srcIp" = u.src AND f."dstIp" = u.dst
+     WHERE f.bucket >= $3 AND f.bucket < $4
+     GROUP BY f."srcIp", f."dstIp"`,
+    [candRes.rows.map((r) => String(r.srcIp)), candRes.rows.map((r) => String(r.dstIp)), new Date(bFromMs).toISOString(), new Date(windowStartMs).toISOString()]
+  );
+  const baseByPair = new Map<string, number[]>();
+  for (const b of baseRes.rows) {
+    baseByPair.set(`${b.srcIp}|${b.dstIp}`, (b.hours ?? []).map((x: unknown) => Number(x)));
+  }
+
   for (const r of candRes.rows) {
     const srcIp = String(r.srcIp);
     const dstIp = String(r.dstIp);
@@ -398,20 +419,9 @@ async function detectEgressBaseline(windowEndMs: number): Promise<void> {
     const hostname = r.hostname ? String(r.hostname) : null;
     const deviceId = r.device_id ? String(r.device_id) : null;
 
-    // Baseline: the pair's per-HOUR totals over the lookback BEFORE the window.
-    // agg_1h only stores hours that had traffic, so this is a median over the
-    // pair's active hours (quiet hours are absent — see worker header).
-    const bFromMs = windowStartMs - baselineDays * 86_400_000;
-    const baseRes = await pool.query(
-      `SELECT "estBytes" FROM flow_agg_1h
-       WHERE "srcIp" = $1::inet AND "dstIp" = $2::inet
-         AND bucket >= $3 AND bucket < $4
-       ORDER BY "estBytes"`,
-      [srcIp, dstIp, new Date(bFromMs).toISOString(), new Date(windowStartMs).toISOString()]
-    );
     // No history → first-time pair (detector 1's job); within the normal range
     // → no finding. The verdict math is pure — unit-tested in flowSecurity.test.ts.
-    const verdict = egressVerdict(total, windowHours, baseRes.rows.map((x) => Number(x.estBytes ?? 0)), multiple);
+    const verdict = egressVerdict(total, windowHours, baseByPair.get(`${srcIp}|${dstIp}`) ?? [], multiple);
     if (!verdict) continue;
     const { severity, ratio } = verdict;
     const detail = `${hostname ?? srcIp} sent ${humanBytes(total)} to ${dstIp}${country ? ` (${country})` : ''} over the last ${windowHours} h — ` +
@@ -450,6 +460,8 @@ async function autoResolveAndPrune(): Promise<void> {
 // ── Beat ─────────────────────────────────────────────────────────────────────
 
 async function beat(): Promise<void> {
+  if (busy) return; // previous beat still running — skip this tick
+  busy = true;
   try {
     const values = await getEffectiveValues();
     await autoResolveAndPrune();
@@ -482,6 +494,8 @@ async function beat(): Promise<void> {
     // eslint-disable-next-line no-console
     console.error('[flow-security] beat failed:', err);
     throw err; // trackBeat records the error; cursor stays put → next beat retries
+  } finally {
+    busy = false;
   }
 }
 
