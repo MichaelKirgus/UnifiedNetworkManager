@@ -21,50 +21,22 @@ One control plane for a mixed-vendor estate — here's what that looks like in p
 
 | | |
 | :---: | :---: |
-| <img src="docs/screenshots/unm_devices.png" alt="Devices page" width="480"/> | <img src="docs/screenshots/unm_topology.png" alt="Topology page" width="480"/> |
-| _**The Devices page** — every router, firewall, NAS and server in one table, with live per-device metrics (CPU, memory, bandwidth, latency) and the plugins managing each._ | _**Live topology** — hosts, VLANs and switches across your whole estate rendered as an interactive graph with a traffic overlay._ |
-| <img src="docs/screenshots/unm_plans.png" alt="Plans page" width="480"/> | <img src="docs/screenshots/unm_plugins.png" alt="Plugins page" width="480"/> |
+| <img src="docs/screenshots/unm_devices.png" alt="Devices page" style="width: 100%; height: auto;"/> | <img src="docs/screenshots/unm_topology.png" alt="Topology page" style="width: 100%; height: auto;"/> |
+| _**The Devices page** — every router, firewall, NAS and server in one table with live per-device metrics and the plugins managing each._ | _**Live topology** — hosts, VLANs and switches across your whole estate rendered as an interactive graph with a traffic overlay._ |
+| <img src="docs/screenshots/unm_plans.png" alt="Plans page" style="width: 100%; height: auto;"/> | <img src="docs/screenshots/unm_plugins.png" alt="Plugins page" style="width: 100%; height: auto;"/> |
 | _**Plans & configuration jobs** — audited, multi-step writes with per-step progress, verification status and a full error trail._ | _**The plugin fleet** — every discovered vendor adapter at a glance: capabilities, live self-metrics sparklines and mTLS transport state._ |
-
-## Contents
-
-- [Screenshots](#screenshots)
-- [Features](#features)
-- [Architecture](#architecture)
-- [Repository layout](#repository-layout)
-- [Getting started](#getting-started)
-  - [First login](#first-login)
-  - [For developers: hot-reload dev setup](#for-developers-hot-reload-dev-setup)
-  - [Pre-built images (GHCR)](#pre-built-images-ghcr)
-- [Security model](#security-model)
-  - [Network exposure — keep it off the public internet](#network-exposure--keep-it-off-the-public-internet)
-  - [Dedicated management VLAN (macvlan deployment)](#dedicated-management-vlan-macvlan-deployment)
-  - [Unprivileged containers](#unprivileged-containers)
-- [Device addressing (multi-IP)](#device-addressing-multi-ip)
-- [Plugin model](#plugin-model)
-  - [Plugin log pipeline](#plugin-log-pipeline)
-  - [Multi-instance plugins (remote sites)](#multi-instance-plugins-remote-sites)
-- [Plans & configuration jobs](#plans--configuration-jobs)
-- [Automations (ITTT rules)](#automations-ittt-rules)
-- [Backup & replication](#backup--replication)
-- [MCP server (AI agent access)](#mcp-server-ai-agent-access)
-- [Development workflow](#development-workflow)
-  - [Key environment variables (API)](#key-environment-variables-api)
-- [Scaling & HA](#scaling--ha)
 
 ## Features
 
-- **Open API** — vendor-neutral REST contract in [`openapi/unified-network-manager.openapi.yaml`](openapi/unified-network-manager.openapi.yaml); the Express API validates every request against it at runtime (`express-openapi-validator`).
-- **Plugin system** — vendor adapters are independent microservices discovered via mDNS/DNS-SD with an HTTP polling fallback. A device can carry **multiple plugins at once** (e.g. generic SNMP + a vendor plugin), each with its own credentials; exactly one is *primary*.
-- **Authentication with RBAC + 2FA** — JWT auth, flat permission catalog, DB-backed roles, TOTP two-factor for privileged operations (config jobs and plan execution require an enrolled authenticator). The API itself is a pure auth broker: credential verification is delegated to the pluggable **basic-auth** identity provider.
-- **Secrets management** — device credentials are encrypted at rest by the pluggable **secrets-provider** plugin (the crypto holder); the API only ever stores ciphertext. Generatable secret types (WireGuard key pairs, tunnel PSKs, OpenVPN CA/cert/key) can be created and regenerated from the UI or as part of a plan.
-- **Configuration workflows** — single-device config jobs plus multi-step **plans**: ordered steps with dependencies, token substitution between step results (`${steps[N].result.details.<key>}`), automatic best-effort config snapshots before writes (undoable plans), and secret provisioning wired into the plan lifecycle.
-- **Automations** — ITTT-style rules (schedule / metric / log / device-status / flow / container-log / update-available triggers → intent, webhook, notification or internal actions) with per-rule cooldowns, deferral windows for updates (e.g. nightly 02:00 apply slots), no-reboot guards, and a template catalog seeded by built-ins + plugin-advertised drafts.
-- **Cross-device inventory pages** — Networks (logical subnets/VLANs merged across devices), Hosts (one row per MAC, ARP/NDP/DHCP/Wi-Fi sources), Routes (static + connected + dynamic, with gateway health enrichment), Tunnels (WireGuard/IPsec/OpenVPN live state: peer addresses, handshake age, transfer rates), and Wi-Fi clients.
-- **Plugin log pipeline** — plugins ship structured logs to the API (`POST /plugin/logs`); entries are retained for a configurable number of days and browsable globally or per device in the webapp (gated by its own `logs:read` permission). Emission is on by default and can be switched off globally or per device.
-- **Plugin self-metrics** — every plugin auto-serves `GET /metrics` (CPU%, heap/RSS memory, event-loop lag, in-flight polls, last-poll duration + error rate, emitted metric count, log queue depth); the API samples it every 30 s and the webapp shows per-plugin runtime health with history sparklines — for spotting overloaded plugins or growing telemetry payloads.
-- **Security insights & threat intelligence** — flow-based detectors (new destinations, port scans, sustained egress vs. per-endpoint baseline) and IOC feed matching (IP lists/STIX against flow destinations + firewall events) raise findings on the Security page with notifications and `securityFinding` automation triggers; a syslog collector plugin ingests RFC5424/BSD device logs into searchable security events that also drive log-trigger automations.
-- **MCP server** — exposes the whole API to AI agents over the [Model Context Protocol](https://modelcontextprotocol.io); new endpoints appear as tools automatically.
+- **Open API** — vendor-neutral REST contract in [`openapi/`](openapi/unified-network-manager.openapi.yaml), validated at runtime on every request.
+- **Plugin system** — vendor adapters are independent microservices that self-register with the API; a device can carry **multiple plugins at once**, each with its own credentials. All 28 shipped plugins: [docs/PLUGINS.md](docs/PLUGINS.md).
+- **Authentication with RBAC + 2FA** — JWT auth, DB-backed roles, TOTP for privileged operations; credential verification delegated to the pluggable basic-auth identity provider.
+- **Secrets management** — device credentials encrypted at rest by the pluggable secrets-provider plugin (the API only ever stores ciphertext); generatable types (WireGuard keys, tunnel PSKs, OpenVPN CA) creatable from the UI or as part of a plan.
+- **Configuration workflows** — single-device config jobs plus multi-step [plans](docs/PLANS-AUTOMATIONS.md): dependencies, token substitution between step results, pre-write snapshots and secret provisioning.
+- **Automations** — ITTT-style rules (schedule / metric / log / device-status / flow / update triggers → intents, webhooks or notifications) with cooldowns, deferral windows and a template catalog.
+- **Cross-device inventory pages** — Networks, Hosts, Routes, Tunnels and Wi-Fi clients merged across all devices.
+- **Flows & security insights** — sFlow/NetFlow visibility (top talkers, pairs, internet egress) with GeoIP + reverse-DNS enrichment; flow-based detectors (new destinations, port scans, egress baselines), IOC/threat-intel matching and syslog ingestion feed the Security page.
+- **MCP server** — exposes the whole API to AI agents over the [Model Context Protocol](https://modelcontextprotocol.io); new endpoints appear as tools automatically ([docs/MCP.md](docs/MCP.md)).
 
 ## Architecture
 
@@ -100,23 +72,7 @@ flowchart LR
 - **Plugin runtime** — each plugin advertises itself via `/discover` (identity, capabilities, options, actions, device-model catalog). The API caches descriptors and injects effective settings as an `x-unm-settings` JSON header on every call it makes to a plugin.
 - **Telemetry pipeline** — normalized metrics + inventory ride in one `telemetry` row per poll; the API fans inventory out into the cross-device `networks`, `hosts`, `routes`, and tunnel tables.
 
-## Repository layout
-
-| Path | What it is |
-|------|-----------|
-| `api/` | Express API service (Drizzle ORM + Postgres), OpenAPI-validated, JWT/RBAC/TOTP auth, workers for telemetry/config jobs/plans/log retention |
-| `webapp/` | React 18 + Vite + Tailwind SPA (login, devices, plans, networks, hosts, routes, tunnels, Wi-Fi, logs, plugins, secrets, sites, users, roles, tokens) |
-| `packages/plugin-sdk/` | Shared TypeScript SDK for plugins (`@unm/plugin-sdk`): HTTP server scaffolding (incl. auto-mounted self-metrics `/metrics`), settings reading, API client, structured logger |
-| `packages/snmp-client/` | Shared net-snmp CLI wrapper used by the SNMP + LANCOM plugins |
-| `plugins/` | One microservice per vendor adapter — 27 plugins in total. The full list with supported vendors & devices lives in [docs/PLUGINS.md](docs/PLUGINS.md); `_template/` is the scaffold for new plugins |
-| `plugins/basic-auth/` | Identity provider plugin — local users + TOTP verification on behalf of the API (swappable via `AUTH_PLUGIN_ID`) |
-| `plugins/secrets-provider/` | Secrets provider plugin — encryption at rest (owns `MASTER_KEY`) + key/cert generation (swappable via `SECRETS_PLUGIN_ID`) |
-| `mcp/` | MCP server exposing the OpenAPI operations as tools (+ read-only SQL & plugin probes on a gated debug endpoint) |
-| `openapi/` | The OpenAPI contract — single source of truth for the public API surface |
-| `scripts/` | Mock OPNsense appliance + TLS material, plan e2e test suite |
-| `docs/PLUGINS.md` | **Plugin catalog** — every shipped plugin with its supported vendors & devices |
-| `docs/PLUGIN-DEVELOPMENT.md` | **The plugin developer guide** — contract, SDK usage, settings loop, logging, discovery, deployment |
-| `docs/PERMISSIONS.md` | **Permission catalog & access control** — full RBAC reference: every permission, the API route → permission map, inline gates and webapp page guards |
+The repository contains `api/` (Express + Drizzle + Postgres), `webapp/` (React SPA), `plugins/` (28 vendor adapters), `packages/plugin-sdk/`, `mcp/` and the OpenAPI contract in `openapi/` — full layout, dev setup and build workflow: [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
 
 ## Getting started
 
@@ -128,46 +84,7 @@ cd UnifiedNetworkManager
 docker compose up -d
 ```
 
-The default `docker-compose.yml` is the end-user deployment: same services, env vars and volumes as the dev file — every locally-built service is pulled from GHCR instead. Overrides (`.env` or environment):
-
-| Variable | Default | Effect |
-|----------|---------|--------|
-| `UNM_IMAGE_TAG` | `dev` | Image tag to pull — use a release tag like `v0.1.0` for stable deployments, or `nightly` for the latest pre-release build |
-| `UNM_REGISTRY` | `ghcr.io/michaelkirgus/unifiednetworkmanager` | Registry prefix (self-mirroring) |
-| `UNM_WEB_PORT` | `8080` | Host port the webapp is published on |
-
-The **MCP server is not exposed to the host by default** — it carries an API token with full agent capabilities, so publishing it on all interfaces is a deliberate choice. If you need remote MCP access, add your own mapping (e.g. `UNM_MCP_PORT=8081`) behind auth or a reverse proxy.
-
-For a production deployment, copy the annotated template to `.env` and change at least the values marked **MUST CHANGE** (`MASTER_KEY`, `CRYPTO_SALT`, `JWT_SECRET`, `POSTGRES_PASSWORD`, `PLUGIN_API_KEY`) — they are insecure dev defaults:
-
-```bash
-cp .env.example .env
-# edit .env → set a strong MASTER_KEY (openssl rand -hex 32), CRYPTO_SALT, JWT_SECRET,
-#              POSTGRES_PASSWORD, PLUGIN_API_KEY
-docker compose up -d
-```
-
-Tear down with `docker compose down` (add `-v` to also remove the Postgres volume).
-
-**Postgres is not published to the host** — api/mcp reach it over the internal compose network only. If you need psql-from-host, add a loopback-only mapping (`"127.0.0.1:5432:5432"`) rather than `"5432:5432"`. Note that `POSTGRES_USER/PASSWORD/DB` are applied when the data volume is first initialized; to rotate credentials on an existing deployment, run `ALTER USER <user> PASSWORD '<new>';` inside Postgres and set the same value in `.env`.
-
-#### RADIUS sidecar — least-privilege database role (managed Postgres)
-
-The optional **unm-radius** service (FreeRADIUS for WiFi EAP-TLS + native accounting into Postgres) connects to the appliance DB with a dedicated, least-privilege role `unm_radius` — it can only write accounting rows (`radacct`) and read the revocation list (`revoked_serials`). The API creates this role at boot and stores its generated password in the `radius_db_credentials` table; the rendered FreeRADIUS config never carries the API's own credentials.
-
-On **managed Postgres** (RDS, Hetzner Cloud, …) the `POSTGRES_USER` usually has no `CREATE ROLE` privilege. That is not fatal: the API logs a warning and RADIUS falls back to the API's own DB credentials until you create the role manually — as a privileged account of your database provider:
-
-```sql
-CREATE ROLE unm_radius LOGIN PASSWORD '<strong-password>' NOINHERIT NOSUPERUSER NOCREATEDB NOREPLICATION;
-GRANT INSERT, UPDATE ON radacct TO unm_radius;
-GRANT SELECT ON revoked_serials TO unm_radius;
-GRANT SELECT ON radius_user_profiles TO unm_radius;
-GRANT USAGE ON SEQUENCE radacct_RadAcctId_seq TO unm_radius;
-```
-
-(The API also attempts to (re-)apply these grants on every start, so upgrades that add tables pick up existing roles automatically; if your `unm` user lacks GRANT rights too, run them manually as shown above — the API logs a warning when it cannot.)
-
-The API picks the role up on its next start: it adopts any pre-existing `unm_radius` role (the password you set there can be a placeholder — the API generates its own, stores it in `radius_db_credentials`, and renders that into the FreeRADIUS config). The grants above are idempotent; re-running them after an upgrade is harmless.
+The default `docker-compose.yml` is the end-user deployment — every service is pulled pre-built from the [GitHub Container Registry](https://ghcr.io), no local build needed. For production, copy the annotated template to `.env` and change at least the values marked **MUST CHANGE** (`MASTER_KEY`, `CRYPTO_SALT`, `JWT_SECRET`, `POSTGRES_PASSWORD`, `PLUGIN_API_KEY`) — they are insecure dev defaults. Image overrides & tags, Postgres notes, RADIUS sidecar DB role, macvlan management VLAN and unprivileged containers: [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).
 
 ### First login
 
@@ -180,281 +97,52 @@ The first sign-in is **password-only**: you are then redirected into a mandatory
 
 before you can use anything else. There is no skip — once the wizard completes, 2FA is required for every subsequent login of that account.
 
-### For developers: hot-reload dev setup
+## Documentation
 
-If you're working on UNM itself, use `setup.sh` instead — it needs Node.js ≥ 20 and builds everything from source (it works against `docker-compose.dev.yml`, which carries the `build:` blocks). The script detects whether you can reach the Docker daemon without sudo and only escalates when truly needed.
-
-```bash
-./setup.sh
-```
-
-This installs all dependencies (`make setup`), starts Postgres, syncs the schema (`drizzle-kit push`), builds the shared packages + plugins in parallel (`make build`), starts every plugin container with `--build`, then runs the API and webapp as hot-reloading dev servers. It blocks until you press Enter; teardown (dev servers + containers) happens automatically on exit/Ctrl+C.
-
-Other targets: `make up|down|restart`, `make stop-api|stop-web`, `make clean` (removes containers **and** volumes).
-
-On first boot the API seeds an **admin** user (password `admin`) — see [First login](#first-login): the initial sign-in is password-only and a mandatory setup wizard then forces a new password + second-factor enrollment. Accounts without an enrolled second factor cannot pass 2FA at all, so they are locked out of 2FA-gated endpoints (config jobs, plan execution) until one is enrolled.
-
-### Pre-built images (GHCR)
-
-Every component is published to the [GitHub Container Registry](https://ghcr.io) after the plugin contract suite passes. All packages are set to **public** visibility on GHCR, so pulling needs no `docker login`. The standard `docker-compose.yml` (end-user deployment, no build step) is **generated** from `docker-compose.dev.yml` by `scripts/generate-registry-compose.cjs` — change the dev file and regenerate; never edit the generated one by hand. Image names follow `ghcr.io/michaelkirgus/unifiednetworkmanager/<service>`, where `<service>` is the compose service name (`api`, `webapp`, `mcp`, `unm-ca`, and every `*-plugin`):
-
-```bash
-docker pull ghcr.io/michaelkirgus/unifiednetworkmanager/api:dev
-```
-
-Tag scheme: **branch pushes** are tagged with the branch name (`main` → `dev`), and **release tags** (`v0.1.0`) additionally move `latest`. So `latest` always points at the newest stable release, never at dev-branch builds — pin `:latest` for stable deployments or a version tag to be explicit.
-
-Two automated lanes sit on top of that (see `.github/workflows/docker-publish.yml`):
-
-- **Stable releases** — pushing a strict semver tag publishes all images tagged with it *and* creates the matching GitHub Release (after the plugin contract suite passes):
-  `git tag v0.2.0 && git push origin v0.2.0`
-- **Nightly pre-releases** — a daily scheduled build of `main` (or manual dispatch) publishes images tagged `nightly-<YYYYMMDD>` plus rolling `nightly`, and creates a dated GitHub **pre-release**. Pre-releases never move `latest`.
-
-### Reverse proxy (remote access)
-
-The supported way to reach UNM remotely is **TLS termination + auth at a reverse proxy** in front of the stack — see [docs/REVERSE-PROXY.md](docs/REVERSE-PROXY.md) for full nginx / Caddy / Cloudflare examples. Three env vars make it work:
-
-| Variable | Default | Effect |
-|----------|---------|--------|
-| `UNM_TRUST_PROXY` | *(off)* | **Required behind any proxy.** Trusts `X-Forwarded-For` so rate limiting buckets on the **real client IP** instead of the proxy's address. Set to `1` for a single proxy hop, `N` for N hops, or a CIDR list / named policy (`loopback`, …). Without it, every proxied request is rejected with 500 — the rate limiter refuses untrusted `X-Forwarded-For` headers by design. |
-| `UNM_CLIENT_IP_HEADER` | *(off)* | Explicit header carrying the client IP (e.g. Cloudflare's `CF-Connecting-IP`). Wins over `X-Forwarded-For`; only set it if the proxy is the sole path to the API. |
-| `UNM_WEBAPP_API_URL` | `/v1` (relative) | The URL the *browser* uses for the API, baked into the webapp at build time. Pre-built images default to same-origin (`/v1`) — one public hostname serves UI + API, no CORS. Set an absolute URL only for cross-origin setups (e.g. dev: `http://localhost:3000/v1`); rebuild the webapp image after changing it. |
-
-The recommended layout is **same-origin**: one public hostname serves the webapp and proxies `/v1/*` to the API, so there's no CORS configuration and the SSH-console WebSocket works with zero extra client setup — which is exactly what the pre-built images ship by default.
+| Document | What it covers |
+|----------|----------------|
+| [docs/PLUGINS.md](docs/PLUGINS.md) | **Plugin catalog** — all 28 shipped plugins with supported vendors & devices, plus how the plugin model works (multi-IP addressing, log pipeline, multi-instance deployments) |
+| [docs/PLUGIN-DEVELOPMENT.md](docs/PLUGIN-DEVELOPMENT.md) | The plugin developer guide — contract, SDK usage, settings loop, discovery, deployment |
+| [docs/PERMISSIONS.md](docs/PERMISSIONS.md) | Full RBAC reference — every permission, the API route → permission map, inline gates and webapp page guards |
+| [docs/INTENTS.md](docs/INTENTS.md) | Plan intents reference — the per-plugin building blocks plans are made of |
+| [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) | Production deployment — `.env` hardening, Postgres notes, RADIUS DB role, macvlan management VLAN, unprivileged containers, reverse-proxy env vars, GHCR images & tags, scaling & HA |
+| [docs/SECURITY.md](docs/SECURITY.md) | Security model overview + network-exposure guidance (keep UNM off the public internet) |
+| [docs/MCP.md](docs/MCP.md) | MCP server (AI agent access) — endpoints, env vars and client config |
+| [docs/PLANS-AUTOMATIONS.md](docs/PLANS-AUTOMATIONS.md) | Plans & configuration jobs + ITTT automations in depth |
+| [docs/BACKUP-REPLICATION.md](docs/BACKUP-REPLICATION.md) | Backups, restore and cross-instance replication (incl. secret portability + dev → prod recipe) |
+| [docs/RADIUS-FAILOVER.md](docs/RADIUS-FAILOVER.md) | FreeRADIUS sidecar — WiFi EAP-TLS, accounting and failover/replication |
+| [docs/REVERSE-PROXY.md](docs/REVERSE-PROXY.md) | Remote access via nginx / Caddy / Cloudflare examples |
+| [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) | Repository layout, hot-reload dev setup, build workflow and key API environment variables |
 
 ## Security model
 
-- **RBAC** — flat permission catalog (`api/src/auth/permissions.ts` is the single source of truth; `GET /v1/permissions` serves it to the UIs). Users carry their effective permissions in JWT claims; roles are DB-backed bundles unioned into explicit grants at login time. New permissions added to the catalog are **backfilled onto existing admin users and the built-in admin role** on API start, so upgrades never lock admins out.
-- **2FA (TOTP)** — required for privileged operations (`configs:apply`); enrollment is per-user via the My Account page or by an admin with `users:manage-credentials`.
-- **Secrets** — values are encrypted by the secrets-provider plugin; the API stores only ciphertext and never sees plaintext. The webapp shows metadata only.
-- **SNMP transport** — SNMP queries run in-process over native UDP (`@unm/snmp-client` on the `net-snmp` npm package); credentials (community strings, USM passphrases) are never passed as command-line arguments or written to logs. DES privacy is rejected at credential-validation time (Node ≥17 OpenSSL dropped it) — use AES.
-- **API tokens** — long-lived bearer tokens (`unm_…`) for agents/scripts, self-service on the Tokens page or `POST /v1/tokens`, with per-token permission narrowing.
+RBAC (~58 permissions — full catalog in [docs/PERMISSIONS.md](docs/PERMISSIONS.md)), mandatory 2FA for privileged operations, secrets encrypted at rest by the pluggable secrets provider (the API only ever stores ciphertext), and long-lived API tokens with per-token permission narrowing.
 
-The full catalog — all ~58 permissions, the API route → permission map, inline gates (secrets personal area, self-vs-other credential ops) and webapp page guards — is documented in [docs/PERMISSIONS.md](docs/PERMISSIONS.md).
+> **Keep UNM off the public internet** — it holds credentials for every device and can write their configuration (firewalls included). Expose only via VPN or an authenticated reverse proxy (TLS termination + auth): [docs/SECURITY.md](docs/SECURITY.md) and [docs/REVERSE-PROXY.md](docs/REVERSE-PROXY.md).
 
-### Network exposure — keep it off the public internet
+Production hardening — `.env` MUST-CHANGE values, macvlan management VLAN (`UNM_DEFAULT_GATEWAY`), unprivileged containers (uid 1001) and the RADIUS sidecar DB role: [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).
 
-> **UNM is a management appliance. The web UI must never, ever be made available on the public internet.**
->
-> It authenticates as *admin* to every device it manages and can rewrite their configuration (firewalls included). Exposing it directly means handing an attacker your entire network's keys.
->
-> **Only expose it via:**
->
-> - a **VPN** (WireGuard/IPsec/OpenVPN — UNM itself can plan those for you), or
-> - a **reverse proxy with additional authentication** in front (TLS termination + auth, e.g. an SSO/OAuth proxy or mutual TLS), ideally combined with source-IP allow-listing.
->
-> Security has layers: even if every best practice above is applied, each layer only matters while the others hold. A single vulnerability — in UNM, its dependencies, or a misconfigured proxy — becomes fatal when the admin plane sits directly on the internet. Treat "reachable from anywhere" as an incident, not a convenience.
+## Plugins
 
-### Dedicated management VLAN (macvlan deployment)
+Each plugin is an independent microservice that self-registers with the API on boot — UNM keeps no catalog of known plugins, so deploying a third-party adapter needs zero changes to the core. A device can carry multiple plugins at once; multi-IP addressing, the log pipeline and multi-instance deployments for remote sites are documented in [docs/PLUGINS.md](docs/PLUGINS.md). Building your own: [docs/PLUGIN-DEVELOPMENT.md](docs/PLUGIN-DEVELOPMENT.md).
 
-For production you typically want every UNM container to be a first-class citizen of a dedicated management VLAN instead of hiding behind Docker's NAT bridge. All images built from this repository ship with an entrypoint wrapper (`scripts/docker-entrypoint.sh`) that installs a default route when the optional environment variable **`UNM_DEFAULT_GATEWAY`** is set — it is already wired into every service in `docker-compose.dev.yml`, and empty/unset means pure passthrough, so normal bridge deployments are unaffected.
+## Plans, automations & backups
 
-1. Create the macvlan network once on the host (parent = your management NIC):
-   ```bash
-   docker network create -d macvlan \
-     --subnet 192.168.50.0/24 --gateway 192.168.50.1 \
-     -o parent=enp3s0 -o mode=bridge unm-vlan
-   ```
-   `mode=bridge` keeps host↔container reachability (plain macvlan blocks it by design — your healthchecks and curl-from-host debugging would break).
-2. Set the gateway in `.env`: `UNM_DEFAULT_GATEWAY=192.168.50.1`
-3. Uncomment the top-level `networks:` block in `docker-compose.dev.yml` (it documents itself) and give every service a static IP, e.g.
-   ```yaml
-   api:
-     networks:
-       default:            # keep → NAT stays as fallback for internet egress
-       unm-vlan:
-         ipv4_address: 192.168.50.10
-   ```
-
-Notes:
-- **Hybrid vs macvlan-only.** Keeping the implicit `default` bridge attached means traffic to your VLAN goes out the macvlan interface (most-specific route) while everything else still NATs through the host. Dropping `default:` makes ALL egress flow via your gateway — which then needs upstream routing/NAT itself.
-- **Service-name URLs keep working.** Docker's embedded DNS resolves names of containers sharing a user-defined network, macvlan included — so `ADVERTISED_ENDPOINT=http://file-repo-plugin:4080`, `UNM_API_URL=http://api:3000/v1` and the ACME directory default need no changes. Just don't mix service names and VLAN IPs for the same endpoint: plugin mTLS leaf certs get their SAN from the host of `ADVERTISED_ENDPOINT`, so URL and certificate must match.
-- **Inter-container traffic transits the physical segment** on macvlan — expected for a management stack, but it shows up on the wire.
-- The wrapper never blocks startup: if no suitable interface is found or the route cannot be written (missing `CAP_NET_ADMIN`), it logs to stderr and continues. `UNM_GW_IFACE` forces the interface instead of auto-detect (which skips `lo` and Docker's 172.16/12 bridge range).
-
-### Unprivileged containers
-
-Every UNM image runs its application as a dedicated unprivileged user **`app`** (uid/gid `1001`) by default — the entrypoint wrapper (`scripts/docker-entrypoint.sh`, PID 1) performs all root-only work first, then drops privileges via a dependency-free Node helper (`scripts/unm-privdrop.js`). The CA container already ran as its own non-root user; this extends that to the API, MCP server and every plugin.
-
-What the wrapper does at boot (all steps best-effort — a failure logs to stderr and never blocks startup):
-1. **Default gateway** — see [macvlan deployment](#dedicated-management-vlan-macvlan-deployment) above (`UNM_DEFAULT_GATEWAY`).
-2. **Data-dir ownership** — chowns the paths listed in `UNM_CHOWN_PATHS` (set per service in `docker-compose.dev.yml`) to `1001:1001`, so persistent volumes created while running as root keep working after the drop.
-3. **Privilege drop** — joins any host docker group (`UNM_DOCKER_GID`), then drops to `app` and re-execs the app with stdio inherited and SIGTERM/SIGINT forwarded (so `docker stop` stays graceful).
-
-Environment variables (all wired into every service in `docker-compose.dev.yml`; set them in `.env`):
-
-| Variable | Effect |
-|----------|--------|
-| `UNM_RUN_AS_ROOT=1` | Explicit opt-out: skip the privilege drop and run as root (e.g. for rollback). |
-| `UNM_SKIP_CHOWN=1` | Skip the runtime data-dir chown entirely — use it for huge byte stores you pre-chowned once (`chown -R 1001:1001 <volume>`), so boot stays instant. |
-| `UNM_DOCKER_GID=<gid>` | Join this host group (e.g. `id -g docker`) as a supplementary group of `app`, so a mounted `/var/run/docker.sock` (owned `root:<gid>`) is accessible after the drop — needed by the docker plugin's socket transport. |
-| `UNM_DOCKER_UID=<uid>` | Run the app under this uid instead of 1001, e.g. to match an existing host user that owns bind-mounted data dirs. |
-
-Notes:
-- **Existing volumes.** If you upgrade a running deployment, your data volumes are still root-owned — on first boot after the switch the wrapper chowns them once (that's what `UNM_CHOWN_PATHS` is for). For large stores, stop the stack and pre-chown instead: `chown -R 1001:1001 /var/lib/docker/volumes/<unm-stack>_filerepo-plugin/_data`, then set `UNM_SKIP_CHOWN=1`.
-- **Shared CA volume.** `/data/ca` is shared between the API (writes `ca.json`) and the CA container (`step`, uid 1000, owns its state DB). It is group-writable for gid 1001 with setgid in the CA image — no runtime chown needed or wanted there.
-- **No extra capabilities.** The ICMP plugin's `ping` works unprivileged (busybox uses SOCK_DGRAM ICMP sockets); nothing in the stack needs `NET_ADMIN` except the optional macvlan default-route step, which degrades gracefully without it.
-
-## Device addressing (multi-IP)
-
-Each device has exactly one **primary address** (`managementAddress`) plus any number of **secondary IPs**. All addresses must be a bare IPv4 literal, an IPv6 literal, or a DNS name — no scheme (`https://…`), because choosing the transport is each plugin's own decision.
-
-- The primary is set at creation and edited via `PATCH /devices/{id}`; secondaries are managed with `GET/POST /devices/{id}/ips` and `DELETE /devices/{id}/ips/{ipId}` (mirrors the plugin-assignment pattern).
-- Every `/monitoring` and `/config` call to a plugin carries **all** addresses as `ipAddresses: [{ address, isPrimary }]`, so plugins can reach secondary interfaces when they need to.
-- Transport handling (TLS vs plaintext, self-signed certificates) lives in the **plugin**, not on the device — e.g. the OPNsense plugin's `transport` option (`auto` = HTTPS with self-signed accepted, `https`, or `http`).
-
-## Plugin model
-
-Each plugin is responsible for one or more `vendor/deviceType` combinations and advertises capabilities:
-
-- `monitoring` (health/metrics/events)
-- `inventory` (facts/interfaces/modules — propagated into the cross-device pages)
-- `configuration` (read/apply/reconcile actions)
-- `planning` (multi-step, multi-device plan intents with a step catalog)
-- `secretsProvider` / `identityProvider` (the two broker plugins; swappable via `SECRETS_PLUGIN_ID` / `AUTH_PLUGIN_ID`)
-
-Plugins are discovered automatically: every plugin SELF-REGISTERS with the API on boot (`POST /v1/plugin/register`, SDK `startRegistration`) using its `UNM_API_URL` + `PLUGIN_API_KEY`, and mDNS/DNS-SD is a second path where multicast reaches. UNM keeps no catalog of known plugins — deploying a third-party plugin needs zero changes to the main app (see [`docs/PLUGIN-DEVELOPMENT.md`](docs/PLUGIN-DEVELOPMENT.md) §1). The full developer guide, including the settings loop, credential slots, device-model catalogs, and the logging pipeline, lives in that document.
-
-### Plugin log pipeline
-
-Every plugin ships structured logs to `POST /plugin/logs` (shared `x-plugin-api-key`, self-reported `pluginId`). Entries land in `plugin_logs` with level, message, optional JSON context and device association; a retention worker deletes rows older than `LOG_RETENTION_DAYS` (default 7) hourly. The webapp shows them on the global **Logs** page and per device in Device Detail — both gated by `logs:read`.
-
-Emission is **on by default** via the standard settings loop: each plugin declares a boolean `logToApi` option, so it can be switched off globally (Plugins → Configure) or overridden per device without redeploying anything. The SDK's `createPluginLogger()` batches entries (2 s flush), queues up to 500 with drop-oldest backpressure, and degrades silently when the API is unreachable — logging never blocks a poll cycle.
-
-### Multi-instance plugins (remote sites)
-
-Every plugin supports running **multiple instances of the same type** — e.g. one ICMP or SNMP plugin at each remote site, all reporting into a single UNM instance. Each instance registers as its own plugin row and can be assigned to devices independently.
-
-Two optional environment variables control this:
-
-| Variable | Effect |
-|----------|--------|
-| `PLUGIN_INSTANCE_ID` (e.g. `site-a`) | Makes the advertised identity unique (`<plugin-uuid>:site-a`). Without it, two instances of the same plugin type would collide into one registration. |
-| `PLUGIN_DISPLAY_NAME` (optional) | Overrides the displayed name. If unset, the instance id is appended automatically: `ICMP Plugin (site-a)`. |
-
-With neither set, behavior is exactly as before — single-instance deployments are unaffected. A commented example lives in `docker-compose.yml`. Notes: each instance needs a unique `ADVERTISED_ENDPOINT` (and self-registers independently on boot); settings are per-instance; changing an id/name just restarts it and the old registration goes offline like any stopped plugin.
-
-## Plans & configuration jobs
-
-- **Config jobs** — single-device action submissions (`POST /devices/:deviceId/config-jobs` with an explicit `pluginId`), executed by the config-job worker against that plugin assignment. Require `configs:apply` + 2FA.
-- **Plans** — multi-step workflows with per-step dependencies, reordering (cycle-checked while draft/ready), and `${steps[N].result.details.<key>}` token substitution from earlier step results. The executor runs one plan at a time, persists the *resolved* input of each step before dispatch, honors `bestEffort` flags, and marks orphaned executing plans failed on startup. Plan creation can **provision secrets** (e.g. WireGuard key pairs) through the secrets provider with rollback on failure; provisioned material is referenced by id in steps and never stored in plaintext anywhere.
-- E2E test suite: `scripts/e2e-plans.ts` against the mock OPNsense appliance (`docker compose --profile test up -d mock-appliance`; the service is hidden behind the `test` profile so productive `up`s never start it).
-
-## Automations (ITTT rules)
-
-The **Automations** page (gated on `automations:read` / `automations:write`) manages ITTT-style rules — *triggers* + *actions*, stored as opaque JSON in the `automations` table and evaluated by a leader-gated worker every 15 s. Rules have an optional per-rule cooldown; every firing writes one row to `automation_runs` (status `succeeded` / `partial` / `failed` / `skipped`, with plan ids and error details).
-
-**Triggers:** `schedule` (cron / interval / dailyAt), `metric` (threshold on a telemetry metric, optional hold-duration), `log` (new lines matching a regex in plugin logs), `deviceStatus` (online/offline transitions — event-driven from the telemetry commit point), `flow` (traffic thresholds over sliding windows), `containerLog` (new lines in an app's log tail), and **`updateAvailable`** (transitions in the Updates page data: a row appearing, its version advancing, or disappearing).
-
-The `updateAvailable` trigger is the automation path for applying updates unattended:
-- `condition: 'available' | 'resolved'` selects which transitions fire; optional filters narrow by plugin, kinds, exact names, name regex, and the reboot flag (rows with a *null* flag never match — unknown ≠ safe to auto-apply).
-- **Deferral** (`defer.schedule` + optional `maxWaitHours`) holds each firing until the next occurrence of the schedule spec (e.g. a nightly 02:00 window); one pending window per update row is tracked in `automation_state`. A vanished row cancels its window silently; a version advance refreshes the snapshot without moving the slot; `maxWaitHours` caps how long an event waits before firing immediately.
-- **Intent actions** can carry `resolveFromTrigger: 'update'`, which fills `pluginId` / `actionId` / input from the *firing row's own* apply path (`device_updates.applyActionId` + `applyInput`) — so one rule applies whatever each plugin reports, and rows without an apply path are skipped with a logged reason. `requireNoReboot: true` hard-skips any row whose `rebootRequired` flag is set (a guard skip is recorded on the run, not counted as a failure).
-- Template variables for action templates include `{{update.kind}}`, `{{update.name}}`, `{{update.currentVersion}}`, `{{update.latestVersion}}`, `{{update.rebootRequired}}`.
-
-**Template catalog:** `GET /automations/templates` serves built-in rule drafts (e.g. *Auto-update apps without reboot (nightly window)*) plus any templates plugins advertise in their `/discover` payload (`automationTemplates`). The webapp renders them as one-click cards that open the builder **pre-filled — everything stays editable before saving**. The Updates page has a matching quick-create: select update rows → *Create automation* hands off a draft (kinds/names/plugin pre-filled, no-reboot guards on) to the Automations page via `sessionStorage`; nothing is created until you save there.
-
-**Verification:** unit tests in `api/src/automations/engine.test.ts` (deterministic deferral math); live E2E in `scripts/verify-update-automations.ts` seeds pending windows + update rows and asserts the evaluator tick fires them — including a real plan creation through `resolveFromTrigger` on a read-risk action.
-
-## Backup & replication
-
-The **Backups** page (gated on the `instance:backup` permission) manages UNM's own database — not device configs:
-
-- **Backups** are section-based gzip-compressed JSON archives (`.unmbak.gz`). Sections: `identity` (users/roles/policies), `settings`, `devices` (+plugins/secrets), `documented` (planned networks/hosts), `plans`, and `liveInventory` (regenerable telemetry — only in the *All* preset). Presets bundle sections; any combination works. Deliberately excluded from every backup: API tokens, passkeys, live telemetry/logs/events and the plugin registry cache.
-- **Destinations** are per-backup: the local volume (`unm-backups` → `/data/backups`, override with `UNM_BACKUP_VOLUME`) or a registered file-repo instance (bytes content-addressed there; the backup is bound to exactly one instance — no fallback to a sibling).
-- **Restore** is a safe merge: rows are upserted by primary key, and rows absent from the archive are never deleted. The webapp walks upload/stored → manifest preview → per-section report.
-- **Replication** syncs portable config (everything except `liveInventory`) one-way to/from a peer instance using a peer API token that carries `instance:backup` there. Targets support manual *Sync now* and an optional interval (leader-gated scheduler). A default exclusion list strips stack-dependent settings (`instanceName`, update feed, provider bindings, …) before sending/applying — editable per target.
-
-**Cross-instance secret portability:** device secrets are encrypted with a key derived from `MASTER_KEY` + `CRYPTO_SALT`. For replicated/restored secrets to decrypt on the peer, both instances MUST run with identical values for both variables (set them in each stack's `.env`).
-
-**Dev → prod recipe:** 1) create an API token on **prod** with only `instance:backup` (Tokens page); 2) on **dev**, Backups → Replication → *Add target* (push, that URL + token, optional interval); 3) *Sync now*, then watch the scheduler. Verify `instanceName`/update-feed settings were NOT overwritten on prod.
+- **Plans** — audited multi-step writes with per-step dependencies, token substitution between step results and secret provisioning; single-device config jobs sit alongside them ([docs/PLANS-AUTOMATIONS.md](docs/PLANS-AUTOMATIONS.md)).
+- **Automations** — ITTT-style rules (schedule / metric / log / device-status / flow / update triggers → intents, webhooks or notifications) with cooldowns and deferral windows.
+- **Backups & replication** — section-based archives of UNM's own database plus one-way cross-instance sync ([docs/BACKUP-REPLICATION.md](docs/BACKUP-REPLICATION.md)).
 
 ## MCP server (AI agent access)
 
-The `mcp/` service exposes the UNM API to AI agents via the [Model Context Protocol](https://modelcontextprotocol.io). It reads the OpenAPI spec at startup and turns every operation into a tool — new API endpoints appear automatically. The container serves two Streamable-HTTP endpoints on port **3901**:
+The `mcp/` service exposes the whole API to AI agents over the [Model Context Protocol](https://modelcontextprotocol.io) — every OpenAPI operation becomes a tool automatically, gated by the permissions of its API token. Endpoints, env vars and client config: [docs/MCP.md](docs/MCP.md).
 
-| Endpoint | Purpose |
-|----------|---------|
-| `POST /mcp` | Production-safe: OpenAPI operations only. What an agent can do is controlled entirely by the permissions of its API token — create a scoped token (e.g. read-only) on the **Tokens** page and pass it as `UNM_API_TOKEN`. |
-| `POST /debug/mcp` | Extended debug for diagnosing UNM itself: adds `query_database` (single read-only SELECT/WITH statement, max 200 rows) and `plugin_probe` (live `/healthz` + `/discover` of every plugin endpoint). Requires `Authorization: Bearer <MCP_DEBUG_KEY>`. |
+## Development
 
-**Environment variables:**
-
-| Variable | Effect |
-|----------|--------|
-| `UNM_API_TOKEN` | Long-lived API token for the OpenAPI tools — **required**. Create it on the Tokens page (or `POST /v1/tokens`). |
-| `UNM_API_BASE` | Base URL of the API. Defaults to `http://localhost:3000/v1`; the container uses `http://api:3000/v1`. |
-| `MCP_DEBUG_KEY` | Bearer key gating `/debug/mcp` (default in compose: `dev-mcp-debug-key`). |
-| `MCP_KEY` | Optional — when set, also gates the plain `/mcp` endpoint. |
-| `DATABASE_URL` | Postgres connection used by the debug SQL tool only (same DB as the API; rendered from the same `POSTGRES_*` vars in compose). |
-
-**VS Code MCP client config** (remote/HTTP transport):
-
-```jsonc
-{
-  "mcpServers": {
-    "unm": {
-      "url": "http://localhost:3901/mcp"
-    },
-    "unm-debug": {
-      "url": "http://localhost:3901/debug/mcp",
-      "headers": { "Authorization": "Bearer dev-mcp-debug-key" }
-    }
-  }
-}
-```
-
-The same server also runs in **stdio mode** without Docker (client-launched, production-safe tools only): `node mcp/dist/index.js` with `UNM_API_TOKEN` set — no `MCP_PORT` needed.
-
-## Development workflow
-
-- **Build order matters**: `@unm/plugin-sdk` and `@unm/snmp-client` must build first — npm `file:` dependencies are *copied* into each consumer's `node_modules`, so `make build` refreshes those copies before fanning out all plugin builds in parallel. After editing a shared package, always run `make build`.
-- **Type-check**: `cd api && npx tsc --noEmit`, same for `webapp/` and each plugin; or just `make build`.
-- **OpenAPI is enforced**: every new public route must be added to `openapi/unified-network-manager.openapi.yaml` — the validator 404s undocumented paths. Structural check: `node validate-openapi.cjs`.
-- **Schema changes**: edit `src/db/schema.ts`, then `cd api && npx drizzle-kit push`. In dev, `setup.sh` re-runs this on every start; in production images the API does it itself at boot (`api/src/schemaBootstrap.ts`) — fresh databases are bootstrapped automatically, and **additive** changes (new tables/columns) apply on next container start. A **data-loss** change is refused without `--force` so it can never silently destroy data: review it, then run it manually with `docker exec <api> sh -c "cd /app/api && node_modules/.bin/drizzle-kit push --force"`. Keep `schema.ts` composite-PK names equal to the live Postgres constraint names.
-- **Smoke tests**: `cd plugins/opnsense && ../../node_modules/.bin/tsx smoke-test.ts` (same for `plugins/mikrotik-swos`).
-- **Plugin images always rebuild from source** (`docker compose up -d --build <service>`) — reusing stale images silently serves old code.
-
-### Key environment variables (API)
-
-| Variable | Default | Effect |
-|----------|---------|--------|
-| `JWT_SECRET` | `dev-secret` | JWT signing key. Set a random value in `.env` for production (compose reads it via `${JWT_SECRET:-dev-secret}`) |
-| `DATABASE_URL` | built from `POSTGRES_*` vars | Postgres connection — compose renders `postgresql://${POSTGRES_USER:-unm}:${POSTGRES_PASSWORD:-unm}@postgres:5432/${POSTGRES_DB:-unm}`, so setting the `POSTGRES_*` vars in `.env` is enough; you only override this directly to point at an external database |
-| `UNM_CORS_ORIGINS` | *(empty)* | Comma-separated CORS allowlist for the API. The webapp origin from `WEBAUTHN_ORIGIN` is always included, and `http(s)://localhost` / `127.0.0.1` on any port are always allowed (dev works without setting this). Production: set your real origin(s), e.g. `https://unm.example.com`. Not needed for a same-origin reverse-proxy setup |
-| `UNM_TRUST_PROXY` | *(off)* | Reverse proxy: trust `X-Forwarded-For` so rate limiting uses the real client IP (`1` = one hop, `N`, or CIDR/named policy). See [Reverse proxy](#reverse-proxy-remote-access) |
-| `UNM_CLIENT_IP_HEADER` | *(off)* | Reverse proxy: explicit client-IP header (e.g. Cloudflare's `CF-Connecting-IP`). Wins over `X-Forwarded-For`; only set if the proxy is the sole ingress |
-| `PLUGIN_API_KEY` | `dev-plugin-key` | Shared key the API presents to plugins (`x-plugin-api-key`) and that plugins use for log shipping / broker calls |
-| `AUTH_PLUGIN_ID` | built-in basic-auth plugin | Active identity provider; falls back to built-in when unset/offline |
-| `SECRETS_PLUGIN_ID` | built-in secrets-provider plugin | Active secrets provider; same fallback behavior |
-| `LOG_RETENTION_DAYS` | `7` | Plugin log + self-metrics retention window for the hourly sweep |
-| `TELEMETRY_RETENTION_DAYS` | `7` | Raw telemetry snapshot retention — older rows are deleted by the hourly retention sweep (the fastest-growing table in the system) |
-| `TELEMETRY_POLL_INTERVAL_MS` | `30000` | Telemetry poll beat. Raise for very large fleets, or lower `TELEMETRY_MAX_CONCURRENCY` instead |
-| `TELEMETRY_MAX_CONCURRENCY` | `64` | Max in-flight `/monitoring` calls per poll cycle — keeps the per-beat burst flat regardless of fleet size |
-| `SECRET_CACHE_TTL_MS` | `60000` | How long decrypted secrets are cached for the poll path (write paths always read fresh). Cuts secrets-provider load by orders of magnitude at scale; set `0` to disable |
-| `DATABASE_POOL_MAX` | `20` | Postgres pool size — raise if you see queued writes during poll beats on large fleets |
-| `PLUGIN_POLL_ENDPOINTS` | *(empty)* | Optional legacy discovery fallback: comma-separated endpoints to poll when a plugin cannot reach the API at all. Normal deployments leave this unset — plugins self-register instead (see §Plugins) |
-| `PLUGIN_HOST_PORT_MAP` | *(unset)* | Dev-mode only (`setup.sh` sets it): `service:port,…` pairs letting the host-running dev API rewrite compose service names to localhost ports |
+Use `./setup.sh` for a hot-reload dev stack built from source. Build-order rules, the schema-change workflow (additive migrations apply at container boot; data-loss changes are refused without `--force`) and all key API environment variables: [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
 
 ## Scaling & HA
 
-The API is designed to run as **N replicas** behind a load balancer while exactly **one** of them runs the background workers. Election uses Postgres advisory locks (`api/src/workers/leader.ts`) — no Redis, no external coordinator:
-
-- Each worker (telemetry polling, plan execution, log/telemetry retention, plugin self-metrics, plugin discovery) takes a non-blocking `pg_try_advisory_lock` at startup. The winner runs the loop; the others log *waiting for leadership* and serve HTTP only.
-- **Failover is automatic**: if the leader dies (crash, OOM, `docker compose down`), Postgres frees its locks and every standby re-attempts within 15 s. A rolling deploy steps down gracefully on SIGTERM so handover takes seconds.
-- All routes are stateless — jobs land in Postgres (`config_jobs`, `plans`), not process memory. The one exception is the **config-job worker**, which drains each instance's own in-process queue, so every replica runs it (it only picks up rows *its* routes enqueued).
-
-**Overhead of HA-by-design on a single-replica deployment:** one extra `pg_try_advisory_lock` per worker at startup plus one verification query per minute — effectively zero. The lock rides on one dedicated pinned pool connection that is never returned to the idle list (node-postgres would destroy it after 5 min and silently drop session-scoped locks).
-
-**Capacity guidance** (2 plugins/device, ~10 KB snapshots):
-
-| Fleet | Notes |
-|-------|-------|
-| ≤ 50 devices | Defaults are fine. Retention is the only thing that matters long-term. |
-| 50–150 devices | Fine as-is; watch plugin self-metrics (`inFlight`, event-loop lag) during poll beats. |
-| 150–400+ devices | Raise `TELEMETRY_POLL_INTERVAL_MS` (60 s) and/or keep the concurrency cap; consider a second API replica for HA — polling load stays on one leader, HTTP scales out. |
-
-The normalized inventory tables (`networks`, `hosts`, …) hold only current state and are swept at 24 h independently of telemetry retention.
+The API runs as N replicas behind a load balancer with exactly one worker leader — election via Postgres advisory locks, automatic failover within 15 s, no external coordinator. Capacity guidance per fleet size: [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md#scaling--ha).
 
 ## Trademark disclaimer
 

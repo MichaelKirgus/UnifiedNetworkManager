@@ -1,6 +1,6 @@
 # Plugin catalog — supported vendors & devices
 
-UNM ships **27 plugins** as independent microservices (one directory each under `plugins/`, plus `_template/` as the scaffold for new ones). Every plugin speaks one common contract and self-registers with the API on boot, so adding a device family never means touching the core — see [PLUGIN-DEVELOPMENT.md](PLUGIN-DEVELOPMENT.md) for how to build your own.
+UNM ships **28 plugins** as independent microservices (one directory each under `plugins/`, plus `_template/` as the scaffold for new ones). Every plugin speaks one common contract and self-registers with the API on boot, so adding a device family never means touching the core — see [PLUGIN-DEVELOPMENT.md](PLUGIN-DEVELOPMENT.md) for how to build your own.
 
 A device can carry **multiple plugins at once** (e.g. generic SNMP + a vendor plugin), each with its own credentials; exactly one is *primary*. Every plugin also supports multi-instance deployments (`PLUGIN_INSTANCE_ID`) for remote sites.
 
@@ -49,6 +49,46 @@ Not device-facing — they serve the UNM core itself and are swappable via `AUTH
 | File Repo (Storage Backend) | `plugins/file-repo/` | Stateless bytes half of the central file repository — content-addressed (SHA-256) store on a local volume; the API owns all metadata and brokers every read/write. Multi-instance via `PLUGIN_INSTANCE_ID` for per-segment repos | fileRepo |
 | Web Fetch (Internet Egress) | `plugins/web-fetch/` | Pull-based egress service for the API (e.g. GeoIP lookups, threat-intel feed fetches); no devices of its own | webFetch |
 | FreeRADIUS (Radius Companion) | `plugins/freeradius/` | Companion to the `unm-radius` sidecar — advertises the RADIUS capability so the Certificates page shows its WiFi (EAP-TLS) client-certificate section and CA enrollment knows a server exists; deliberately no control surface (config hot-applies via render → shared volume → SIGHUP) | radius |
+| Basic Notifications | `plugins/basic-notifications/` | Stateless notification transport — delivers already-rendered UNM notifications over the three most common easy-to-implement channels: email (SMTP), generic webhooks and Telegram bot messages. The API owns rules/channels/templates; this plugin only delivers one title+body per channel type | notificationSender |
+
+## How plugins work
+
+Each plugin is responsible for one or more `vendor/deviceType` combinations and advertises capabilities:
+
+- `monitoring` (health/metrics/events)
+- `inventory` (facts/interfaces/modules — propagated into the cross-device pages)
+- `configuration` (read/apply/reconcile actions)
+- `planning` (multi-step, multi-device plan intents with a step catalog)
+- `secretsProvider` / `identityProvider` (the two broker plugins; swappable via `SECRETS_PLUGIN_ID` / `AUTH_PLUGIN_ID`)
+
+Plugins are discovered automatically: every plugin SELF-REGISTERS with the API on boot (`POST /v1/plugin/register`, SDK `startRegistration`) using its `UNM_API_URL` + `PLUGIN_API_KEY`, and mDNS/DNS-SD is a second path where multicast reaches. UNM keeps no catalog of known plugins — deploying a third-party plugin needs zero changes to the main app (see [PLUGIN-DEVELOPMENT.md](PLUGIN-DEVELOPMENT.md) §1). The full developer guide, including the settings loop, credential slots, device-model catalogs, and the logging pipeline, lives in that document.
+
+### Device addressing (multi-IP)
+
+Each device has exactly one **primary address** (`managementAddress`) plus any number of **secondary IPs**. All addresses must be a bare IPv4 literal, an IPv6 literal, or a DNS name — no scheme (`https://…`), because choosing the transport is each plugin's own decision.
+
+- The primary is set at creation and edited via `PATCH /devices/{id}`; secondaries are managed with `GET/POST /devices/{id}/ips` and `DELETE /devices/{id}/ips/{ipId}` (mirrors the plugin-assignment pattern).
+- Every `/monitoring` and `/config` call to a plugin carries **all** addresses as `ipAddresses: [{ address, isPrimary }]`, so plugins can reach secondary interfaces when they need to.
+- Transport handling (TLS vs plaintext, self-signed certificates) lives in the **plugin**, not on the device — e.g. the OPNsense plugin's `transport` option (`auto` = HTTPS with self-signed accepted, `https`, or `http`).
+
+### Plugin log pipeline
+
+Every plugin ships structured logs to `POST /plugin/logs` (shared `x-plugin-api-key`, self-reported `pluginId`). Entries land in `plugin_logs` with level, message, optional JSON context and device association; a retention worker deletes rows older than `LOG_RETENTION_DAYS` (default 7) hourly. The webapp shows them on the global **Logs** page and per device in Device Detail — both gated by `logs:read`.
+
+Emission is **on by default** via the standard settings loop: each plugin declares a boolean `logToApi` option, so it can be switched off globally (Plugins → Configure) or overridden per device without redeploying anything. The SDK's `createPluginLogger()` batches entries (2 s flush), queues up to 500 with drop-oldest backpressure, and degrades silently when the API is unreachable — logging never blocks a poll cycle.
+
+### Multi-instance plugins (remote sites)
+
+Every plugin supports running **multiple instances of the same type** — e.g. one ICMP or SNMP plugin at each remote site, all reporting into a single UNM instance. Each instance registers as its own plugin row and can be assigned to devices independently.
+
+Two optional environment variables control this:
+
+| Variable | Effect |
+|----------|--------|
+| `PLUGIN_INSTANCE_ID` (e.g. `site-a`) | Makes the advertised identity unique (`<plugin-uuid>:site-a`). Without it, two instances of the same plugin type would collide into one registration. |
+| `PLUGIN_DISPLAY_NAME` (optional) | Overrides the displayed name. If unset, the instance id is appended automatically: `ICMP Plugin (site-a)`. |
+
+With neither set, behavior is exactly as before — single-instance deployments are unaffected. A commented example lives in `docker-compose.yml`. Notes: each instance needs a unique `ADVERTISED_ENDPOINT` (and self-registers independently on boot); settings are per-instance; changing an id/name just restarts it and the old registration goes offline like any stopped plugin.
 
 ## Adding a new plugin
 
