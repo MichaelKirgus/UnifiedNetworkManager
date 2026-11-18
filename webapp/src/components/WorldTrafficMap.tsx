@@ -445,12 +445,14 @@ export function WorldTrafficMap({ from, to, siteId, onLoadingChange }: {
           )}
         </div>
 
-        {/* Top pairs list — hover a row to highlight its arc. self-start: the
-         * list is at most topN rows, so it keeps its natural height instead of
-         * stretching next to a tall map with empty space below. */}
-        <div className="self-start rounded-lg border border-border bg-card">
+        {/* Top pairs list — hover a row to highlight its arc. The card
+         * stretches to match the map's height (grid default) so the section
+         * reads as one balanced block; the LIST inside is capped at the
+         * available viewport height and scrolls, so many rows can never grow
+         * the section taller than the map itself. */}
+        <div className="rounded-lg border border-border bg-card">
           <p className="border-b border-border px-3 py-2 text-xs font-medium text-secondary">Top pairs</p>
-          <div>
+          <div className="max-h-[calc(100vh-360px)] overflow-y-auto">
             {((scope === 'all' && intlArcs.length === 0 && natArcs.length === 0) ||
               (scope === 'international' && intlArcs.length === 0) ||
               (scope === 'national' && natArcs.length === 0)) && (
