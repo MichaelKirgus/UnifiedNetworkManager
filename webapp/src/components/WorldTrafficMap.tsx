@@ -34,6 +34,9 @@ function mercY(lat: number): number {
 
 // Height of the cropped world view — aspect W:H ≈ 1.41:1.
 const H = mercY(LAT_BOTTOM); // ≈710
+/** Max zoom factor — at MAX_K the viewport is ~2 map units (≈0.7°, city scale),
+ * enough to separate sites that sit a few km apart in one town. */
+const MAX_K = 512;
 
 /** Web Mercator projection: [lng, lat] → SVG x/y. Points below LAT_BOTTOM
  * (Antarctica) render past the bottom edge and are clipped by the viewBox. */
@@ -159,7 +162,7 @@ export function WorldTrafficMap({ from, to, siteId, onLoadingChange }: {
     return () => onLoadingChange?.(false);
   }, [loading, onLoadingChange]);
 
-  // Zoom/pan — viewBox math. k clamped to 1..8; pan is clamped so the world
+  // Zoom/pan — viewBox math. k clamped to 1..MAX_K; pan is clamped so the world
   // always covers the viewport (at k=1 both clamps collapse to 0). Wheel zoom
   // uses a native non-passive listener: React registers onWheel as passive,
   // which would swallow preventDefault() and let the page scroll while zooming.
@@ -169,7 +172,7 @@ export function WorldTrafficMap({ from, to, siteId, onLoadingChange }: {
   // Viewport window [x, x + W/k] must stay inside [0, W] → x ∈ [0, W − W/k]
   // (at k=1 the range collapses to exactly 0). The earlier min(0, max(W−W/k, x))
   // was inverted and clamped EVERY pan back to the top-left corner.
-  const clampK = (k: number) => Math.min(8, Math.max(1, k));
+  const clampK = (k: number) => Math.min(MAX_K, Math.max(1, k));
   const clampX = (x: number, k: number) => Math.min(W - W / k, Math.max(0, x));
   const clampY = (y: number, k: number) => Math.min(H - H / k, Math.max(0, y));
 
@@ -267,6 +270,47 @@ export function WorldTrafficMap({ from, to, siteId, onLoadingChange }: {
       .map((s) => ({ ...s, pos: project(s.longitude!, s.latitude!) }));
   }, [mapQuery.data]);
 
+  // Label decluttering in SCREEN space (viewport = exactly W×H units there, so
+  // the counter-scaled font size / offsets are constants). Each site tries its
+  // label at right → left → below → above and keeps the first spot that does
+  // not overlap an already-placed label or any marker circle — close sites
+  // (e.g. two in one city) get labels on opposite sides instead of overlaying,
+  // and zooming in simply frees up more room. Busiest sites place first.
+  const siteLabels = useMemo(() => {
+    const CHAR_W = 4.7; // avg char width at the 9-unit (screen) font size
+    type Box = { x0: number; y0: number; x1: number; y1: number };
+    const bytesBySite = new Map<string, number>();
+    for (const p of natPairs) {
+      bytesBySite.set(p.srcSiteId, (bytesBySite.get(p.srcSiteId) ?? 0) + p.estBytes);
+      bytesBySite.set(p.dstSiteId, (bytesBySite.get(p.dstSiteId) ?? 0) + p.estBytes);
+    }
+    const ordered = [...siteMarkers].sort((a, b) => (bytesBySite.get(b.id) ?? 0) - (bytesBySite.get(a.id) ?? 0));
+    // Screen position of each marker; off-screen sites neither block nor get labels.
+    const pts = ordered
+      .map((s) => ({ s, sx: (s.pos.x - view.x) * view.k, sy: (s.pos.y - view.y) * view.k }))
+      .filter(({ sx, sy }) => sx > -150 && sx < W + 150 && sy > -60 && sy < H + 60);
+    const boxes: Box[] = pts.map(({ sx, sy }) => ({ x0: sx - 3.2, y0: sy - 3.2, x1: sx + 3.2, y1: sy + 3.2 }));
+    const hits = (b: Box) => boxes.some((o) => b.x0 < o.x1 && b.x1 > o.x0 && b.y0 < o.y1 && b.y1 > o.y0);
+    const out = new Map<string, { dx: number; dy: number } | null>();
+    for (const { s, sx, sy } of pts) {
+      const w = s.name.length * CHAR_W + 2;
+      // Label anchor candidates (text start point): right, left, below, above.
+      const cands: Array<[number, number]> = [
+        [sx + 5, sy + 3],
+        [sx - 5 - w, sy + 3],
+        [sx + 4, sy + 12],
+        [sx + 4, sy - 8],
+      ];
+      let chosen: [number, number] | null = null;
+      for (const c of cands) {
+        const box: Box = { x0: c[0], y0: c[1] - 7.5, x1: c[0] + w, y1: c[1] + 3 };
+        if (!hits(box)) { chosen = c; boxes.push(box); break; }
+      }
+      out.set(s.id, chosen ? { dx: chosen[0] - sx, dy: chosen[1] - sy } : null);
+    }
+    return out;
+  }, [siteMarkers, natPairs, view]);
+
   const building = Boolean(basemapQuery.data?.progress);
   const hasMap = Boolean(geo && geo.paths.length > 0);
 
@@ -280,7 +324,7 @@ export function WorldTrafficMap({ from, to, siteId, onLoadingChange }: {
       e.preventDefault();
       const rect = el.getBoundingClientRect();
       setView((v) => {
-        const k2 = clampK(v.k * Math.exp(-e.deltaY * 0.0015));
+        const k2 = clampK(v.k * Math.exp(-e.deltaY * 0.002));
         if (k2 === v.k) return v;
         // Keep the point under the cursor fixed while zooming.
         const px = (e.clientX - rect.left) / rect.width;
@@ -368,7 +412,7 @@ export function WorldTrafficMap({ from, to, siteId, onLoadingChange }: {
           ) : hasMap && geo ? (
             <svg
               ref={svgRef}
-              viewBox={`${view.x.toFixed(2)} ${view.y.toFixed(2)} ${(W / view.k).toFixed(2)} ${(H / view.k).toFixed(2)}`}
+              viewBox={`${view.x.toFixed(4)} ${view.y.toFixed(4)} ${(W / view.k).toFixed(4)} ${(H / view.k).toFixed(4)}`}
               className={`block h-auto w-full select-none ${view.k > 1 ? 'cursor-grab active:cursor-grabbing' : ''}`}
               role="img"
               aria-label="World traffic map — scroll to zoom, drag to pan"
@@ -409,13 +453,24 @@ export function WorldTrafficMap({ from, to, siteId, onLoadingChange }: {
                   onMouseLeave={() => setHover(null)}
                 />
               ))}
-              {/* Site markers — counter-scaled so they stay the same size on screen. */}
-              {siteMarkers.map((s) => (
-                <g key={s.id}>
-                  <circle cx={s.pos.x} cy={s.pos.y} r={3.2 / view.k} fill="rgb(var(--card))" stroke="rgb(var(--status-ok))" strokeWidth={1.4 / view.k} />
-                  <text x={s.pos.x + 5 / view.k} y={s.pos.y + 3 / view.k} fontSize={9 / view.k} fill="rgb(var(--secondary))">{s.name}</text>
-                </g>
-              ))}
+              {/* Site markers — counter-scaled so they stay the same size on screen.
+               * Labels come from the decluttering pass above (null = hidden to
+               * avoid an overlap); hovering a marker always shows its name. */}
+              {siteMarkers.map((s) => {
+                const lab = siteLabels.get(s.id);
+                return (
+                  <g key={s.id}>
+                    {/* Invisible larger hit area — the visible dot is only ~3 px. */}
+                    <circle cx={s.pos.x} cy={s.pos.y} r={8 / view.k} fill="transparent"
+                      onMouseEnter={() => setHover({ title: `site|${s.id}`, sub: s.name, bytes: 0 })}
+                      onMouseLeave={() => setHover(null)} />
+                    <circle cx={s.pos.x} cy={s.pos.y} r={3.2 / view.k} fill="rgb(var(--card))" stroke="rgb(var(--status-ok))" strokeWidth={1.4 / view.k} pointerEvents="none" />
+                    {lab && (
+                      <text x={s.pos.x + lab.dx / view.k} y={s.pos.y + lab.dy / view.k} fontSize={9 / view.k} fill="rgb(var(--secondary))">{s.name}</text>
+                    )}
+                  </g>
+                );
+              })}
             </svg>
           ) : null}
 
@@ -432,7 +487,9 @@ export function WorldTrafficMap({ from, to, siteId, onLoadingChange }: {
           {hover && (
             <div className="pointer-events-none absolute left-2 top-2 rounded-md border border-border bg-card/95 px-3 py-1.5 text-xs shadow-sm">
               <p className="font-medium">{hover.sub}</p>
-              <p className="font-mono text-secondary">{formatBytes(hover.bytes)}</p>
+              {!hover.title.startsWith('site|') && (
+                <p className="font-mono text-secondary">{formatBytes(hover.bytes)}</p>
+              )}
             </div>
           )}
 
