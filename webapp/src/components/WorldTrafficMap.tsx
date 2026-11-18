@@ -328,15 +328,18 @@ export function WorldTrafficMap({ from, to, siteId, onLoadingChange }: {
       {/* Map + top-pairs list side by side (stacks on narrow screens). */}
       <div className="grid grid-cols-1 gap-3 xl:grid-cols-[minmax(0,1fr)_280px]">
         <div className="relative overflow-hidden rounded-lg border border-border bg-card">
-          {/* max-w keeps the map a sane size on wide (16:9) monitors — it used
-           * to stretch across the whole grid column and look flat. */}
+          {/* Size by available VERTICAL space, not a fixed pixel width: the map
+           * fills the card's full width (no wasted side margins on wide
+           * monitors) but its height is capped at what fits above the fold —
+           * 2:1 aspect means max-width = 2 × (viewport − page chrome). */}
           {basemapQuery.isLoading ? (
             <div className="flex h-72 items-center justify-center text-sm text-muted-foreground">Loading map…</div>
           ) : hasMap && geo ? (
             <svg
               ref={svgRef}
               viewBox={`${view.x.toFixed(2)} ${view.y.toFixed(2)} ${(W / view.k).toFixed(2)} ${(H / view.k).toFixed(2)}`}
-              className={`mx-auto block h-auto w-full max-w-[1080px] select-none ${view.k > 1 ? 'cursor-grab active:cursor-grabbing' : ''}`}
+              className={`mx-auto block h-auto w-full select-none ${view.k > 1 ? 'cursor-grab active:cursor-grabbing' : ''}`}
+              style={{ maxWidth: 'min(100%, max(640px, calc(2 * (100vh - 200px))))' }}
               role="img"
               aria-label="World traffic map — scroll to zoom, drag to pan"
               onPointerDown={onPointerDown}
