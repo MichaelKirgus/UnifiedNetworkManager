@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { Activity, Globe, Network, Radio, ArrowLeftRight, Server, ShieldAlert, X, Map as MapIcon } from 'lucide-react';
 import { Layout } from '../components/Layout';
@@ -136,10 +136,13 @@ export default function Flows() {
   // live traffic; each view group gets its own tab. Filters stay global above.
   const [tab, setTab] = useState<'traffic' | 'internet' | 'map' | 'networks' | 'security' | 'collectors'>('traffic');
 
-  // The `from` bound is computed at fetch time so relative presets keep sliding
-  // as the page refetches; custom ranges are absolute. Rollups land every 5
-  // minutes — refresh on that cadence.
-  const windowParams = () => resolveTimeRangeIso(range);
+  // Memoized per range so query keys stay stable across re-renders. The Map
+  // tab takes from/to as props (part of its query key) — recomputing fresh ISO
+  // timestamps on every render would change that key and restart the fetch on
+  // each page-level refetch (visible flicker). The window now slides at most
+  // one refresh cycle behind real time, which is imperceptible; custom ranges
+  // are absolute anyway. Rollups land every 5 minutes — refresh on that cadence.
+  const windowIso = useMemo(() => resolveTimeRangeIso(range), [range]);
   // Every flow query shares the site filter (null = no filter).
   const siteParam = () => (siteId || undefined);
   const { formatDateTime } = useTimeFormat();
@@ -148,36 +151,36 @@ export default function Flows() {
 
   const talkersQuery = useQuery({
     queryKey: ['flows', 'top-talkers', range, siteId],
-    queryFn: () => api.flowsTopTalkers({ ...windowParams(), limit: 20, siteId: siteParam() }),
+    queryFn: () => api.flowsTopTalkers({ ...windowIso, limit: 20, siteId: siteParam() }),
     refetchInterval: 60_000,
   });
   const internetQuery = useQuery({
     queryKey: ['flows', 'internet', range, siteId],
-    queryFn: () => api.flowsInternet({ ...windowParams(), siteId: siteParam() }),
+    queryFn: () => api.flowsInternet({ ...windowIso, siteId: siteParam() }),
     refetchInterval: 60_000,
   });
   const pairsQuery = useQuery({
     queryKey: ['flows', 'pairs', range, siteId],
-    queryFn: () => api.flowsPairs({ ...windowParams(), limit: 20, siteId: siteParam() }),
+    queryFn: () => api.flowsPairs({ ...windowIso, limit: 20, siteId: siteParam() }),
     refetchInterval: 60_000,
   });
   // Internet egress over time — the page's headline chart. Hourly buckets for
   // multi-day ranges keep the point count sane; 5-minute otherwise.
   const seriesQuery = useQuery({
     queryKey: ['flows', 'timeseries', range, siteId],
-    queryFn: () => api.flowsTimeseries({ ...windowParams(), bucket: range === '7d' || range === '30d' ? '1h' : '5m', class: 'internet', siteId: siteParam() }),
+    queryFn: () => api.flowsTimeseries({ ...windowIso, bucket: range === '7d' || range === '30d' ? '1h' : '5m', class: 'internet', siteId: siteParam() }),
     refetchInterval: 60_000,
   });
   // Port usage — top source/destination ports (optionally scoped to one host).
   const portsQuery = useQuery({
     queryKey: ['flows', 'ports', range, siteId, drillIp],
-    queryFn: () => api.flowsPorts({ ...windowParams(), limit: 15, ip: drillIp ?? undefined, siteId: siteParam() }),
+    queryFn: () => api.flowsPorts({ ...windowIso, limit: 15, ip: drillIp ?? undefined, siteId: siteParam() }),
     refetchInterval: 60_000,
   });
   // Traffic per inventoried network (name + VLAN) — the "which networks" view.
   const networksQuery = useQuery({
     queryKey: ['flows', 'networks', range, siteId],
-    queryFn: () => api.flowsNetworks({ ...windowParams(), limit: 20, siteId: siteParam() }),
+    queryFn: () => api.flowsNetworks({ ...windowIso, limit: 20, siteId: siteParam() }),
     refetchInterval: 60_000,
   });
   const collectorsQuery = useQuery({
@@ -752,7 +755,7 @@ export default function Flows() {
       {/* World map — international country→country + national site→site arcs.
        *  Inherits the global time range and site filter from above. The
        *  component reports its own initial-load state for the tab dot. */}
-      {tab === 'map' && <WorldTrafficMap {...windowParams()} siteId={siteParam()} onLoadingChange={setMapLoading} />}
+      {tab === 'map' && <WorldTrafficMap {...windowIso} siteId={siteParam()} onLoadingChange={setMapLoading} />}
 
       {tab === 'networks' && (<>
       {networksTabLoading && <div className="mb-3 shrink-0"><LoadingBar label="Loading network traffic…" /></div>}

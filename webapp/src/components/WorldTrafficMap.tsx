@@ -1,6 +1,6 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react';
 import { useQuery } from '@tanstack/react-query';
-import { Download, Globe2, Loader2 } from 'lucide-react';
+import { Download, Globe2, Loader2, RotateCcw, ZoomIn, ZoomOut } from 'lucide-react';
 import { api, FlowMapInternationalPair, FlowMapNationalPair, MapBasemapFeature } from '../api/client';
 import { can } from '../auth/permissions';
 import { formatBytes } from './formatMetric';
@@ -111,6 +111,9 @@ export function WorldTrafficMap({ from, to, siteId, onLoadingChange }: {
   const [minBytes, setMinBytes] = useState(0);
   const [topN, setTopN] = useState(25);
   const [hover, setHover] = useState<HoverInfo | null>(null);
+  // Map viewport — viewBox-based zoom/pan (k=1 is the full world). Strokes and
+  // labels are counter-scaled by 1/k so they keep a constant on-screen size.
+  const [view, setView] = useState({ x: 0, y: 0, k: 1 });
 
   // Pairs refresh with the page cadence; the basemap only changes when a build
   // runs — poll faster while one is in flight (progress "N/M" non-empty).
@@ -129,11 +132,52 @@ export function WorldTrafficMap({ from, to, siteId, onLoadingChange }: {
   });
 
   // Initial-load state — true until both the pair query and the basemap have
-  // returned their first response (refetches never re-trigger it).
+  // returned their first response (refetches never re-trigger it). The cleanup
+  // clears the flag on unmount so a stale dot can't keep pulsing on other tabs.
   const loading = mapQuery.isLoading || basemapQuery.isLoading;
   useEffect(() => {
     onLoadingChange?.(loading);
+    return () => onLoadingChange?.(false);
   }, [loading, onLoadingChange]);
+
+  // Zoom/pan — viewBox math. k clamped to 1..8; pan is clamped so the world
+  // always covers the viewport (at k=1 both clamps collapse to 0). Wheel zoom
+  // uses a native non-passive listener: React registers onWheel as passive,
+  // which would swallow preventDefault() and let the page scroll while zooming.
+  const svgRef = useRef<SVGSVGElement | null>(null);
+  const dragRef = useRef<{ px: number; py: number; k: number } | null>(null);
+
+  const clampK = (k: number) => Math.min(8, Math.max(1, k));
+  const clampX = (x: number, k: number) => Math.min(0, Math.max(W - W / k, x));
+  const clampY = (y: number, k: number) => Math.min(0, Math.max(H - H / k, y));
+
+  // Zoom by factor f around the current viewport center (button clicks).
+  const zoomBy = (f: number) =>
+    setView((v) => {
+      const k2 = clampK(v.k * f);
+      if (k2 === v.k) return v;
+      const cx = v.x + W / (2 * v.k); // center of the current view in map coords
+      const cy = v.y + H / (2 * v.k);
+      return { x: clampX(cx - W / k2 / 2, k2), y: clampY(cy - H / k2 / 2, k2), k: k2 };
+    });
+
+  const onPointerDown = (e: ReactPointerEvent<SVGSVGElement>) => {
+    if (view.k <= 1) return; // nothing to pan at full view
+    dragRef.current = { px: e.clientX, py: e.clientY, k: view.k };
+    e.currentTarget.setPointerCapture(e.pointerId);
+  };
+  const onPointerMove = (e: ReactPointerEvent<SVGSVGElement>) => {
+    const d = dragRef.current;
+    if (!d) return;
+    const el = svgRef.current;
+    if (!el) return;
+    const rect = el.getBoundingClientRect();
+    const dx = ((e.clientX - d.px) / rect.width) * (W / d.k);
+    const dy = ((e.clientY - d.py) / rect.height) * (H / d.k);
+    dragRef.current = { px: e.clientX, py: e.clientY, k: d.k };
+    setView((v) => ({ ...v, x: clampX(v.x - dx, v.k), y: clampY(v.y - dy, v.k) }));
+  };
+  const onPointerUp = () => { dragRef.current = null; };
 
   const fetchNow = async () => {
     await api.fetchMapBasemap();
@@ -203,6 +247,30 @@ export function WorldTrafficMap({ from, to, siteId, onLoadingChange }: {
   const building = Boolean(basemapQuery.data?.progress);
   const hasMap = Boolean(geo && geo.paths.length > 0);
 
+  // Wheel zoom — native non-passive listener (React's onWheel is passive and
+  // would swallow preventDefault()). Re-runs when the SVG mounts: while the
+  // basemap is still loading there is no element to attach to.
+  useEffect(() => {
+    const el = svgRef.current;
+    if (!el) return;
+    const onWheel = (e: WheelEvent) => {
+      e.preventDefault();
+      const rect = el.getBoundingClientRect();
+      setView((v) => {
+        const k2 = clampK(v.k * Math.exp(-e.deltaY * 0.0015));
+        if (k2 === v.k) return v;
+        // Keep the point under the cursor fixed while zooming.
+        const px = (e.clientX - rect.left) / rect.width;
+        const py = (e.clientY - rect.top) / rect.height;
+        const mx = v.x + px * (W / v.k);
+        const my = v.y + py * (H / v.k);
+        return { x: clampX(mx - px * (W / k2), k2), y: clampY(my - py * (H / k2), k2), k: k2 };
+      });
+    };
+    el.addEventListener('wheel', onWheel, { passive: false });
+    return () => el.removeEventListener('wheel', onWheel);
+  }, [hasMap]);
+
   return (
     <div className="flex shrink-0 flex-col gap-3">
       {/* Initial-load indicator — the pair query can take >10 s on big databases. */}
@@ -229,6 +297,7 @@ export function WorldTrafficMap({ from, to, siteId, onLoadingChange }: {
         <span className="ml-auto flex items-center gap-3 text-secondary">
           <span className="flex items-center gap-1"><span className="inline-block h-0.5 w-4 rounded" style={{ background: 'rgb(var(--status-info))' }} /> international</span>
           <span className="flex items-center gap-1"><span className="inline-block h-0.5 w-4 rounded" style={{ background: 'rgb(var(--status-ok))' }} /> national (site→site)</span>
+          <span className="text-faint">scroll to zoom · drag to pan</span>
         </span>
       </div>
 
@@ -259,13 +328,25 @@ export function WorldTrafficMap({ from, to, siteId, onLoadingChange }: {
       {/* Map + top-pairs list side by side (stacks on narrow screens). */}
       <div className="grid grid-cols-1 gap-3 xl:grid-cols-[minmax(0,1fr)_280px]">
         <div className="relative overflow-hidden rounded-lg border border-border bg-card">
+          {/* max-w keeps the map a sane size on wide (16:9) monitors — it used
+           * to stretch across the whole grid column and look flat. */}
           {basemapQuery.isLoading ? (
             <div className="flex h-72 items-center justify-center text-sm text-muted-foreground">Loading map…</div>
           ) : hasMap && geo ? (
-            <svg viewBox={`0 0 ${W} ${H}`} className="block w-full" role="img" aria-label="World traffic map">
+            <svg
+              ref={svgRef}
+              viewBox={`${view.x.toFixed(2)} ${view.y.toFixed(2)} ${(W / view.k).toFixed(2)} ${(H / view.k).toFixed(2)}`}
+              className={`mx-auto block h-auto w-full max-w-[1080px] select-none ${view.k > 1 ? 'cursor-grab active:cursor-grabbing' : ''}`}
+              role="img"
+              aria-label="World traffic map — scroll to zoom, drag to pan"
+              onPointerDown={onPointerDown}
+              onPointerMove={onPointerMove}
+              onPointerUp={onPointerUp}
+              onPointerCancel={onPointerUp}
+            >
               {/* Country polygons */}
               {geo.paths.map((p) => (
-                <path key={p.iso} d={p.d} fillRule="evenodd" fill="rgb(var(--muted) / 0.65)" stroke="rgb(var(--border))" strokeWidth="0.4" />
+                <path key={p.iso} d={p.d} fillRule="evenodd" fill="rgb(var(--muted) / 0.65)" stroke="rgb(var(--border))" strokeWidth={0.4 / view.k} />
               ))}
               {/* International arcs */}
               {scope !== 'national' && intlArcs.map((a) => (
@@ -274,7 +355,7 @@ export function WorldTrafficMap({ from, to, siteId, onLoadingChange }: {
                   d={a.d}
                   fill="none"
                   stroke="rgb(var(--status-info))"
-                  strokeWidth={hover?.title === `i|${a.pair.srcCountry}|${a.pair.dstCountry}` ? a.width + 1.5 : a.width}
+                  strokeWidth={(hover?.title === `i|${a.pair.srcCountry}|${a.pair.dstCountry}` ? a.width + 1.5 : a.width) / view.k}
                   strokeLinecap="round"
                   opacity={hover && hover.title !== `i|${a.pair.srcCountry}|${a.pair.dstCountry}` ? 0.25 : 0.7}
                   onMouseEnter={() => setHover({ title: `i|${a.pair.srcCountry}|${a.pair.dstCountry}`, sub: `${flagEmoji(a.pair.srcCountry)} ${a.pair.srcCountry} → ${flagEmoji(a.pair.dstCountry)} ${a.pair.dstCountry}`, bytes: a.pair.estBytes })}
@@ -288,26 +369,35 @@ export function WorldTrafficMap({ from, to, siteId, onLoadingChange }: {
                   d={a.d}
                   fill="none"
                   stroke="rgb(var(--status-ok))"
-                  strokeWidth={hover?.title === `n|${a.pair.srcSiteId}|${a.pair.dstSiteId}` ? a.width + 1.5 : a.width}
+                  strokeWidth={(hover?.title === `n|${a.pair.srcSiteId}|${a.pair.dstSiteId}` ? a.width + 1.5 : a.width) / view.k}
                   strokeLinecap="round"
                   opacity={hover && hover.title !== `n|${a.pair.srcSiteId}|${a.pair.dstSiteId}` ? 0.25 : 0.75}
                   onMouseEnter={() => setHover({ title: `n|${a.pair.srcSiteId}|${a.pair.dstSiteId}`, sub: `${a.pair.srcSiteName} → ${a.pair.dstSiteName}`, bytes: a.pair.estBytes })}
                   onMouseLeave={() => setHover(null)}
                 />
               ))}
-              {/* Site markers */}
+              {/* Site markers — counter-scaled so they stay the same size on screen. */}
               {siteMarkers.map((s) => (
                 <g key={s.id}>
-                  <circle cx={s.pos.x} cy={s.pos.y} r="3.2" fill="rgb(var(--card))" stroke="rgb(var(--status-ok))" strokeWidth="1.4" />
-                  <text x={s.pos.x + 5} y={s.pos.y + 3} fontSize="9" fill="rgb(var(--secondary))">{s.name}</text>
+                  <circle cx={s.pos.x} cy={s.pos.y} r={3.2 / view.k} fill="rgb(var(--card))" stroke="rgb(var(--status-ok))" strokeWidth={1.4 / view.k} />
+                  <text x={s.pos.x + 5 / view.k} y={s.pos.y + 3 / view.k} fontSize={9 / view.k} fill="rgb(var(--secondary))">{s.name}</text>
                 </g>
               ))}
             </svg>
           ) : null}
 
+          {/* Zoom controls — wheel zoom + drag pan live on the SVG itself. */}
+          {hasMap && geo && (
+            <div className="absolute right-2 top-2 flex flex-col gap-1">
+              <button type="button" onClick={() => zoomBy(1.5)} title="Zoom in" className="rounded-md border border-border bg-card/95 p-1.5 text-secondary hover:bg-muted"><ZoomIn size={13} /></button>
+              <button type="button" onClick={() => zoomBy(1 / 1.5)} title="Zoom out" disabled={view.k <= 1} className="rounded-md border border-border bg-card/95 p-1.5 text-secondary hover:bg-muted disabled:opacity-40"><ZoomOut size={13} /></button>
+              <button type="button" onClick={() => setView({ x: 0, y: 0, k: 1 })} title="Reset view" disabled={view.k <= 1} className="rounded-md border border-border bg-card/95 p-1.5 text-secondary hover:bg-muted disabled:opacity-40"><RotateCcw size={13} /></button>
+            </div>
+          )}
+
           {/* Hover readout — pinned corner box (arcs are thin, no cursor-follow). */}
           {hover && (
-            <div className="pointer-events-none absolute right-2 top-2 rounded-md border border-border bg-card/95 px-3 py-1.5 text-xs shadow-sm">
+            <div className="pointer-events-none absolute left-2 top-2 rounded-md border border-border bg-card/95 px-3 py-1.5 text-xs shadow-sm">
               <p className="font-medium">{hover.sub}</p>
               <p className="font-mono text-secondary">{formatBytes(hover.bytes)}</p>
             </div>
