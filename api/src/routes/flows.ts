@@ -6,7 +6,10 @@ import { resolveOne } from '../utils/reverseDns';
 import { lookupGeoIp } from '../utils/geoIp';
 import { getFlowIngestStats } from '../workers/flows';
 import { getFlowSecurityStats, resetFlowSecurityBaseline, FLOW_SECURITY_KINDS } from '../workers/flowSecurity';
-import { getEffectiveSettingValue } from '../systemSettings';
+import { getEffectiveValues, getEffectiveSettingValue, invalidateSystemSettingsCache } from '../systemSettings';
+import { getRepoFile, openRepoFile } from '../fileRepo';
+import { readMapBasemapStatus } from '../workers/mapBasemap';
+import { countryForPoint } from '../utils/countryLookup';
 import { mergeNetworkRows } from './networks';
 import type { MergedNetwork } from './networks';
 import { ipInCidr } from '@unm/plugin-sdk';
@@ -1058,5 +1061,216 @@ function safeParseContext(s: string): Record<string, unknown> | null {
     return null;
   }
 }
+
+/** All sites with their WGS84 coordinates (map markers + country derivation). */
+interface MapSite { id: string; name: string; latitude: number | null; longitude: number | null }
+
+async function loadMapSites(): Promise<MapSite[]> {
+  const res = await pool.query(`SELECT id, name, latitude, longitude FROM sites ORDER BY name`);
+  return res.rows.map((r) => ({
+    id: String(r.id),
+    name: String(r.name),
+    latitude: r.latitude != null ? Number(r.latitude) : null,
+    longitude: r.longitude != null ? Number(r.longitude) : null,
+  }));
+}
+
+/**
+ * GET /v1/flows/map?from&to&siteId — traffic pairs for the world-map tab.
+ *
+ * International pairs are COUNTRY→COUNTRY; national pairs are SITE→SITE:
+ *   - external→external rows carry stored GeoIP codes on both sides (transit);
+ *   - internal↔external rows carry a device id on one side — that endpoint's
+ *     country is derived from the site coordinates via point-in-polygon against
+ *     the stored basemap (countryLookup), so no external service is needed;
+ *   - internal→internal rows between two devices become a site pair when both
+ *     devices belong to sites.
+ */
+router.get('/flows/map', requireAuth, requirePermission('flows:read'), async (req: Request, res: Response) => {
+  const q = req.query as Record<string, unknown>;
+  const { fromMs, toMs } = resolveWindow(q);
+
+  try {
+    const use5m = toMs - fromMs <= 31 * 86_400_000;
+    const table = use5m ? 'flow_agg_5m' : 'flow_agg_1h';
+
+    const params: unknown[] = [new Date(fromMs).toISOString(), new Date(toMs).toISOString()];
+    // Map view: traffic INVOLVING the site (either endpoint), like /flows/pairs.
+    const site = await resolveSiteFilter(params, q, true);
+    if (site.kind === 'unknown') return res.status(400).json({ error: `Unknown site id: ${String(q.siteId)}` });
+
+    const sites = await loadMapSites();
+    if (site.kind === 'ok' && site.empty) {
+      res.status(200).json({ fromMs, toMs, table, international: [], national: [], unplacedInternationalBytes: 0, sites });
+      return;
+    }
+
+    const siteClause = site.kind === 'ok' ? site.clause : '';
+    const [extExt, intExt, extInt, nat] = await Promise.all([
+      // External→external (transit): both endpoints have stored GeoIP codes.
+      pool.query(
+        `SELECT "srcCountryCode" AS src_country, "dstCountryCode" AS dst_country, SUM("estBytes")::bigint AS est_bytes
+         FROM ${table}
+         WHERE bucket >= $1 AND bucket < $2 AND "srcClass" = 'internet' AND "dstClass" = 'internet'
+           AND "srcCountryCode" IS NOT NULL AND "dstCountryCode" IS NOT NULL${siteClause}
+         GROUP BY 1, 2 ORDER BY est_bytes DESC LIMIT 500`,
+        params
+      ),
+      // Internal→external: source is a device on a site (country from its location).
+      pool.query(
+        `SELECT "srcDeviceId" AS src_device, "dstCountryCode" AS dst_country, SUM("estBytes")::bigint AS est_bytes
+         FROM ${table}
+         WHERE bucket >= $1 AND bucket < $2 AND "srcClass" = 'internal' AND "dstClass" = 'internet'
+           AND "srcDeviceId" IS NOT NULL AND "dstCountryCode" IS NOT NULL${siteClause}
+         GROUP BY 1, 2 ORDER BY est_bytes DESC LIMIT 500`,
+        params
+      ),
+      // External→internal: mirror of the above.
+      pool.query(
+        `SELECT "srcCountryCode" AS src_country, "dstDeviceId" AS dst_device, SUM("estBytes")::bigint AS est_bytes
+         FROM ${table}
+         WHERE bucket >= $1 AND bucket < $2 AND "srcClass" = 'internet' AND "dstClass" = 'internal'
+           AND "dstDeviceId" IS NOT NULL AND "srcCountryCode" IS NOT NULL${siteClause}
+         GROUP BY 1, 2 ORDER BY est_bytes DESC LIMIT 500`,
+        params
+      ),
+      // Internal→internal between two devices (national traffic).
+      pool.query(
+        `SELECT "srcDeviceId" AS src_device, "dstDeviceId" AS dst_device, SUM("estBytes")::bigint AS est_bytes
+         FROM ${table}
+         WHERE bucket >= $1 AND bucket < $2 AND "srcClass" = 'internal' AND "dstClass" = 'internal'
+           AND "srcDeviceId" IS NOT NULL AND "dstDeviceId" IS NOT NULL AND "srcDeviceId" <> "dstDeviceId"${siteClause}
+         GROUP BY 1, 2 ORDER BY est_bytes DESC LIMIT 500`,
+        params
+      ),
+    ]);
+
+    // Device → site resolution for every device id that appeared above.
+    const deviceIds = [
+      ...intExt.rows.map((r) => String(r.src_device)),
+      ...extInt.rows.map((r) => String(r.dst_device)),
+      ...nat.rows.flatMap((r) => [String(r.src_device), String(r.dst_device)]),
+    ];
+    const deviceSite = new Map<string, string>();
+    if (deviceIds.length > 0) {
+      const res = await pool.query(`SELECT id, "siteId" FROM devices WHERE id = ANY($1::text[]) AND "siteId" IS NOT NULL`, [Array.from(new Set(deviceIds))]);
+      for (const r of res.rows) deviceSite.set(String(r.id), String(r.siteid ?? r.siteId));
+    }
+
+    const siteById = new Map(sites.map((s) => [s.id, s]));
+    // Site → country is stable within a request; memoize the async lookup.
+    const siteCountryCache = new Map<string, string | null>();
+    const siteCountry = async (siteId: string): Promise<string | null> => {
+      if (!siteCountryCache.has(siteId)) {
+        const s = siteById.get(siteId);
+        siteCountryCache.set(siteId, s?.latitude != null && s.longitude != null ? await countryForPoint(s.latitude, s.longitude) : null);
+      }
+      return siteCountryCache.get(siteId)!;
+    };
+
+    // Merge the three international sources into ordered country pairs.
+    const pairBytes = new Map<string, number>();
+    let unplacedInternationalBytes = 0;
+    const addPair = (src: string | null, dst: string | null, bytes: number): void => {
+      if (!src || !dst) { unplacedInternationalBytes += bytes; return; } // endpoint without a resolvable country
+      pairBytes.set(`${src}->${dst}`, (pairBytes.get(`${src}->${dst}`) ?? 0) + bytes);
+    };
+    for (const r of extExt.rows) addPair(String(r.src_country), String(r.dst_country), Number(r.est_bytes));
+    for (const r of intExt.rows) {
+      const s = siteById.get(deviceSite.get(String(r.src_device)) ?? '');
+      if (!s || s.latitude == null || s.longitude == null) { unplacedInternationalBytes += Number(r.est_bytes); continue; }
+      addPair(await siteCountry(s.id), String(r.dst_country), Number(r.est_bytes));
+    }
+    for (const r of extInt.rows) {
+      const s = siteById.get(deviceSite.get(String(r.dst_device)) ?? '');
+      if (!s || s.latitude == null || s.longitude == null) { unplacedInternationalBytes += Number(r.est_bytes); continue; }
+      addPair(String(r.src_country), await siteCountry(s.id), Number(r.est_bytes));
+    }
+
+    // National pairs: device pair → site pair (both devices must sit on sites).
+    const national: Array<{ srcSiteId: string; srcSiteName: string; srcLatitude: number | null; srcLongitude: number | null; dstSiteId: string; dstSiteName: string; dstLatitude: number | null; dstLongitude: number | null; estBytes: number; unplaced: boolean }> = [];
+    for (const r of nat.rows) {
+      const a = siteById.get(deviceSite.get(String(r.src_device)) ?? '');
+      const b = siteById.get(deviceSite.get(String(r.dst_device)) ?? '');
+      if (!a || !b) continue; // device without a site — not part of the site-to-site view
+      national.push({
+        srcSiteId: a.id, srcSiteName: a.name, srcLatitude: a.latitude, srcLongitude: a.longitude,
+        dstSiteId: b.id, dstSiteName: b.name, dstLatitude: b.latitude, dstLongitude: b.longitude,
+        estBytes: Number(r.est_bytes),
+        unplaced: a.latitude == null || a.longitude == null || b.latitude == null || b.longitude == null,
+      });
+    }
+
+    res.status(200).json({
+      fromMs,
+      toMs,
+      table,
+      international: [...pairBytes.entries()]
+        .map(([k, estBytes]) => { const [srcCountry, dstCountry] = k.split('->'); return { srcCountry, dstCountry, estBytes }; })
+        .sort((x, y) => y.estBytes - x.estBytes),
+      national: national.sort((x, y) => y.estBytes - x.estBytes),
+      unplacedInternationalBytes,
+      sites,
+    });
+  } catch (error) {
+    console.error('Error querying map pairs:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+/**
+ * GET /v1/flows/map/basemap — worker status + the stored GeoJSON world map.
+ * The client refetches this while a build is in progress (progress "N/M").
+ */
+router.get('/flows/map/basemap', requireAuth, requirePermission('flows:read'), async (_req: Request, res: Response) => {
+  try {
+    const status = await readMapBasemapStatus();
+    const values = await getEffectiveValues();
+    const fileId = String(values.mapBasemapFileId ?? '').trim() || null;
+    const source = String(values.mapBasemapCustomUrl ?? '').trim() ? 'custom' : 'osm';
+
+    let geojson: unknown = null;
+    if (fileId) {
+      try {
+        const entry = await getRepoFile(fileId);
+        if (entry) {
+          const opened = await openRepoFile(entry.id);
+          if (opened) {
+            const chunks: Buffer[] = [];
+            for await (const chunk of opened.stream) chunks.push(chunk as Buffer);
+            geojson = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+          }
+        }
+      } catch (err) {
+        console.warn('[flows/map] could not read basemap file:', (err as Error).message);
+      }
+    }
+
+    res.status(200).json({ ...status, fileId, source, geojson });
+  } catch (error) {
+    console.error('Error reading map basemap:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+/**
+ * POST /v1/flows/map/fetch-basemap — "Fetch now" button on the Map tab.
+ * Sets the managed flag consumed by the next worker beat (≤60 s later).
+ */
+router.post('/flows/map/fetch-basemap', requireAuth, requirePermission('system:write'), async (_req: Request, res: Response) => {
+  try {
+    await pool.query(
+      `INSERT INTO system_settings ("key", value, "updatedAt") VALUES ('mapBasemapBuildRequested', 'true', $1)
+       ON CONFLICT ("key") DO UPDATE SET value = EXCLUDED.value, "updatedAt" = EXCLUDED."updatedAt"`,
+      [new Date().toISOString()]
+    );
+    invalidateSystemSettingsCache();
+    const status = await readMapBasemapStatus();
+    res.status(200).json({ requested: true, ...status });
+  } catch (error) {
+    console.error('Error requesting basemap fetch:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
 
 export default router;

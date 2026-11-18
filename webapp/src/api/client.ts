@@ -1451,6 +1451,68 @@ export interface FlowPairsResponse {
   pairs: FlowPair[];
 }
 
+/** One international country→country traffic pair (GET /flows/map). Country
+ * codes are ISO-3166 alpha-2; the site-side code is derived from the site's
+ * coordinates against the stored basemap, the external side from GeoIP. */
+export interface FlowMapInternationalPair {
+  srcCountry: string;
+  dstCountry: string;
+  estBytes: number;
+}
+
+/** One national site→site traffic pair (GET /flows/map). */
+export interface FlowMapNationalPair {
+  srcSiteId: string;
+  srcSiteName: string;
+  srcLatitude: number | null;
+  srcLongitude: number | null;
+  dstSiteId: string;
+  dstSiteName: string;
+  dstLatitude: number | null;
+  dstLongitude: number | null;
+  estBytes: number;
+  /** True when either site has no coordinates — the pair cannot be drawn. */
+  unplaced: boolean;
+}
+
+/** A site with its WGS84 coordinates (map markers, GET /flows/map). */
+export interface FlowMapSite {
+  id: string;
+  name: string;
+  latitude: number | null;
+  longitude: number | null;
+}
+
+export interface FlowMapResponse {
+  fromMs: number;
+  toMs: number;
+  table: 'flow_agg_5m' | 'flow_agg_1h';
+  international: FlowMapInternationalPair[];
+  national: FlowMapNationalPair[];
+  /** International bytes whose site endpoint has no resolvable country. */
+  unplacedInternationalBytes: number;
+  sites: FlowMapSite[];
+}
+
+/** Minimal GeoJSON shapes of the stored world map (GET /flows/map/basemap). */
+export interface MapBasemapFeature {
+  type: 'Feature';
+  properties?: { iso?: string; name?: string };
+  geometry?: { type: 'Polygon' | 'MultiPolygon'; coordinates: number[][][] | number[][][][] } | null;
+}
+
+/** Status of the map-basemap worker + the stored GeoJSON world map. */
+export interface MapBasemapResponse {
+  lastAttemptAt: string | null;
+  lastSuccessAt: string | null;
+  lastError: string;
+  /** "183/249" while a build is in flight, empty when idle. */
+  progress: string;
+  fileId: string | null;
+  source: 'osm' | 'custom';
+  geojson?: { type: 'FeatureCollection'; features: MapBasemapFeature[] } | null;
+}
+
 /** One known internal device with its total estimated bytes over the window
  * (GET /flows/devices) — feeds node sizing on the topology page. */
 export interface FlowDeviceRow {
@@ -4585,6 +4647,21 @@ export const api = {
     const suffix = qs.toString() ? `?${qs.toString()}` : '';
     return apiFetch<FlowPairsResponse>(`/flows/pairs${suffix}`);
   },
+  /** Traffic pairs for the world-map tab — international country→country and
+   * national site→site (Flows page "Map" tab). */
+  flowsMap: (params?: { from?: string; to?: string; siteId?: string }) => {
+    const qs = new URLSearchParams();
+    if (params?.from) qs.set('from', params.from);
+    if (params?.to) qs.set('to', params.to);
+    if (params?.siteId) qs.set('siteId', params.siteId);
+    const suffix = qs.toString() ? `?${qs.toString()}` : '';
+    return apiFetch<FlowMapResponse>(`/flows/map${suffix}`);
+  },
+  /** World-map basemap: worker status + stored GeoJSON (refetch while building). */
+  mapBasemap: () => apiFetch<MapBasemapResponse>('/flows/map/basemap'),
+  /** "Fetch now" — sets the flag consumed by the next worker beat (≤60 s). */
+  fetchMapBasemap: () =>
+    apiFetch<{ requested: boolean; lastAttemptAt: string | null; lastSuccessAt: string | null; lastError: string; progress: string }>('/flows/map/fetch-basemap', { method: 'POST' }),
   /** Per-device TOTAL traffic over the window — topology node sizing. */
   flowsDevices: (params?: { from?: string; to?: string; siteId?: string }) => {
     const qs = new URLSearchParams();

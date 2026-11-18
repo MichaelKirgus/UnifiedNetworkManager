@@ -1,0 +1,352 @@
+import { pool } from '../db';
+import { getEffectiveValues, invalidateSystemSettingsCache } from '../systemSettings';
+import { addRepoFile, deleteRepoFile, getRepoFile, listRepoFiles, openRepoFile } from '../fileRepo';
+import { resolveWebFetchProvider, fetchViaWebFetch, type WebFetchProvider } from '../webFetchBroker';
+import { emitNotification, resolveNotificationsByDedupeKeys } from '../notifications';
+import { COUNTRIES, type CountryEntry } from '../data/countries';
+import { simplifyGeometry, countGeometryPoints } from '../utils/geoSimplify';
+import { LEADER_KEYS } from './leader';
+import { initWorker, trackBeat } from './stats';
+
+/**
+ * Map basemap worker (leader-gated, key 9025) — keeps the world-map boundary
+ * data for the Flows "Map" tab fresh in the central file repository.
+ *
+ * The API itself never opens an outbound internet connection: every download
+ * goes THROUGH the web-fetch plugin (capability `webFetch`), exactly like the
+ * GeoIP worker — so a firewalled deployment only needs egress on that one
+ * service's network segment (or points mapBasemapCustomUrl at an internal
+ * mirror).
+ *
+ * Two sources:
+ *   - custom URL (mapBasemapCustomUrl): ONE direct file, expected to be a
+ *     GeoJSON FeatureCollection of country polygons. Stored as-is (no
+ *     simplification — the operator controls what they serve).
+ *   - default = OpenStreetMap via Nominatim: one polygon_geojson request per
+ *     country (≥1.1 s apart, well inside Nominatim's 1 req/s usage policy),
+ *     name-verified against data/countries.ts so an ambiguous search can never
+ *     store the wrong boundary, then simplified with Douglas-Peucker — full-res
+ *     OSM polygons are ~3 MB per country (~700 MB for the world) and useless at
+ *     world-map scale. The merged FeatureCollection is stored under category
+ *     'map'; each feature carries properties.iso (the GeoIP code used by the
+ *     flow aggregates).
+ *
+ * Builds are incremental: a cycle fetches only countries missing from the
+ * current file, so an interrupted build resumes where it stopped and monthly
+ * refreshes re-fetch everything once per mapBasemapRefreshDays.
+ */
+
+const BEAT_MS = 60_000; // fixed beat — build work is budgeted per cycle below
+/** Countries fetched per cycle (≥1.1 s apart → ~15-30 s of wire time). */
+const BATCH_PER_CYCLE = 8;
+/** Pacing between Nominatim requests — the usage policy allows 1 req/s max. */
+const NOMINATIM_PACING_MS = 1_100;
+/** Simplification tolerance in degrees (~2 km) — world-map scale detail. */
+const SIMPLIFY_TOLERANCE_DEG = 0.02;
+/** Nominatim requires an identifying User-Agent (usage policy). */
+const NOMINATIM_UA = 'UnifiedNetworkManager/1.0 (map basemap build; self-hosted network manager)';
+
+interface BasemapStatus {
+  lastAttemptAt: string | null;
+  lastSuccessAt: string | null;
+  lastError: string;
+  /** "183/249" while a build is in flight, "" when idle. */
+  progress: string;
+}
+
+const STATUS_KEYS = ['mapBasemapLastAttemptAt', 'mapBasemapLastSuccessAt', 'mapBasemapLastError', 'mapBasemapProgress'] as const;
+
+/** Worker status (also served by GET /flows/map/basemap). */
+export async function readMapBasemapStatus(): Promise<BasemapStatus> {
+  const out: BasemapStatus = { lastAttemptAt: null, lastSuccessAt: null, lastError: '', progress: '' };
+  try {
+    const res = await pool.query(
+      `SELECT "key", value FROM system_settings WHERE "key" IN (${STATUS_KEYS.map((_, i) => `$${i + 1}`).join(', ')})`,
+      [...STATUS_KEYS]
+    );
+    for (const row of res.rows) {
+      if (row.key === 'mapBasemapLastAttemptAt') out.lastAttemptAt = String(row.value);
+      else if (row.key === 'mapBasemapLastSuccessAt') out.lastSuccessAt = String(row.value);
+      else if (row.key === 'mapBasemapLastError') out.lastError = String(row.value);
+      else if (row.key === 'mapBasemapProgress') out.progress = String(row.value);
+    }
+  } catch { /* table hiccup — treat as fresh */ }
+  return out;
+}
+
+async function writeStatusKey(key: string, value: string): Promise<void> {
+  await pool.query(
+    `INSERT INTO system_settings ("key", value, "updatedAt") VALUES ($1, $2, $3)
+     ON CONFLICT ("key") DO UPDATE SET value = EXCLUDED.value, "updatedAt" = EXCLUDED."updatedAt"`,
+    [key, value, new Date().toISOString()]
+  );
+}
+
+async function setActiveFileId(fileId: string): Promise<void> {
+  await writeStatusKey('mapBasemapFileId', fileId);
+  invalidateSystemSettingsCache(); // the pointer is a registry entry — bust its cache too
+}
+
+/** Loads the current basemap as an iso → feature map (empty when none stored). */
+async function loadCurrentFeatures(): Promise<Map<string, unknown>> {
+  const values = await getEffectiveValues();
+  const fileId = String(values.mapBasemapFileId ?? '').trim();
+  if (!fileId) return new Map();
+  try {
+    const entry = await getRepoFile(fileId);
+    if (!entry) return new Map();
+    const opened = await openRepoFile(entry.id);
+    if (!opened) return new Map();
+    const chunks: Buffer[] = [];
+    for await (const chunk of opened.stream) chunks.push(chunk as Buffer);
+    const fc = JSON.parse(Buffer.concat(chunks).toString('utf8')) as { features?: Array<{ properties?: { iso?: string } }> };
+    const byIso = new Map<string, unknown>();
+    for (const f of fc.features ?? []) {
+      const iso = String(f.properties?.iso ?? '').toUpperCase();
+      if (iso) byIso.set(iso, f);
+    }
+    return byIso;
+  } catch (err) {
+    // Corrupt/unreadable file — rebuild from scratch rather than fail forever.
+    console.warn('[map-basemap] could not read current basemap, rebuilding:', (err as Error).message);
+    return new Map();
+  }
+}
+
+/** Prunes superseded map files (keeps only the active one), like geoip does. */
+async function pruneOldFiles(activeFileId: string): Promise<void> {
+  const all = await listRepoFiles('map');
+  for (const f of all) {
+    if (f.id === activeFileId) continue;
+    try {
+      await deleteRepoFile(f.id);
+    } catch (err) {
+      console.warn(`[map-basemap] failed to prune old file ${f.name}:`, (err as Error).message);
+    }
+  }
+}
+
+/** True when the stored basemap is younger than the refresh interval. */
+function isFresh(lastSuccessAt: string | null, refreshDays: number): boolean {
+  if (!lastSuccessAt) return false;
+  const ageMs = Date.now() - new Date(lastSuccessAt).getTime();
+  return Number.isFinite(ageMs) && ageMs < refreshDays * 86_400_000;
+}
+
+/** Verifies a Nominatim response name against the entry's accepted names. */
+function nameMatches(entry: CountryEntry, returnedName: string): boolean {
+  const n = returnedName.trim().toLowerCase();
+  if (!n) return false;
+  const accepted = [entry.name, ...(entry.aliases ?? [])].map((a) => a.toLowerCase());
+  return accepted.includes(n);
+}
+
+/** One Nominatim polygon fetch → simplified GeoJSON feature (null on mismatch). */
+async function fetchCountryFeature(
+  provider: WebFetchProvider,
+  entry: CountryEntry,
+  proxyUrl?: string,
+  timeoutMs = 120_000,
+  maxBytes = 536_870_912
+): Promise<{ feature: unknown; pointsBefore: number } | null> {
+  const url = `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(entry.name)}&format=geojson&polygon_geojson=1&limit=1&accept-language=en`;
+  const { bytes, result } = await fetchViaWebFetch(provider, {
+    url,
+    proxyUrl,
+    timeoutMs,
+    maxBytes,
+    headers: { 'User-Agent': NOMINATIM_UA },
+  });
+  if (result.status < 200 || result.status >= 300) return null;
+  const fc = JSON.parse(bytes.toString('utf8')) as { features?: Array<{ properties?: Record<string, unknown>; geometry: { type: string; coordinates: unknown } }> };
+  const f = fc.features?.[0];
+  if (!f || !nameMatches(entry, String(f.properties?.name ?? ''))) return null; // wrong/ambiguous result — never store it
+  const simplified = simplifyGeometry(f.geometry, SIMPLIFY_TOLERANCE_DEG);
+  if (!simplified) return null; // degenerate after simplification (e.g. a line)
+  return {
+    feature: { type: 'Feature', properties: { iso: entry.iso, name: entry.name }, geometry: simplified },
+    pointsBefore: countGeometryPoints(f.geometry),
+  };
+}
+
+/** Custom-URL source: one direct file, stored as-is. */
+async function customUrlCycle(customUrl: string): Promise<void> {
+  const values = await getEffectiveValues();
+  const provider = await resolveWebFetchProvider();
+  if (!provider) throw new Error('No web-fetch plugin is registered/online — start the web-fetch-plugin service (or another plugin with capability `webFetch`)');
+
+  const proxyUrl = String(values.webFetchProxyUrl ?? '').trim() || undefined;
+  const timeoutMs = Number(values.webFetchTimeoutMs) || 120_000;
+  const maxBytes = Number(values.webFetchMaxBytes) || 536_870_912;
+
+  console.log(`[map-basemap] fetching custom basemap ${customUrl} via ${provider.name}`);
+  const { bytes, result } = await fetchViaWebFetch(provider, { url: customUrl, proxyUrl, timeoutMs, maxBytes, extract: 'auto' });
+  // Sanity-check it is a GeoJSON FeatureCollection before publishing it.
+  const fc = JSON.parse(bytes.toString('utf8')) as { type?: string; features?: unknown[] };
+  if (fc.type !== 'FeatureCollection' || !Array.isArray(fc.features)) {
+    throw new Error(`Custom basemap URL did not return a GeoJSON FeatureCollection (got ${String(fc.type ?? 'unknown')})`);
+  }
+
+  const name = `map-basemap-custom-${new Date().toISOString().slice(0, 10)}.geojson`;
+  const { entry } = await addRepoFile({ data: bytes, name, category: 'map', uploadedBy: 'plugin' });
+  await setActiveFileId(entry.id);
+  await writeStatusKey('mapBasemapLastSuccessAt', new Date().toISOString());
+  await writeStatusKey('mapBasemapLastError', '');
+  await writeStatusKey('mapBasemapProgress', '');
+  console.log(`[map-basemap] stored ${entry.name} (${result.sizeBytes} bytes, sha256 ${result.sha256.slice(0, 12)}…)`);
+  await pruneOldFiles(entry.id);
+  await resolveNotificationsByDedupeKeys(['map-basemap-fetch-failed']);
+}
+
+/** OSM source: fetch the missing countries for this cycle (incremental). */
+async function osmCycle(current: Map<string, unknown>): Promise<void> {
+  const values = await getEffectiveValues();
+  const provider = await resolveWebFetchProvider();
+  if (!provider) throw new Error('No web-fetch plugin is registered/online — start the web-fetch-plugin service (or another plugin with capability `webFetch`)');
+
+  const proxyUrl = String(values.webFetchProxyUrl ?? '').trim() || undefined;
+  const timeoutMs = Number(values.webFetchTimeoutMs) || 120_000;
+  const maxBytes = Number(values.webFetchMaxBytes) || 536_870_912;
+
+  const missing = COUNTRIES.filter((c) => !current.has(c.iso));
+  if (missing.length === 0) {
+    // Complete — just record success so the freshness check has a timestamp.
+    await writeStatusKey('mapBasemapLastSuccessAt', new Date().toISOString());
+    await writeStatusKey('mapBasemapLastError', '');
+    await writeStatusKey('mapBasemapProgress', '');
+    return;
+  }
+
+  const batch = missing.slice(0, BATCH_PER_CYCLE);
+  let fetched = 0;
+  for (let i = 0; i < batch.length; i++) {
+    const entry = batch[i];
+    try {
+      const res = await fetchCountryFeature(provider, entry, proxyUrl, timeoutMs, maxBytes);
+      if (res) {
+        current.set(entry.iso, res.feature);
+        fetched++;
+        console.log(`[map-basemap] ${entry.iso} (${entry.name}): simplified from ${res.pointsBefore.toLocaleString()} points`);
+      } else {
+        console.warn(`[map-basemap] ${entry.iso}: Nominatim returned no matching polygon — will retry next cycle`);
+      }
+    } catch (err) {
+      // One country failing must not abort the whole build — resume it next beat.
+      console.warn(`[map-basemap] ${entry.iso} fetch failed:`, (err as Error).message);
+    }
+    if (i < batch.length - 1) await new Promise((r) => setTimeout(r, NOMINATIM_PACING_MS)); // Nominatim usage policy
+  }
+
+  if (fetched === 0) {
+    const msg = 'No countries could be fetched this cycle (Nominatim unreachable or all lookups mismatched)';
+    await writeStatusKey('mapBasemapLastError', msg);
+    throw new Error(msg); // trackBeat records it; the build resumes next beat
+  }
+
+  const remaining = COUNTRIES.length - current.size;
+  const fc = { type: 'FeatureCollection' as const, features: [...current.values()] };
+  const name = `map-basemap-osm-${new Date().toISOString().slice(0, 10)}.geojson`;
+  const { entry } = await addRepoFile({ data: Buffer.from(JSON.stringify(fc), 'utf8'), name, category: 'map', uploadedBy: 'plugin' });
+  await setActiveFileId(entry.id);
+  await writeStatusKey('mapBasemapProgress', remaining > 0 ? `${current.size}/${COUNTRIES.length}` : '');
+  if (remaining === 0) {
+    await writeStatusKey('mapBasemapLastSuccessAt', new Date().toISOString());
+    await writeStatusKey('mapBasemapLastError', '');
+    console.log(`[map-basemap] build complete — ${current.size} countries stored (${entry.name})`);
+    await resolveNotificationsByDedupeKeys(['map-basemap-fetch-failed']);
+  } else {
+    // Still building — keep the last success timestamp (the map serves partial data).
+    console.log(`[map-basemap] build in progress: ${current.size}/${COUNTRIES.length} countries`);
+  }
+  await pruneOldFiles(entry.id);
+}
+
+/** One cycle. Never throws to the timer — failures land in status + notification. */
+export async function mapBasemapCycle(): Promise<void> {
+  const values = await getEffectiveValues();
+  if (!values.mapBasemapEnabled) return; // master switch off — no cycles, no noise
+
+  const nowIso = new Date().toISOString();
+  await writeStatusKey('mapBasemapLastAttemptAt', nowIso);
+
+  try {
+    const customUrl = String(values.mapBasemapCustomUrl ?? '').trim();
+    const refreshDays = Number(values.mapBasemapRefreshDays) || 30;
+    const status = await readMapBasemapStatus();
+    const requested = String(values.mapBasemapBuildRequested ?? '') === 'true';
+
+    if (customUrl) {
+      // Single-file source: only re-fetch when stale or explicitly requested.
+      if (!requested && isFresh(status.lastSuccessAt, refreshDays)) return;
+      await customUrlCycle(customUrl);
+    } else {
+      const current = await loadCurrentFeatures();
+      const complete = current.size >= COUNTRIES.length;
+      if (!requested && complete && isFresh(status.lastSuccessAt, refreshDays)) return; // idle — nothing due
+      if (complete && !isFresh(status.lastSuccessAt, refreshDays) && !requested) {
+        // Periodic full rebuild: drop the stored file so every country re-fetches.
+        const fileId = String(values.mapBasemapFileId ?? '').trim();
+        if (fileId) await deleteRepoFile(fileId).catch(() => undefined);
+        current.clear();
+      }
+      await osmCycle(current);
+    }
+  } catch (err) {
+    const msg = ((err as Error).message ?? String(err)).slice(0, 500);
+    await writeStatusKey('mapBasemapLastError', msg);
+    console.error(`[map-basemap] cycle failed:`, msg);
+
+    // One live notification per failure condition (dedupe key keeps it stable).
+    const status = await readMapBasemapStatus();
+    if (!status.lastSuccessAt) {
+      await emitNotification({
+        severity: 'warning',
+        source: 'system',
+        title: 'Map basemap not available yet',
+        message: `The world-map boundaries have never been fetched — the Flows Map tab shows no map. Last error: ${msg}`,
+        dedupeKey: 'map-basemap-fetch-failed',
+      });
+    } else {
+      await emitNotification({
+        severity: 'warning',
+        source: 'system',
+        title: 'Map basemap refresh failed (serving last good data)',
+        message: `The map boundary download failed — the Flows Map tab keeps using the previously stored file. Last error: ${msg}`,
+        dedupeKey: 'map-basemap-fetch-failed',
+      });
+    }
+  } finally {
+    // A manual "fetch now" is consumed by this cycle regardless of outcome.
+    await writeStatusKey('mapBasemapBuildRequested', 'false').catch(() => undefined);
+  }
+}
+
+/** Starts the map basemap worker loop (same rules as every other worker). */
+export function startMapBasemapWorker(): () => void {
+  initWorker('mapBasemap', LEADER_KEYS.mapBasemap);
+  console.log('[map-basemap] worker started');
+
+  // Overlap guard — a build cycle takes ~30 s and must not pile up.
+  let busy = false;
+  const beat = async (): Promise<void> => {
+    if (busy) return; // previous cycle still running — skip this tick
+    busy = true;
+    try {
+      await mapBasemapCycle();
+    } finally {
+      busy = false;
+    }
+  };
+
+  void trackBeat('mapBasemap', beat).catch((err) => {
+    console.error('[map-basemap] initial cycle failed:', err);
+  });
+
+  const timer = setInterval(() => {
+    void trackBeat('mapBasemap', beat).catch((err) => {
+      console.error('[map-basemap] cycle failed:', err);
+    });
+  }, BEAT_MS);
+
+  return () => clearInterval(timer);
+}

@@ -59,6 +59,7 @@ import { startPluginMetricsWorker } from './workers/pluginMetrics';
 import { startNtpReferencesWorker } from './workers/ntpReferences';
 import { startUpdateCheckWorker } from './workers/updateCheck';
 import { startGeoIpWorker } from './workers/geoip';
+import { startMapBasemapWorker } from './workers/mapBasemap';
 import { startCveWorker } from './cve/worker';
 import { startFlowsWorker } from './workers/flows';
 import { startFlowSecurityWorker } from './workers/flowSecurity';
@@ -453,6 +454,10 @@ async function main(): Promise<void> {
 
     // GeoIP database refresh (leader-gated; cadence from geoipFetchIntervalHours).
     void runAsLeader(LEADER_KEYS.geoip, 'geoip', () => startGeoIpWorker()).then((stop) => workerStops.push(stop));
+
+    // World-map basemap for the Flows "Map" tab (leader-gated; OSM via web-fetch,
+    // cadence from mapBasemapRefreshDays).
+    void runAsLeader(LEADER_KEYS.mapBasemap, 'mapBasemap', () => startMapBasemapWorker()).then((stop) => workerStops.push(stop));
 
     // Reverse-DNS backfill — drains pre-existing/unresolved flow endpoint IPs
     // through the configured resolver (budgeted per beat; gated by rdnsEnabled).

@@ -1209,6 +1209,66 @@ export const SETTING_DESCRIPTORS: SettingDescriptor[] = [
       'Internal pointer to the currently active GeoIP file in the central repository — written by the geoip worker after each successful refresh. Do not edit manually; clear it to force a re-download on the next cycle.',
   },
 
+  // Map basemap (Flows page "Map" tab) — world country boundaries for the flat
+  // traffic map, kept fresh by workers/mapBasemap.ts. Like GeoIP, ALL egress
+  // goes through the web-fetch plugin: the API never opens an outbound internet
+  // connection itself, so a firewalled deployment only needs egress on that one
+  // service's segment (or points mapBasemapCustomUrl at an internal mirror).
+  {
+    key: 'mapBasemapEnabled',
+    label: 'Map basemap fetching',
+    type: 'boolean',
+    category: 'Flows',
+    default: true,
+    envVar: 'UNM_MAP_BASEMAP_ENABLED',
+    help:
+      'Master switch for the world-map boundary download (Flows page "Map" tab). When on, the worker keeps country boundaries fresh — by default from OpenStreetMap via Nominatim (one request per country, paced to 1/second), simplified and cached in the central file repository. Off = no downloads; an already-stored map keeps working.',
+  },
+  {
+    key: 'mapBasemapCustomUrl',
+    label: 'Custom basemap URL',
+    type: 'string',
+    category: 'Flows',
+    default: '',
+    maxLength: 2048,
+    envVar: 'UNM_MAP_BASEMAP_CUSTOM_URL',
+    help:
+      'Optional direct URL to a GeoJSON world map (FeatureCollection of country polygons whose features carry properties.iso = ISO alpha-2 code). When set, it REPLACES the OpenStreetMap/Nominatim source and is fetched as one file through the web-fetch plugin — point it at an internal mirror in firewalled environments. Leave empty for the OSM default.',
+  },
+  {
+    key: 'mapBasemapRefreshDays',
+    label: 'Basemap refresh interval',
+    type: 'integer',
+    category: 'Flows',
+    unit: 'days',
+    min: 1,
+    max: 3650,
+    default: 30,
+    envVar: 'UNM_MAP_BASEMAP_REFRESH_DAYS',
+    help:
+      'How often the stored world map is re-fetched (boundaries change rarely — a full rebuild every 30 days by default). The manual "Fetch now" button on the Map tab bypasses this interval.',
+  },
+  {
+    key: 'mapBasemapFileId',
+    label: 'Active basemap file (managed)',
+    type: 'string',
+    category: 'Flows',
+    default: '',
+    maxLength: 128,
+    help:
+      'Internal pointer to the currently active map file in the central repository — written by the map-basemap worker after each successful build. Do not edit manually; clear it to force a rebuild on the next cycle.',
+  },
+  {
+    key: 'mapBasemapBuildRequested',
+    label: 'Build requested (managed)',
+    type: 'string',
+    category: 'Flows',
+    default: 'false',
+    maxLength: 5,
+    help:
+      'Internal flag set by the "Fetch now" button on the Map tab — consumed and cleared by the next worker cycle. Do not edit manually.',
+  },
+
   // CVE vulnerability tracking (Security page) — the cve worker queries an OSINT
   // provider (OSV.dev today, commercial providers later via the CveProvider
   // interface) for every distinct package installed in the fleet and matches

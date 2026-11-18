@@ -4762,6 +4762,133 @@ paths:
         '401':
           description: Authentication required
 
+  /flows/map:
+    get:
+      tags: [Flows]
+      summary: Traffic pairs for the world map (international + national)
+      description: >-
+        Aggregated traffic pairs for the Flows page "Map" tab. International
+        pairs are COUNTRY→COUNTRY (ISO-3166 alpha-2): external endpoints use
+        their stored GeoIP code, internal endpoints derive theirs from the
+        site's WGS84 coordinates via point-in-polygon against the stored map
+        basemap. National pairs are SITE→SITE between devices at two sites.
+      parameters:
+        - in: query
+          name: from
+          required: false
+          schema: { type: string }
+        - in: query
+          name: to
+          required: false
+          schema: { type: string }
+        - in: query
+          name: siteId
+          required: false
+          schema: { type: string }
+          description: "Filter to traffic where either endpoint belongs to a device at this site (400 for an unknown id)"
+      responses:
+        '200':
+          description: Map pairs + sites
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  fromMs: { type: integer }
+                  toMs: { type: integer }
+                  table: { type: string, enum: [flow_agg_5m, flow_agg_1h] }
+                  international:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        srcCountry: { type: string, description: "ISO-3166 alpha-2" }
+                        dstCountry: { type: string, description: "ISO-3166 alpha-2" }
+                        estBytes: { type: integer, format: int64 }
+                  national:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        srcSiteId: { type: string }
+                        srcSiteName: { type: string }
+                        srcLatitude: { type: [number, 'null'] }
+                        srcLongitude: { type: [number, 'null'] }
+                        dstSiteId: { type: string }
+                        dstSiteName: { type: string }
+                        dstLatitude: { type: [number, 'null'] }
+                        dstLongitude: { type: [number, 'null'] }
+                        estBytes: { type: integer, format: int64 }
+                        unplaced: { type: boolean, description: "True when either site has no coordinates" }
+                  unplacedInternationalBytes:
+                    type: integer
+                    format: int64
+                    description: International bytes whose site endpoint has no resolvable country
+                  sites:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id: { type: string }
+                        name: { type: string }
+                        latitude: { type: [number, 'null'] }
+                        longitude: { type: [number, 'null'] }
+        '401':
+          description: Authentication required
+
+  /flows/map/basemap:
+    get:
+      tags: [Flows]
+      summary: World-map basemap status + stored GeoJSON
+      description: >-
+        Status of the map-basemap worker (progress "N/M" while a build is in
+        flight) plus the currently active GeoJSON FeatureCollection of country
+        polygons (features carry properties.iso). The client refetches this
+        endpoint while building.
+      responses:
+        '200':
+          description: Basemap status + geometry
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  lastAttemptAt: { type: [string, 'null'] }
+                  lastSuccessAt: { type: [string, 'null'] }
+                  lastError: { type: string }
+                  progress: { type: string, description: '"183/249" while building, empty when idle' }
+                  fileId: { type: [string, 'null'], description: "Active basemap file in the central repository" }
+                  source: { type: string, enum: [osm, custom] }
+                  geojson:
+                    type: ['object', 'null']
+                    nullable: true
+                    description: The stored GeoJSON FeatureCollection (absent when no map is stored yet)
+        '401':
+          description: Authentication required
+
+  /flows/map/fetch-basemap:
+    post:
+      tags: [Flows]
+      summary: Request an immediate basemap fetch ("Fetch now")
+      description: >-
+        Sets the managed build-requested flag consumed by the next worker beat
+        (within ~60 s). Requires system:write.
+      responses:
+        '200':
+          description: Request accepted + current status
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  requested: { type: boolean }
+                  lastAttemptAt: { type: [string, 'null'] }
+                  lastSuccessAt: { type: [string, 'null'] }
+                  lastError: { type: string }
+                  progress: { type: string }
+        '401':
+          description: Authentication required
+
   /flows/pairs:
     get:
       tags: [Flows]
