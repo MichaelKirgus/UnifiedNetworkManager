@@ -22,7 +22,8 @@ import { initWorker, trackBeat } from './stats';
  *   - custom URL (mapBasemapCustomUrl): ONE direct file, expected to be a
  *     GeoJSON FeatureCollection of country polygons. Stored as-is (no
  *     simplification — the operator controls what they serve).
- *   - default = OpenStreetMap via Nominatim: one polygon_geojson request per
+ *   - default = Nominatim (base URL configurable via mapBasemapNominatimUrl,
+ *     public OpenStreetMap by default): one polygon_geojson request per
  *     country (≥1.1 s apart, well inside Nominatim's 1 req/s usage policy),
  *     name-verified against data/countries.ts so an ambiguous search can never
  *     store the wrong boundary, then simplified with Douglas-Peucker — full-res
@@ -41,10 +42,20 @@ const BEAT_MS = 60_000; // fixed beat — build work is budgeted per cycle below
 const BATCH_PER_CYCLE = 8;
 /** Pacing between Nominatim requests — the usage policy allows 1 req/s max. */
 const NOMINATIM_PACING_MS = 1_100;
-/** Simplification tolerance in degrees (~2 km) — world-map scale detail. */
-const SIMPLIFY_TOLERANCE_DEG = 0.02;
+/** Simplification tolerances in degrees, coarsest first (~2 km world-map scale).
+ * Tiny states (e.g. Vatican City) degenerate to nothing at the coarsest step —
+ * retry finer before giving up on a country that DOES have a real polygon. */
+const SIMPLIFY_TOLERANCES_DEG = [0.02, 0.01, 0.005, 0.001];
+/** Consecutive deterministic failures (no matching polygon) before a country
+ * is skipped for the rest of this build — keeps one permanently-unresolvable
+ * lookup from head-of-line-blocking every cycle's batch. */
+const MAX_CONSECUTIVE_FAILURES = 3;
 /** Nominatim requires an identifying User-Agent (usage policy). */
 const NOMINATIM_UA = 'UnifiedNetworkManager/1.0 (map basemap build; self-hosted network manager)';
+
+/** Per-country consecutive failure counts (worker scope — reset on process
+ * restart, manual "Fetch now", and periodic full rebuilds). */
+const failCounts = new Map<string, number>();
 
 interface BasemapStatus {
   lastAttemptAt: string | null;
@@ -52,13 +63,15 @@ interface BasemapStatus {
   lastError: string;
   /** "183/249" while a build is in flight, "" when idle. */
   progress: string;
+  /** ISO codes skipped for the current build (no matching OSM boundary). */
+  skipped: string[];
 }
 
-const STATUS_KEYS = ['mapBasemapLastAttemptAt', 'mapBasemapLastSuccessAt', 'mapBasemapLastError', 'mapBasemapProgress'] as const;
+const STATUS_KEYS = ['mapBasemapLastAttemptAt', 'mapBasemapLastSuccessAt', 'mapBasemapLastError', 'mapBasemapProgress', 'mapBasemapSkipped'] as const;
 
 /** Worker status (also served by GET /flows/map/basemap). */
 export async function readMapBasemapStatus(): Promise<BasemapStatus> {
-  const out: BasemapStatus = { lastAttemptAt: null, lastSuccessAt: null, lastError: '', progress: '' };
+  const out: BasemapStatus = { lastAttemptAt: null, lastSuccessAt: null, lastError: '', progress: '', skipped: [] };
   try {
     const res = await pool.query(
       `SELECT "key", value FROM system_settings WHERE "key" IN (${STATUS_KEYS.map((_, i) => `$${i + 1}`).join(', ')})`,
@@ -69,6 +82,7 @@ export async function readMapBasemapStatus(): Promise<BasemapStatus> {
       else if (row.key === 'mapBasemapLastSuccessAt') out.lastSuccessAt = String(row.value);
       else if (row.key === 'mapBasemapLastError') out.lastError = String(row.value);
       else if (row.key === 'mapBasemapProgress') out.progress = String(row.value);
+      else if (row.key === 'mapBasemapSkipped') out.skipped = String(row.value).split(',').filter(Boolean);
     }
   } catch { /* table hiccup — treat as fresh */ }
   return out;
@@ -141,15 +155,21 @@ function nameMatches(entry: CountryEntry, returnedName: string): boolean {
   return accepted.includes(n);
 }
 
-/** One Nominatim polygon fetch → simplified GeoJSON feature (null on mismatch). */
+/** One Nominatim polygon fetch → simplified GeoJSON feature.
+ * Returns null on DETERMINISTIC failure (no result / wrong name / degenerate
+ * geometry) — the caller counts those toward skipping. THROWS on transient
+ * failure (network error, HTTP 5xx/429) so it is retried next cycle WITHOUT
+ * counting toward skip: an outage must not permanently drop countries. */
 async function fetchCountryFeature(
   provider: WebFetchProvider,
   entry: CountryEntry,
+  nominatimBase: string,
   proxyUrl?: string,
   timeoutMs = 120_000,
   maxBytes = 536_870_912
 ): Promise<{ feature: unknown; pointsBefore: number } | null> {
-  const url = `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(entry.name)}&format=geojson&polygon_geojson=1&limit=1&accept-language=en`;
+  let url = `${nominatimBase}/search?q=${encodeURIComponent(entry.name)}&format=geojson&polygon_geojson=1&limit=1&accept-language=en`;
+  if (entry.viewbox) url += `&viewbox=${encodeURIComponent(entry.viewbox)}&bounded=1`; // disambiguate same-named places elsewhere
   const { bytes, result } = await fetchViaWebFetch(provider, {
     url,
     proxyUrl,
@@ -157,12 +177,17 @@ async function fetchCountryFeature(
     maxBytes,
     headers: { 'User-Agent': NOMINATIM_UA },
   });
-  if (result.status < 200 || result.status >= 300) return null;
+  if (result.status >= 500 || result.status === 429) throw new Error(`Nominatim HTTP ${result.status} — transient, retry next cycle`);
+  if (result.status < 200 || result.status >= 300) return null; // 4xx = deterministic no-result
   const fc = JSON.parse(bytes.toString('utf8')) as { features?: Array<{ properties?: Record<string, unknown>; geometry: { type: string; coordinates: unknown } }> };
   const f = fc.features?.[0];
   if (!f || !nameMatches(entry, String(f.properties?.name ?? ''))) return null; // wrong/ambiguous result — never store it
-  const simplified = simplifyGeometry(f.geometry, SIMPLIFY_TOLERANCE_DEG);
-  if (!simplified) return null; // degenerate after simplification (e.g. a line)
+  let simplified: unknown = null;
+  for (const tol of SIMPLIFY_TOLERANCES_DEG) { // tiny states degenerate at coarse tolerances — retry finer
+    simplified = simplifyGeometry(f.geometry, tol);
+    if (simplified) break;
+  }
+  if (!simplified) return null; // degenerate after simplification (e.g. a point/line)
   return {
     feature: { type: 'Feature', properties: { iso: entry.iso, name: entry.name }, geometry: simplified },
     pointsBefore: countGeometryPoints(f.geometry),
@@ -207,6 +232,8 @@ async function osmCycle(current: Map<string, unknown>): Promise<void> {
   const proxyUrl = String(values.webFetchProxyUrl ?? '').trim() || undefined;
   const timeoutMs = Number(values.webFetchTimeoutMs) || 120_000;
   const maxBytes = Number(values.webFetchMaxBytes) || 536_870_912;
+  // Configurable Nominatim base (self-hosted instances in firewalled deployments).
+  const nominatimBase = String(values.mapBasemapNominatimUrl ?? '').trim().replace(/\/+$/, '') || 'https://nominatim.openstreetmap.org';
 
   const missing = COUNTRIES.filter((c) => !current.has(c.iso));
   if (missing.length === 0) {
@@ -217,43 +244,81 @@ async function osmCycle(current: Map<string, unknown>): Promise<void> {
     return;
   }
 
-  const batch = missing.slice(0, BATCH_PER_CYCLE);
+  // Skip countries that already failed MAX_CONSECUTIVE_FAILURES times — left
+  // in the batch they would head-of-line-block it (the first missing in ISO
+  // order are always tried first) and stall every other country behind them.
+  const pending = missing.filter((c) => (failCounts.get(c.iso) ?? 0) < MAX_CONSECUTIVE_FAILURES);
+
+  const batch = pending.slice(0, BATCH_PER_CYCLE);
   let fetched = 0;
   for (let i = 0; i < batch.length; i++) {
     const entry = batch[i];
     try {
-      const res = await fetchCountryFeature(provider, entry, proxyUrl, timeoutMs, maxBytes);
+      const res = await fetchCountryFeature(provider, entry, nominatimBase, proxyUrl, timeoutMs, maxBytes);
       if (res) {
+        failCounts.delete(entry.iso); // success — clear any earlier failures
         current.set(entry.iso, res.feature);
         fetched++;
         console.log(`[map-basemap] ${entry.iso} (${entry.name}): simplified from ${res.pointsBefore.toLocaleString()} points`);
       } else {
-        console.warn(`[map-basemap] ${entry.iso}: Nominatim returned no matching polygon — will retry next cycle`);
+        // Deterministic no-match (wrong/ambiguous name or degenerate geometry).
+        const n = (failCounts.get(entry.iso) ?? 0) + 1;
+        failCounts.set(entry.iso, n);
+        if (n >= MAX_CONSECUTIVE_FAILURES) console.warn(`[map-basemap] ${entry.iso}: no matching polygon after ${n} attempts — skipping for this build`);
+        else console.warn(`[map-basemap] ${entry.iso}: Nominatim returned no matching polygon (attempt ${n}/${MAX_CONSECUTIVE_FAILURES})`);
       }
     } catch (err) {
-      // One country failing must not abort the whole build — resume it next beat.
+      // Transient failure (network / HTTP 5xx) — retry next beat, NOT counted toward skip.
       console.warn(`[map-basemap] ${entry.iso} fetch failed:`, (err as Error).message);
     }
     if (i < batch.length - 1) await new Promise((r) => setTimeout(r, NOMINATIM_PACING_MS)); // Nominatim usage policy
   }
 
-  if (fetched === 0) {
+  const stillMissing = COUNTRIES.filter((c) => !current.has(c.iso));
+  const skippedIso = stillMissing
+    .filter((c) => (failCounts.get(c.iso) ?? 0) >= MAX_CONSECUTIVE_FAILURES)
+    .map((c) => c.iso)
+    .sort();
+  await writeStatusKey('mapBasemapSkipped', skippedIso.join(','));
+
+  if (fetched === 0 && batch.length > 0) {
     const msg = 'No countries could be fetched this cycle (Nominatim unreachable or all lookups mismatched)';
     await writeStatusKey('mapBasemapLastError', msg);
     throw new Error(msg); // trackBeat records it; the build resumes next beat
   }
 
-  const remaining = COUNTRIES.length - current.size;
+  // Done when nothing unskipped is left to fetch.
+  const done = stillMissing.every((c) => (failCounts.get(c.iso) ?? 0) >= MAX_CONSECUTIVE_FAILURES);
+  if (!done && fetched === 0) return; // nothing new to persist this cycle
+
+  if (done && current.size === 0) {
+    const msg = 'All country lookups failed — no basemap could be built';
+    await writeStatusKey('mapBasemapLastError', msg);
+    throw new Error(msg); // pathological: never publish an empty map as "success"
+  }
+
   const fc = { type: 'FeatureCollection' as const, features: [...current.values()] };
   const name = `map-basemap-osm-${new Date().toISOString().slice(0, 10)}.geojson`;
   const { entry } = await addRepoFile({ data: Buffer.from(JSON.stringify(fc), 'utf8'), name, category: 'map', uploadedBy: 'plugin' });
   await setActiveFileId(entry.id);
-  await writeStatusKey('mapBasemapProgress', remaining > 0 ? `${current.size}/${COUNTRIES.length}` : '');
-  if (remaining === 0) {
+  await writeStatusKey('mapBasemapProgress', done ? '' : `${current.size}/${COUNTRIES.length}`);
+  if (done) {
     await writeStatusKey('mapBasemapLastSuccessAt', new Date().toISOString());
-    await writeStatusKey('mapBasemapLastError', '');
-    console.log(`[map-basemap] build complete — ${current.size} countries stored (${entry.name})`);
+    await writeStatusKey('mapBasemapLastError', ''); // holes are reported via `skipped`, not as an error
     await resolveNotificationsByDedupeKeys(['map-basemap-fetch-failed']);
+    if (skippedIso.length > 0) {
+      // Build finished with holes — serve the partial map, note it once.
+      console.log(`[map-basemap] build complete with ${skippedIso.length} skipped: ${skippedIso.join(', ')} (${current.size}/${COUNTRIES.length})`);
+      await emitNotification({
+        severity: 'warning',
+        source: 'system',
+        title: 'Map basemap built with missing countries',
+        message: `${current.size}/${COUNTRIES.length} country polygons fetched — no matching OSM boundary for: ${skippedIso.join(', ')}. They are retried on the next full rebuild.`,
+        dedupeKey: 'map-basemap-skipped',
+      });
+    } else {
+      console.log(`[map-basemap] build complete — ${current.size} countries stored (${entry.name})`);
+    }
   } else {
     // Still building — keep the last success timestamp (the map serves partial data).
     console.log(`[map-basemap] build in progress: ${current.size}/${COUNTRIES.length} countries`);
@@ -281,14 +346,19 @@ export async function mapBasemapCycle(): Promise<void> {
       await customUrlCycle(customUrl);
     } else {
       const current = await loadCurrentFeatures();
-      const complete = current.size >= COUNTRIES.length;
-      if (!requested && complete && isFresh(status.lastSuccessAt, refreshDays)) return; // idle — nothing due
-      if (complete && !isFresh(status.lastSuccessAt, refreshDays) && !requested) {
+      // Countries not yet stored and not skipped for this build. A build that
+      // finished WITH skips has pending.length === 0 too — it goes idle like a
+      // complete one (and gets a full rebuild when the refresh interval elapses).
+      const pending = COUNTRIES.filter((c) => !current.has(c.iso) && (failCounts.get(c.iso) ?? 0) < MAX_CONSECUTIVE_FAILURES);
+      if (!requested && pending.length === 0 && isFresh(status.lastSuccessAt, refreshDays)) return; // idle — nothing due
+      if (pending.length === 0 && !isFresh(status.lastSuccessAt, refreshDays) && !requested) {
         // Periodic full rebuild: drop the stored file so every country re-fetches.
         const fileId = String(values.mapBasemapFileId ?? '').trim();
         if (fileId) await deleteRepoFile(fileId).catch(() => undefined);
         current.clear();
+        failCounts.clear(); // fresh build — give previously skipped countries another chance
       }
+      if (requested) failCounts.clear(); // manual "Fetch now" — retry everything, including skipped countries
       await osmCycle(current);
     }
   } catch (err) {

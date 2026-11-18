@@ -1236,6 +1236,18 @@ export const SETTING_DESCRIPTORS: SettingDescriptor[] = [
       'Optional direct URL to a GeoJSON world map (FeatureCollection of country polygons whose features carry properties.iso = ISO alpha-2 code). When set, it REPLACES the OpenStreetMap/Nominatim source and is fetched as one file through the web-fetch plugin — point it at an internal mirror in firewalled environments. Leave empty for the OSM default.',
   },
   {
+    key: 'mapBasemapNominatimUrl',
+    label: 'Nominatim base URL',
+    type: 'string',
+    category: 'Flows',
+    default: 'https://nominatim.openstreetmap.org',
+    maxLength: 512,
+    pattern: '^https?://\\S+$',
+    envVar: 'UNM_MAP_BASEMAP_NOMINATIM_URL',
+    help:
+      'Base URL of the Nominatim instance used for per-country boundary lookups (the worker queries <base>/search). Defaults to the public OpenStreetMap Nominatim — point it at a self-hosted Nominatim in firewalled or high-volume deployments. Only used while "Custom basemap URL" is empty.',
+  },
+  {
     key: 'mapBasemapRefreshDays',
     label: 'Basemap refresh interval',
     type: 'integer',

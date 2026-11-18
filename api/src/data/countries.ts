@@ -6,6 +6,10 @@
  * territory — a fetched polygon is only accepted when its returned name
  * matches the primary name or one of the aliases (case-insensitive), so an
  * ambiguous search can never store a wrong country's boundary.
+ *
+ * `viewbox` (optional) restricts the search to a bounding box via Nominatim's
+ * viewbox+bounded parameters — needed where the plain query is dominated by
+ * same-named places elsewhere (Jersey → Massachusetts, New Caledonia → its EEZ).
  */
 export interface CountryEntry {
   /** ISO 3166-1 alpha-2 code (matches GeoIP country codes in flow_agg_*). */
@@ -14,6 +18,8 @@ export interface CountryEntry {
   name: string;
   /** Alternative English names accepted when verifying a fetched polygon. */
   aliases?: string[];
+  /** Optional "west,north,east,south" box — adds viewbox+bounded=1 to disambiguate. */
+  viewbox?: string;
 }
 
 export const COUNTRIES: CountryEntry[] = [
@@ -99,7 +105,8 @@ export const COUNTRIES: CountryEntry[] = [
   { iso: 'GH', name: 'Ghana' },
   { iso: 'GI', name: 'Gibraltar' },
   { iso: 'GL', name: 'Greenland' },
-  { iso: 'GM', name: 'Gambia' },
+  // Nominatim answers "The Gambia" for q=Gambia — accept it via alias.
+  { iso: 'GM', name: 'Gambia', aliases: ['The Gambia'] },
   { iso: 'GN', name: 'Guinea' },
   { iso: 'GP', name: 'Guadeloupe' },
   { iso: 'GQ', name: 'Equatorial Guinea' },
@@ -125,7 +132,9 @@ export const COUNTRIES: CountryEntry[] = [
   { iso: 'IR', name: 'Iran', aliases: ['Islamic Republic of Iran'] },
   { iso: 'IS', name: 'Iceland' },
   { iso: 'IT', name: 'Italy' },
-  { iso: 'JE', name: 'Jersey' },
+  // Plain q=Jersey is dominated by Jersey County (Massachusetts) — bound the
+  // search to a Channel Islands box so [0] is the island itself.
+  { iso: 'JE', name: 'Jersey', viewbox: '-3.0,50.2,-1.5,49.0' },
   { iso: 'JM', name: 'Jamaica' },
   { iso: 'JO', name: 'Jordan' },
   { iso: 'JP', name: 'Japan' },
@@ -175,7 +184,9 @@ export const COUNTRIES: CountryEntry[] = [
   { iso: 'MY', name: 'Malaysia' },
   { iso: 'MZ', name: 'Mozambique' },
   { iso: 'NA', name: 'Namibia' },
-  { iso: 'NC', name: 'New Caledonia' },
+  // Plain q=New Caledonia returns the EEZ (maritime) first — bound the search
+  // to a landmass box so [0] is the archipelago boundary.
+  { iso: 'NC', name: 'New Caledonia', viewbox: '162,-14.5,170,-22.5' },
   { iso: 'NE', name: 'Niger' },
   { iso: 'NF', name: 'Norfolk Island' },
   { iso: 'NG', name: 'Nigeria' },
@@ -197,7 +208,8 @@ export const COUNTRIES: CountryEntry[] = [
   { iso: 'PM', name: 'Saint Pierre and Miquelon' },
   { iso: 'PN', name: 'Pitcairn Islands' },
   { iso: 'PR', name: 'Puerto Rico' },
-  { iso: 'PS', name: 'Palestine', aliases: ['State of Palestine'] },
+  // Nominatim answers "Palestinian Territories" (type=disputed) for q=Palestine.
+  { iso: 'PS', name: 'Palestine', aliases: ['State of Palestine', 'Palestinian Territories'] },
   { iso: 'PT', name: 'Portugal' },
   { iso: 'PW', name: 'Palau' },
   { iso: 'PY', name: 'Paraguay' },
@@ -213,9 +225,12 @@ export const COUNTRIES: CountryEntry[] = [
   { iso: 'SD', name: 'Sudan' },
   { iso: 'SE', name: 'Sweden' },
   { iso: 'SG', name: 'Singapore' },
-  { iso: 'SH', name: 'Saint Helena, Ascension and Tristan da Cunha' },
+  // The full official name returns NO Nominatim result — query the short
+  // name (resolves to the Saint Helena island boundary; good enough at world scale).
+  { iso: 'SH', name: 'Saint Helena', aliases: ['Saint Helena, Ascension and Tristan da Cunha'] },
   { iso: 'SI', name: 'Slovenia' },
-  { iso: 'SJ', name: 'Svalbard and Jan Mayen' },
+  // Nominatim answers "Svalbard" for the full official query — accept via alias.
+  { iso: 'SJ', name: 'Svalbard and Jan Mayen', aliases: ['Svalbard'] },
   { iso: 'SK', name: 'Slovakia' },
   { iso: 'SL', name: 'Sierra Leone' },
   { iso: 'SM', name: 'San Marino' },

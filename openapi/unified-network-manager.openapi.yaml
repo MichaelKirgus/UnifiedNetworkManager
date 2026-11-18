@@ -4857,6 +4857,10 @@ paths:
                   lastSuccessAt: { type: [string, 'null'] }
                   lastError: { type: string }
                   progress: { type: string, description: '"183/249" while building, empty when idle' }
+                  skipped:
+                    type: array
+                    items: { type: string }
+                    description: "ISO codes skipped for the current build (no matching OSM boundary)"
                   fileId: { type: [string, 'null'], description: "Active basemap file in the central repository" }
                   source: { type: string, enum: [osm, custom] }
                   geojson:
@@ -4886,6 +4890,9 @@ paths:
                   lastSuccessAt: { type: [string, 'null'] }
                   lastError: { type: string }
                   progress: { type: string }
+                  skipped:
+                    type: array
+                    items: { type: string }
         '401':
           description: Authentication required
 

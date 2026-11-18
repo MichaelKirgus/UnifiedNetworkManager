@@ -1508,6 +1508,8 @@ export interface MapBasemapResponse {
   lastError: string;
   /** "183/249" while a build is in flight, empty when idle. */
   progress: string;
+  /** ISO codes skipped for the current build (no matching OSM boundary). */
+  skipped?: string[];
   fileId: string | null;
   source: 'osm' | 'custom';
   geojson?: { type: 'FeatureCollection'; features: MapBasemapFeature[] } | null;
