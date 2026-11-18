@@ -290,3 +290,18 @@ body {
    * over the dark minimap canvas (the light default is near-invisible). */
   --xy-minimap-mask-background-color: rgb(255 255 255 / 0.18);
 }
+
+/* ---------------------------------------------------------------------------
+ * LoadingBar — indeterminate marquee sweep for the thin loading line
+ * (components/LoadingBar.tsx). The segment is 1/3 of the track wide; moving it
+ * -100% → 400% of its own width carries it fully off-left to fully off-right.
+ * ------------------------------------------------------------------------- */
+
+@keyframes loading-bar-marquee {
+  from { transform: translateX(-100%); }
+  to   { transform: translateX(400%); }
+}
+
+.loading-bar-indeterminate {
+  animation: loading-bar-marquee 1.2s ease-in-out infinite;
+}

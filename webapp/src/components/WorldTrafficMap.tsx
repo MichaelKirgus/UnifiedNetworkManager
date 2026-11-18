@@ -1,9 +1,10 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { Download, Globe2, Loader2 } from 'lucide-react';
 import { api, FlowMapInternationalPair, FlowMapNationalPair, MapBasemapFeature } from '../api/client';
 import { can } from '../auth/permissions';
 import { formatBytes } from './formatMetric';
+import { LoadingBar } from './LoadingBar';
 
 /**
  * WorldTrafficMap — flat equirectangular world map of flow traffic (Flows page
@@ -99,7 +100,13 @@ const MIN_BYTES_OPTIONS: Array<{ label: string; value: number }> = [
 
 interface HoverInfo { title: string; sub?: string; bytes: number }
 
-export function WorldTrafficMap({ from, to, siteId }: { from?: string; to?: string; siteId?: string }) {
+export function WorldTrafficMap({ from, to, siteId, onLoadingChange }: {
+  from?: string;
+  to?: string;
+  siteId?: string;
+  /** Reports the component's initial-load state (drives the Flows tab dot). */
+  onLoadingChange?: (loading: boolean) => void;
+}) {
   const [scope, setScope] = useState<Scope>('all');
   const [minBytes, setMinBytes] = useState(0);
   const [topN, setTopN] = useState(25);
@@ -120,6 +127,13 @@ export function WorldTrafficMap({ from, to, siteId }: { from?: string; to?: stri
       return d?.progress ? 15_000 : 300_000; // building → poll, idle → rarely
     },
   });
+
+  // Initial-load state — true until both the pair query and the basemap have
+  // returned their first response (refetches never re-trigger it).
+  const loading = mapQuery.isLoading || basemapQuery.isLoading;
+  useEffect(() => {
+    onLoadingChange?.(loading);
+  }, [loading, onLoadingChange]);
 
   const fetchNow = async () => {
     await api.fetchMapBasemap();
@@ -191,6 +205,9 @@ export function WorldTrafficMap({ from, to, siteId }: { from?: string; to?: stri
 
   return (
     <div className="flex shrink-0 flex-col gap-3">
+      {/* Initial-load indicator — the pair query can take >10 s on big databases. */}
+      {loading && <LoadingBar label="Loading map…" />}
+
       {/* Local filters — scope, minimum size, top-N. Global range/site stay above. */}
       <div className="flex flex-wrap items-center gap-2 text-xs">
         <select className="rounded-md border border-border px-2 py-1" value={scope} onChange={(e) => setScope(e.target.value as Scope)} title="Traffic scope">

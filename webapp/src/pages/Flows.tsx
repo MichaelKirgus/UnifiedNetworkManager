@@ -4,6 +4,7 @@ import { Activity, Globe, Network, Radio, ArrowLeftRight, Server, ShieldAlert, X
 import { Layout } from '../components/Layout';
 import { PageTabs } from '../components/PageTabs';
 import { DataTable, DataTableColumn } from '../components/DataTable';
+import { LoadingBar } from '../components/LoadingBar';
 import { WorldTrafficMap } from '../components/WorldTrafficMap';
 import { TimeRangeFilter, resolveTimeRangeIso, type TimeRangeValue } from '../components/TimeRangeFilter';
 import { formatBytes, formatNumber } from '../components/formatMetric';
@@ -191,6 +192,20 @@ export default function Flows() {
     queryFn: () => api.flowsSecurity({ limit: 100 }),
     refetchInterval: 60_000,
   });
+
+  // Per-tab loading flags — while none of a tab's queries has data yet and at
+  // least one is still fetching, the tab shows a marquee LoadingBar (and its
+  // tab label gets a pulsing dot) instead of an empty pane. On big flow_agg
+  // tables the first fetch can take >10 s; refetches never re-trigger this.
+  const [mapLoading, setMapLoading] = useState(false);
+  const initialLoad = (queries: Array<{ isLoading: boolean; data?: unknown }>) =>
+    !queries.some((q) => q.data != null) && queries.some((q) => q.isLoading);
+
+  const trafficTabLoading = initialLoad([talkersQuery, seriesQuery, portsQuery, pairsQuery, internetQuery]);
+  const internetTabLoading = initialLoad([internetQuery]);
+  const networksTabLoading = initialLoad([networksQuery]);
+  const securityTabLoading = initialLoad([securityQuery]);
+  const collectorsTabLoading = initialLoad([collectorsQuery]);
 
   const talkerColumns: DataTableColumn<FlowTalker>[] = [
     {
@@ -572,18 +587,21 @@ export default function Flows() {
 
       <PageTabs
         tabs={[
-          { id: 'traffic', label: 'Traffic', icon: <Activity className="h-3.5 w-3.5" />, count: talkersQuery.data ? talkersQuery.data.sources.length + talkersQuery.data.destinations.length : null },
-          { id: 'internet', label: 'Internet egress', icon: <Globe className="h-3.5 w-3.5" />, count: internetQuery.data?.perDevice.length ?? null },
-          { id: 'map', label: 'Map', icon: <MapIcon className="h-3.5 w-3.5" /> },
-          { id: 'networks', label: 'Networks', icon: <Network className="h-3.5 w-3.5" />, count: networksQuery.data?.networks.length ?? null },
-          { id: 'security', label: 'Security', icon: <ShieldAlert className="h-3.5 w-3.5" />, count: securityQuery.data ? securityQuery.data.findings.length : null },
-          { id: 'collectors', label: 'Collectors', icon: <Server className="h-3.5 w-3.5" /> },
+          { id: 'traffic', label: 'Traffic', icon: <Activity className="h-3.5 w-3.5" />, count: talkersQuery.data ? talkersQuery.data.sources.length + talkersQuery.data.destinations.length : null, loading: trafficTabLoading },
+          { id: 'internet', label: 'Internet egress', icon: <Globe className="h-3.5 w-3.5" />, count: internetQuery.data?.perDevice.length ?? null, loading: internetTabLoading },
+          { id: 'map', label: 'Map', icon: <MapIcon className="h-3.5 w-3.5" />, loading: mapLoading },
+          { id: 'networks', label: 'Networks', icon: <Network className="h-3.5 w-3.5" />, count: networksQuery.data?.networks.length ?? null, loading: networksTabLoading },
+          { id: 'security', label: 'Security', icon: <ShieldAlert className="h-3.5 w-3.5" />, count: securityQuery.data ? securityQuery.data.findings.length : null, loading: securityTabLoading },
+          { id: 'collectors', label: 'Collectors', icon: <Server className="h-3.5 w-3.5" />, loading: collectorsTabLoading },
         ]}
         value={tab}
         onChange={setTab}
       />
 
       {tab === 'traffic' && (<>
+      {/* Initial-load indicator — big flow tables can take >10 s on first fetch. */}
+      {trafficTabLoading && <div className="mb-3 shrink-0"><LoadingBar label="Loading traffic…" /></div>}
+
       {/* Summary strip — internet egress total, top talker, busiest pair. */}
       {internetQuery.data && (
         <div className="mb-3 flex shrink-0 flex-wrap items-center gap-x-6 gap-y-1 rounded-lg border border-border bg-card px-4 py-2 text-xs">
@@ -700,6 +718,8 @@ export default function Flows() {
       </>)}
 
       {tab === 'internet' && (<>
+      {internetTabLoading && <div className="mb-3 shrink-0"><LoadingBar label="Loading internet egress…" /></div>}
+
       {/* Internet egress per device. */}
       {internetQuery.data && (
         <DataTable
@@ -730,10 +750,13 @@ export default function Flows() {
       </>)}
 
       {/* World map — international country→country + national site→site arcs.
-       *  Inherits the global time range and site filter from above. */}
-      {tab === 'map' && <WorldTrafficMap {...windowParams()} siteId={siteParam()} />}
+       *  Inherits the global time range and site filter from above. The
+       *  component reports its own initial-load state for the tab dot. */}
+      {tab === 'map' && <WorldTrafficMap {...windowParams()} siteId={siteParam()} onLoadingChange={setMapLoading} />}
 
       {tab === 'networks' && (<>
+      {networksTabLoading && <div className="mb-3 shrink-0"><LoadingBar label="Loading network traffic…" /></div>}
+
       {/* Traffic per network — which documented networks the traffic lives on. */}
       <div className="shrink-0 rounded-lg border border-border bg-card px-4 py-2">
         <p className="flex items-center gap-2 text-xs font-medium text-secondary">
@@ -755,6 +778,8 @@ export default function Flows() {
 
       {/* Security findings — new destinations, port scans, egress baseline breaches. */}
       {tab === 'security' && (<>
+      {securityTabLoading && <div className="mb-3 shrink-0"><LoadingBar label="Loading security findings…" /></div>}
+
       <div className="shrink-0 rounded-lg border border-border bg-card px-4 py-2">
         <p className="flex items-center gap-2 text-xs font-medium text-secondary">
           <ShieldAlert size={13} /> Security findings
@@ -785,6 +810,8 @@ export default function Flows() {
 
       {/* Collector health — live plugin stats + API ingest queue. */}
       {tab === 'collectors' && (<>
+      {collectorsTabLoading && <div className="mb-3 shrink-0"><LoadingBar label="Loading collector stats…" /></div>}
+
       <div className="shrink-0 rounded-lg border border-border bg-card px-4 py-2">
         <p className="flex items-center gap-2 text-xs font-medium text-secondary">
           <Server size={13} /> Collectors &amp; ingest

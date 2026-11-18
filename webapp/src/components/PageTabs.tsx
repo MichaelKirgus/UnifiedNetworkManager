@@ -8,6 +8,8 @@ export interface PageTab<T extends string = string> {
   icon?: ReactNode;
   /** Optional count badge — rendered only when a number is provided (null/undefined hides it). */
   count?: number | null;
+  /** While true, a small pulsing dot marks the tab as still loading its content. */
+  loading?: boolean;
 }
 
 interface PageTabsProps<T extends string> {
@@ -43,6 +45,10 @@ export function PageTabs<T extends string>({ tabs, value, onChange, actions }: P
           {t.label}
           {typeof t.count === 'number' && (
             <span className="rounded-full bg-muted px-1.5 text-[10px] font-semibold leading-4 text-secondary">{t.count}</span>
+          )}
+          {/* Pulsing dot — this tab's content is still loading (see LoadingBar). */}
+          {t.loading && (
+            <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-primary" title="Loading…" aria-label="Loading" />
           )}
         </button>
       ))}
