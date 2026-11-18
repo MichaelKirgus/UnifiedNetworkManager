@@ -351,20 +351,18 @@ export function WorldTrafficMap({ from, to, siteId, onLoadingChange }: {
       {/* Map + top-pairs list side by side (stacks on narrow screens). */}
       <div className="grid grid-cols-1 gap-3 xl:grid-cols-[minmax(0,1fr)_280px]">
         <div className="relative overflow-hidden rounded-lg border border-border bg-card">
-          {/* Size by available VERTICAL space: the map grows with viewport
-           * height (aspect W:H ≈ 1.41 → max-width = 1.41 × available height),
-           * so a 4K monitor gets a big map and a laptop a small one — always
-           * fitting above the fold, never wider than the card. The viewBox
-           * preserves the aspect ratio at any size (no stretching); zoom
-           * covers anything bigger still. */}
+          {/* Fill the card's full width: a height-based cap left dead side
+           * margins on wide monitors, and the user wants the space used. The
+           * viewBox preserves the 1.41:1 aspect at any size (no stretching);
+           * if the resulting height exceeds the viewport, <main> scrolls —
+           * zoom covers anything bigger still. */}
           {basemapQuery.isLoading ? (
             <div className="flex h-72 items-center justify-center text-sm text-muted-foreground">Loading map…</div>
           ) : hasMap && geo ? (
             <svg
               ref={svgRef}
               viewBox={`${view.x.toFixed(2)} ${view.y.toFixed(2)} ${(W / view.k).toFixed(2)} ${(H / view.k).toFixed(2)}`}
-              className={`mx-auto block h-auto w-full select-none ${view.k > 1 ? 'cursor-grab active:cursor-grabbing' : ''}`}
-              style={{ maxWidth: 'min(100%, max(640px, calc(1.41 * (100vh - 320px))))' }}
+              className={`block h-auto w-full select-none ${view.k > 1 ? 'cursor-grab active:cursor-grabbing' : ''}`}
               role="img"
               aria-label="World traffic map — scroll to zoom, drag to pan"
               onPointerDown={onPointerDown}
@@ -447,11 +445,12 @@ export function WorldTrafficMap({ from, to, siteId, onLoadingChange }: {
           )}
         </div>
 
-        {/* Top pairs list — hover a row to highlight its arc. */}
-        <div className="rounded-lg border border-border bg-card">
+        {/* Top pairs list — hover a row to highlight its arc. self-start: the
+         * list is at most topN rows, so it keeps its natural height instead of
+         * stretching next to a tall map with empty space below. */}
+        <div className="self-start rounded-lg border border-border bg-card">
           <p className="border-b border-border px-3 py-2 text-xs font-medium text-secondary">Top pairs</p>
-          {/* Scales with the viewport so it tracks the map's height on big screens. */}
-          <div className="max-h-[calc(100vh-360px)] overflow-y-auto">
+          <div>
             {((scope === 'all' && intlArcs.length === 0 && natArcs.length === 0) ||
               (scope === 'international' && intlArcs.length === 0) ||
               (scope === 'national' && natArcs.length === 0)) && (
