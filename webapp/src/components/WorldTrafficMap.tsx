@@ -7,19 +7,30 @@ import { formatBytes } from './formatMetric';
 import { LoadingBar } from './LoadingBar';
 
 /**
- * WorldTrafficMap — flat equirectangular world map of flow traffic (Flows page
- * "Map" tab). No chart/map library: plain SVG with a 2:1 projection, country
- * polygons from the stored basemap GeoJSON and quadratic-Bézier arcs between
- * endpoints. International pairs are COUNTRY→COUNTRY (blue), national pairs are
- * SITE→SITE (green) with site markers.
+ * WorldTrafficMap — world map of flow traffic (Flows page "Map" tab). No
+ * chart/map library: plain SVG with a Web Mercator projection (the same one
+ * openstreetmap.org uses, so continent shapes match what users know from
+ * there), country polygons from the stored basemap GeoJSON and quadratic-
+ * Bézier arcs between endpoints. International pairs are COUNTRY→COUNTRY
+ * (blue), national pairs are SITE→SITE (green) with site markers.
  */
 
 const W = 1000;
-const H = 500;
+// Web Mercator clipped at ±85.06° (the standard OSM tile limit) is a perfect
+// square — the clip keeps y finite at the poles and matches OSM's world view.
+const H = 1000;
+const MERC_MAX_LAT = 85.06;
 
-/** Equirectangular projection: [lng, lat] → SVG x/y. */
+/** Web Mercator projection: [lng, lat] → SVG x/y (clipped at ±85.06°).
+ * y = R·atanh(sin φ); with R = W/2π and the ±85.06° clip, atanh ≈ π so the
+ * full range spans exactly H — hence the square viewBox. */
 function project(lng: number, lat: number): { x: number; y: number } {
-  return { x: ((lng + 180) / 360) * W, y: ((90 - lat) / 180) * H };
+  const clampedLat = Math.max(-MERC_MAX_LAT, Math.min(MERC_MAX_LAT, lat));
+  const sin = Math.sin((clampedLat * Math.PI) / 180);
+  return {
+    x: ((lng + 180) / 360) * W,
+    y: H / 2 - (W / (4 * Math.PI)) * Math.log((1 + sin) / (1 - sin)),
+  };
 }
 
 /** ISO-3166 alpha-2 → flag emoji (regional indicators). */
@@ -334,9 +345,9 @@ export function WorldTrafficMap({ from, to, siteId, onLoadingChange }: {
         <div className="relative overflow-hidden rounded-lg border border-border bg-card">
           {/* Size by available VERTICAL space with a sane ceiling: full card
            * width on wide monitors looked stretched, and a small fixed cap
-           * wasted side space — so the map grows with viewport height (2:1
-           * aspect → max-width = 2 × available height) up to 1500 px, then
-           * stays centered. Zoom covers anything bigger. */}
+           * wasted side space — so the map grows with viewport height (the
+           * Mercator view is 1:1 → max-width = available height) up to 1500
+           * px, then stays centered. Zoom covers anything bigger. */}
           {basemapQuery.isLoading ? (
             <div className="flex h-72 items-center justify-center text-sm text-muted-foreground">Loading map…</div>
           ) : hasMap && geo ? (
@@ -344,7 +355,7 @@ export function WorldTrafficMap({ from, to, siteId, onLoadingChange }: {
               ref={svgRef}
               viewBox={`${view.x.toFixed(2)} ${view.y.toFixed(2)} ${(W / view.k).toFixed(2)} ${(H / view.k).toFixed(2)}`}
               className={`mx-auto block h-auto w-full select-none ${view.k > 1 ? 'cursor-grab active:cursor-grabbing' : ''}`}
-              style={{ maxWidth: 'min(100%, max(640px, calc(2 * (100vh - 300px))), 1500px)' }}
+              style={{ maxWidth: 'min(100%, max(640px, calc(100vh - 320px)), 1500px)' }}
               role="img"
               aria-label="World traffic map — scroll to zoom, drag to pan"
               onPointerDown={onPointerDown}
@@ -430,7 +441,7 @@ export function WorldTrafficMap({ from, to, siteId, onLoadingChange }: {
         {/* Top pairs list — hover a row to highlight its arc. */}
         <div className="rounded-lg border border-border bg-card">
           <p className="border-b border-border px-3 py-2 text-xs font-medium text-secondary">Top pairs</p>
-          <div className="max-h-[460px] overflow-y-auto">
+          <div className="max-h-[640px] overflow-y-auto">
             {((scope === 'all' && intlArcs.length === 0 && natArcs.length === 0) ||
               (scope === 'international' && intlArcs.length === 0) ||
               (scope === 'national' && natArcs.length === 0)) && (
