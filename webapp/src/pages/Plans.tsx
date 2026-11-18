@@ -2,7 +2,7 @@ import { FormEvent, ReactNode, useMemo, useState } from 'react';
 import clsx from 'clsx';
 import { useQuery, useMutation } from '@tanstack/react-query';
 import { Link } from 'react-router-dom';
-import { CalendarClock, Play, Plus, RotateCcw, Trash2, X } from 'lucide-react';
+import { CalendarClock, Loader2, Play, Plus, RotateCcw, Trash2, X } from 'lucide-react';
 import { Layout } from '../components/Layout';
 import { DataTable, DataTableBulkAction, DataTableColumn, ExpandChildContext } from '../components/DataTable';
 import { StatusBadge } from '../components/StatusBadge';
@@ -12,6 +12,7 @@ import { ReauthDialog } from '../components/ReauthDialog';
 import { ScheduleDialog } from '../components/ScheduleDialog';
 import { api, ApiError, CatalogEntry, Device, Plan } from '../api/client';
 import { can } from '../auth/permissions';
+import { activePlanCount, usePlanActivity } from '../planActivity';
 import { useTimeFormat } from '../utils/time';
 
 /** True when the user lacks a 2FA-completed session (server returns this on execute/create). */
@@ -40,6 +41,15 @@ function PlansList({ onCreate }: { onCreate?: () => void }) {
   // '—' when absent — the central formatter already renders null/invalid as '—'.
   const fmtTime = (iso?: string | null) => formatDateTime(iso);
   const plansQuery = useQuery({ queryKey: ['plans'], queryFn: api.plans, refetchInterval: 10_000 });
+  // Live status chip in the top right — executing/queued counts. The shared
+  // hook updates it IMMEDIATELY after any local plan mutation (create/execute/
+  // retry/schedule/delete) and polls fast while anything is executing, so a
+  // started run shows up here without waiting for the list's 10 s refresh.
+  const plansActivity = usePlanActivity(true);
+  const activityRows = plansActivity.data ?? [];
+  const executingCount = activityRows.filter((p) => p.status === 'executing').length;
+  const queuedCount = activePlanCount(activityRows) - executingCount;
+  const activeTotal = executingCount + queuedCount;
   // Plugin names for the table — only fetched when allowed (API gates on plugins:read).
   const pluginsQuery = useQuery({ queryKey: ['plugins'], queryFn: api.plugins, enabled: can('plugins:read') });
   // Device names for the affected-devices column — same gate (devices:read).
@@ -342,15 +352,28 @@ function PlansList({ onCreate }: { onCreate?: () => void }) {
     <Layout
       title="Plans"
       actions={
-        onCreate && (
-          <button
-            type="button"
-            className="inline-flex items-center gap-2 rounded-md bg-primary px-3 py-1.5 text-sm font-medium text-white hover:bg-primary-hover"
-            onClick={onCreate}
-          >
-            <Plus className="h-4 w-4" /> New Plan
-          </button>
-        )
+        <>
+          {activeTotal > 0 && (
+            <span
+              className="flex items-center gap-2 rounded-md border border-info-border bg-info px-3 py-1.5 text-xs font-medium text-info-fg"
+              title={`${executingCount} executing · ${queuedCount} queued — per-plan progress in the plans icon (top right)`}
+            >
+              {executingCount > 0 && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+              {[executingCount > 0 ? `${executingCount} executing` : '', queuedCount > 0 ? `${queuedCount} queued` : '']
+                .filter(Boolean)
+                .join(' · ')}
+            </span>
+          )}
+          {onCreate && (
+            <button
+              type="button"
+              className="inline-flex items-center gap-2 rounded-md bg-primary px-3 py-1.5 text-sm font-medium text-white hover:bg-primary-hover"
+              onClick={onCreate}
+            >
+              <Plus className="h-4 w-4" /> New Plan
+            </button>
+          )}
+        </>
       }
     >
 

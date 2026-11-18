@@ -1,3 +1,5 @@
+import { emitPlanMutated } from '../planActivityBus';
+
 // API base URL, baked in at build time (Vite inlines VITE_* at build).
 // - Unset → "/v1" (relative): the browser calls the API on the SAME origin as
 //   the webapp. This is the default for pre-built images and the recommended
@@ -4941,7 +4943,7 @@ export const api = {
     deviceInputs?: Record<string, Record<string, unknown>>;
     /** Optional per-plan retry override; wins over the plugin's suggestion and the global defaults. */
     retryPolicy?: PlanRetryPolicy | null;
-  }) => apiFetch<PlanDetail>('/plans', { method: 'POST', body: JSON.stringify(body) }),
+  }) => apiFetch<PlanDetail>('/plans', { method: 'POST', body: JSON.stringify(body) }).then((r) => { emitPlanMutated(); return r; }),
   /** Read-only best-guess resolution for a fleet intent — one result per device
    * (suggested values + confidence + notes from the plugin's live-state probe). */
   plansPreflight: (body: {
@@ -4967,17 +4969,17 @@ export const api = {
     intentActionId: string;
     inputs?: Record<string, unknown>;
     steps?: Array<{ input: Record<string, unknown> }>;
-  }) => apiFetch<PlanDetail>('/plans/system', { method: 'POST', body: JSON.stringify(body) }),
+  }) => apiFetch<PlanDetail>('/plans/system', { method: 'POST', body: JSON.stringify(body) }).then((r) => { emitPlanMutated(); return r; }),
   getPlan: (id: string) => apiFetch<PlanDetail>(`/plans/${id}`),
   /** Update plan-level settings (currently: the per-plan retry policy). Draft/ready/scheduled only. */
   updatePlan: (id: string, body: { retryPolicy?: PlanRetryPolicy | null }) =>
     apiFetch<PlanDetail>(`/plans/${id}`, { method: 'PATCH', body: JSON.stringify(body) }),
-  deletePlan: (id: string) => apiFetch<void>(`/plans/${id}`, { method: 'DELETE' }),
-  executePlan: (id: string) => apiFetch<PlanDetail>(`/plans/${id}/execute`, { method: 'POST' }),
+  deletePlan: (id: string) => apiFetch<void>(`/plans/${id}`, { method: 'DELETE' }).then(() => { emitPlanMutated(); }),
+  executePlan: (id: string) => apiFetch<PlanDetail>(`/plans/${id}/execute`, { method: 'POST' }).then((r) => { emitPlanMutated(); return r; }),
   /** Start execution of MANY plans in one round-trip (2FA-gated). Per-plan
    *  outcomes reported — non-executable plans are skipped, errors never fatal. */
   bulkExecutePlans: (ids: string[]) =>
-    apiFetch<{ started: string[]; skipped: Array<{ id: string; status: string }>; errors: Array<{ id: string; error: string }> }>('/plans/bulk-execute', { method: 'POST', body: JSON.stringify({ ids }) }),
+    apiFetch<{ started: string[]; skipped: Array<{ id: string; status: string }>; errors: Array<{ id: string; error: string }> }>('/plans/bulk-execute', { method: 'POST', body: JSON.stringify({ ids }) }).then((r) => { emitPlanMutated(); return r; }),
   /** Resolve a kind:'url' quick action into the device's management web-UI URL. */
   resolveQuickAction: (deviceId: string, actionId: string, pluginId?: string) =>
     apiFetch<{ deviceId: string; url: string }>(`/devices/${deviceId}/quick-action`, {
@@ -4985,19 +4987,19 @@ export const api = {
       body: JSON.stringify({ actionId, ...(pluginId ? { pluginId } : {}) }),
     }),
   /** Duplicate this plan (same payload + provisioned secrets) and execute the copy. */
-  retryPlan: (id: string) => apiFetch<PlanDetail>(`/plans/${id}/retry`, { method: 'POST' }),
+  retryPlan: (id: string) => apiFetch<PlanDetail>(`/plans/${id}/retry`, { method: 'POST' }).then((r) => { emitPlanMutated(); return r; }),
   /** (Re-)schedule a saved or finished plan for later execution. Relative (`inMinutes`) or absolute (`at`). */
   schedulePlan: (id: string, body: { at?: string; inMinutes?: number; policy?: 'run-asap' | 'skip' }) =>
-    apiFetch<PlanDetail>(`/plans/${id}/schedule`, { method: 'POST', body: JSON.stringify(body) }),
+    apiFetch<PlanDetail>(`/plans/${id}/schedule`, { method: 'POST', body: JSON.stringify(body) }).then((r) => { emitPlanMutated(); return r; }),
   /** Remove the schedule — the plan returns to its pre-schedule status. */
-  unschedulePlan: (id: string) => apiFetch<PlanDetail>(`/plans/${id}/schedule`, { method: 'DELETE' }),
+  unschedulePlan: (id: string) => apiFetch<PlanDetail>(`/plans/${id}/schedule`, { method: 'DELETE' }).then((r) => { emitPlanMutated(); return r; }),
   /** Remove the schedule from MANY plans in one round-trip; non-scheduled plans skipped, never fatal. */
   bulkUnschedulePlans: (ids: string[]) =>
-    apiFetch<{ unscheduled: string[]; skipped: Array<{ id: string; status: string }>; errors: Array<{ id: string; error: string }> }>('/plans/bulk-unschedule', { method: 'POST', body: JSON.stringify({ ids }) }),
+    apiFetch<{ unscheduled: string[]; skipped: Array<{ id: string; status: string }>; errors: Array<{ id: string; error: string }> }>('/plans/bulk-unschedule', { method: 'POST', body: JSON.stringify({ ids }) }).then((r) => { emitPlanMutated(); return r; }),
   /** Delete MANY non-executing plans in one round-trip; executing/unknown plans reported, never fatal. */
   bulkDeletePlans: (ids: string[]) =>
-    apiFetch<{ deleted: string[]; errors: Array<{ id: string; error: string }> }>('/plans/bulk-delete', { method: 'POST', body: JSON.stringify({ ids }) }),
-  cancelPlan: (id: string) => apiFetch<PlanDetail>(`/plans/${id}/cancel`, { method: 'POST' }),
+    apiFetch<{ deleted: string[]; errors: Array<{ id: string; error: string }> }>('/plans/bulk-delete', { method: 'POST', body: JSON.stringify({ ids }) }).then((r) => { emitPlanMutated(); return r; }),
+  cancelPlan: (id: string) => apiFetch<PlanDetail>(`/plans/${id}/cancel`, { method: 'POST' }).then((r) => { emitPlanMutated(); return r; }),
   addPlanStep: (planId: string, body: {
     deviceId: string;
     actionId: string;

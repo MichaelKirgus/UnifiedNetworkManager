@@ -1,9 +1,9 @@
 import { useEffect, useRef, useState } from 'react';
-import { useQuery } from '@tanstack/react-query';
 import clsx from 'clsx';
 import { CheckCircle2, CircleDashed, ListChecks, Loader2, OctagonX, Settings2 } from 'lucide-react';
-import { api, Plan } from '../api/client';
+import { Plan } from '../api/client';
 import { can } from '../auth/permissions';
+import { activePlanCount, usePlanActivity } from '../planActivity';
 
 /**
  * Top-bar plans icon (next to the notification bell) with an overview panel.
@@ -16,8 +16,6 @@ import { can } from '../auth/permissions';
  * 5-minute window, via `recentlyFinishedAt`) stay listed with a green tick and
  * fade out on their own when the window expires.
  */
-
-const RECENT_WINDOW_MS = 300_000; // must match the API default
 
 function timeAgo(iso: string): string {
   const s = Math.max(0, (Date.now() - new Date(iso).getTime()) / 1000);
@@ -51,17 +49,10 @@ export function PlansCenter() {
   // Hidden entirely without `plans:read` (the API would 403 anyway).
   const allowed = can('plans:read');
 
-  // Badge + panel rows — one feed covers both. Polls while there is activity;
-  // when the list empties it slows down so a quiet system costs nothing.
-  const query = useQuery({
-    queryKey: ['planActivity'],
-    queryFn: () => api.planActivity(RECENT_WINDOW_MS),
-    refetchInterval: (q) => {
-      const rows = q.state.data ?? [];
-      return rows.some((p) => p.status === 'executing') ? 5_000 : 15_000;
-    },
-    enabled: allowed,
-  });
+  // Badge + panel rows — one feed covers both. Shared hook (see planActivity.ts):
+  // polls while there is activity, slows down when quiet, and refetches
+  // IMMEDIATELY after any local plan mutation instead of waiting for a poll.
+  const query = usePlanActivity(allowed);
 
   // Close on outside click / Escape.
   useEffect(() => {
@@ -86,7 +77,7 @@ export function PlansCenter() {
   // Badge counts in-flight work only (executing + queued). Recently-finished
   // plans are visible in the panel but don't keep a badge on the icon.
   // Scheduled plans count as active too — they are queued for a later run.
-  const activeCount = rows.filter((p) => p.status === 'executing' || p.status === 'ready' || p.status === 'draft' || p.status === 'scheduled').length;
+  const activeCount = activePlanCount(rows);
 
   return (
     <div className="relative" ref={anchorRef}>

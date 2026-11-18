@@ -3,8 +3,9 @@ import { NavLink } from 'react-router-dom';
 import clsx from 'clsx';
 import { useQuery } from '@tanstack/react-query';
 import { LogOut, Lock, Network, PanelLeftClose, PanelLeftOpen, SlidersHorizontal } from 'lucide-react';
-import { clearPermissions, clearUsername } from '../auth/permissions';
+import { can, clearPermissions, clearUsername } from '../auth/permissions';
 import { api } from '../api/client';
+import { activePlanCount, usePlanActivity } from '../planActivity';
 import { MY_ACCOUNT_ITEM, orderedNavItems, BADGE_COLORS, type NavItem } from './navItems';
 import { NavCustomizer } from './NavCustomizer';
 import { useNavLock } from './NavLock';
@@ -114,6 +115,11 @@ export function Sidebar() {
     queryFn: api.navCounts,
     refetchInterval: 30_000,
   });
+  // The Plans badge comes from the shared activity feed instead of /counts:
+  // it polls fast while a plan executes and updates IMMEDIATELY after any
+  // local create/execute/retry/schedule/delete (the 30 s counts poll was too
+  // slow — starting a plan could take half a minute to light up the badge).
+  const plansActivity = usePlanActivity(can('plans:read'));
 
   // Build tags for the brand block: API's tag comes from GET /info (baked into
   // the API image at CI build time), the webapp's own from dist/manifest.json.
@@ -165,7 +171,19 @@ export function Sidebar() {
           action dialog) holds the nav lock; the hint below explains why. */}
       <nav className={clsx('flex flex-1 flex-col gap-1 overflow-y-auto p-2', collapsed && 'items-center')}>
         {visibleItems.map((item) => (
-          <NavRow key={item.to} item={item} collapsed={collapsed} count={item.countKey ? counts[item.countKey] : undefined} locked={locked} />
+          <NavRow
+            key={item.to}
+            item={item}
+            collapsed={collapsed}
+            count={
+              item.countKey === 'plans'
+                ? activePlanCount(plansActivity.data)
+                : item.countKey
+                  ? counts[item.countKey]
+                  : undefined
+            }
+            locked={locked}
+          />
         ))}
         {/* My Account is pinned last and never hidden/reordered. */}
         <NavRow item={MY_ACCOUNT_ITEM} collapsed={collapsed} locked={locked} />
