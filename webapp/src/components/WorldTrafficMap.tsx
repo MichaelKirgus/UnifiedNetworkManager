@@ -147,9 +147,12 @@ export function WorldTrafficMap({ from, to, siteId, onLoadingChange }: {
   const svgRef = useRef<SVGSVGElement | null>(null);
   const dragRef = useRef<{ px: number; py: number; k: number } | null>(null);
 
+  // Viewport window [x, x + W/k] must stay inside [0, W] → x ∈ [0, W − W/k]
+  // (at k=1 the range collapses to exactly 0). The earlier min(0, max(W−W/k, x))
+  // was inverted and clamped EVERY pan back to the top-left corner.
   const clampK = (k: number) => Math.min(8, Math.max(1, k));
-  const clampX = (x: number, k: number) => Math.min(0, Math.max(W - W / k, x));
-  const clampY = (y: number, k: number) => Math.min(0, Math.max(H - H / k, y));
+  const clampX = (x: number, k: number) => Math.min(W - W / k, Math.max(0, x));
+  const clampY = (y: number, k: number) => Math.min(H - H / k, Math.max(0, y));
 
   // Zoom by factor f around the current viewport center (button clicks).
   const zoomBy = (f: number) =>
@@ -162,7 +165,8 @@ export function WorldTrafficMap({ from, to, siteId, onLoadingChange }: {
     });
 
   const onPointerDown = (e: ReactPointerEvent<SVGSVGElement>) => {
-    if (view.k <= 1) return; // nothing to pan at full view
+    // Drag is allowed at any zoom — at k=1 the clamps make it a no-op, and
+    // starting mid-drag lets a wheel-zoom-in take effect immediately.
     dragRef.current = { px: e.clientX, py: e.clientY, k: view.k };
     e.currentTarget.setPointerCapture(e.pointerId);
   };
@@ -328,10 +332,11 @@ export function WorldTrafficMap({ from, to, siteId, onLoadingChange }: {
       {/* Map + top-pairs list side by side (stacks on narrow screens). */}
       <div className="grid grid-cols-1 gap-3 xl:grid-cols-[minmax(0,1fr)_280px]">
         <div className="relative overflow-hidden rounded-lg border border-border bg-card">
-          {/* Size by available VERTICAL space, not a fixed pixel width: the map
-           * fills the card's full width (no wasted side margins on wide
-           * monitors) but its height is capped at what fits above the fold —
-           * 2:1 aspect means max-width = 2 × (viewport − page chrome). */}
+          {/* Size by available VERTICAL space with a sane ceiling: full card
+           * width on wide monitors looked stretched, and a small fixed cap
+           * wasted side space — so the map grows with viewport height (2:1
+           * aspect → max-width = 2 × available height) up to 1500 px, then
+           * stays centered. Zoom covers anything bigger. */}
           {basemapQuery.isLoading ? (
             <div className="flex h-72 items-center justify-center text-sm text-muted-foreground">Loading map…</div>
           ) : hasMap && geo ? (
@@ -339,7 +344,7 @@ export function WorldTrafficMap({ from, to, siteId, onLoadingChange }: {
               ref={svgRef}
               viewBox={`${view.x.toFixed(2)} ${view.y.toFixed(2)} ${(W / view.k).toFixed(2)} ${(H / view.k).toFixed(2)}`}
               className={`mx-auto block h-auto w-full select-none ${view.k > 1 ? 'cursor-grab active:cursor-grabbing' : ''}`}
-              style={{ maxWidth: 'min(100%, max(640px, calc(2 * (100vh - 200px))))' }}
+              style={{ maxWidth: 'min(100%, max(640px, calc(2 * (100vh - 300px))), 1500px)' }}
               role="img"
               aria-label="World traffic map — scroll to zoom, drag to pan"
               onPointerDown={onPointerDown}
