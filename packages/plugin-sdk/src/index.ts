@@ -82,6 +82,10 @@ export type { NtpQueryResult } from './ntp';
 export { compareVersions, isUpdateAvailable, firmwareRow, extractMajorMinor, latestCatalogLine, catalogFirmwareRow, PACKAGE_MANAGER_ADAPTERS, detectPackageManager, readOsReleaseIds, listUpgradablePackages, listInstalledPackages, readAlpineRelease, runPackageUpgrade, runPackageUpgradeList, holdPackages, unholdPackages, listHeldPackages, runForceFullUpgrade, packageRequiresReboot, buildDetachedUpgradeScript, buildUpgradeStatusScript, parseDetachedUpgradeStatus, UPGRADE_DONE_MARKER, DETACHED_ALREADY_RUNNING_EXIT } from './updates';
 export type { InstalledPackage, InstalledPackagesResult } from './updates';
 export type { UpdateKind, UpdateRow, UpdateExecBackend, UpgradablePackage, PmAdapter, SshUpdatesOptions, PackageUpgradeResult, DetachedUpgradeStatus } from './updates';
+// Container BOM probe (installedPackages with component='container'): shared
+// in-container shell script + line-protocol parser. See bom.ts.
+export { BOM_PROBE_SCRIPT, bomExecCommand, parseBomOutput } from './bom';
+export type { BomPackage, BomProbeResult } from './bom';
 // Security checks (capability 'securityChecks'): row contract for the cross-device
 // Security page. See security.ts.
 export type { SecurityCheckKind, SecurityCheckRow } from './security';

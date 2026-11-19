@@ -390,3 +390,107 @@ export async function containerLogsRaw(o: DockerClientOptions, idOrName: string,
   }
   return last ?? { ok: false, status: 0, data: Buffer.alloc(0), error: 'no transports attempted' };
 }
+
+// --- Exec (container BOM probe) ----------------------------------------------------
+
+/** POST /containers/{id}/exec — create an exec instance. Returns `{Id}` on success;
+ * the caller then starts it via containerExecStartRaw. */
+export function containerExecCreate(o: DockerClientOptions, idOrName: string, cmd: string[]): Promise<DockerApiResult<{ Id?: string }>> {
+  return dockerRequest<{ Id?: string }>(o, 'POST', `/containers/${encodeURIComponent(idOrName)}/exec`, {
+    Cmd: cmd,
+    AttachStdout: true,
+    AttachStderr: false,
+    Tty: false,
+  });
+}
+
+/** POST /exec/{id}/start — RAW byte stream (NOT JSON). With Tty=false the daemon
+ * multiplexes stdout into 8-byte-header frames even when stderr is not attached;
+ * returns the raw body so the caller can demux (see demuxDockerStream). */
+export async function containerExecStartRaw(o: DockerClientOptions, execId: string): Promise<DockerApiResult<Buffer>> {
+  const path = `/exec/${encodeURIComponent(execId)}/start`;
+  const attempts: BoundClient[] = [];
+  if (o.transport === 'auto') {
+    try { attempts.push(buildBound({ ...o, transport: 'tcp' })); } catch { /* no host */ }
+    if (o.tls?.ca || o.tls?.cert) {
+      try { attempts.push(buildBound({ ...o, transport: 'tls' })); } catch { /* missing material */ }
+    }
+  } else {
+    attempts.push(buildBound(o));
+  }
+  if (attempts.length === 0) return { ok: false, status: 0, data: Buffer.alloc(0), error: 'No target address — set the device management address.' };
+
+  const timeoutMs = 30_000; // a slow container's package listing can take a while
+  let last: DockerApiResult<Buffer> | null = null;
+  for (const bound of attempts) {
+    try {
+      if (bound.kind === 'socket') {
+        const payload = JSON.stringify({ Tty: false });
+        const { status, body } = await new Promise<{ status: number; body: Buffer }>((resolve, reject) => {
+          const req = http.request(
+            { socketPath: bound.socketPath!, path, method: 'POST', timeout: timeoutMs },
+            (res) => {
+              const chunks: Buffer[] = [];
+              res.on('data', (c: Buffer) => chunks.push(c));
+              res.on('end', () => resolve({ status: res.statusCode ?? 0, body: Buffer.concat(chunks) }));
+            }
+          );
+          req.setHeader('Content-Type', 'application/json');
+          req.on('timeout', () => req.destroy(new Error(`socket request timed out after ${timeoutMs} ms`)));
+          req.on('error', reject);
+          req.write(payload);
+          req.end();
+        });
+        if (status >= 200 && status < 300) return { ok: true, status, data: body, transportUsed: 'socket' };
+        let msg = `HTTP ${status}`;
+        try { const j = JSON.parse(body.toString('utf8')); if (j && typeof j.message === 'string') msg = j.message; } catch { /* not JSON */ }
+        return { ok: false, status, data: Buffer.alloc(0), transportUsed: 'socket', error: msg };
+      }
+      const res = await bound.axios!.request<Buffer>({ method: 'POST', url: path, timeout: timeoutMs, responseType: 'arraybuffer', data: { Tty: false } });
+      if (res.status >= 200 && res.status < 300) {
+        return { ok: true, status: res.status, data: Buffer.isBuffer(res.data) ? res.data : Buffer.from(res.data as ArrayBuffer), transportUsed: bound.kind === 'tls' ? 'tls' : 'tcp' };
+      }
+      if (res.status >= 400 && res.status < 600) {
+        return { ok: false, status: res.status, data: Buffer.alloc(0), transportUsed: bound.kind === 'tls' ? 'tls' : 'tcp', error: `HTTP ${res.status}` };
+      }
+    } catch (err) {
+      last = { ok: false, status: 0, data: Buffer.alloc(0), transportUsed: bound.kind === 'tls' ? 'tls' : 'socket', error: err instanceof Error ? err.message : String(err) };
+    }
+  }
+  return last ?? { ok: false, status: 0, data: Buffer.alloc(0), error: 'no transports attempted' };
+}
+
+/**
+ * Demuxes a Docker Engine stream (logs OR exec attach). With Tty=false the
+ * daemon multiplexes: each frame = 8-byte header (stream-type byte + 3-byte
+ * zero pad + uint32 BE payload length) + payload, and frames may be split or
+ * coalesced across TCP chunks — so we walk a cursor over the buffer. A body
+ * that does NOT start with a valid header is treated as plain text (single
+ * stream / older daemons). Returns the reassembled stdout+stderr text.
+ */
+export function demuxDockerStream(buf: Buffer): string {
+  if (buf.length === 0) return '';
+  // Plain-text heuristic: first byte must be a known stream type (1=stdout, 2=stderr).
+  const looksMultiplexed = buf.length >= 8 && (buf[0] === 1 || buf[0] === 2);
+  if (!looksMultiplexed) return buf.toString('utf8').replace(/\n$/, '');
+
+  let cursor = 0;
+  const out: string[] = [];
+  while (cursor + 8 <= buf.length) {
+    const streamType = buf[cursor]; // 1=stdout, 2=stderr
+    if (streamType !== 1 && streamType !== 2) break; // not a frame — stop demuxing
+    const len = buf.readUInt32BE(cursor + 4);
+    if (cursor + 8 + len > buf.length) {
+      // Truncated final frame (daemon cut the stream mid-frame) — take what's left.
+      out.push(buf.slice(cursor + 8).toString('utf8'));
+      break;
+    }
+    const payload = buf.slice(cursor + 8, cursor + 8 + len);
+    if (payload.length > 0) {
+      // Tag stderr lines so callers can distinguish them; stdout stays untagged.
+      out.push(streamType === 2 ? `[err] ${payload.toString('utf8')}` : payload.toString('utf8'));
+    }
+    cursor += 8 + len;
+  }
+  return out.join('').replace(/\n$/, '');
+}

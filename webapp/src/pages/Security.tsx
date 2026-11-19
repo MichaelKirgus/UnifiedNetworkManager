@@ -152,6 +152,13 @@ export default function Security() {
   const cveRows = cveVulnsQuery.data?.rows ?? [];
   const summary = cveSummaryQuery.data;
 
+  // Component filter — host (appliance OS) vs. container (BOM rows). Client-side,
+  // same data flow as the table's built-in search; the API also accepts a
+  // `component` query param for direct consumers.
+  const [cveComponent, setCveComponent] = useState<'all' | 'host' | 'container'>('all');
+  const cveFilteredRows =
+    cveComponent === 'all' ? cveRows : cveRows.filter((r) => (r.component ?? 'host') === cveComponent);
+
   // Findings | Vulnerabilities (CVEs) | Threat Intel — each section is a
   // self-contained tab so the page reads top-down instead of one long scroll.
   const [tab, setTab] = useState<'findings' | 'vulnerabilities' | 'threat-intel'>('findings');
@@ -241,6 +248,21 @@ export default function Security() {
           interfaces={[]}
         />
       ),
+    },
+    {
+      header: 'Component',
+      key: 'component',
+      width: 190,
+      sortAccessor: (row) => `${row.component ?? 'host'}|${row.componentName ?? ''}`,
+      exportValue: (row) => (row.component === 'container' ? `container:${row.componentName ?? '?'}` : 'host'),
+      render: (row) =>
+        row.component === 'container' ? (
+          <span className="inline-flex items-center gap-1 rounded-md bg-info/15 px-2 py-0.5 text-xs font-medium text-info-fg" title={`Software inside container ${row.componentName ?? ''}`}>
+            container · {row.componentName}
+          </span>
+        ) : (
+          <span className="text-xs text-secondary">host</span>
+        ),
     },
     {
       header: 'Package',
@@ -394,6 +416,14 @@ export default function Security() {
                 <span className="text-sm text-secondary">
                   on <strong className="text-foreground">{summary.affectedDevices}</strong> device{summary.affectedDevices === 1 ? '' : 's'}
                 </span>
+                {typeof summary.affectedContainers === 'number' && summary.affectedContainers > 0 && (
+                  <>
+                    <span className="text-faint">·</span>
+                    <span className="text-sm text-secondary">
+                      in <strong className="text-foreground">{summary.affectedContainers}</strong> container{summary.affectedContainers === 1 ? '' : 's'}
+                    </span>
+                  </>
+                )}
               </>
             )}
             {summary.lastError && (
@@ -410,15 +440,40 @@ export default function Security() {
         )}
 
         {cveVulnsQuery.data && (
-          <DataTable
-            columns={cveColumns}
-            rows={cveRows}
-            rowKey={(row) => `${row.deviceId}|${row.pluginId}|${row.packageName}|${row.cveId}`}
-            storageKey="security-cves"
-            autoRefresh={{ intervalMs: 30_000, queries: [cveVulnsQuery] }}
-            searchPlaceholder="Search package or CVE id…"
-            emptyMessage="No known vulnerabilities — packages are matched against OSV advisories once the fleet's installed-package inventory is collected (Generic SSH plugin on Linux hosts) and at least one advisory fetch has succeeded."
-          />
+          <>
+            {/* Component filter — host OS packages vs. container BOM rows */}
+            <div className="mb-2 flex items-center gap-2">
+              <label htmlFor="cve-component-filter" className="text-xs text-faint">Component</label>
+              <select
+                id="cve-component-filter"
+                value={cveComponent}
+                onChange={(e) => setCveComponent(e.target.value as 'all' | 'host' | 'container')}
+                className="rounded-md border border-border bg-background px-2 py-1 text-xs text-foreground"
+              >
+                <option value="all">All</option>
+                <option value="host">Host (appliance OS)</option>
+                <option value="container">Containers</option>
+              </select>
+              {cveComponent !== 'all' && (
+                <span className="text-xs text-faint">
+                  {cveFilteredRows.length} of {cveRows.length}
+                </span>
+              )}
+            </div>
+            <DataTable
+              columns={cveColumns}
+              rows={cveFilteredRows}
+              rowKey={(row) => `${row.deviceId}|${row.pluginId}|${row.component ?? 'host'}|${row.componentName ?? ''}|${row.packageName}|${row.cveId}`}
+              storageKey="security-cves"
+              autoRefresh={{ intervalMs: 30_000, queries: [cveVulnsQuery] }}
+              searchPlaceholder="Search package or CVE id…"
+              emptyMessage={
+                cveComponent !== 'all' && cveRows.length > 0
+                  ? `No ${cveComponent} matches — other components have ${cveRows.length}.`
+                  : "No known vulnerabilities — packages are matched against OSV advisories once the fleet's installed-package inventory is collected (Generic SSH plugin on Linux hosts) and at least one advisory fetch has succeeded."
+              }
+            />
+          </>
         )}
       </div>
       )}

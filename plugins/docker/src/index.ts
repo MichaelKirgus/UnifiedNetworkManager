@@ -48,6 +48,7 @@ import { registry as actionRegistry, sshPool, DockerActionContext } from './acti
 import { buildPlan, PlanningError } from './plan';
 import { collectProbeStats, collectProbeStates, ProbeContainerStat, ProbeContainerState } from './probe';
 import { mirrorDockerContainers, ContainerCondition } from './notifications';
+import { collectContainerPackages } from './bom';
 
 // --- Identity -----------------------------------------------------------------
 export const PLUGIN_UUID = '00000000-0000-4000-8000-00000000000b';
@@ -112,7 +113,13 @@ const identity = resolvePluginIdentity({
   // labels incl. compose project/service, ports, binds/volumes, restart policy,
   // static IPs + aliases); named volumes are never touched and stopped
   // containers stay stopped. Compose members are recreated in depends_on order.
-  version: '0.11.0',
+  // 0.12.0 — container BOM: per-container installed-package inventory via
+  // Engine API exec (shared SDK probe script, read-only sh -c) emitted into the
+  // generic `installedPackages` metric with component=container — feeds the
+  // CVE tracker's fleet-wide matching without any SSH slot. TTL-cached per
+  // container id (6 h), deadline-capped inside the ~10 s poll budget; gated by
+  // the new `collectContainerPackages` option (default ON).
+  version: '0.12.1',
   vendors: ['generic'],
   capabilities: ['monitoring', 'configuration', 'planning', 'deviceState', 'probe'],
 });
@@ -167,6 +174,14 @@ const PLUGIN_OPTIONS: PluginOptionDescriptor[] = [
     default: false,
     description:
       "Enumerate the host's GPUs (NVIDIA / AMD / Intel, incl. enabled iGPUs) and read live counters via nvidia-smi / rocm-smi during inventory polls — over an OPTIONAL bound ssh slot, since the Engine API has no host-GPU endpoint. OFF by default: most Docker hosts are GPU-less servers/VMs; off = zero SSH traffic.",
+  },
+  {
+    key: 'collectContainerPackages',
+    label: 'Collect container software inventory (BOM)',
+    type: 'boolean' as const,
+    default: true,
+    description:
+      "Probe each RUNNING container's installed packages via Engine API exec (sh -c, read-only — no SSH needed) and report them to the CVE tracker with component=container. TTL-cached per container (6 h) so steady-state polls cost nothing; containers without a shell (scratch/distroless) are skipped. OFF = previously collected container package rows are cleared.",
   },
 ];
 
@@ -282,6 +297,8 @@ async function collect(opts: DockerClientOptions, full = true): Promise<{
   health: Health;
   error?: string;
   rows: UnmContainerRow[];
+  /** Raw /containers/json entries (every poll — the BOM probe needs Id/State/Image). */
+  rawContainers: DockerContainerRaw[];
   /** null = not collected (key omitted from metrics — no wipe). */
   images: ImageRow[] | null;
   running: number;
@@ -295,7 +312,7 @@ async function collect(opts: DockerClientOptions, full = true): Promise<{
 }> {
   const version = await engineVersion(opts);
   if (!version.ok) {
-    return { health: 'critical', error: `Docker Engine unreachable via ${version.transportUsed ?? opts.transport}: ${version.error || `HTTP ${version.status}`}`, rows: [], images: null, running: 0, stopped: 0, compose: { total: 0, running: 0, entries: [] }, engineVersionText: null, conditions: null };
+    return { health: 'critical', error: `Docker Engine unreachable via ${version.transportUsed ?? opts.transport}: ${version.error || `HTTP ${version.status}`}`, rows: [], rawContainers: [], images: null, running: 0, stopped: 0, compose: { total: 0, running: 0, entries: [] }, engineVersionText: null, conditions: null };
   }
 
   // Version + container list in parallel (both cheap). On a full poll the image
@@ -314,9 +331,9 @@ async function collect(opts: DockerClientOptions, full = true): Promise<{
     // (rows are not emitted → no wipe of stored rows).
     const engineVersionText = version.data?.Version ? `Docker ${version.data.Version}` : null;
     if (!full) {
-      return { health: 'ok', rows: [], images: null, running: 0, stopped: 0, compose: { total: 0, running: 0, entries: [] }, engineVersionText, conditions: null };
+      return { health: 'ok', rows: [], rawContainers: [], images: null, running: 0, stopped: 0, compose: { total: 0, running: 0, entries: [] }, engineVersionText, conditions: null };
     }
-    return { health: 'critical', error: `/containers/json failed (HTTP ${list.status}): ${JSON.stringify(list.data ?? '').slice(0, 200)}`, rows: [], images: null, running: 0, stopped: 0, compose: { total: 0, running: 0, entries: [] }, engineVersionText, conditions: null };
+    return { health: 'critical', error: `/containers/json failed (HTTP ${list.status}): ${JSON.stringify(list.data ?? '').slice(0, 200)}`, rows: [], rawContainers: [], images: null, running: 0, stopped: 0, compose: { total: 0, running: 0, entries: [] }, engineVersionText, conditions: null };
   }
 
   const raw = Array.isArray(list.data) ? (list.data as DockerContainerRaw[]) : [];
@@ -359,6 +376,7 @@ async function collect(opts: DockerClientOptions, full = true): Promise<{
   return {
     health: 'ok',
     rows,
+    rawContainers: raw,
     images,
     running,
     stopped,
@@ -407,14 +425,16 @@ app.post('/monitoring', async (req, res) => {
   const full = body.collectInventory !== false;
 
   try {
-    const result = await collect({
+    const opts: DockerClientOptions = {
       host: managementAddress,
       transport: transport as DockerClientOptions['transport'],
       tcpPort: port,
       tlsPort: 2376,
       localSocketPath,
       tls: tlsMaterialFromCredentials(body.credentials),
-    }, full);
+    };
+
+    const result = await collect(opts, full);
 
     if (result.error) {
       logger.warn(`Docker poll for ${managementAddress} failed: ${result.error}`, { deviceId, context: { host: managementAddress } });
@@ -465,6 +485,26 @@ app.post('/monitoring', async (req, res) => {
         } catch {
           /* best-effort — a failed GPU probe must never sink the poll */
         }
+      }
+    }
+    // Container BOM — per-container package inventory via Engine API exec
+    // (no SSH needed). Inventory-due polls only; TTL-cached + deadline-capped
+    // inside bom.ts so it stays within the ~10 s /monitoring budget. null =
+    // coverage incomplete after a restart → key omitted (NO wipe); EMPTY array
+    // = authoritative wipe (host has no running containers). A failed probe
+    // degrades to "keep previous rows" per container.
+    if (full) {
+      if (settings.collectContainerPackages !== false) {
+        try {
+          const bomRows = await collectContainerPackages(opts, result.rawContainers);
+          if (bomRows !== null) metrics['installedPackages'] = bomRows;
+        } catch {
+          /* best-effort — a failed BOM probe must never sink the poll */
+        }
+      } else {
+        // Disabled by option → authoritative wipe: previously collected
+        // container package rows are cleared (an absent key would keep them).
+        metrics['installedPackages'] = [];
       }
     }
     if (result.engineVersionText) {

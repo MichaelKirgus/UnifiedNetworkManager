@@ -63,13 +63,19 @@ async function resolveScope(req: Parameters<typeof allowedDeviceIds>[0], deviceI
   return allowed;
 }
 
-// GET /cve/vulnerabilities — per-device CVE matches (the Security page table).
+// GET /cve/vulnerabilities — per-component CVE matches (the Security page table).
 router.get('/cve/vulnerabilities', requireAuth, requirePermission('security:read'), async (req, res: Response) => {
   try {
-    const { deviceId, siteId, severityRank, ecosystem, q } = req.query as Record<string, string | undefined>;
+    const { deviceId, siteId, severityRank, ecosystem, component, q } = req.query as Record<string, string | undefined>;
 
     if (severityRank && !KNOWN_RANKS.includes(severityRank)) {
       res.status(400).json({ error: `"severityRank" must be one of: ${KNOWN_RANKS.join(', ')}` });
+      return;
+    }
+    // BOM component filter — 'host' | 'container' (any other value = 400, same
+    // strictness as severityRank so a typo can't silently empty the table).
+    if (component && !['host', 'container'].includes(component)) {
+      res.status(400).json({ error: `"component" must be one of: host, container` });
       return;
     }
 
@@ -85,6 +91,7 @@ router.get('/cve/vulnerabilities', requireAuth, requirePermission('security:read
     if (scope !== 'all') clauses.push(inArray(schema.deviceCves.deviceId, [...scope]));
     if (severityRank) clauses.push(eq(schema.deviceCves.severityRank, severityRank));
     if (ecosystem) clauses.push(eq(schema.deviceCves.ecosystem, ecosystem));
+    if (component) clauses.push(eq(schema.deviceCves.component, component));
     if (q && q.trim()) {
       const like = `%${q.trim().replace(/[%_]/g, '')}%`; // strip wildcards — plain substring only
       clauses.push(sql`("packageName" ILIKE ${like} OR "cveId" ILIKE ${like})`);
@@ -132,13 +139,17 @@ router.get('/cve/summary', requireAuth, requirePermission('security:read'), asyn
     if (scope !== 'all') clauses.push(inArray(schema.deviceCves.deviceId, [...scope]));
     const where = clauses.length > 0 ? and(...(clauses as never[])) : undefined;
 
-    // One pass for the per-rank counts + affected-device count.
-    const [rankRows, deviceRow] = await Promise.all([
+    // One pass for the per-rank counts + affected-device count + affected
+    // container count (BOM — how many distinct containers carry a match).
+    const [rankRows, deviceRow, containerRow] = await Promise.all([
       db.select({ rank: schema.deviceCves.severityRank, n: sql<number>`count(*)::int` })
         .from(schema.deviceCves)
         .where(where)
         .groupBy(schema.deviceCves.severityRank),
       db.select({ n: sql<number>`count(DISTINCT "deviceId")::int` }).from(schema.deviceCves).where(where),
+      db.select({ n: sql<number>`count(DISTINCT "componentName") FILTER (WHERE component = 'container')::int` })
+        .from(schema.deviceCves)
+        .where(where),
     ]);
 
     const bySeverity = emptyBySeverity();
@@ -149,6 +160,7 @@ router.get('/cve/summary', requireAuth, requirePermission('security:read'), asyn
     res.status(200).json({
       bySeverity,
       affectedDevices: deviceRow[0]?.n ?? 0,
+      affectedContainers: containerRow[0]?.n ?? 0,
       totalMatches: Object.values(bySeverity).reduce((a, b) => a + b, 0),
       ...(await readWorkerStatus()),
     });

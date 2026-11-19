@@ -6794,6 +6794,13 @@ paths:
           schema: { type: string }
           description: Filter by package ecosystem tag (e.g. debian, alpine, npm)
         - in: query
+          name: component
+          required: false
+          schema:
+            type: string
+            enum: [host, container]
+          description: BOM filter — host OS packages only, or software inside containers only
+        - in: query
           name: q
           required: false
           schema: { type: string }
@@ -6806,7 +6813,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/CveVulnerabilitiesResponse'
         '400':
-          description: Invalid severityRank filter value
+          description: Invalid severityRank or component filter value
         '401':
           description: Authentication required
 
@@ -12706,11 +12713,13 @@ components:
 
     CveMatchRow:
       type: object
-      description: One (device × vulnerable package) match from the device_cves table.
-      required: [deviceId, pluginId, ecosystem, packageName, cveId, severityRank, collectedAt]
+      description: One (component × vulnerable package) match from the device_cves table.
+      required: [deviceId, pluginId, component, componentName, ecosystem, packageName, cveId, severityRank, collectedAt]
       properties:
         deviceId: { type: string }
         pluginId: { type: string }
+        component: { type: string, enum: [host, container], description: "BOM component carrying the match — 'host' (OS packages) or 'container'" }
+        componentName: { type: string, description: "Container name for component=container rows; empty string for host rows" }
         ecosystem: { type: string, description: "Package ecosystem tag (debian, alpine, npm, …)" }
         packageName: { type: string }
         cveId: { type: string, description: "Advisory id — a CVE alias when the source provides one" }
@@ -12739,6 +12748,7 @@ components:
               description: "Match counts per severity bucket (all five keys always present)"
               additionalProperties: { type: integer }
             affectedDevices: { type: integer, description: "Distinct devices with at least one match" }
+            affectedContainers: { type: integer, description: "Distinct containers (BOM) carrying at least one match" }
             totalMatches: { type: integer }
 
     CveWorkerStatus:

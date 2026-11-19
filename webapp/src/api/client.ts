@@ -946,6 +946,10 @@ export interface UpdateRow {
 export interface CveVulnerabilityRow {
   deviceId: string;
   pluginId: string;
+  /** 'host' = the appliance/OS itself; 'container' = software inside a container (BOM). */
+  component?: 'host' | 'container';
+  /** Container name when component='container' (empty for host rows). */
+  componentName?: string;
   ecosystem: string;
   packageName: string;
   cveId: string;
@@ -971,6 +975,8 @@ export interface CveVulnerabilitiesResponse {
 export interface CveSummaryResponse {
   bySeverity: { critical: number; high: number; medium: number; low: number; unknown: number };
   affectedDevices: number;
+  /** Distinct containers (componentName) with at least one CVE match. */
+  affectedContainers?: number;
   totalMatches: number;
   lastAttemptAt?: string | null;
   lastSuccessAt?: string | null;
@@ -4597,12 +4603,13 @@ export const api = {
     return apiFetch<SecurityChecksResponse>(`/security-checks${suffix}`);
   },
   /** CVE matches on installed packages — one row per (device × package × advisory). */
-  cveVulnerabilities: (params?: { deviceId?: string; siteId?: string; severityRank?: 'critical' | 'high' | 'medium' | 'low' | 'unknown'; ecosystem?: string; q?: string }) => {
+  cveVulnerabilities: (params?: { deviceId?: string; siteId?: string; severityRank?: 'critical' | 'high' | 'medium' | 'low' | 'unknown'; ecosystem?: string; component?: 'host' | 'container'; q?: string }) => {
     const qs = new URLSearchParams();
     if (params?.deviceId) qs.set('deviceId', params.deviceId);
     if (params?.siteId) qs.set('siteId', params.siteId);
     if (params?.severityRank) qs.set('severityRank', params.severityRank);
     if (params?.ecosystem) qs.set('ecosystem', params.ecosystem);
+    if (params?.component) qs.set('component', params.component);
     if (params?.q) qs.set('q', params.q);
     const suffix = qs.toString() ? `?${qs.toString()}` : '';
     return apiFetch<CveVulnerabilitiesResponse>(`/cve/vulnerabilities${suffix}`);

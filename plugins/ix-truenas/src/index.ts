@@ -77,6 +77,7 @@ import {
   type ServiceNetDetail,
   buildVirshPreamble,
 } from './enrichment';
+import { ensureBom, getBomRows } from './bom';
 import { hostSshPort, setHostSshPort, sshPool } from './ssh';
 import { alertDedupeKey, bootPoolName, PREFLIGHT_RESOLVERS, queryBootEnvs, registry as actionRegistry, type BootEnvRow, TruenasActionContext } from './actions';
 import { collectServices } from './services';
@@ -331,7 +332,14 @@ const identity = resolvePluginIdentity({
   // app.update (the matched `image:` fields of their structured config are
   // rewritten and the app redeployed); catalog apps have no editable compose
   // config and are skipped with a note — version bumps stay on containers.upgrade.
-  version: '0.30.0',
+  // 0.31.0 — Container software inventory (BOM): each running container's
+  // installed packages are probed via `docker exec` over the bound SSH slot
+  // (per-container, TTL-cached, background — /monitoring never blocks) and
+  // reported as `installedPackages` rows with component=container for the CVE
+  // tracker. Gated by the new `collectContainerPackages` option (default ON);
+  // OFF = no SSH probe traffic + previously collected container package rows
+  // are cleared.
+  version: '0.31.0',
   vendors: ['truenas'],
   capabilities: ['monitoring', 'configuration', 'planning', 'deviceState', 'ssh', 'probe', 'filesystem', 'sshConsole', 'updates', 'quickActions'],
 });
@@ -437,6 +445,14 @@ const PLUGIN_OPTIONS: PluginOptionDescriptor[] = [
     default: true,
     description:
       "Enumerate GPUs (NVIDIA / AMD / Intel, incl. enabled iGPUs) via the appliance's own PCI inventory and read live counters over SSH when a slot is bound. Disable on GPU-less appliances to skip the probe entirely.",
+  },
+  {
+    key: 'collectContainerPackages',
+    label: 'Collect container software inventory (BOM)',
+    type: 'boolean' as const,
+    default: true,
+    description:
+      "Probe each RUNNING container's installed packages via `docker exec` over the bound SSH slot and report them to the CVE tracker with component=container. Background + TTL-cached per container (6 h) so steady-state polls cost nothing; requires a bound SSH secret — without one this is a no-op. Disable to stop the probe traffic entirely: previously collected container package rows are cleared.",
   },
   {
     key: 'uploadViaSftp',
@@ -2106,6 +2122,9 @@ async function handleMonitoring(req: Request, res: Response): Promise<void> {
   // App/Container collection toggle — off = skip app.query/docker.network + all
   // enrichment and emit empty containers[]/dockerHosts[] to clear stale rows.
   const collectApps = settings.collectApps !== false;
+  // Container BOM (installed packages) toggle — off = no SSH probe traffic and
+  // an authoritative wipe of previously collected container package rows.
+  const collectBom = settings.collectContainerPackages !== false;
   // VM collection toggle — off = skip vm.query + the SSH virsh enrichment and
   // emit empty vms[]/vmHosts[] to clear stale rows (same contract as apps).
   const collectVms = settings.collectVms !== false;
@@ -2708,6 +2727,7 @@ async function handleMonitoring(req: Request, res: Response): Promise<void> {
     // enrichment (app.config wave / SSH inspect) is scheduled while disabled.
     metrics['containers'] = [];
     metrics['dockerHosts'] = [];
+    metrics['installedPackages'] = [];
   } else if (collectInventory && appsRes.status === 'fulfilled' && Array.isArray(appsRes.value)) {
     const apps = appsRes.value as Record<string, unknown>[];
 
@@ -2724,6 +2744,18 @@ async function handleMonitoring(req: Request, res: Response): Promise<void> {
       log: (level, message) => (level === 'warn' ? logger.warn(message, { deviceId }) : logger.info(message, { deviceId })),
     });
 
+    // Container BOM — background `docker exec` probe over the SAME ssh slot as
+    // the enrichment above (6 h TTL cache, 15-min retry while uncovered).
+    // Schedules only; /monitoring reads whatever cached rows exist right now.
+    // Skipped entirely when the option is off (no SSH traffic at all).
+    if (collectBom) {
+      ensureBom(
+        host,
+        sshCreds,
+        (level, message) => (level === 'warn' ? logger.warn(message, { deviceId }) : logger.info(message, { deviceId }))
+      );
+    }
+
     const enrichment = getEnrichment(host);
     const serviceDetailsByApp = enrichment?.serviceDetails ?? new Map<string, ServiceNetDetail[]>();
     const dockerInfo = enrichment?.dockerInfo; // undefined until the first SSH cycle completes
@@ -2733,6 +2765,18 @@ async function handleMonitoring(req: Request, res: Response): Promise<void> {
         ? parseDockerNetworks(dockerNetsRes.value as Record<string, unknown>[])
         : new Map<string, { driver: string; subnets: string[] }>();
     metrics['containers'] = buildContainerRows(apps, serviceDetailsByApp, dockerNets, dockerInfo, enrichment?.dockerStats);
+
+    // Container BOM rows (`component: 'container'`) for the CVE/vulnerability
+    // feature. Option OFF → authoritative wipe ([]). ON → emit whatever the
+    // cache holds for running containers (partial coverage is fine — ingestion
+    // never wipes a container missing from this batch); null omits the key so
+    // the API keeps its previous rows.
+    if (!collectBom) {
+      metrics['installedPackages'] = [];
+    } else {
+      const bomRows = getBomRows(host);
+      if (bomRows !== null) metrics['installedPackages'] = bomRows;
+    }
 
     // Host inventory (source 'docker'): one row per container with a REAL MAC —
     // only possible via `docker inspect` over SSH (the public API exposes no

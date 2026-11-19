@@ -66,8 +66,13 @@ async function computeFixesForRows(
   }
 
   // Ecosystem per (device, plugin) from the package inventory — the tag that
-  // drove both the advisory fetch and the device_cves matching.
-  const devRes = await db.query.devicePackages.findMany({ where: inArray(schema.devicePackages.deviceId, [...new Set(candidates.map((c) => c.deviceId))] ) });
+  // drove both the advisory fetch and the device_cves matching. HOST rows only:
+  // container BOM rows carry their own ecosystems (an alpine sidecar on an
+  // ubuntu host) and must not leak into the host OS-package fix computation.
+  const devRes = await db.query.devicePackages.findMany({ where: and(
+    inArray(schema.devicePackages.deviceId, [...new Set(candidates.map((c) => c.deviceId))]),
+    eq(schema.devicePackages.component, 'host'),
+  ) });
   const ecoByDevicePlugin = new Map<string, string>();
   for (const p of devRes) {
     if (!ecoByDevicePlugin.has(`${p.deviceId}|${p.pluginId}`)) ecoByDevicePlugin.set(`${p.deviceId}|${p.pluginId}`, String(p.ecosystem));

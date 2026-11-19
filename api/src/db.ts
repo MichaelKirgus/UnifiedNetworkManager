@@ -1547,22 +1547,46 @@ export async function initDb(): Promise<void> {
   await pool.query(`
     CREATE INDEX IF NOT EXISTS idx_device_security_checks_device ON device_security_checks ("deviceId")`);
 
-  // Installed-package inventory (CVE tracking) — one row per package, upserted
-  // per poll from the plugin's `installedPackages` metric. Same lifecycle as
-  // containers (upsert + delete-on-absent + 24h sweep). See schema.devicePackages.
+  // Installed-package inventory / BOM (CVE tracking) — one row per package,
+  // upserted per poll from the plugin's `installedPackages` metric. Same
+  // lifecycle as containers (upsert + delete-on-absent + 24h sweep). See
+  // schema.devicePackages.
   await pool.query(`
     CREATE TABLE IF NOT EXISTS device_packages (
       "deviceId" TEXT NOT NULL,
       "pluginId" TEXT NOT NULL,
+      component TEXT NOT NULL DEFAULT 'host',
+      "componentName" TEXT NOT NULL DEFAULT '',
       name TEXT NOT NULL,
       version TEXT,
       ecosystem TEXT NOT NULL DEFAULT 'unknown',
       extra TEXT NOT NULL DEFAULT '{}',
       "collectedAt" TEXT NOT NULL,
-      PRIMARY KEY ("deviceId", "pluginId", name)
+      PRIMARY KEY ("deviceId", "pluginId", component, "componentName", name)
     )`);
   await pool.query(`
     CREATE INDEX IF NOT EXISTS idx_device_packages_device ON device_packages ("deviceId")`);
+  // BOM generalization migration (existing DBs): additive schema sync adds the
+  // two columns but can NEVER alter a constraint, so widen the PK here —
+  // idempotent (no-op when component is already part of it). Existing rows all
+  // carry ('host','') by default → no duplicate conflict under the wider key.
+  await pool.query(`ALTER TABLE device_packages ADD COLUMN IF NOT EXISTS component TEXT NOT NULL DEFAULT 'host'`);
+  await pool.query(`ALTER TABLE device_packages ADD COLUMN IF NOT EXISTS "componentName" TEXT NOT NULL DEFAULT ''`);
+  await pool.query(`
+    DO $$ BEGIN
+      IF EXISTS (
+        SELECT 1 FROM pg_constraint c
+        WHERE c.conname = 'device_packages_pkey' AND c.contype = 'p'
+          AND NOT EXISTS (
+            SELECT 1 FROM pg_index i
+            JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = ANY(i.indkey)
+            WHERE i.indexrelid = c.conindid AND a.attname = 'component'
+          )
+      ) THEN
+        ALTER TABLE device_packages DROP CONSTRAINT device_packages_pkey;
+        ALTER TABLE device_packages ADD PRIMARY KEY ("deviceId", "pluginId", component, "componentName", name);
+      END IF;
+    END $$`);
 
   // CVE advisory knowledge base (Security page) — one row per (ecosystem,
   // package, advisory). Worker-managed only: fetched from an OSINT provider and
@@ -1586,13 +1610,16 @@ export async function initDb(): Promise<void> {
   await pool.query(`
     CREATE INDEX IF NOT EXISTS idx_cve_advisories_pkg ON cve_advisories (ecosystem, "packageName")`);
 
-  // Per-device CVE matches (Security page) — the join of device_packages with
-  // cve_advisories, recomputed wholesale by the CVE worker each cycle. Swept
-  // like other inventory so offline devices drop out of the views. See schema.deviceCves.
+  // Per-component CVE matches (Security page) — the join of device_packages
+  // with cve_advisories, recomputed wholesale by the CVE worker each cycle.
+  // Swept like other inventory so offline devices drop out of the views. See
+  // schema.deviceCves.
   await pool.query(`
     CREATE TABLE IF NOT EXISTS device_cves (
       "deviceId" TEXT NOT NULL,
       "pluginId" TEXT NOT NULL,
+      component TEXT NOT NULL DEFAULT 'host',
+      "componentName" TEXT NOT NULL DEFAULT '',
       ecosystem TEXT NOT NULL,
       "packageName" TEXT NOT NULL,
       "cveId" TEXT NOT NULL,
@@ -1603,10 +1630,28 @@ export async function initDb(): Promise<void> {
       url TEXT,
       extra TEXT NOT NULL DEFAULT '{}',
       "collectedAt" TEXT NOT NULL,
-      PRIMARY KEY ("deviceId", "pluginId", ecosystem, "packageName", "cveId")
+      PRIMARY KEY ("deviceId", "pluginId", component, "componentName", ecosystem, "packageName", "cveId")
     )`);
   await pool.query(`
     CREATE INDEX IF NOT EXISTS idx_device_cves_device ON device_cves ("deviceId")`);
+  // BOM generalization migration — same pattern as device_packages above.
+  await pool.query(`ALTER TABLE device_cves ADD COLUMN IF NOT EXISTS component TEXT NOT NULL DEFAULT 'host'`);
+  await pool.query(`ALTER TABLE device_cves ADD COLUMN IF NOT EXISTS "componentName" TEXT NOT NULL DEFAULT ''`);
+  await pool.query(`
+    DO $$ BEGIN
+      IF EXISTS (
+        SELECT 1 FROM pg_constraint c
+        WHERE c.conname = 'device_cves_pkey' AND c.contype = 'p'
+          AND NOT EXISTS (
+            SELECT 1 FROM pg_index i
+            JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = ANY(i.indkey)
+            WHERE i.indexrelid = c.conindid AND a.attname = 'component'
+          )
+      ) THEN
+        ALTER TABLE device_cves DROP CONSTRAINT device_cves_pkey;
+        ALTER TABLE device_cves ADD PRIMARY KEY ("deviceId", "pluginId", component, "componentName", ecosystem, "packageName", "cveId");
+      END IF;
+    END $$`);
 
   // Generic per-plugin persistent state (see schema.pluginState). Plugins store
   // opaque JSON blobs here across polls/restarts via the internal /plugin/state/*

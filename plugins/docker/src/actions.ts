@@ -16,7 +16,7 @@
  */
 
 import { ActionDescriptor, ActionResult, INTENT_CONTAINERS_IMAGE_SET, createRegistry, createSshPool, pollUntil, resolveSshCredentials } from '@unm/plugin-sdk';
-import { DockerClientOptions, containerLogsRaw, dockerDelete, dockerGet, dockerPost, dockerRequest, listComposeMembers, listContainers, listImages, pullImageStream } from './client';
+import { DockerClientOptions, containerLogsRaw, demuxDockerStream, dockerDelete, dockerGet, dockerPost, dockerRequest, listComposeMembers, listContainers, listImages, pullImageStream } from './client';
 
 /** Executor context for one /config step — resolved client options + the raw
  *  decrypted credentials body (needed by SSH-based actions like deploy-compose). */
@@ -745,41 +745,6 @@ const imagesDeleteAction: ActionDescriptor<DockerActionContext> = {
   },
 };
 
-/**
- * Demuxes the Docker Engine log stream. With BOTH stdout+stderr requested the
- * daemon multiplexes: each frame = 8-byte header (stream-type byte + 3-byte
- * zero pad + uint32 BE payload length) + payload, and frames may be split or
- * coalesced across TCP chunks — so we walk a cursor over the buffer. A body
- * that does NOT start with a valid header is treated as plain text (single
- * stream / older daemons). Returns interleaved lines tagged [out]/[err].
- */
-function demuxDockerLogs(buf: Buffer): string {
-  if (buf.length === 0) return '';
-  // Plain-text heuristic: first byte must be a known stream type (1=stdout, 2=stderr).
-  const looksMultiplexed = buf.length >= 8 && (buf[0] === 1 || buf[0] === 2);
-  if (!looksMultiplexed) return buf.toString('utf8').replace(/\n$/, '');
-
-  let cursor = 0;
-  const out: string[] = [];
-  while (cursor + 8 <= buf.length) {
-    const streamType = buf[cursor]; // 1=stdout, 2=stderr
-    if (streamType !== 1 && streamType !== 2) break; // not a frame — stop demuxing
-    const len = buf.readUInt32BE(cursor + 4);
-    if (cursor + 8 + len > buf.length) {
-      // Truncated final frame (daemon cut the stream mid-frame) — take what's left.
-      out.push(buf.slice(cursor + 8).toString('utf8'));
-      break;
-    }
-    const payload = buf.slice(cursor + 8, cursor + 8 + len);
-    if (payload.length > 0) {
-      // Tag stderr lines so the webapp can tint them; stdout stays untagged.
-      out.push(streamType === 2 ? `[err] ${payload.toString('utf8')}` : payload.toString('utf8'));
-    }
-    cursor += 8 + len;
-  }
-  return out.join('').replace(/\n$/, '');
-}
-
 // --- containers.logs.read -----------------------------------------------------
 const containersLogsReadAction: ActionDescriptor<DockerActionContext> = {
   id: 'containers.logs.read',
@@ -809,7 +774,7 @@ const containersLogsReadAction: ActionDescriptor<DockerActionContext> = {
     const results = await Promise.all(members.map(async (m) => {
       const r = await containerLogsRaw(ctx.opts, nameOf(m), { tail });
       if (!r.ok) return { id: m.Id ?? '', name: nameOf(m), state: m.State ?? 'unknown', error: r.error || `HTTP ${r.status}`, logs: '' };
-      return { id: m.Id ?? '', name: nameOf(m), state: m.State ?? 'unknown', error: undefined as string | undefined, logs: demuxDockerLogs(r.data) };
+      return { id: m.Id ?? '', name: nameOf(m), state: m.State ?? 'unknown', error: undefined as string | undefined, logs: demuxDockerStream(r.data) };
     }));
 
     const failed = results.filter((x) => x.error);

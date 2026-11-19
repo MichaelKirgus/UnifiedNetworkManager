@@ -247,6 +247,8 @@ export async function cveFetchCycle(): Promise<void> {
 interface DeviceCveRow {
   deviceId: string;
   pluginId: string;
+  component: string;
+  componentName: string;
   ecosystem: string;
   packageName: string;
   cveId: string;
@@ -260,7 +262,7 @@ interface DeviceCveRow {
 /** Recomputes device_cves wholesale. Never throws — a failed beat retries next time. */
 export async function recomputeDeviceCves(): Promise<void> {
   const [pkgRes, advRes] = await Promise.all([
-    pool.query(`SELECT "deviceId", "pluginId", name, version, ecosystem FROM device_packages`),
+    pool.query(`SELECT "deviceId", "pluginId", component, "componentName", name, version, ecosystem FROM device_packages`),
     pool.query(
       `SELECT id, ecosystem, "packageName", "severityScore", "severityRank", "affectedRanges", summary, url
        FROM cve_advisories`
@@ -291,6 +293,8 @@ export async function recomputeDeviceCves(): Promise<void> {
       matches.push({
         deviceId: String(p.deviceId),
         pluginId: String(p.pluginId),
+        component: typeof p.component === 'string' && p.component !== '' ? p.component : 'host',
+        componentName: typeof p.componentName === 'string' ? p.componentName : '',
         ecosystem: String(p.ecosystem),
         packageName: String(p.name),
         cveId: String(a.id),
@@ -303,10 +307,12 @@ export async function recomputeDeviceCves(): Promise<void> {
     }
   }
 
-  // Previous match set (device|cve) — needed AFTER the wholesale recompute to
-  // tell which findings are NEW (alert-worthy) vs. already known.
-  const prevRes = await pool.query(`SELECT "deviceId", "cveId" FROM device_cves`);
-  const prevKeys = new Set(prevRes.rows.map((r: { deviceId: string; cveId: string }) => `${String(r.deviceId)}|${String(r.cveId)}`));
+  // Previous match set (device|component|cve) — needed AFTER the wholesale
+  // recompute to tell which findings are NEW (alert-worthy) vs. already known.
+  // Component-scoped: the same CVE in a host package AND in a container are two
+  // distinct findings, and neither re-alerts on every beat once both exist.
+  const prevRes = await pool.query(`SELECT "deviceId", component, "componentName", "cveId" FROM device_cves`);
+  const prevKeys = new Set(prevRes.rows.map((r: { deviceId: string; component?: string; componentName?: string; cveId: string }) => `${String(r.deviceId)}|${String(r.component ?? 'host')}|${String(r.componentName ?? '')}|${String(r.cveId)}`));
 
   // Wholesale recompute in one transaction — the table is a pure derived view.
   const client = await pool.connect();
@@ -318,11 +324,11 @@ export async function recomputeDeviceCves(): Promise<void> {
       const params: unknown[] = [];
       let p = 1;
       const valuesSql = batch.map((m) => {
-        params.push(m.deviceId, m.pluginId, m.ecosystem, m.packageName, m.cveId, m.installedVersion, m.severityScore, m.severityRank, m.summary, m.url, '{}', nowIso);
-        return `($${p++},$${p++},$${p++},$${p++},$${p++},$${p++},$${p++},$${p++},$${p++},$${p++},$${p++},$${p++})`;
+        params.push(m.deviceId, m.pluginId, m.component, m.componentName, m.ecosystem, m.packageName, m.cveId, m.installedVersion, m.severityScore, m.severityRank, m.summary, m.url, '{}', nowIso);
+        return `($${p++},$${p++},$${p++},$${p++},$${p++},$${p++},$${p++},$${p++},$${p++},$${p++},$${p++},$${p++},$${p++},$${p++})`;
       }).join(', ');
       await client.query(
-        `INSERT INTO device_cves ("deviceId", "pluginId", ecosystem, "packageName", "cveId", "installedVersion", "severityScore", "severityRank", summary, url, extra, "collectedAt")
+        `INSERT INTO device_cves ("deviceId", "pluginId", component, "componentName", ecosystem, "packageName", "cveId", "installedVersion", "severityScore", "severityRank", summary, url, extra, "collectedAt")
          VALUES ${valuesSql}`,
         params
       );
@@ -371,7 +377,8 @@ async function alertNewCveMatches(matches: DeviceCveRow[], prevKeys: Set<string>
     // Matches that disappeared in this recompute — resolve their stale rows.
     await resolveStaleCveFoundNotifications(matches);
 
-    const fresh = matches.filter((m) => !prevKeys.has(`${m.deviceId}|${m.cveId}`));
+    const findingKey = (m: DeviceCveRow) => `${m.deviceId}|${m.component}|${m.componentName}|${m.cveId}`;
+    const fresh = matches.filter((m) => !prevKeys.has(findingKey(m)));
     if (fresh.length === 0) return;
     if (prevKeys.size === 0) {
       // eslint-disable-next-line no-console
@@ -395,16 +402,18 @@ async function alertNewCveMatches(matches: DeviceCveRow[], prevKeys: Set<string>
     );
 
     for (const m of sorted.slice(0, MAX_INDIVIDUAL_CVE_ALERTS)) {
+      // Component-scoped label — "on MAIL04" vs. "on MAIL04 (container mailcow)".
+      const compLabel = m.component === 'host' || m.componentName === '' ? '' : ` (${m.component} ${m.componentName})`;
       await emitNotification({
         severity: m.severityRank === 'critical' ? 'critical' : 'warning',
         source: 'device',
         deviceId: m.deviceId,
-        title: `New CVE finding on ${names.get(m.deviceId) ?? m.deviceId}: ${m.cveId}`,
+        title: `New CVE finding on ${names.get(m.deviceId) ?? m.deviceId}${compLabel}: ${m.cveId}`,
         message:
           `${m.packageName}${m.installedVersion ? ` @ ${m.installedVersion}` : ''} is affected by ${m.cveId} ` +
-          `(${m.severityRank}${m.severityScore !== null ? `, CVSS ${m.severityScore}` : ''}).`,
-        dedupeKey: `cve-found:${m.deviceId}:${m.cveId}`,
-        context: { cveId: m.cveId, packageName: m.packageName, installedVersion: m.installedVersion, severityRank: m.severityRank, url: m.url },
+          `(${m.severityRank}${m.severityScore !== null ? `, CVSS ${m.severityScore}` : ''})${compLabel}.`,
+        dedupeKey: `cve-found:${m.deviceId}:${m.component}:${m.componentName}:${m.cveId}`,
+        context: { cveId: m.cveId, packageName: m.packageName, installedVersion: m.installedVersion, severityRank: m.severityRank, component: m.component, componentName: m.componentName || null, url: m.url },
       });
     }
     if (alertable.length > MAX_INDIVIDUAL_CVE_ALERTS) {
@@ -423,9 +432,9 @@ async function alertNewCveMatches(matches: DeviceCveRow[], prevKeys: Set<string>
   }
 }
 
-/** Resolves cve-found:* notifications whose (device, CVE) pair no longer matches. */
+/** Resolves cve-found:* notifications whose (device, component, CVE) finding no longer matches. */
 async function resolveStaleCveFoundNotifications(matches: DeviceCveRow[]): Promise<void> {
-  const current = new Set(matches.map((m) => `cve-found:${m.deviceId}:${m.cveId}`));
+  const current = new Set(matches.map((m) => `cve-found:${m.deviceId}:${m.component}:${m.componentName}:${m.cveId}`));
   // The batch-summary row (dedupeKey 'cve-found-batch') is not pair-scoped — it
   // never matches a `cve-found:<deviceId>:<cveId>` key and stays open for the user.
   const res = await pool.query(

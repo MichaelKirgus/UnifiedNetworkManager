@@ -549,19 +549,29 @@ async function ingestUpdates(
 }
 
 /**
- * Ingests the `installedPackages` metric into device_packages (CVE tracking).
- * Runs on EVERY poll — not inventory-gated — so a package upgrade refreshes the
- * row's version + collectedAt immediately and the cve worker re-matches within
- * one beat.
+ * Ingests the `installedPackages` metric into device_packages (CVE tracking /
+ * BOM). Runs on EVERY poll — not inventory-gated — so a package upgrade
+ * refreshes the row's version + collectedAt immediately and the cve worker
+ * re-matches within one beat.
  *
  * Generic key — any plugin may emit it:
- *   installedPackages[] { name, version?, ecosystem?, extra? }
+ *   installedPackages[] { name, version?, ecosystem?, extra?, component?, componentName? }
  * `ecosystem` is a free-form tag ('debian', 'alpine', 'npm', …) the cve worker
  * maps onto its provider's source names; missing = 'unknown' (skipped by the
- * fetch, but still stored so the UI can show untracked packages). Same
- * CONFIG-object lifecycle as containers: upsert-per-poll + delete-on-absent,
+ * fetch, but still stored so the UI can show untracked packages).
+ * BOM extension: `component` ('host' | 'container') + `componentName` (the
+ * container name for component='container'; '' otherwise) let one device carry
+ * its host OS packages AND per-container software in separate rows — the same
+ * package at different versions in host vs. container must not collide. Rows
+ * without the fields default to ('host','') so pre-BOM plugins keep working.
+ * Same CONFIG-object lifecycle as containers: upsert-per-poll + delete-on-absent,
  * present-but-empty = authoritative wipe. Never throws.
  */
+/** Rows per INSERT statement in the wholesale replace — keeps drizzle's SQL
+ * merge recursion comfortably under the call-stack limit (a single ~20k-row
+ * VALUES overflows it). */
+const BOM_INGEST_CHUNK_SIZE = 500;
+
 async function ingestInstalledPackages(
   deviceId: string,
   pluginId: string,
@@ -582,8 +592,8 @@ async function ingestInstalledPackages(
   };
 
   const values: {
-    deviceId: string; pluginId: string; name: string; version: string | null;
-    ecosystem: string; extra: string; collectedAt: string;
+    deviceId: string; pluginId: string; component: string; componentName: string; name: string;
+    version: string | null; ecosystem: string; extra: string; collectedAt: string;
   }[] = [];
   for (const raw of rawPkgs) {
     if (!raw || typeof raw !== 'object') continue;
@@ -593,6 +603,8 @@ async function ingestInstalledPackages(
     values.push({
       deviceId,
       pluginId,
+      component: typeof r['component'] === 'string' && (r['component'] as string).trim() !== '' ? (r['component'] as string).trim().toLowerCase() : 'host',
+      componentName: typeof r['componentName'] === 'string' ? (r['componentName'] as string).trim() : '',
       name,
       version: typeof r['version'] === 'string' && (r['version'] as string).trim() !== '' ? (r['version'] as string).trim() : null,
       ecosystem: typeof r['ecosystem'] === 'string' && (r['ecosystem'] as string).trim() !== '' ? (r['ecosystem'] as string).trim().toLowerCase() : 'unknown',
@@ -603,23 +615,24 @@ async function ingestInstalledPackages(
 
   if (values.length > 0) {
     const byKey = new Map<string, typeof values[number]>();
-    for (const v of values) byKey.set(v.name, v); // one row per package name (PK is case-sensitive; the cve worker matches case-insensitively)
-    await db.insert(schema.devicePackages).values(Array.from(byKey.values())).onConflictDoUpdate({
-      target: [schema.devicePackages.deviceId, schema.devicePackages.pluginId, schema.devicePackages.name],
-      set: {
-        version: sql`excluded.version`,
-        ecosystem: sql`excluded.ecosystem`,
-        extra: sql`excluded.extra`,
-        collectedAt: sql`excluded."collectedAt"`,
-      },
-    });
-    const seenNames = new Set(values.map((v) => v.name));
-    await db.delete(schema.devicePackages)
-      .where(and(
+    for (const v of values) byKey.set(`${v.component}|${v.componentName}|${v.name}`, v); // one row per composite key (PK is case-sensitive; the cve worker matches names case-insensitively)
+    // The emitted set is AUTHORITATIVE for this (device, plugin) — nothing else
+    // writes these rows — so replace it wholesale in ONE transaction: delete +
+    // chunked inserts. This is equivalent to upsert + delete-on-absent but
+    // scales to real fleets: a single multi-row VALUES with ~20k rows overflows
+    // drizzle's recursive SQL merge (RangeError: Maximum call stack size
+    // exceeded), and the delete-on-absent NOT IN list would hit the same wall
+    // plus Postgres' 65k bind-parameter cap.
+    const rows = Array.from(byKey.values());
+    await db.transaction(async (tx) => {
+      await tx.delete(schema.devicePackages).where(and(
         eq(schema.devicePackages.deviceId, deviceId),
         eq(schema.devicePackages.pluginId, pluginId),
-        notInArray(schema.devicePackages.name, Array.from(seenNames))
       ));
+      for (let i = 0; i < rows.length; i += BOM_INGEST_CHUNK_SIZE) {
+        await tx.insert(schema.devicePackages).values(rows.slice(i, i + BOM_INGEST_CHUNK_SIZE));
+      }
+    });
   } else {
     // Present-but-EMPTY is the authoritative wipe — same contract as containers.
     await db.delete(schema.devicePackages)

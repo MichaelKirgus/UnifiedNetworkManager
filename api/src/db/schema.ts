@@ -2900,16 +2900,23 @@ export const replicationTargets = pgTable(
 
 // ── CVE vulnerability tracking (Security page) ───────────────────────────────
 // One row per installed package as reported by a plugin's `installedPackages`
-// metric — the fleet-wide inventory the CVE worker matches advisories against.
-// Same upsert-per-poll + delete-on-absent lifecycle as containers: an uninstalled
-// package must vanish on the next poll, not linger until the 24h sweep. PK is
-// (device, plugin, name) so two plugins watching one device keep separate rows;
-// a device without package data contributes no rows. Swept like other inventory.
+// metric — the fleet-wide BOM (bill of materials) the CVE worker matches
+// advisories against. Same upsert-per-poll + delete-on-absent lifecycle as
+// containers: an uninstalled package must vanish on the next poll, not linger
+// until the 24h sweep. PK is (device, plugin, component, componentName, name)
+// so two plugins watching one device keep separate rows AND the same package
+// can exist at different versions in the host and in each container; a device
+// without package data contributes no rows. Swept like other inventory.
 export const devicePackages = pgTable(
   'device_packages',
   {
     deviceId: text('deviceId').notNull(),
     pluginId: text('pluginId').notNull(),
+    // BOM component type: 'host' (the OS the plugin monitors directly) or
+    // 'container' (software inside a container, probed via exec). Part of the PK.
+    component: text('component').notNull().default('host'),
+    // Component identity for non-host rows (the container name); '' for host rows.
+    componentName: text('componentName').notNull().default(''),
     // Package name as reported (e.g. "openssl", "nginx", "node").
     name: text('name').notNull(),
     // Installed version string, verbatim ("1.1.1n-0ubuntu3.9", "2.4.5-r0", …).
@@ -2928,7 +2935,7 @@ export const devicePackages = pgTable(
     return {
       pkDevicePackages: primaryKey({
         name: 'device_packages_pkey',
-        columns: [table.deviceId, table.pluginId, table.name],
+        columns: [table.deviceId, table.pluginId, table.component, table.componentName, table.name],
       }),
       idxDevicePackagesDevice: index('idx_device_packages_device').on(table.deviceId),
     };
@@ -2982,17 +2989,22 @@ export const cveAdvisories = pgTable(
   }
 );
 
-// One row per (device × vulnerable package) match — the join of device_packages
-// with cve_advisories computed by the CVE worker on every fetch cycle. This is
-// what the Security page renders: which devices are exposed to which CVEs, at
-// what severity. Recomputed WHOLESALE each beat (delete-all + re-insert per
-// device set) — the table is a pure derived view and must never drift from its
-// inputs. Swept like other inventory so offline devices drop out of the views.
+// One row per (component × vulnerable package) match — the join of
+// device_packages with cve_advisories computed by the CVE worker on every fetch
+// cycle. This is what the Security page renders: which devices/containers are
+// exposed to which CVEs, at what severity. Recomputed WHOLESALE each beat
+// (delete-all + re-insert per device set) — the table is a pure derived view and
+// must never drift from its inputs. Swept like other inventory so offline
+// devices drop out of the views.
 export const deviceCves = pgTable(
   'device_cves',
   {
     deviceId: text('deviceId').notNull(),
     pluginId: text('pluginId').notNull(),
+    // Denormalized from device_packages — which component carries the match
+    // ('host' or a specific container), so the UI can say "nginx in mailcow".
+    component: text('component').notNull().default('host'),
+    componentName: text('componentName').notNull().default(''),
     ecosystem: text('ecosystem').notNull(),
     packageName: text('packageName').notNull(),
     cveId: text('cveId').notNull(),
@@ -3010,7 +3022,7 @@ export const deviceCves = pgTable(
     return {
       pkDeviceCves: primaryKey({
         name: 'device_cves_pkey',
-        columns: [table.deviceId, table.pluginId, table.ecosystem, table.packageName, table.cveId],
+        columns: [table.deviceId, table.pluginId, table.component, table.componentName, table.ecosystem, table.packageName, table.cveId],
       }),
       idxDeviceCvesDevice: index('idx_device_cves_device').on(table.deviceId),
     };
