@@ -18,7 +18,20 @@ export type ServerTableParams<TExtra extends object> = TExtra & {
   pageSize: number;
   q?: string;
   sort?: ServerTableSort | null;
+  /** Committed per-column filter values (COLUMN KEY → text), non-empty only —
+   * the fetcher maps keys to API params exactly like it does for `sort`. */
+  filters?: Record<string, string>;
 };
+
+/** Stable JSON with sorted object keys — used for change detection + query cache
+ * so `{a:'x',b:''}` and `{b:'',a:'x'}` are the same state. */
+function stableStringify(v: unknown): string {
+  if (v && typeof v === 'object' && !Array.isArray(v)) {
+    const obj = v as Record<string, unknown>;
+    return `{${Object.keys(obj).sort().map((k) => `${JSON.stringify(k)}:${stableStringify(obj[k])}`).join(',')}}`;
+  }
+  return JSON.stringify(v);
+}
 
 interface PersistedPrefs {
   pageSize?: number;
@@ -69,6 +82,11 @@ export function useServerTable<TExtra extends object, TRow>(opts: {
   /** Committed search text — wire to DataTable's `onSearch` + `externalSearch`. */
   q: string;
   setQ: (q: string) => void;
+  /** Committed per-column filters (COLUMN KEY → non-empty text). Wire the map to
+   * DataTable's serverPagination.filters and this setter to onFiltersChange. */
+  filters: Record<string, string>;
+  /** Full replacement of the column-filter map — resets to page 1 when it changes. */
+  setFilters: (next: Record<string, string>) => void;
   sort: ServerTableSort | null;
   /** Wire to DataTable's serverPagination.onSortChange. Resets to page 1 on change. */
   setSort: (sort: ServerTableSort | null) => void;
@@ -84,8 +102,11 @@ export function useServerTable<TExtra extends object, TRow>(opts: {
   const [pageSize, setPageSizeRaw] = useState(persisted.pageSize ?? 50);
   const [q, setQRaw] = useState('');
   const [sort, setSortRaw] = useState<ServerTableSort | null>(persisted.sort ?? null);
+  // Committed per-column filters (COLUMN KEY → text). Session-only like `q` —
+  // not persisted: a reload starts with a clean table.
+  const [filters, setFiltersRaw] = useState<Record<string, string>>({});
 
-  // Any caller-filter change goes back to page 1 (search/sort resets are inline below).
+  // Any caller-filter change goes back to page 1 (search/sort/filter resets are inline below).
   const extraKey = JSON.stringify(opts.extra);
   useEffect(() => {
     setPageRaw(1);
@@ -93,6 +114,15 @@ export function useServerTable<TExtra extends object, TRow>(opts: {
 
   function setQ(v: string) {
     setQRaw(v);
+    setPageRaw(1);
+  }
+  /** Full replacement of the column-filter map (mirrors client-mode colFilters).
+   * Empty/whitespace values are stripped; a no-op change does NOT reset the page. */
+  function setFilters(next: Record<string, string>) {
+    const clean: Record<string, string> = {};
+    for (const [k, v] of Object.entries(next)) if (v.trim() !== '') clean[k] = v;
+    if (stableStringify(clean) === stableStringify(filters)) return;
+    setFiltersRaw(clean);
     setPageRaw(1);
   }
   function setSort(s: ServerTableSort | null) {
@@ -104,10 +134,11 @@ export function useServerTable<TExtra extends object, TRow>(opts: {
     setPageRaw(1);
   }
 
+  const filterKey = stableStringify(filters);
   const query = useQuery({
     // In ALL_PAGES mode the page is irrelevant — pin it out of the key so the cache stays stable.
-    queryKey: ['serverTable', opts.storageKey ?? 'default', extraKey, q, sort?.key ?? null, sort?.dir ?? null, pageSize === ALL_PAGES ? null : page, pageSize],
-    queryFn: () => opts.fetcher({ ...(opts.extra as object), page: pageSize === ALL_PAGES ? 1 : page, pageSize, q: q || undefined, sort } as ServerTableParams<TExtra>),
+    queryKey: ['serverTable', opts.storageKey ?? 'default', extraKey, q, filterKey, sort?.key ?? null, sort?.dir ?? null, pageSize === ALL_PAGES ? null : page, pageSize],
+    queryFn: () => opts.fetcher({ ...(opts.extra as object), page: pageSize === ALL_PAGES ? 1 : page, pageSize, q: q || undefined, sort, filters } as ServerTableParams<TExtra>),
     // Keep the previous page visible while a new one loads — no flash to empty.
     placeholderData: keepPreviousData,
     refetchInterval: opts.refetchIntervalMs === false ? false : (opts.refetchIntervalMs ?? 30_000),
@@ -145,6 +176,8 @@ export function useServerTable<TExtra extends object, TRow>(opts: {
     setPageSize,
     q,
     setQ,
+    filters,
+    setFilters,
     sort,
     setSort,
     setRefetchInterval: (interval: false | number) => controls.setRefetchInterval?.(interval),

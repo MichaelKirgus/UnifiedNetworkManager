@@ -151,14 +151,20 @@ export default function Security() {
   const VULN_SORT_MAP: Record<string, string> = { component: 'componentName', packageName: 'packageName', cveId: 'cveId', severityRank: 'severityRank', ecosystem: 'ecosystem' };
 
   const pkgTable = useServerTable({
-    // pageSize === ALL_PAGES → unpaginated `all=true` (the "All" entry in the pager select).
-    fetcher: (p) => api.cvePackages({ ...p, all: p.pageSize === ALL_PAGES ? true : undefined, sort: p.sort ? PKG_SORT_MAP[p.sort.key] : undefined, dir: p.sort?.dir }),
+    // pageSize === ALL_PAGES → unpaginated `all=true`; column filters map COLUMN KEY → API param.
+    fetcher: (p) => {
+      const { filters, ...rest } = p;
+      return api.cvePackages({ ...rest, ecosystem: filters?.ecosystem || undefined, all: p.pageSize === ALL_PAGES ? true : undefined, sort: p.sort ? PKG_SORT_MAP[p.sort.key] : undefined, dir: p.sort?.dir });
+    },
     extra: cveExtra,
     storageKey: 'security-cves-packages',
   });
   const vulnTable = useServerTable({
-    // pageSize === ALL_PAGES → unpaginated `all=true` (the "All" entry in the pager select).
-    fetcher: (p) => api.cveVulnerabilities({ ...p, all: p.pageSize === ALL_PAGES ? true : undefined, sort: p.sort ? VULN_SORT_MAP[p.sort.key] : undefined, dir: p.sort?.dir }),
+    // pageSize === ALL_PAGES → unpaginated `all=true`; column filters map COLUMN KEY → API param.
+    fetcher: (p) => {
+      const { filters, ...rest } = p;
+      return api.cveVulnerabilities({ ...rest, ecosystem: filters?.ecosystem || undefined, all: p.pageSize === ALL_PAGES ? true : undefined, sort: p.sort ? VULN_SORT_MAP[p.sort.key] : undefined, dir: p.sort?.dir });
+    },
     extra: cveExtra,
     storageKey: 'security-cves',
   });
@@ -340,9 +346,11 @@ export default function Security() {
       render: (row) => <RankBadge rank={row.severityRank} score={row.severityScore} />,
     },
     {
+      // serverFilter: the API already has an `ecosystem` param — the fetcher maps this key to it.
       header: 'Ecosystem',
       key: 'ecosystem',
       width: 120,
+      serverFilter: true,
       exportValue: (row) => row.ecosystem,
       render: (row) => <span className="text-xs text-secondary">{orDash(row.ecosystem)}</span>,
     },
@@ -409,9 +417,11 @@ export default function Security() {
       ),
     },
     {
+      // serverFilter: the API already has an `ecosystem` param — the fetcher maps this key to it.
       header: 'Ecosystem',
       key: 'ecosystem',
       width: 120,
+      serverFilter: true,
       exportValue: (row) => row.ecosystem,
       render: (row) => <span className="text-xs text-secondary">{orDash(row.ecosystem)}</span>,
     },
@@ -628,6 +638,8 @@ export default function Security() {
                 onPageChange: pkgTable.setPage,
                 onPageSizeChange: pkgTable.setPageSize,
                 pageSizeOptions: [25, 50, 100, ALL_PAGES], // "All" = unpaginated (all=true)
+                filters: pkgTable.filters,
+                onFiltersChange: pkgTable.setFilters,
                 sort: pkgTable.sort,
                 onSortChange: pkgTable.setSort,
               }}
@@ -661,6 +673,8 @@ export default function Security() {
               onPageChange: vulnTable.setPage,
               onPageSizeChange: vulnTable.setPageSize,
               pageSizeOptions: [25, 50, 100, ALL_PAGES], // "All" = unpaginated (all=true)
+              filters: vulnTable.filters,
+              onFiltersChange: vulnTable.setFilters,
               sort: vulnTable.sort,
               onSortChange: vulnTable.setSort,
             }}

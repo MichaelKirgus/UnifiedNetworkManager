@@ -34,8 +34,13 @@ export interface DataTableColumn<T> {
   sortAccessor?: (row: T) => string | number | null | undefined;
   /** Default width in px when the user has not resized this column. Defaults to 160. */
   width?: number;
-  /** Whether a per-column filter input is offered for this column. Defaults to true. */
+  /** Whether a per-column filter input is offered for this column (client mode). Defaults to true. */
   filterable?: boolean;
+  /** SERVER-PAGINATION MODE ONLY: offer a per-column filter input that is applied
+   * on the server — DataTable debounces it and hands the COLUMN KEY + text to
+   * `serverPagination.onFiltersChange`; the owning page maps keys to API params.
+   * Ignored in client mode (use `filterable` there). */
+  serverFilter?: boolean;
   /** Explicit value used by CSV/JSON export (and quick search). Falls back to sortAccessor, then row[key]. */
   exportValue?: (row: T) => string | number | null | undefined;  /** Custom text used ONLY for quick-search / column-filter matching. Lets a
    * parent row be found by data that lives in its children (e.g. a device row
@@ -54,7 +59,10 @@ export interface DataTableBulkAction<T> {
   label: string;
   /** Optional confirmation dialog text; receives the number of selected rows. */
   confirm?: (count: number) => string;
-  /** Called with the currently selected rows (resolved from the full row list). */
+  /** Called with the currently selected rows, resolved from the row list handed to
+   * DataTable. In SERVER-PAGINATION mode that is only the CURRENT PAGE — a
+   * selection spanning pages yields fewer rows than `confirm`'s count says; act
+   * on row keys (via rowKey) if you need the full cross-page set. */
   onClick: (rows: T[]) => void | Promise<void>;
   /** When set, the button is disabled unless this returns true for the current selection. */
   enabled?: (rows: T[]) => boolean;
@@ -126,10 +134,12 @@ interface DataTableProps<T> {
   };
   /** SERVER-SIDE PAGINATION mode — `rows` is ONE page of a larger server-filtered,
    * set. When set, DataTable stops applying its own search / column-filter pipeline
-   * (the API already did), hides the per-column Filter UI, wires the quick-search box
-   * to `onSearch` (debounced internally) and renders a pager footer with prev/next
-   * (+ optional page-size select). Header sorting stays DISABLED unless `sort` +
-   * `onSortChange` are provided — then it cycles asc → desc → off against the server. */
+   * (the API already did), wires the quick-search box to `onSearch` (debounced
+   * internally) and renders a pager footer with prev/next (+ optional page-size
+   * select). Header sorting stays DISABLED unless `sort` + `onSortChange` are
+   * provided — then it cycles asc → desc → off against the server. Per-column
+   * filters appear for columns marked `serverFilter: true` when `onFiltersChange`
+   * is wired (also debounced internally). */
   serverPagination?: {
     /** Total rows for the current filters (across all pages). */
     total: number;
@@ -146,6 +156,13 @@ interface DataTableProps<T> {
     sort?: { key: string; dir: 'asc' | 'desc' } | null;
     /** Receives the NEXT sort state (null = off). Cycles asc → desc → off like client mode. */
     onSortChange?: (next: { key: string; dir: 'asc' | 'desc' } | null) => void;
+    /** Committed per-column filter values (COLUMN KEY → text, non-empty only) —
+     * shown in the server-mode filter row + status chips. */
+    filters?: Record<string, string>;
+    /** Receives the NEXT full column-filter map (COLUMN KEY → text). Debounced
+     * internally like search; pass {} to clear all. Only columns with
+     * `serverFilter: true` produce entries — the parent maps keys to API params. */
+    onFiltersChange?: (next: Record<string, string>) => void;
   };
   /** A refetch is in flight — dims the body and shows a progress strip under the
    * toolbar so page changes don't flash as "no data". Pair with keepPreviousData. */
@@ -318,6 +335,45 @@ export function DataTable<T>({
   useEffect(() => {
     if (externalSearch !== undefined) setSearchText_(externalSearch ?? '');
   }, [externalSearch]);
+
+  // SERVER-MODE per-column filter DRAFTS — what the input boxes hold right now.
+  // Committed values live in serverPagination.filters; drafts debounce into them
+  // via onFiltersChange (same 300ms pattern as quick search). One shared timer:
+  // typing across several columns coalesces into a single commit, so the page
+  // resets at most once per pause.
+  const [serverFilterDrafts, setServerFilterDrafts] = useState<Record<string, string>>({});
+  const filterTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => () => {
+    if (filterTimer.current) clearTimeout(filterTimer.current);
+  }, []);
+  function emitFilters(drafts: Record<string, string>) {
+    const cb = serverPagination?.onFiltersChange;
+    if (!cb) return;
+    if (filterTimer.current) clearTimeout(filterTimer.current);
+    // Commit immediately when the map becomes empty — a stale server filter behind
+    // emptied boxes is confusing (same rule as search).
+    if (!Object.values(drafts).some((v) => v.trim() !== '')) {
+      cb({});
+      return;
+    }
+    filterTimer.current = setTimeout(() => cb(drafts), 300);
+  }
+  function updateServerFilter(key: string, value: string) {
+    const next = { ...serverFilterDrafts, [key]: value };
+    setServerFilterDrafts(next);
+    emitFilters(next);
+  }
+  // Parent-driven CLEAR-ALL sync — when the committed map goes empty while the
+  // boxes still hold text, wipe the drafts. Normal commits need no sync: the box
+  // already shows what was emitted (empties render as '' via `?? ''`).
+  useEffect(() => {
+    if (!serverPagination?.onFiltersChange) return;
+    const committed = serverPagination.filters ?? {};
+    setServerFilterDrafts((prev) =>
+      Object.keys(committed).length === 0 && Object.values(prev).some((v) => v.trim() !== '') ? {} : prev
+    );
+  }, [serverPagination?.filters]);
+
   const [colFilters, setColFilters] = useState<Record<string, string>>({});
   const [showFilters, setShowFilters] = useState(false);
   const [selectedKeys, setSelectedKeys] = useState<Set<string>>(new Set());
@@ -429,8 +485,12 @@ export function DataTable<T>({
   }, [rows, visibleColumns, colFilters, searchText_, prefs.sort, columns, expandable, serverMode]);
 
   // Drop selected keys whose rows disappeared from the dataset (e.g. deleted).
+  // SERVER MODE: skipped — `rows` is only the CURRENT PAGE, so garbage-collecting
+  // against it would wipe selections made on other pages while navigating. The
+  // selection therefore persists across page changes (rowKey must be globally
+  // unique); rows deleted server-side linger until "Clear selection".
   useEffect(() => {
-    if (!selectable || selectedKeys.size === 0) return;
+    if (!selectable || selectedKeys.size === 0 || serverMode) return;
     const current = new Set(rows.map(rowKey));
     for (const k of Array.from(selectedKeys)) {
       if (!current.has(k)) setSelectedKeys((prev) => { const n = new Set(prev); n.delete(k); return n; });
@@ -438,7 +498,18 @@ export function DataTable<T>({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [rows, selectable]);
 
-  const hasActiveNarrowing = searchText_.trim() !== '' || Object.values(colFilters).some((f) => (f ?? '').trim() !== '');
+  // Server-mode column filters — committed values come from the parent (the
+  // useServerTable hook); only columns marked `serverFilter: true` participate.
+  const serverFilterableCols = visibleColumns.filter((c) => c.serverFilter === true);
+  const hasServerFilters = !!serverPagination?.onFiltersChange && serverFilterableCols.length > 0;
+  const activeServerFilterCols = serverFilterableCols.filter(
+    (c) => ((serverPagination?.filters ?? {})[c.key] ?? '').trim() !== ''
+  );
+
+  const hasActiveNarrowing =
+    searchText_.trim() !== '' ||
+    Object.values(colFilters).some((f) => (f ?? '').trim() !== '') ||
+    activeServerFilterCols.length > 0;
   const activeFilterCols = visibleColumns.filter((c) => (colFilters[c.key] ?? '').trim() !== '');
 
   /** Explicit width for a column (user-resized or declared by the page), if any. */
@@ -491,6 +562,12 @@ export function DataTable<T>({
   function clearNarrowing() {
     updateSearch('');
     setColFilters({});
+    // Server-mode column filters — commit the wipe immediately (no debounce) and
+    // empty the local drafts so the boxes read clean at once.
+    if (hasServerFilters && serverPagination?.onFiltersChange) {
+      setServerFilterDrafts({});
+      serverPagination.onFiltersChange({});
+    }
   }
 
   /* ------------------------------ selection ------------------------------ */
@@ -619,8 +696,10 @@ export function DataTable<T>({
           />
         </div>
 
-        {/* Per-column filters are client-side only — hidden in server-pagination mode. */}
-        {!serverMode && (
+        {/* Per-column filters — client-side by default; in server-pagination mode
+            they appear only when the parent wired onFiltersChange (applied on the
+            server, debounced like search). */}
+        {(!serverMode || hasServerFilters) && (
         <button
           type="button"
           onClick={() => setShowFilters((v) => !v)}
@@ -628,15 +707,15 @@ export function DataTable<T>({
           title="Toggle per-column filters"
           className={clsx(
             'flex items-center gap-1.5 rounded-md border px-2 py-1 text-xs font-medium',
-            showFilters || activeFilterCols.length > 0
+            showFilters || activeFilterCols.length > 0 || activeServerFilterCols.length > 0
               ? 'border-focus-ring bg-muted text-foreground'
               : 'border-border text-secondary hover:bg-background'
           )}
         >
           <Filter className="h-3.5 w-3.5" />
           Filter
-          {activeFilterCols.length > 0 && (
-            <span className="rounded-full bg-primary-hover px-1.5 text-[10px] font-semibold leading-4 text-white">{activeFilterCols.length}</span>
+          {(activeFilterCols.length + activeServerFilterCols.length) > 0 && (
+            <span className="rounded-full bg-primary-hover px-1.5 text-[10px] font-semibold leading-4 text-white">{activeFilterCols.length + activeServerFilterCols.length}</span>
           )}
         </button>
         )}
@@ -748,8 +827,13 @@ export function DataTable<T>({
         )}
       </div>
 
-      {/* Fetch-in-flight strip — keeps page changes from reading as "no data". */}
-      {isFetching && <div className="h-0.5 shrink-0 animate-pulse bg-primary" aria-hidden="true" />}
+      {/* Fetch-in-flight strip — keeps page changes from reading as "no data";
+          role=status announces the refresh to screen readers (sr-only text). */}
+      {isFetching && (
+        <div role="status" className="h-0.5 shrink-0 animate-pulse bg-primary">
+          <span className="sr-only">Refreshing…</span>
+        </div>
+      )}
 
       {/* Status line: row count + active filter chips (only when narrowing). In
           server-pagination mode the denominator is the FILTERED TOTAL, not this page. */}
@@ -775,6 +859,16 @@ export function DataTable<T>({
               className="flex items-center gap-1 rounded-full border border-border bg-card px-2 py-0.5 text-secondary hover:bg-muted"
             >
               {col.header}: “{(colFilters[col.key] ?? '').trim()}” <X className="h-3 w-3" />
+            </button>
+          ))}
+          {activeServerFilterCols.map((col) => (
+            <button
+              key={col.key}
+              type="button"
+              onClick={() => updateServerFilter(col.key, '')}
+              className="flex items-center gap-1 rounded-full border border-border bg-card px-2 py-0.5 text-secondary hover:bg-muted"
+            >
+              {col.header}: “{(serverPagination?.filters ?? {})[col.key]?.trim()}” <X className="h-3 w-3" />
             </button>
           ))}
           <button type="button" onClick={clearNarrowing} className="ml-auto font-medium text-muted-foreground underline-offset-2 hover:text-secondary hover:underline">
@@ -942,6 +1036,30 @@ export function DataTable<T>({
                   ))}
                 </tr>
               )}
+              {/* Server-mode filter row — same sticky placement; only columns the
+                  page marked `serverFilter` get an input, values commit to the API. */}
+              {showFilters && hasServerFilters && (
+                <tr className="bg-card">
+                  {expandable && <td className="sticky top-[37px] z-10 border-b border-r border-border bg-card" />}
+                  {selectable && <td className="sticky top-[37px] z-10 border-b border-r border-border bg-card" />}
+                  {visibleColumns.map((col) => (
+                    <td key={col.key} className="sticky top-[37px] z-10 border-b border-r border-border bg-card px-2 py-1 last:border-r-0">
+                      {col.serverFilter === true ? (
+                        <input
+                          type="text"
+                          value={serverFilterDrafts[col.key] ?? ''}
+                          onChange={(e) => updateServerFilter(col.key, e.target.value)}
+                          placeholder={`Filter ${col.header.toLowerCase()}`}
+                          aria-label={`Filter by ${col.header} (applied on the server)`}
+                          className="w-full rounded border border-border px-1.5 py-0.5 text-xs text-secondary focus:border-focus-ring focus:outline-none"
+                        />
+                      ) : (
+                        <span />
+                      )}
+                    </td>
+                  ))}
+                </tr>
+              )}
           </thead>
           <tbody
             className="divide-y divide-border"
@@ -974,6 +1092,7 @@ export function DataTable<T>({
                               return next;
                             })}
                             aria-expanded={expanded}
+                            aria-label={expanded ? 'Collapse row' : `Expand row — ${children.length} item${children.length === 1 ? '' : 's'}`}
                             title={expanded ? 'Collapse' : `Show ${children.length} item${children.length === 1 ? '' : 's'}`}
                             className="flex h-6 w-6 items-center justify-center rounded text-faint hover:bg-muted hover:text-secondary"
                           >
@@ -1031,7 +1150,8 @@ export function DataTable<T>({
         const end = allMode ? serverPagination.total : Math.min(serverPagination.total, serverPagination.page * serverPagination.pageSize);
         return (
           <div className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-t border-border px-3 py-1.5 text-xs text-muted-foreground">
-            <span>
+            {/* aria-live: page changes announce the new range to screen readers. */}
+            <span aria-live="polite">
               Showing {start.toLocaleString()}–{end.toLocaleString()} of {serverPagination.total.toLocaleString()}
             </span>
             <div className="flex items-center gap-2">
