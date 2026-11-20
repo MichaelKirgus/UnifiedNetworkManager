@@ -4,20 +4,29 @@
  * GET  /cve/vulnerabilities — rows from device_cves: one row per (device ×
  *      vulnerable package) match, joined with device + plugin identity. Filters:
  *      deviceId, siteId, severityRank ('critical'|'high'|'medium'|'low'),
- *      ecosystem, q (case-insensitive substring on package name or CVE id).
+ *      ecosystem, component ('host'|'container'), q (case-insensitive substring
+ *      on package name or CVE id). SERVER-SIDE PAGINATED — page/pageSize
+ *      (default 50, max 200); the response carries `total` for the pager. Rows
+ *      are ordered severity-first so page 1 is always the most urgent matches.
+ * GET  /cve/packages — the SMART DEFAULT view: one row per vulnerable package
+ *      INSTANCE (device × component × package) with cveCount, worst severity
+ *      and the top CVE ids. Same filters + pagination; here severityRank means
+ *      "the group contains at least one CVE of this rank or worse" (HAVING on
+ *      the group's worst rank). Collapses a 25k-row CVE table into ~1-2k
+ *      actionable rows — what the Security page shows first.
  * GET  /cve/summary — page header: counts by severity rank, affected-device
  *      count, total matches, and the worker's last fetch outcome.
  * POST /cve/refresh — run one advisory fetch cycle NOW (bypasses the interval);
  *      match recomputation happens on the next beat automatically.
  *
- * All three are gated on `security:read` (the data feeds the Security page) and
+ * All four are gated on `security:read` (the data feeds the Security page) and
  * honor device-level access control exactly like /security-checks: scoped
  * callers get 200 with an empty/zeroed payload for out-of-scope devices, never
  * a leak.
  */
 
 import { Router, Response } from 'express';
-import { and, asc, eq, inArray, sql } from 'drizzle-orm';
+import { and, asc, eq, inArray, sql, type SQL } from 'drizzle-orm';
 import { db, pool } from '../db';
 import * as schema from '../db/schema';
 import { requireAuth, requirePermission } from '../auth/middleware';
@@ -63,44 +72,96 @@ async function resolveScope(req: Parameters<typeof allowedDeviceIds>[0], deviceI
   return allowed;
 }
 
+// ── Shared filter/pagination helpers (both list endpoints) ───────────────────
+
+const PAGE_SIZE_DEFAULT = 50;
+const PAGE_SIZE_MAX = 200; // hard cap — unbounded pages are exactly what this exists to prevent
+
+/** Parse + validate page/pageSize. Non-numeric → error; pageSize is CLAMPED to the max. */
+function parsePagination(query: Record<string, string | undefined>): { page: number; pageSize: number } | { error: string } {
+  let page = 1;
+  let pageSize = PAGE_SIZE_DEFAULT;
+  if (query.page !== undefined) {
+    const n = Number(query.page);
+    if (!Number.isInteger(n) || n < 1) return { error: `"page" must be a positive integer` };
+    page = n;
+  }
+  if (query.pageSize !== undefined) {
+    const n = Number(query.pageSize);
+    if (!Number.isInteger(n) || n < 1) return { error: `"pageSize" must be a positive integer` };
+    pageSize = Math.min(n, PAGE_SIZE_MAX);
+  }
+  return { page, pageSize };
+}
+
+/** Severity rank ordering — critical first, then high/medium/low/unknown. */
+const SEVERITY_ORDER = sql`CASE "severityRank" WHEN 'critical' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2 WHEN 'low' THEN 3 ELSE 4 END`;
+
+interface CveListFilters {
+  severityRank?: string;
+  ecosystem?: string;
+  component?: string;
+  q?: string;
+}
+
+/** Validate the shared filter params — returns an error message or null. */
+function validateCveFilters(f: CveListFilters): string | null {
+  if (f.severityRank && !KNOWN_RANKS.includes(f.severityRank)) {
+    return `"severityRank" must be one of: ${KNOWN_RANKS.join(', ')}`;
+  }
+  // BOM component filter — 'host' | 'container' (any other value = 400, same
+  // strictness as severityRank so a typo can't silently empty the table).
+  if (f.component && !['host', 'container'].includes(f.component)) {
+    return `"component" must be one of: host, container`;
+  }
+  return null;
+}
+
+/** WHERE clauses shared by both list endpoints (severity is handled per-endpoint —
+ * exact match on /cve/vulnerabilities, HAVING-worst-rank on /cve/packages). */
+function buildCveWhere(scope: Set<string> | 'all', f: CveListFilters): unknown[] {
+  const clauses: unknown[] = [];
+  if (scope !== 'all') clauses.push(inArray(schema.deviceCves.deviceId, [...scope]));
+  if (f.ecosystem) clauses.push(eq(schema.deviceCves.ecosystem, f.ecosystem));
+  if (f.component) clauses.push(eq(schema.deviceCves.component, f.component));
+  if (f.q && f.q.trim()) {
+    const like = `%${f.q.trim().replace(/[%_]/g, '')}%`; // strip wildcards — plain substring only
+    clauses.push(sql`("packageName" ILIKE ${like} OR "cveId" ILIKE ${like})`);
+  }
+  return clauses;
+}
+
 // GET /cve/vulnerabilities — per-component CVE matches (the Security page table).
 router.get('/cve/vulnerabilities', requireAuth, requirePermission('security:read'), async (req, res: Response) => {
   try {
-    const { deviceId, siteId, severityRank, ecosystem, component, q } = req.query as Record<string, string | undefined>;
+    const query = req.query as Record<string, string | undefined>;
+    const { deviceId, siteId } = query;
 
-    if (severityRank && !KNOWN_RANKS.includes(severityRank)) {
-      res.status(400).json({ error: `"severityRank" must be one of: ${KNOWN_RANKS.join(', ')}` });
-      return;
-    }
-    // BOM component filter — 'host' | 'container' (any other value = 400, same
-    // strictness as severityRank so a typo can't silently empty the table).
-    if (component && !['host', 'container'].includes(component)) {
-      res.status(400).json({ error: `"component" must be one of: host, container` });
-      return;
-    }
+    const filterError = validateCveFilters(query);
+    if (filterError) { res.status(400).json({ error: filterError }); return; }
+    const pg = parsePagination(query);
+    if ('error' in pg) { res.status(400).json({ error: pg.error }); return; }
 
     const scope = await resolveScope(req, deviceId, siteId);
     if (scope === 'none' || (scope instanceof Set && scope.size === 0)) {
-      res.status(200).json({ rows: [] });
+      res.status(200).json({ rows: [], total: 0, page: pg.page, pageSize: pg.pageSize });
       return;
     }
 
-    // Severity rank ordering — critical first, then high/medium/low/unknown.
-    const severityOrder = sql`CASE "severityRank" WHEN 'critical' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2 WHEN 'low' THEN 3 ELSE 4 END`;
-    const clauses: unknown[] = [];
-    if (scope !== 'all') clauses.push(inArray(schema.deviceCves.deviceId, [...scope]));
-    if (severityRank) clauses.push(eq(schema.deviceCves.severityRank, severityRank));
-    if (ecosystem) clauses.push(eq(schema.deviceCves.ecosystem, ecosystem));
-    if (component) clauses.push(eq(schema.deviceCves.component, component));
-    if (q && q.trim()) {
-      const like = `%${q.trim().replace(/[%_]/g, '')}%`; // strip wildcards — plain substring only
-      clauses.push(sql`("packageName" ILIKE ${like} OR "cveId" ILIKE ${like})`);
-    }
+    const clauses = buildCveWhere(scope, query);
+    if (query.severityRank) clauses.push(eq(schema.deviceCves.severityRank, query.severityRank)); // exact rank
+    const where = clauses.length > 0 ? and(...(clauses as never[])) : undefined;
 
-    const rows = await db.query.deviceCves.findMany({
-      ...(clauses.length > 0 ? { where: and(...(clauses as never[])) } : {}),
-      orderBy: [severityOrder, asc(schema.deviceCves.deviceId), asc(schema.deviceCves.packageName), asc(schema.deviceCves.cveId)],
-    });
+    // One page of rows + the filtered total in parallel — severity-first order so
+    // page 1 is always the most urgent matches.
+    const [rows, countRow] = await Promise.all([
+      db.select().from(schema.deviceCves)
+        .where(where)
+        .orderBy(SEVERITY_ORDER, asc(schema.deviceCves.deviceId), asc(schema.deviceCves.packageName), asc(schema.deviceCves.cveId))
+        .limit(pg.pageSize)
+        .offset((pg.page - 1) * pg.pageSize),
+      db.select({ n: sql<number>`count(*)::int` }).from(schema.deviceCves).where(where),
+    ]);
 
     const [deviceViews, pluginNames] = await Promise.all([
       loadDeviceViews(Array.from(new Set(rows.map((r) => r.deviceId)))),
@@ -119,6 +180,123 @@ router.get('/cve/vulnerabilities', requireAuth, requirePermission('security:read
           pluginName: pluginNames.get(r.pluginId) ?? null,
         };
       }),
+      total: countRow[0]?.n ?? 0,
+      page: pg.page,
+      pageSize: pg.pageSize,
+    });
+  } catch (err) {
+    const e = err as { status?: number; message?: string };
+    res.status(e.status ?? 500).json({ error: e.message ?? 'Internal server error' });
+  }
+});
+
+// GET /cve/packages — grouped view: one row per vulnerable package INSTANCE.
+// The "smart default" for the Security page — a fleet with tens of thousands of
+// CVE matches collapses to a few thousand actionable rows (one per device ×
+// component × package), each carrying its CVE count, worst severity and the top
+// CVE ids. Same filters + pagination as /cve/vulnerabilities; severityRank here
+// means "the group contains at least one CVE of this rank or worse".
+router.get('/cve/packages', requireAuth, requirePermission('security:read'), async (req, res: Response) => {
+  try {
+    const query = req.query as Record<string, string | undefined>;
+    const { deviceId, siteId } = query;
+
+    const filterError = validateCveFilters(query);
+    if (filterError) { res.status(400).json({ error: filterError }); return; }
+    const pg = parsePagination(query);
+    if ('error' in pg) { res.status(400).json({ error: pg.error }); return; }
+
+    const scope = await resolveScope(req, deviceId, siteId);
+    if (scope === 'none' || (scope instanceof Set && scope.size === 0)) {
+      res.status(200).json({ rows: [], total: 0, page: pg.page, pageSize: pg.pageSize });
+      return;
+    }
+
+    const where = buildCveWhere(scope, query);
+    // Severity is a HAVING on the group's WORST rank — WHERE would only count
+    // matching CVEs and understate cveCount for mixed-severity packages.
+    let having: SQL | undefined;
+    if (query.severityRank) {
+      const order = KNOWN_RANKS.indexOf(query.severityRank); // critical=0 … unknown=4
+      having = sql`min(${SEVERITY_ORDER}) <= ${order}`;
+    }
+
+    const whereClause = where.length > 0 ? and(...(where as never[])) : undefined;
+
+    // Fresh builder per call — drizzle select builders share mutable state, so a
+    // single instance reused for both the paged query and the count subquery
+    // leaks orderBy/limit into whichever was derived second.
+    const makeGroupBase = () =>
+      db.select({
+        deviceId: schema.deviceCves.deviceId,
+        pluginId: schema.deviceCves.pluginId,
+        component: schema.deviceCves.component,
+        componentName: schema.deviceCves.componentName,
+        ecosystem: schema.deviceCves.ecosystem,
+        packageName: schema.deviceCves.packageName,
+        // Explicit `as "<key>"` aliases are REQUIRED — drizzle does not alias raw
+        // SQL chunks, so without them the driver names the columns by function
+        // ("count", "") and ORDER BY <name> has nothing to reference.
+        installedVersion: sql<string | null>`max("installedVersion") as "installedVersion"`,
+        cveCount: sql<number>`count(*)::int as "cveCount"`,
+        worstRankOrder: sql<number>`min(${SEVERITY_ORDER}) as "worstRankOrder"`,
+        worstScore: sql<number | null>`max("severityScore") as "worstScore"`,
+        // Most severe first — the API slices the top 5 for quick links.
+        cveIds: sql<string[]>`array_agg("cveId" ORDER BY ${SEVERITY_ORDER}, "cveId") as "cveIds"`,
+      })
+        .from(schema.deviceCves)
+        .where(whereClause)
+        .groupBy(
+          schema.deviceCves.deviceId,
+          schema.deviceCves.pluginId,
+          schema.deviceCves.component,
+          schema.deviceCves.componentName,
+          schema.deviceCves.ecosystem,
+          schema.deviceCves.packageName
+        );
+
+    // Page of groups + group count in parallel (count over the SAME grouped
+    // subquery — total is the number of package instances, not CVE rows).
+    const [groups, countRow] = await Promise.all([
+      (having ? makeGroupBase().having(having) : makeGroupBase())
+        // Quoted: the aliases are camelCase, and unquoted ORDER BY names fold to lowercase.
+        .orderBy(sql`"worstRankOrder" ASC`, sql`"cveCount" DESC`, asc(schema.deviceCves.packageName))
+        .limit(pg.pageSize)
+        .offset((pg.page - 1) * pg.pageSize),
+      db.select({ n: sql<number>`count(*)::int` })
+        .from((having ? makeGroupBase().having(having) : makeGroupBase()).as('g')),
+    ]);
+
+    const RANK_BY_ORDER: Record<number, string> = { 0: 'critical', 1: 'high', 2: 'medium', 3: 'low', 4: 'unknown' };
+    const [deviceViews, pluginNames] = await Promise.all([
+      loadDeviceViews(Array.from(new Set(groups.map((g) => g.deviceId)))),
+      loadPluginNames(Array.from(new Set(groups.map((g) => g.pluginId)))),
+    ]);
+
+    res.status(200).json({
+      rows: groups.map((g) => {
+        const device = deviceViews.get(g.deviceId);
+        return {
+          deviceId: g.deviceId,
+          pluginId: g.pluginId,
+          component: g.component || 'host',
+          componentName: g.componentName ?? '',
+          ecosystem: g.ecosystem,
+          packageName: g.packageName,
+          installedVersion: g.installedVersion ?? null,
+          cveCount: g.cveCount,
+          worstRank: RANK_BY_ORDER[g.worstRankOrder] ?? 'unknown',
+          worstScore: g.worstScore ?? null,
+          topCves: (g.cveIds ?? []).slice(0, 5),
+          deviceName: device?.name ?? null,
+          managementAddress: device?.managementAddress ?? null,
+          siteName: device?.siteName ?? null,
+          pluginName: pluginNames.get(g.pluginId) ?? null,
+        };
+      }),
+      total: countRow[0]?.n ?? 0,
+      page: pg.page,
+      pageSize: pg.pageSize,
     });
   } catch (err) {
     const e = err as { status?: number; message?: string };

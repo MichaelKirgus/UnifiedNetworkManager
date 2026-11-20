@@ -1,12 +1,13 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { Bug, Loader2, RefreshCw, Radar, ShieldCheck, ShieldAlert, ShieldX, Info, Trash2 } from 'lucide-react';
 import { Link } from 'react-router-dom';
-import { useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
+import clsx from 'clsx';
 import { Layout } from '../components/Layout';
 import { DataTable, DataTableColumn } from '../components/DataTable';
 import { DeviceChip } from '../components/DeviceChip';
 import { PageTabs } from '../components/PageTabs';
-import { api, SecurityCheckRow, CveVulnerabilityRow, ThreatIntelSource } from '../api/client';
+import { api, SecurityCheckRow, CvePackageRow, CveVulnerabilityRow, ThreatIntelSource } from '../api/client';
 
 /** Check-kind pill — the vocabulary is shared across all plugins (SDK contract). */
 const KIND_STYLES: Record<string, string> = {
@@ -123,11 +124,64 @@ export default function Security() {
     queryFn: () => api.cveSummary(),
     refetchInterval: 30_000,
   });
-  const cveVulnsQuery = useQuery({
-    queryKey: ['cveVulnerabilities'],
-    queryFn: () => api.cveVulnerabilities(),
+
+  // --- CVE list state (Phase 2 — server-side pagination + smart default view) --
+  // The raw CVE table has tens of thousands of rows on a real fleet, so the API
+  // paginates and this page defaults to the GROUPED packages view (one row per
+  // vulnerable package instance). Every filter below is SERVER-SIDE — the DOM
+  // never holds more than one page of rows.
+  type CveSeverity = 'critical' | 'high' | 'medium' | 'low' | 'unknown';
+  const [cveView, setCveView] = useState<'packages' | 'vulns'>('packages');
+  const [cveSeverity, setCveSeverity] = useState<CveSeverity | ''>('');
+  const [cveComponent, setCveComponent] = useState<'all' | 'host' | 'container'>('all');
+  const [cvePage, setCvePage] = useState(1);
+  const [cvePageSize, setCvePageSize] = useState(50);
+  const [cveSearchText, setCveSearchText] = useState(''); // live quick-search box text
+  const [cveQ, setCveQ] = useState('');                  // committed (debounced) → server `q`
+
+  // Debounce the quick-search box into the server-side `q` param.
+  useEffect(() => {
+    const t = setTimeout(() => setCveQ(cveSearchText.trim()), 300);
+    return () => clearTimeout(t);
+  }, [cveSearchText]);
+
+  const cveParams = useMemo(
+    () => ({
+      severityRank: (cveSeverity || undefined) as CveSeverity | undefined,
+      component: (cveComponent === 'all' ? undefined : cveComponent) as 'host' | 'container' | undefined,
+      q: cveQ || undefined,
+      page: cvePage,
+      pageSize: cvePageSize,
+    }),
+    [cveSeverity, cveComponent, cveQ, cvePage, cvePageSize]
+  );
+
+  const cvePackagesQuery = useQuery({
+    queryKey: ['cvePackages', cveParams],
+    queryFn: () => api.cvePackages(cveParams),
     refetchInterval: 30_000,
   });
+  const cveVulnsQuery = useQuery({
+    queryKey: ['cveVulnerabilities', cveParams],
+    queryFn: () => api.cveVulnerabilities(cveParams),
+    refetchInterval: 30_000,
+  });
+
+  // Any filter change goes back to page 1.
+  function resetCvePage() {
+    setCvePage(1);
+  }
+  function toggleCveSeverity(rank: CveSeverity) {
+    setCveSeverity((prev) => (prev === rank ? '' : rank));
+    resetCvePage();
+  }
+
+  // Drill-down: a grouped package row → the raw CVE list pre-filtered to that package.
+  function drillIntoPackage(row: CvePackageRow) {
+    setCveView('vulns');
+    setCveSearchText(row.packageName); // debounce commits q; externalSearch syncs the box
+    resetCvePage();
+  }
 
   // "Refresh advisories" runs one full fetch cycle server-side (~3.5 min) — fire
   // and forget; the summary's lastSuccessAt/lastError surface the outcome.
@@ -138,6 +192,7 @@ export default function Security() {
     try {
       await api.refreshCveAdvisories();
       void queryClient.invalidateQueries({ queryKey: ['cveSummary'] });
+      void queryClient.invalidateQueries({ queryKey: ['cvePackages'] });
       void queryClient.invalidateQueries({ queryKey: ['cveVulnerabilities'] });
     } catch (err) {
       // The cycle itself never throws — a 502 here means the fetch FAILED and
@@ -149,15 +204,15 @@ export default function Security() {
     }
   }
 
-  const cveRows = cveVulnsQuery.data?.rows ?? [];
   const summary = cveSummaryQuery.data;
 
-  // Component filter — host (appliance OS) vs. container (BOM rows). Client-side,
-  // same data flow as the table's built-in search; the API also accepts a
-  // `component` query param for direct consumers.
-  const [cveComponent, setCveComponent] = useState<'all' | 'host' | 'container'>('all');
-  const cveFilteredRows =
-    cveComponent === 'all' ? cveRows : cveRows.filter((r) => (r.component ?? 'host') === cveComponent);
+  // Clamp the page when the filtered total shrinks under it (e.g. advisories pruned).
+  const activeTotal = cveView === 'packages' ? (cvePackagesQuery.data?.total ?? 0) : (cveVulnsQuery.data?.total ?? 0);
+  useEffect(() => {
+    if (activeTotal > 0 && (cvePage - 1) * cvePageSize >= activeTotal) {
+      setCvePage(Math.max(1, Math.ceil(activeTotal / cvePageSize)));
+    }
+  }, [activeTotal, cvePage, cvePageSize]);
 
   // Findings | Vulnerabilities (CVEs) | Threat Intel — each section is a
   // self-contained tab so the page reads top-down instead of one long scroll.
@@ -320,6 +375,94 @@ export default function Security() {
     },
   ];
 
+  // Grouped "smart default" view — one row per vulnerable package instance.
+  const cvePackageColumns: DataTableColumn<CvePackageRow>[] = [
+    {
+      header: 'Device',
+      key: 'deviceName',
+      width: 240,
+      exportValue: (row) => `${row.deviceName ?? '?'} (${row.managementAddress ?? '?'})`,
+      render: (row) => (
+        <DeviceChip
+          deviceName={row.deviceName}
+          managementAddress={row.managementAddress}
+          pluginName={row.pluginName}
+          siteName={row.siteName}
+          interfaces={[]}
+        />
+      ),
+    },
+    {
+      header: 'Component',
+      key: 'component',
+      width: 190,
+      exportValue: (row) => (row.component === 'container' ? `container:${row.componentName ?? '?'}` : 'host'),
+      render: (row) =>
+        row.component === 'container' ? (
+          <span className="inline-flex items-center gap-1 rounded-md bg-info/15 px-2 py-0.5 text-xs font-medium text-info-fg" title={`Software inside container ${row.componentName ?? ''}`}>
+            container · {row.componentName}
+          </span>
+        ) : (
+          <span className="text-xs text-secondary">host</span>
+        ),
+    },
+    {
+      header: 'Package',
+      key: 'packageName',
+      width: 260,
+      exportValue: (row) => row.packageName,
+      render: (row) => (
+        <span className="font-mono text-xs">
+          {row.packageName}
+          {row.installedVersion ? (
+            <span className="text-faint"> @ {row.installedVersion}</span>
+          ) : null}
+        </span>
+      ),
+    },
+    {
+      header: 'Ecosystem',
+      key: 'ecosystem',
+      width: 120,
+      exportValue: (row) => row.ecosystem,
+      render: (row) => <span className="text-xs text-secondary">{orDash(row.ecosystem)}</span>,
+    },
+    {
+      header: 'CVEs',
+      key: 'cveCount',
+      width: 90,
+      sortAccessor: (row) => row.cveCount,
+      exportValue: (row) => row.cveCount,
+      render: (row) => <span className="font-mono text-xs">{row.cveCount.toLocaleString()}</span>,
+    },
+    {
+      header: 'Worst severity',
+      key: 'worstRank',
+      width: 140,
+      sortAccessor: (row) => ({ critical: 0, high: 1, medium: 2, low: 3, unknown: 4 }[row.worstRank] ?? 5),
+      exportValue: (row) => row.worstRank,
+      render: (row) => <RankBadge rank={row.worstRank} score={row.worstScore} />,
+    },
+    {
+      header: 'Top CVEs',
+      key: 'topCves',
+      width: 320,
+      exportValue: (row) => row.topCves.join(', '),
+      render: (row) => (
+        <span className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
+          {row.topCves.slice(0, 3).map((id) => (
+            <a key={id} href={`https://www.cve.org/CVERecord?id=${id}`} target="_blank" rel="noreferrer" className="font-mono text-xs text-info hover:underline">
+              {id}
+            </a>
+          ))}
+          {row.topCves.length > 3 && (
+            <span className="text-xs text-faint">+{row.cveCount - 3} more</span>
+          )}
+        </span>
+      ),
+    },
+  ];
+
   return (
     <Layout title="Security">
       <PageTabs
@@ -407,11 +550,25 @@ export default function Security() {
               </span>
             ) : (
               <>
-                {(Object.entries(summary.bySeverity) as Array<[string, number]>).filter(([, n]) => n > 0).map(([rank, n]) => (
-                  <span key={rank} className={`inline-flex items-center gap-1 rounded-md px-2 py-1 text-xs font-medium ${RANK_STYLES[rank] ?? 'bg-muted text-secondary'}`}>
-                    {n.toLocaleString()} {rank}
-                  </span>
-                ))}
+                {/* Severity chips are CLICKABLE server-side filters (toggle on/off). */}
+                {(Object.entries(summary.bySeverity) as Array<[string, number]>).filter(([, n]) => n > 0).map(([rank, n]) => {
+                  const active = cveSeverity === rank;
+                  return (
+                    <button
+                      key={rank}
+                      type="button"
+                      onClick={() => toggleCveSeverity(rank as CveSeverity)}
+                      title={active ? `Clear the ${rank} filter` : `Filter to severity ${rank}${cveView === 'packages' ? ' (packages carrying at least one such CVE)' : ''}`}
+                      className={clsx(
+                        'inline-flex items-center gap-1 rounded-md px-2 py-1 text-xs font-medium',
+                        RANK_STYLES[rank] ?? 'bg-muted text-secondary',
+                        active ? 'ring-2 ring-focus-ring' : 'opacity-80 hover:opacity-100'
+                      )}
+                    >
+                      {n.toLocaleString()} {rank}
+                    </button>
+                  );
+                })}
                 <span className="text-faint">·</span>
                 <span className="text-sm text-secondary">
                   on <strong className="text-foreground">{summary.affectedDevices}</strong> device{summary.affectedDevices === 1 ? '' : 's'}
@@ -439,41 +596,104 @@ export default function Security() {
           </div>
         )}
 
-        {cveVulnsQuery.data && (
-          <>
-            {/* Component filter — host OS packages vs. container BOM rows */}
-            <div className="mb-2 flex items-center gap-2">
-              <label htmlFor="cve-component-filter" className="text-xs text-faint">Component</label>
-              <select
-                id="cve-component-filter"
-                value={cveComponent}
-                onChange={(e) => setCveComponent(e.target.value as 'all' | 'host' | 'container')}
-                className="rounded-md border border-border bg-background px-2 py-1 text-xs text-foreground"
+        {/* Controls row — view toggle + component filter (both server-side). */}
+        <div className="mb-2 flex flex-wrap items-center gap-3">
+          <div className="flex rounded-md border border-border p-0.5 text-xs font-medium" role="tablist" aria-label="CVE view">
+            {(['packages', 'vulns'] as const).map((v) => (
+              <button
+                key={v}
+                type="button"
+                onClick={() => {
+                  setCveView(v);
+                  resetCvePage();
+                }}
+                className={clsx('rounded px-2.5 py-1', cveView === v ? 'bg-muted text-foreground' : 'text-secondary hover:text-foreground')}
               >
-                <option value="all">All</option>
-                <option value="host">Host (appliance OS)</option>
-                <option value="container">Containers</option>
-              </select>
-              {cveComponent !== 'all' && (
-                <span className="text-xs text-faint">
-                  {cveFilteredRows.length} of {cveRows.length}
-                </span>
-              )}
-            </div>
+                {v === 'packages'
+                  ? `Packages${cvePackagesQuery.data ? ` (${cvePackagesQuery.data.total.toLocaleString()})` : ''}`
+                  : `All CVEs${cveVulnsQuery.data ? ` (${cveVulnsQuery.data.total.toLocaleString()})` : ''}`}
+              </button>
+            ))}
+          </div>
+          <label htmlFor="cve-component-filter" className="text-xs text-faint">Component</label>
+          <select
+            id="cve-component-filter"
+            value={cveComponent}
+            onChange={(e) => {
+              setCveComponent(e.target.value as 'all' | 'host' | 'container');
+              resetCvePage();
+            }}
+            className="rounded-md border border-border bg-background px-2 py-1 text-xs text-foreground"
+          >
+            <option value="all">All</option>
+            <option value="host">Host (appliance OS)</option>
+            <option value="container">Containers</option>
+          </select>
+        </div>
+
+        {cveView === 'packages' ? (
+          cvePackagesQuery.data ? (
             <DataTable
-              columns={cveColumns}
-              rows={cveFilteredRows}
-              rowKey={(row) => `${row.deviceId}|${row.pluginId}|${row.component ?? 'host'}|${row.componentName ?? ''}|${row.packageName}|${row.cveId}`}
-              storageKey="security-cves"
-              autoRefresh={{ intervalMs: 30_000, queries: [cveVulnsQuery] }}
+              columns={cvePackageColumns}
+              rows={cvePackagesQuery.data.rows}
+              rowKey={(row) => `${row.deviceId}|${row.pluginId}|${row.component ?? 'host'}|${row.componentName ?? ''}|${row.ecosystem}|${row.packageName}`}
+              storageKey="security-cves-packages"
+              serverPagination={{
+                total: cvePackagesQuery.data.total,
+                page: cvePage,
+                pageSize: cvePageSize,
+                onPageChange: setCvePage,
+                onPageSizeChange: (n) => {
+                  setCvePageSize(n);
+                  resetCvePage();
+                },
+              }}
+              onSearch={setCveSearchText}
+              externalSearch={cveSearchText}
+              onRowClick={drillIntoPackage}
+              autoRefresh={{ intervalMs: 30_000, queries: [cvePackagesQuery] }}
               searchPlaceholder="Search package or CVE id…"
               emptyMessage={
-                cveComponent !== 'all' && cveRows.length > 0
-                  ? `No ${cveComponent} matches — other components have ${cveRows.length}.`
-                  : "No known vulnerabilities — packages are matched against OSV advisories once the fleet's installed-package inventory is collected (Generic SSH plugin on Linux hosts) and at least one advisory fetch has succeeded."
+                cveSeverity || cveComponent !== 'all' || cveQ
+                  ? 'No vulnerable packages match the current filters.'
+                  : "No known vulnerabilities — packages are matched against OSV advisories once the fleet's installed-package inventory is collected and at least one advisory fetch has succeeded."
               }
             />
-          </>
+          ) : cvePackagesQuery.isError ? (
+            <p className="text-sm text-danger-fg">Failed to load vulnerable packages: {(cvePackagesQuery.error as Error).message}</p>
+          ) : (
+            <p className="text-sm text-muted-foreground">Loading vulnerability data…</p>
+          )
+        ) : cveVulnsQuery.data ? (
+          <DataTable
+            columns={cveColumns}
+            rows={cveVulnsQuery.data.rows}
+            rowKey={(row) => `${row.deviceId}|${row.pluginId}|${row.component ?? 'host'}|${row.componentName ?? ''}|${row.packageName}|${row.cveId}`}
+            storageKey="security-cves"
+            serverPagination={{
+              total: cveVulnsQuery.data.total,
+              page: cvePage,
+              pageSize: cvePageSize,
+              onPageChange: setCvePage,
+              onPageSizeChange: (n) => {
+                setCvePageSize(n);
+                resetCvePage();
+              },
+            }}
+            onSearch={setCveSearchText}
+            externalSearch={cveSearchText}
+            autoRefresh={{ intervalMs: 30_000, queries: [cveVulnsQuery] }}
+            searchPlaceholder="Search package or CVE id…"
+            emptyMessage={
+              cveSeverity || cveComponent !== 'all' || cveQ
+                ? 'No CVE matches for the current filters.'
+                : "No known vulnerabilities — packages are matched against OSV advisories once the fleet's installed-package inventory is collected and at least one advisory fetch has succeeded."
+            }
+          />
+        ) : cveVulnsQuery.isError ? (
+          <p className="text-sm text-danger-fg">Failed to load CVE matches: {(cveVulnsQuery.error as Error).message}</p>
+        ) : (
+          <p className="text-sm text-muted-foreground">Loading vulnerability data…</p>
         )}
       </div>
       )}

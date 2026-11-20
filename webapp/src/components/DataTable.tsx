@@ -1,6 +1,6 @@
 import { Fragment, MouseEvent as ReactMouseEvent, ReactNode, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import clsx from 'clsx';
-import { ChevronDown, ChevronRight, Download, Filter, RefreshCw, RotateCcw, Search, SlidersHorizontal, X } from 'lucide-react';
+import { ChevronDown, ChevronLeft, ChevronRight, Download, Filter, RefreshCw, RotateCcw, Search, SlidersHorizontal, X } from 'lucide-react';
 import { useTablePrefs } from './useTablePrefs';
 
 /** Context handed to `expandable.renderChild` for one child row. The page uses
@@ -124,6 +124,29 @@ interface DataTableProps<T> {
     /** The page's auto-refreshing queries (any useQuery result works). */
     queries: AutoRefreshable[];
   };
+  /** SERVER-SIDE PAGINATION mode — `rows` is ONE page of a larger server-filtered,
+   * server-sorted set. When set, DataTable stops applying its own search / column-
+   * filter / sort pipeline (the API already did), hides the per-column Filter UI and
+   * header sorting, wires the quick-search box to `onSearch`, and renders a pager
+   * footer with prev/next (+ optional page-size select). */
+  serverPagination?: {
+    /** Total rows for the current filters (across all pages). */
+    total: number;
+    /** Current page, 1-based — controlled by the parent. */
+    page: number;
+    pageSize: number;
+    onPageChange: (page: number) => void;
+    /** When provided, a rows-per-page select (25/50/100) appears in the pager footer. */
+    onPageSizeChange?: (size: number) => void;
+  };
+  /** Called with the quick-search text on every keystroke — only meaningful together
+   * with `serverPagination` (the parent debounces and refetches). */
+  onSearch?: (q: string) => void;
+  /** Parent-driven search text (e.g. drill-down from a grouped row into the raw list).
+   * Synced into the search box whenever it changes; pass '' to clear. */
+  externalSearch?: string | null;
+  /** Row click handler — adds cursor-pointer + onClick to data rows. */
+  onRowClick?: (row: T) => void;
 }
 
 const MIN_COL_WIDTH = 80;
@@ -244,12 +267,28 @@ export function DataTable<T>({
   expandable,
   fillHeight = false,
   autoRefresh,
+  serverPagination,
+  onSearch,
+  externalSearch,
+  onRowClick,
 }: DataTableProps<T>) {
   const { prefs, setPrefs, reset } = useTablePrefs(storageKey);
   const [menuOpen, setMenuOpen] = useState(false); // column visibility picker
   const [exportOpen, setExportOpen] = useState(false); // export dropdown
   const menuRef = useRef<HTMLDivElement>(null);
   const [searchText_, setSearchText_] = useState('');
+  // Every search-text mutation goes through here so server-pagination mode
+  // ALWAYS notifies the parent — including the clear actions below (a stale
+  // server `q` would otherwise keep filtering while the box reads empty).
+  function updateSearch(v: string) {
+    setSearchText_(v);
+    onSearch?.(v);
+  }
+  // Parent-driven search sync (drill-down etc.) — also runs on mount, which is a
+  // no-op when the parent starts with ''/null.
+  useEffect(() => {
+    if (externalSearch !== undefined) setSearchText_(externalSearch ?? '');
+  }, [externalSearch]);
   const [colFilters, setColFilters] = useState<Record<string, string>>({});
   const [showFilters, setShowFilters] = useState(false);
   const [selectedKeys, setSelectedKeys] = useState<Set<string>>(new Set());
@@ -333,10 +372,16 @@ export function DataTable<T>({
     [columns, prefs.hiddenKeys, prefs.visibilityTouched]
   );
 
+  // Server-pagination mode: the API already applied search/filters/sort — render
+  // the page AS-IS and skip the whole client-side pipeline below.
+  const serverMode = !!serverPagination;
+
   // Row pipeline: search (visible cols) → per-column filters (AND) → sort. With
   // expandable rows, matching also considers each row's nested children so an
   // app is found by any of its containers' images/volumes/networks.
   const viewRows = useMemo(() => {
+    filteredRef.current = rows;
+    if (serverMode) return rows;
     let out = rows;
     const kidsOf = expandable ? (r: T) => expandable.childrenOf(r) : () => [] as T[];
     const q = searchText_.trim().toLowerCase();
@@ -352,7 +397,7 @@ export function DataTable<T>({
     }
     filteredRef.current = out;
     return prefs.sort ? sortRows(out, columns, prefs.sort.key, prefs.sort.dir) : out;
-  }, [rows, visibleColumns, colFilters, searchText_, prefs.sort, columns, expandable]);
+  }, [rows, visibleColumns, colFilters, searchText_, prefs.sort, columns, expandable, serverMode]);
 
   // Drop selected keys whose rows disappeared from the dataset (e.g. deleted).
   useEffect(() => {
@@ -415,7 +460,7 @@ export function DataTable<T>({
   }
 
   function clearNarrowing() {
-    setSearchText_('');
+    updateSearch('');
     setColFilters({});
   }
 
@@ -538,13 +583,15 @@ export function DataTable<T>({
           <input
             type="text"
             value={searchText_}
-            onChange={(e) => setSearchText_(e.target.value)}
+            onChange={(e) => updateSearch(e.target.value)}
             placeholder={searchPlaceholder}
             aria-label="Quick search rows"
             className="w-full rounded-md border border-border py-1 pl-7 pr-2 text-xs text-secondary focus:border-focus-ring focus:outline-none"
           />
         </div>
 
+        {/* Per-column filters are client-side only — hidden in server-pagination mode. */}
+        {!serverMode && (
         <button
           type="button"
           onClick={() => setShowFilters((v) => !v)}
@@ -563,6 +610,7 @@ export function DataTable<T>({
             <span className="rounded-full bg-primary-hover px-1.5 text-[10px] font-semibold leading-4 text-white">{activeFilterCols.length}</span>
           )}
         </button>
+        )}
 
         {autoRefresh && (
           <button
@@ -671,16 +719,17 @@ export function DataTable<T>({
         )}
       </div>
 
-      {/* Status line: row count + active filter chips (only when narrowing) */}
+      {/* Status line: row count + active filter chips (only when narrowing). In
+          server-pagination mode the denominator is the FILTERED TOTAL, not this page. */}
       {hasActiveNarrowing && (
         <div className="flex shrink-0 flex-wrap items-center gap-1.5 border-b border-border bg-background/60 px-3 py-1 text-xs text-muted-foreground">
           <span>
-            {viewRows.length} of {rows.length} rows
+            {viewRows.length} of {(serverMode ? serverPagination.total : rows.length).toLocaleString()} rows
           </span>
           {searchText_.trim() !== '' && (
             <button
               type="button"
-              onClick={() => setSearchText_('')}
+              onClick={() => updateSearch('')}
               className="flex items-center gap-1 rounded-full border border-border bg-card px-2 py-0.5 text-secondary hover:bg-muted"
             >
               search: “{searchText_.trim()}” <X className="h-3 w-3" />
@@ -770,7 +819,9 @@ export function DataTable<T>({
                   </th>
                 )}
               {visibleColumns.map((col) => {
-                const sortable = col.sortable !== false;
+                // Header sorting is client-side only — disabled in server-pagination mode
+                // (the API owns the order; re-sorting one page would be misleading).
+                const sortable = col.sortable !== false && !serverMode;
                 const active = sortKey === col.key && prefs.sort ? prefs.sort.dir : null;
                 return (
                   <th
@@ -811,7 +862,7 @@ export function DataTable<T>({
                 );
               })}
             </tr>
-              {showFilters && (
+              {showFilters && !serverMode && (
                 <tr className="bg-card">
                   {/* top-[37px] = header row height (py-2 + 20px line-height +
                       1px border) — keeps the filter inputs pinned directly
@@ -853,7 +904,8 @@ export function DataTable<T>({
               return (
                 <Fragment key={key}>
                   <tr
-                    className={clsx('hover:bg-background', selectable && selectedKeys.has(key) && 'bg-info/40', rowClassName?.(row))}
+                    className={clsx('hover:bg-background', selectable && selectedKeys.has(key) && 'bg-info/40', rowClassName?.(row), onRowClick && 'cursor-pointer')}
+                    onClick={onRowClick ? () => onRowClick(row) : undefined}
                     onMouseEnter={() => onRowHover?.(row)}
                   >
                     {expandable && (
@@ -914,6 +966,53 @@ export function DataTable<T>({
         </table>
         </div>
       )}
+
+      {/* Pager footer — server-pagination mode only. */}
+      {serverPagination && viewRows.length > 0 && (() => {
+        const totalPages = Math.max(1, Math.ceil(serverPagination.total / serverPagination.pageSize));
+        const start = (serverPagination.page - 1) * serverPagination.pageSize + 1;
+        const end = Math.min(serverPagination.total, serverPagination.page * serverPagination.pageSize);
+        return (
+          <div className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-t border-border px-3 py-1.5 text-xs text-muted-foreground">
+            <span>
+              Showing {start.toLocaleString()}–{end.toLocaleString()} of {serverPagination.total.toLocaleString()}
+            </span>
+            <div className="flex items-center gap-2">
+              {serverPagination.onPageSizeChange && (
+                <select
+                  value={serverPagination.pageSize}
+                  onChange={(e) => serverPagination.onPageSizeChange?.(Number(e.target.value))}
+                  aria-label="Rows per page"
+                  className="rounded-md border border-border bg-background px-1.5 py-0.5 text-xs text-secondary focus:border-focus-ring focus:outline-none"
+                >
+                  {[25, 50, 100].map((n) => (
+                    <option key={n} value={n}>{n}</option>
+                  ))}
+                </select>
+              )}
+              <button
+                type="button"
+                disabled={serverPagination.page <= 1}
+                onClick={() => serverPagination.onPageChange(serverPagination.page - 1)}
+                aria-label="Previous page"
+                className="flex h-6 w-6 items-center justify-center rounded border border-border text-secondary hover:bg-background disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                <ChevronLeft className="h-3.5 w-3.5" />
+              </button>
+              <span>{serverPagination.page} / {totalPages.toLocaleString()}</span>
+              <button
+                type="button"
+                disabled={serverPagination.page >= totalPages}
+                onClick={() => serverPagination.onPageChange(serverPagination.page + 1)}
+                aria-label="Next page"
+                className="flex h-6 w-6 items-center justify-center rounded border border-border text-secondary hover:bg-background disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                <ChevronRight className="h-3.5 w-3.5" />
+              </button>
+            </div>
+          </div>
+        );
+      })()}
     </div>
   );
 }

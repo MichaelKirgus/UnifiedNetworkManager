@@ -967,8 +967,57 @@ export interface CveVulnerabilityRow {
   pluginName?: string | null;
 }
 
-export interface CveVulnerabilitiesResponse {
+/** Shared filter/pagination params for the two CVE list endpoints. */
+export interface CveListParams {
+  deviceId?: string;
+  siteId?: string;
+  /** /cve/vulnerabilities: exact rank match. /cve/packages: group contains ≥ this rank. */
+  severityRank?: 'critical' | 'high' | 'medium' | 'low' | 'unknown';
+  ecosystem?: string;
+  component?: 'host' | 'container';
+  /** Case-insensitive substring on package name or CVE id. */
+  q?: string;
+  page?: number;
+  pageSize?: number;
+}
+
+/** Server-side pagination envelope — total is the filtered count across ALL pages. */
+export interface CvePagination {
+  total: number;
+  page: number;
+  pageSize: number;
+}
+
+export interface CveVulnerabilitiesResponse extends CvePagination {
   rows: CveVulnerabilityRow[];
+}
+
+/** One vulnerable package INSTANCE — the grouped "smart default" row (device × component × package). */
+export interface CvePackageRow {
+  deviceId: string;
+  pluginId: string;
+  /** 'host' = the appliance/OS itself; 'container' = software inside a container (BOM). */
+  component?: 'host' | 'container';
+  /** Container name when component='container' (empty for host rows). */
+  componentName?: string;
+  ecosystem: string;
+  packageName: string;
+  installedVersion?: string | null;
+  /** Number of CVE matches for this package instance. */
+  cveCount: number;
+  /** Most severe rank among the group's matches. */
+  worstRank: 'critical' | 'high' | 'medium' | 'low' | 'unknown';
+  worstScore?: number | null;
+  /** Up to 5 most severe CVE ids, severity-first (quick links). */
+  topCves: string[];
+  deviceName?: string | null;
+  managementAddress?: string | null;
+  siteName?: string | null;
+  pluginName?: string | null;
+}
+
+export interface CvePackagesResponse extends CvePagination {
+  rows: CvePackageRow[];
 }
 
 /** Fleet-wide CVE tracking status + severity distribution. */
@@ -4001,6 +4050,21 @@ async function apiFetch<T>(path: string, opts?: RequestInit): Promise<T> {
   return res.json();
 }
 
+/** Query string for the two CVE list endpoints (shared filter/pagination params). */
+function cveQuerySuffix(params?: CveListParams): string {
+  const qs = new URLSearchParams();
+  if (params?.deviceId) qs.set('deviceId', params.deviceId);
+  if (params?.siteId) qs.set('siteId', params.siteId);
+  if (params?.severityRank) qs.set('severityRank', params.severityRank);
+  if (params?.ecosystem) qs.set('ecosystem', params.ecosystem);
+  if (params?.component) qs.set('component', params.component);
+  if (params?.q) qs.set('q', params.q);
+  if (params?.page && params.page > 1) qs.set('page', String(params.page));
+  if (params?.pageSize && params.pageSize !== 50) qs.set('pageSize', String(params.pageSize)); // 50 = server default, omit to keep URLs clean
+  const s = qs.toString();
+  return s ? `?${s}` : '';
+}
+
 export const api = {
   /** Stack identity (name/version/build tag) for the sidebar brand block. */
   info: () => apiFetch<StackInfo>('/info'),
@@ -4602,17 +4666,16 @@ export const api = {
     const suffix = qs.toString() ? `?${qs.toString()}` : '';
     return apiFetch<SecurityChecksResponse>(`/security-checks${suffix}`);
   },
-  /** CVE matches on installed packages — one row per (device × package × advisory). */
-  cveVulnerabilities: (params?: { deviceId?: string; siteId?: string; severityRank?: 'critical' | 'high' | 'medium' | 'low' | 'unknown'; ecosystem?: string; component?: 'host' | 'container'; q?: string }) => {
-    const qs = new URLSearchParams();
-    if (params?.deviceId) qs.set('deviceId', params.deviceId);
-    if (params?.siteId) qs.set('siteId', params.siteId);
-    if (params?.severityRank) qs.set('severityRank', params.severityRank);
-    if (params?.ecosystem) qs.set('ecosystem', params.ecosystem);
-    if (params?.component) qs.set('component', params.component);
-    if (params?.q) qs.set('q', params.q);
-    const suffix = qs.toString() ? `?${qs.toString()}` : '';
+  /** CVE matches on installed packages — one row per (device × package × advisory).
+   * Server-side paginated: pass page/pageSize; the response carries `total`. */
+  cveVulnerabilities: (params?: CveListParams) => {
+    const suffix = cveQuerySuffix(params);
     return apiFetch<CveVulnerabilitiesResponse>(`/cve/vulnerabilities${suffix}`);
+  },
+  /** Grouped CVE view — one row per vulnerable package instance (the Security page's smart default). */
+  cvePackages: (params?: CveListParams) => {
+    const suffix = cveQuerySuffix(params);
+    return apiFetch<CvePackagesResponse>(`/cve/packages${suffix}`);
   },
   /** Fleet-wide CVE tracking status + severity distribution (Security page header). */
   cveSummary: () => apiFetch<CveSummaryResponse>('/cve/summary'),

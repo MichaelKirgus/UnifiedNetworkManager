@@ -6761,15 +6761,19 @@ paths:
   /cve/vulnerabilities:
     get:
       tags: [Security]
-      summary: Per-device CVE matches (installed packages × known advisories)
+      summary: Per-device CVE matches (installed packages × known advisories), paginated
       description: >-
         Rows from the `device_cves` table — one row per (device × vulnerable
         package) match, recomputed wholesale by the cve worker on every beat.
         The worker fetches advisories for every distinct package installed in
         the fleet (OSV.dev today; commercial providers later via the CveProvider
         interface) and matches them against each device's installed versions
-        with per-ecosystem comparators. Device-level access control applies —
-        scoped callers get an empty list for out-of-scope devices, never a leak.
+        with per-ecosystem comparators. SERVER-SIDE PAGINATED: rows are ordered
+        severity-first (critical first) and one page is returned at a time —
+        `total` carries the filtered row count for the pager. On a real fleet
+        this table has tens of thousands of rows; use /cve/packages for the
+        grouped, actionable view. Device-level access control applies — scoped
+        callers get an empty list for out-of-scope devices, never a leak.
       parameters:
         - in: query
           name: deviceId
@@ -6787,7 +6791,7 @@ paths:
           schema:
             type: string
             enum: [critical, high, medium, low, unknown]
-          description: Filter by CVSS-derived severity bucket
+          description: Filter by CVSS-derived severity bucket (exact match)
         - in: query
           name: ecosystem
           required: false
@@ -6805,15 +6809,98 @@ paths:
           required: false
           schema: { type: string }
           description: Case-insensitive substring match on package name or CVE id
+        - in: query
+          name: page
+          required: false
+          schema: { type: integer, minimum: 1, default: 1 }
+          description: Page number (1-based)
+        - in: query
+          name: pageSize
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 200, default: 50 }
+          description: Rows per page (clamped to 200 max)
       responses:
         '200':
-          description: CVE match rows (device + plugin identity included)
+          description: One page of CVE match rows + filtered total (device + plugin identity included)
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/CveVulnerabilitiesResponse'
         '400':
-          description: Invalid severityRank or component filter value
+          description: Invalid severityRank, component or pagination value
+        '401':
+          description: Authentication required
+
+  /cve/packages:
+    get:
+      tags: [Security]
+      summary: Grouped CVE view — one row per vulnerable package instance (smart default)
+      description: >-
+        The "smart default" for the Security page: instead of one row per CVE
+        match, one row per vulnerable PACKAGE INSTANCE (device × component ×
+        package), carrying its CVE count, worst severity and the top 5 most
+        severe CVE ids. Same filters + pagination as /cve/vulnerabilities —
+        except `severityRank` here means "the group contains at least one CVE
+        of this rank or worse" (HAVING on the group's worst rank), so a package
+        with criticals still shows under the high filter only if it also has
+        highs. Ordered by worst severity, then CVE count. A fleet with 25k+
+        CVE matches typically collapses to ~1-2k rows here. Device-level access
+        control applies — scoped callers get an empty list for out-of-scope
+        devices, never a leak.
+      parameters:
+        - in: query
+          name: deviceId
+          required: false
+          schema: { type: string }
+          description: Filter to one device
+        - in: query
+          name: siteId
+          required: false
+          schema: { type: string }
+          description: Filter to devices belonging to a site
+        - in: query
+          name: severityRank
+          required: false
+          schema:
+            type: string
+            enum: [critical, high, medium, low, unknown]
+          description: Keep groups containing at least one CVE of this rank or worse
+        - in: query
+          name: ecosystem
+          required: false
+          schema: { type: string }
+          description: Filter by package ecosystem tag (e.g. debian, alpine, npm)
+        - in: query
+          name: component
+          required: false
+          schema:
+            type: string
+            enum: [host, container]
+          description: BOM filter — host OS packages only, or software inside containers only
+        - in: query
+          name: q
+          required: false
+          schema: { type: string }
+          description: Case-insensitive substring match on package name or CVE id (narrows the CVE rows feeding each group)
+        - in: query
+          name: page
+          required: false
+          schema: { type: integer, minimum: 1, default: 1 }
+          description: Page number (1-based)
+        - in: query
+          name: pageSize
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 200, default: 50 }
+          description: Rows per page (clamped to 200 max)
+      responses:
+        '200':
+          description: One page of grouped package rows + filtered group count
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CvePackagesResponse'
+        '400':
+          description: Invalid severityRank, component or pagination value
         '401':
           description: Authentication required
 
@@ -12702,14 +12789,64 @@ components:
           items:
             $ref: '#/components/schemas/SecurityCheckRow'
 
-    CveVulnerabilitiesResponse:
+    Paginated:
       type: object
-      required: [rows]
+      description: "Server-side pagination envelope — total is the filtered count across ALL pages"
+      required: [total, page, pageSize]
       properties:
-        rows:
+        total: { type: integer, minimum: 0 }
+        page: { type: integer, minimum: 1 }
+        pageSize: { type: integer, minimum: 1, maximum: 200 }
+
+    CveVulnerabilitiesResponse:
+      allOf:
+        - $ref: '#/components/schemas/Paginated'
+        - type: object
+          required: [rows]
+          properties:
+            rows:
+              type: array
+              items:
+                $ref: '#/components/schemas/CveMatchRow'
+
+    CvePackagesResponse:
+      allOf:
+        - $ref: '#/components/schemas/Paginated'
+        - type: object
+          required: [rows]
+          properties:
+            rows:
+              type: array
+              items:
+                $ref: '#/components/schemas/CvePackageRow'
+
+    CvePackageRow:
+      type: object
+      description: One vulnerable package INSTANCE (device × component × package) with its aggregated CVE matches.
+      required: [deviceId, pluginId, component, componentName, ecosystem, packageName, cveCount, worstRank, topCves]
+      properties:
+        deviceId: { type: string }
+        pluginId: { type: string }
+        component: { type: string, enum: [host, container], description: "BOM component carrying the package — 'host' (OS) or 'container'" }
+        componentName: { type: string, description: "Container name for component=container rows; empty string for host rows" }
+        ecosystem: { type: string }
+        packageName: { type: string }
+        installedVersion: { type: [string, 'null'], description: "The installed version (null = unversioned package)" }
+        cveCount: { type: integer, description: "Number of CVE matches for this package instance" }
+        worstRank:
+          type: string
+          enum: [critical, high, medium, low, unknown]
+          description: "Most severe rank among the group's matches"
+        worstScore: { type: [number, 'null'], description: "Highest CVSS v3 base score in the group (null = unscored)" }
+        topCves:
           type: array
-          items:
-            $ref: '#/components/schemas/CveMatchRow'
+          maxItems: 5
+          items: { type: string }
+          description: "Up to 5 most severe CVE ids, severity-first"
+        deviceName: { type: [string, 'null'] }
+        managementAddress: { type: [string, 'null'] }
+        siteName: { type: [string, 'null'] }
+        pluginName: { type: [string, 'null'] }
 
     CveMatchRow:
       type: object
