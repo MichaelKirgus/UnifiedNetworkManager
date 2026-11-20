@@ -8,6 +8,10 @@ export interface ServerTableSort {
   dir: 'asc' | 'desc';
 }
 
+/** Sentinel pageSize meaning "return everything in one response" (no pagination).
+ * The fetcher maps it to whatever its API calls unpaginated (e.g. `all=true`). */
+export const ALL_PAGES = 0;
+
 /** Params handed to the fetcher: the caller's extra filters + table controls. */
 export type ServerTableParams<TExtra extends object> = TExtra & {
   page: number;
@@ -58,7 +62,9 @@ export function useServerTable<TExtra extends object, TRow>(opts: {
   error: Error | null;
   page: number;
   setPage: (page: number) => void;
+  /** Current rows-per-page — ALL_PAGES (0) means "everything, unpaginated". */
   pageSize: number;
+  /** Set rows-per-page; pass ALL_PAGES for the unpaginated view. Resets to page 1. */
   setPageSize: (size: number) => void;
   /** Committed search text — wire to DataTable's `onSearch` + `externalSearch`. */
   q: string;
@@ -99,16 +105,19 @@ export function useServerTable<TExtra extends object, TRow>(opts: {
   }
 
   const query = useQuery({
-    queryKey: ['serverTable', opts.storageKey ?? 'default', extraKey, q, sort?.key ?? null, sort?.dir ?? null, page, pageSize],
-    queryFn: () => opts.fetcher({ ...(opts.extra as object), page, pageSize, q: q || undefined, sort } as ServerTableParams<TExtra>),
+    // In ALL_PAGES mode the page is irrelevant — pin it out of the key so the cache stays stable.
+    queryKey: ['serverTable', opts.storageKey ?? 'default', extraKey, q, sort?.key ?? null, sort?.dir ?? null, pageSize === ALL_PAGES ? null : page, pageSize],
+    queryFn: () => opts.fetcher({ ...(opts.extra as object), page: pageSize === ALL_PAGES ? 1 : page, pageSize, q: q || undefined, sort } as ServerTableParams<TExtra>),
     // Keep the previous page visible while a new one loads — no flash to empty.
     placeholderData: keepPreviousData,
     refetchInterval: opts.refetchIntervalMs === false ? false : (opts.refetchIntervalMs ?? 30_000),
   });
 
   // Clamp the page when the filtered total shrinks under it (e.g. advisories pruned).
+  // ALL_PAGES mode has no pages to clamp.
   const total = query.data?.total ?? 0;
   useEffect(() => {
+    if (pageSize === ALL_PAGES) return;
     if (total > 0 && (page - 1) * pageSize >= total) {
       setPageRaw(Math.max(1, Math.ceil(total / pageSize)));
     }

@@ -137,8 +137,11 @@ interface DataTableProps<T> {
     page: number;
     pageSize: number;
     onPageChange: (page: number) => void;
-    /** When provided, a rows-per-page select (25/50/100) appears in the pager footer. */
+    /** When provided, a rows-per-page select appears in the pager footer. */
     onPageSizeChange?: (size: number) => void;
+    /** The select's choices (default [25, 50, 100]). Include 0 to offer an "All"
+     * (unpaginated) option — prev/next then hide and every row is shown. */
+    pageSizeOptions?: number[];
     /** Current server sort — with `onSortChange`, header sorting works in this mode. */
     sort?: { key: string; dir: 'asc' | 'desc' } | null;
     /** Receives the NEXT sort state (null = off). Cycles asc → desc → off like client mode. */
@@ -1022,9 +1025,10 @@ export function DataTable<T>({
       {/* Pager footer — server-pagination mode only. Rendered on TOTAL (not page
           length) so an out-of-range/empty page still shows where the user is. */}
       {serverPagination && serverPagination.total > 0 && (() => {
-        const totalPages = Math.max(1, Math.ceil(serverPagination.total / serverPagination.pageSize));
-        const start = (serverPagination.page - 1) * serverPagination.pageSize + 1;
-        const end = Math.min(serverPagination.total, serverPagination.page * serverPagination.pageSize);
+        const allMode = serverPagination.pageSize === 0; // "All" — one unpaginated response
+        const totalPages = Math.max(1, Math.ceil(serverPagination.total / Math.max(1, serverPagination.pageSize)));
+        const start = allMode ? 1 : (serverPagination.page - 1) * serverPagination.pageSize + 1;
+        const end = allMode ? serverPagination.total : Math.min(serverPagination.total, serverPagination.page * serverPagination.pageSize);
         return (
           <div className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-t border-border px-3 py-1.5 text-xs text-muted-foreground">
             <span>
@@ -1038,30 +1042,32 @@ export function DataTable<T>({
                   aria-label="Rows per page"
                   className="rounded-md border border-border bg-background px-1.5 py-0.5 text-xs text-secondary focus:border-focus-ring focus:outline-none"
                 >
-                  {[25, 50, 100].map((n) => (
-                    <option key={n} value={n}>{n}</option>
+                  {(serverPagination.pageSizeOptions ?? [25, 50, 100]).map((n) => (
+                    <option key={n} value={n}>{n === 0 ? 'All' : n}</option>
                   ))}
                 </select>
               )}
-              <button
-                type="button"
-                disabled={serverPagination.page <= 1}
-                onClick={() => serverPagination.onPageChange(serverPagination.page - 1)}
-                aria-label="Previous page"
-                className="flex h-6 w-6 items-center justify-center rounded border border-border text-secondary hover:bg-background disabled:cursor-not-allowed disabled:opacity-40"
-              >
-                <ChevronLeft className="h-3.5 w-3.5" />
-              </button>
-              <span>{serverPagination.page} / {totalPages.toLocaleString()}</span>
-              <button
-                type="button"
-                disabled={serverPagination.page >= totalPages}
-                onClick={() => serverPagination.onPageChange(serverPagination.page + 1)}
-                aria-label="Next page"
-                className="flex h-6 w-6 items-center justify-center rounded border border-border text-secondary hover:bg-background disabled:cursor-not-allowed disabled:opacity-40"
-              >
-                <ChevronRight className="h-3.5 w-3.5" />
-              </button>
+              {!allMode && (<>
+                <button
+                  type="button"
+                  disabled={serverPagination.page <= 1}
+                  onClick={() => serverPagination.onPageChange(serverPagination.page - 1)}
+                  aria-label="Previous page"
+                  className="flex h-6 w-6 items-center justify-center rounded border border-border text-secondary hover:bg-background disabled:cursor-not-allowed disabled:opacity-40"
+                >
+                  <ChevronLeft className="h-3.5 w-3.5" />
+                </button>
+                <span>{serverPagination.page} / {totalPages.toLocaleString()}</span>
+                <button
+                  type="button"
+                  disabled={serverPagination.page >= totalPages}
+                  onClick={() => serverPagination.onPageChange(serverPagination.page + 1)}
+                  aria-label="Next page"
+                  className="flex h-6 w-6 items-center justify-center rounded border border-border text-secondary hover:bg-background disabled:cursor-not-allowed disabled:opacity-40"
+                >
+                  <ChevronRight className="h-3.5 w-3.5" />
+                </button>
+              </>)}
             </div>
           </div>
         );

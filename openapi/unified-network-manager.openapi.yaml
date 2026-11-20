@@ -6831,6 +6831,11 @@ paths:
           required: false
           schema: { type: integer, minimum: 1, maximum: 200, default: 50 }
           description: Rows per page (clamped to 200 max)
+        - in: query
+          name: all
+          required: false
+          schema: { type: boolean }
+          description: "true = return ALL matching rows in one unpaginated response — for exports and small filtered sets; wins over page/pageSize"
       responses:
         '200':
           description: One page of CVE match rows + filtered total (device + plugin identity included)
@@ -6916,6 +6921,11 @@ paths:
           required: false
           schema: { type: integer, minimum: 1, maximum: 200, default: 50 }
           description: Rows per page (clamped to 200 max)
+        - in: query
+          name: all
+          required: false
+          schema: { type: boolean }
+          description: "true = return ALL matching rows in one unpaginated response — for exports and small filtered sets; wins over page/pageSize"
       responses:
         '200':
           description: One page of grouped package rows + filtered group count

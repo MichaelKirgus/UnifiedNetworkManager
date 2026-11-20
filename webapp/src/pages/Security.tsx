@@ -5,7 +5,7 @@ import { useMemo, useState } from 'react';
 import clsx from 'clsx';
 import { Layout } from '../components/Layout';
 import { DataTable, DataTableColumn } from '../components/DataTable';
-import { useServerTable } from '../components/useServerTable';
+import { ALL_PAGES, useServerTable } from '../components/useServerTable';
 import { DeviceChip } from '../components/DeviceChip';
 import { PageTabs } from '../components/PageTabs';
 import { api, SecurityCheckRow, CvePackageRow, CveVulnerabilityRow, ThreatIntelSource } from '../api/client';
@@ -151,12 +151,14 @@ export default function Security() {
   const VULN_SORT_MAP: Record<string, string> = { component: 'componentName', packageName: 'packageName', cveId: 'cveId', severityRank: 'severityRank', ecosystem: 'ecosystem' };
 
   const pkgTable = useServerTable({
-    fetcher: (p) => api.cvePackages({ ...p, sort: p.sort ? PKG_SORT_MAP[p.sort.key] : undefined, dir: p.sort?.dir }),
+    // pageSize === ALL_PAGES → unpaginated `all=true` (the "All" entry in the pager select).
+    fetcher: (p) => api.cvePackages({ ...p, all: p.pageSize === ALL_PAGES ? true : undefined, sort: p.sort ? PKG_SORT_MAP[p.sort.key] : undefined, dir: p.sort?.dir }),
     extra: cveExtra,
     storageKey: 'security-cves-packages',
   });
   const vulnTable = useServerTable({
-    fetcher: (p) => api.cveVulnerabilities({ ...p, sort: p.sort ? VULN_SORT_MAP[p.sort.key] : undefined, dir: p.sort?.dir }),
+    // pageSize === ALL_PAGES → unpaginated `all=true` (the "All" entry in the pager select).
+    fetcher: (p) => api.cveVulnerabilities({ ...p, all: p.pageSize === ALL_PAGES ? true : undefined, sort: p.sort ? VULN_SORT_MAP[p.sort.key] : undefined, dir: p.sort?.dir }),
     extra: cveExtra,
     storageKey: 'security-cves',
   });
@@ -625,6 +627,7 @@ export default function Security() {
                 pageSize: pkgTable.pageSize,
                 onPageChange: pkgTable.setPage,
                 onPageSizeChange: pkgTable.setPageSize,
+                pageSizeOptions: [25, 50, 100, ALL_PAGES], // "All" = unpaginated (all=true)
                 sort: pkgTable.sort,
                 onSortChange: pkgTable.setSort,
               }}
@@ -657,6 +660,7 @@ export default function Security() {
               pageSize: vulnTable.pageSize,
               onPageChange: vulnTable.setPage,
               onPageSizeChange: vulnTable.setPageSize,
+              pageSizeOptions: [25, 50, 100, ALL_PAGES], // "All" = unpaginated (all=true)
               sort: vulnTable.sort,
               onSortChange: vulnTable.setSort,
             }}

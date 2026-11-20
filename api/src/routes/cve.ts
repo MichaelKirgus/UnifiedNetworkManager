@@ -6,8 +6,10 @@
  *      deviceId, siteId, severityRank ('critical'|'high'|'medium'|'low'),
  *      ecosystem, component ('host'|'container'), q (case-insensitive substring
  *      on package name or CVE id). SERVER-SIDE PAGINATED — page/pageSize
- *      (default 50, max 200); the response carries `total` for the pager. Rows
- *      are ordered severity-first so page 1 is always the most urgent matches;
+ *      (default 50, max 200); the response carries `total` for the pager.
+ *      all=true returns EVERY matching row in one unpaginated response (opt-in
+ *      escape hatch for exports / small filtered sets). Rows are ordered
+ *      severity-first so page 1 is always the most urgent matches;
  *      an explicit sort/dir param (allowlisted per endpoint) overrides that.
  * GET  /cve/packages — the SMART DEFAULT view: one row per vulnerable package
  *      INSTANCE (device × component × package) with cveCount, worst severity
@@ -78,8 +80,11 @@ async function resolveScope(req: Parameters<typeof allowedDeviceIds>[0], deviceI
 const PAGE_SIZE_DEFAULT = 50;
 const PAGE_SIZE_MAX = 200; // hard cap — unbounded pages are exactly what this exists to prevent
 
-/** Parse + validate page/pageSize. Non-numeric → error; pageSize is CLAMPED to the max. */
-function parsePagination(query: Record<string, string | undefined>): { page: number; pageSize: number } | { error: string } {
+/** Parse + validate page/pageSize/all. Non-numeric → error; pageSize is CLAMPED to the max.
+ * `all=true` disables pagination entirely (every matching row in one response) — an
+ * opt-in escape hatch for exports and small filtered sets; it wins over any explicit
+ * page/pageSize (the 200 cap exists precisely so nobody ships unbounded pages by accident). */
+function parsePagination(query: Record<string, string | undefined>): { all: boolean; page: number; pageSize: number } | { error: string } {
   let page = 1;
   let pageSize = PAGE_SIZE_DEFAULT;
   if (query.page !== undefined) {
@@ -92,7 +97,14 @@ function parsePagination(query: Record<string, string | undefined>): { page: num
     if (!Number.isInteger(n) || n < 1) return { error: `"pageSize" must be a positive integer` };
     pageSize = Math.min(n, PAGE_SIZE_MAX);
   }
-  return { page, pageSize };
+  // The OpenAPI validator (express-openapi-validator v5 forces coerceTypes) converts
+  // declared boolean params to REAL booleans before this handler runs — accept both.
+  const allRaw = query.all as boolean | string | undefined;
+  if (allRaw !== undefined && typeof allRaw !== 'boolean' && !['true', 'false'].includes(allRaw)) {
+    return { error: `"all" must be "true" or "false"` };
+  }
+  const all = allRaw === true || allRaw === 'true';
+  return { all, page, pageSize };
 }
 
 /** Severity rank ordering — critical first, then high/medium/low/unknown. */
@@ -196,13 +208,14 @@ router.get('/cve/vulnerabilities', requireAuth, requirePermission('security:read
       ? sorted
       : [SEVERITY_ORDER, asc(schema.deviceCves.deviceId), asc(schema.deviceCves.packageName), asc(schema.deviceCves.cveId)];
 
-    // One page of rows + the filtered total in parallel.
+    // One page of rows + the filtered total in parallel (all=true → no LIMIT/OFFSET).
     const [rows, countRow] = await Promise.all([
-      db.select().from(schema.deviceCves)
-        .where(where)
-        .orderBy(...(orderBy as never[]))
-        .limit(pg.pageSize)
-        .offset((pg.page - 1) * pg.pageSize),
+      (() => {
+        const q = db.select().from(schema.deviceCves)
+          .where(where)
+          .orderBy(...(orderBy as never[]));
+        return pg.all ? q : q.limit(pg.pageSize).offset((pg.page - 1) * pg.pageSize);
+      })(),
       db.select({ n: sql<number>`count(*)::int` }).from(schema.deviceCves).where(where),
     ]);
 
@@ -224,8 +237,8 @@ router.get('/cve/vulnerabilities', requireAuth, requirePermission('security:read
         };
       }),
       total: countRow[0]?.n ?? 0,
-      page: pg.page,
-      pageSize: pg.pageSize,
+      page: pg.all ? 1 : pg.page,
+      pageSize: pg.all ? (countRow[0]?.n ?? 0) : pg.pageSize, // all=true → one page holding everything
     });
   } catch (err) {
     const e = err as { status?: number; message?: string };
@@ -310,10 +323,11 @@ router.get('/cve/packages', requireAuth, requirePermission('security:read'), asy
     // Page of groups + group count in parallel (count over the SAME grouped
     // subquery — total is the number of package instances, not CVE rows).
     const [groups, countRow] = await Promise.all([
-      (having ? makeGroupBase().having(having) : makeGroupBase())
-        .orderBy(...(pkgOrderBy as never[]))
-        .limit(pg.pageSize)
-        .offset((pg.page - 1) * pg.pageSize),
+      (() => {
+        const q = (having ? makeGroupBase().having(having) : makeGroupBase())
+          .orderBy(...(pkgOrderBy as never[]));
+        return pg.all ? q : q.limit(pg.pageSize).offset((pg.page - 1) * pg.pageSize);
+      })(),
       db.select({ n: sql<number>`count(*)::int` })
         .from((having ? makeGroupBase().having(having) : makeGroupBase()).as('g')),
     ]);
@@ -346,8 +360,8 @@ router.get('/cve/packages', requireAuth, requirePermission('security:read'), asy
         };
       }),
       total: countRow[0]?.n ?? 0,
-      page: pg.page,
-      pageSize: pg.pageSize,
+      page: pg.all ? 1 : pg.page,
+      pageSize: pg.all ? (countRow[0]?.n ?? 0) : pg.pageSize, // all=true → one page holding everything
     });
   } catch (err) {
     const e = err as { status?: number; message?: string };
