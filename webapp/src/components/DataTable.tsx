@@ -125,10 +125,11 @@ interface DataTableProps<T> {
     queries: AutoRefreshable[];
   };
   /** SERVER-SIDE PAGINATION mode — `rows` is ONE page of a larger server-filtered,
-   * server-sorted set. When set, DataTable stops applying its own search / column-
-   * filter / sort pipeline (the API already did), hides the per-column Filter UI and
-   * header sorting, wires the quick-search box to `onSearch`, and renders a pager
-   * footer with prev/next (+ optional page-size select). */
+   * set. When set, DataTable stops applying its own search / column-filter pipeline
+   * (the API already did), hides the per-column Filter UI, wires the quick-search box
+   * to `onSearch` (debounced internally) and renders a pager footer with prev/next
+   * (+ optional page-size select). Header sorting stays DISABLED unless `sort` +
+   * `onSortChange` are provided — then it cycles asc → desc → off against the server. */
   serverPagination?: {
     /** Total rows for the current filters (across all pages). */
     total: number;
@@ -138,7 +139,14 @@ interface DataTableProps<T> {
     onPageChange: (page: number) => void;
     /** When provided, a rows-per-page select (25/50/100) appears in the pager footer. */
     onPageSizeChange?: (size: number) => void;
+    /** Current server sort — with `onSortChange`, header sorting works in this mode. */
+    sort?: { key: string; dir: 'asc' | 'desc' } | null;
+    /** Receives the NEXT sort state (null = off). Cycles asc → desc → off like client mode. */
+    onSortChange?: (next: { key: string; dir: 'asc' | 'desc' } | null) => void;
   };
+  /** A refetch is in flight — dims the body and shows a progress strip under the
+   * toolbar so page changes don't flash as "no data". Pair with keepPreviousData. */
+  isFetching?: boolean;
   /** Called with the quick-search text on every keystroke — only meaningful together
    * with `serverPagination` (the parent debounces and refetches). */
   onSearch?: (q: string) => void;
@@ -271,6 +279,7 @@ export function DataTable<T>({
   onSearch,
   externalSearch,
   onRowClick,
+  isFetching = false,
 }: DataTableProps<T>) {
   const { prefs, setPrefs, reset } = useTablePrefs(storageKey);
   const [menuOpen, setMenuOpen] = useState(false); // column visibility picker
@@ -280,9 +289,26 @@ export function DataTable<T>({
   // Every search-text mutation goes through here so server-pagination mode
   // ALWAYS notifies the parent — including the clear actions below (a stale
   // server `q` would otherwise keep filtering while the box reads empty).
+  // Server-mode search commits are debounced HERE so pages don't each re-implement
+  // it. Clears (empty text) commit immediately — a stale server filter behind an
+  // empty box is confusing.
+  const searchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => () => {
+    if (searchTimer.current) clearTimeout(searchTimer.current);
+  }, []);
+  function emitSearch(v: string) {
+    if (!onSearch) return;
+    if (searchTimer.current) clearTimeout(searchTimer.current);
+    if (v.trim() === '') {
+      onSearch(v);
+      return;
+    }
+    searchTimer.current = setTimeout(() => onSearch(v), 300);
+  }
+
   function updateSearch(v: string) {
     setSearchText_(v);
-    onSearch?.(v);
+    emitSearch(v);
   }
   // Parent-driven search sync (drill-down etc.) — also runs on mount, which is a
   // no-op when the parent starts with ''/null.
@@ -665,7 +691,7 @@ export function DataTable<T>({
               // clipped by anything with overflow hidden.
               <div className="absolute right-0 top-full z-20 mt-1 w-44 rounded-md border border-border bg-card p-1 shadow-lg">
                 <p className="px-1.5 pb-1 pt-0.5 text-[11px] font-semibold uppercase tracking-wide text-faint">
-                  Export {viewRows.length} row{viewRows.length === 1 ? '' : 's'} (current view)
+                  Export {viewRows.length} row{viewRows.length === 1 ? '' : 's'} ({serverMode ? 'this page only' : 'current view'})
                 </p>
                 <button type="button" onClick={() => handleExport('csv')} className="block w-full rounded px-1.5 py-1 text-left text-sm text-secondary hover:bg-background">
                   CSV
@@ -718,6 +744,9 @@ export function DataTable<T>({
           </div>
         )}
       </div>
+
+      {/* Fetch-in-flight strip — keeps page changes from reading as "no data". */}
+      {isFetching && <div className="h-0.5 shrink-0 animate-pulse bg-primary" aria-hidden="true" />}
 
       {/* Status line: row count + active filter chips (only when narrowing). In
           server-pagination mode the denominator is the FILTERED TOTAL, not this page. */}
@@ -785,8 +814,9 @@ export function DataTable<T>({
         </div>
       ) : (
         // The ONLY scroll container of the card — header rows below are sticky
-        // inside it, so they stay visible while the body scrolls.
-        <div className="min-h-0 flex-1 overflow-auto">
+        // inside it, so they stay visible while the body scrolls. Dimmed (not
+        // hidden) while a server refetch is in flight.
+        <div className={clsx('min-h-0 flex-1 overflow-auto transition-opacity duration-150', isFetching && 'opacity-60')}>
         <table className="min-w-full table-fixed text-sm">
           {/* Only columns with an explicit width (resized or declared) are pinned;
               the rest share the remaining space, so the table fits its container
@@ -819,10 +849,14 @@ export function DataTable<T>({
                   </th>
                 )}
               {visibleColumns.map((col) => {
-                // Header sorting is client-side only — disabled in server-pagination mode
-                // (the API owns the order; re-sorting one page would be misleading).
-                const sortable = col.sortable !== false && !serverMode;
-                const active = sortKey === col.key && prefs.sort ? prefs.sort.dir : null;
+                // Client mode: always sortable (unless the page opts out). Server
+                // mode: only when the parent wired onSortChange — otherwise sorting
+                // one page client-side would be misleading.
+                const serverSortable = !serverMode || !!serverPagination?.onSortChange;
+                const sortable = col.sortable !== false && serverSortable;
+                const active = serverMode
+                  ? (serverPagination?.sort?.key === col.key ? serverPagination.sort.dir : null)
+                  : (sortKey === col.key && prefs.sort ? prefs.sort.dir : null);
                 return (
                   <th
                     key={col.key}
@@ -835,7 +869,25 @@ export function DataTable<T>({
                     className="sticky top-0 z-10 select-none border-b border-r border-border bg-background px-4 py-2 text-left font-semibold text-secondary last:border-r-0"
                   >
                     {sortable ? (
-                      <button type="button" onClick={() => cycleSort(col.key)} className="group flex w-full items-center gap-1.5 text-left">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          if (serverMode && serverPagination?.onSortChange) {
+                            // Same 3-state cycle as client mode: none → asc → desc → off.
+                            const cur = serverPagination.sort;
+                            serverPagination.onSortChange(
+                              !cur || cur.key !== col.key
+                                ? { key: col.key, dir: 'asc' }
+                                : cur.dir === 'asc'
+                                  ? { key: col.key, dir: 'desc' }
+                                  : null
+                            );
+                          } else {
+                            cycleSort(col.key);
+                          }
+                        }}
+                        className="group flex w-full items-center gap-1.5 text-left"
+                      >
                         <span className="truncate">{col.header}</span>
                         <span aria-hidden="true" className={clsx('text-[10px] leading-none', active ? 'text-secondary' : 'text-transparent group-hover:text-faint')}>
                           {active === 'asc' ? '▲' : active === 'desc' ? '▼' : '↕'}
@@ -967,8 +1019,9 @@ export function DataTable<T>({
         </div>
       )}
 
-      {/* Pager footer — server-pagination mode only. */}
-      {serverPagination && viewRows.length > 0 && (() => {
+      {/* Pager footer — server-pagination mode only. Rendered on TOTAL (not page
+          length) so an out-of-range/empty page still shows where the user is. */}
+      {serverPagination && serverPagination.total > 0 && (() => {
         const totalPages = Math.max(1, Math.ceil(serverPagination.total / serverPagination.pageSize));
         const start = (serverPagination.page - 1) * serverPagination.pageSize + 1;
         const end = Math.min(serverPagination.total, serverPagination.page * serverPagination.pageSize);

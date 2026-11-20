@@ -1,10 +1,11 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { Bug, Loader2, RefreshCw, Radar, ShieldCheck, ShieldAlert, ShieldX, Info, Trash2 } from 'lucide-react';
 import { Link } from 'react-router-dom';
-import { useEffect, useMemo, useState } from 'react';
+import { useMemo, useState } from 'react';
 import clsx from 'clsx';
 import { Layout } from '../components/Layout';
 import { DataTable, DataTableColumn } from '../components/DataTable';
+import { useServerTable } from '../components/useServerTable';
 import { DeviceChip } from '../components/DeviceChip';
 import { PageTabs } from '../components/PageTabs';
 import { api, SecurityCheckRow, CvePackageRow, CveVulnerabilityRow, ThreatIntelSource } from '../api/client';
@@ -128,59 +129,46 @@ export default function Security() {
   // --- CVE list state (Phase 2 — server-side pagination + smart default view) --
   // The raw CVE table has tens of thousands of rows on a real fleet, so the API
   // paginates and this page defaults to the GROUPED packages view (one row per
-  // vulnerable package instance). Every filter below is SERVER-SIDE — the DOM
-  // never holds more than one page of rows.
+  // vulnerable package instance). Every filter is SERVER-SIDE — the DOM never
+  // holds more than one page of rows. Page/pageSize/search/sort live in the
+  // useServerTable hooks below; this page only owns the SHARED filters.
   type CveSeverity = 'critical' | 'high' | 'medium' | 'low' | 'unknown';
   const [cveView, setCveView] = useState<'packages' | 'vulns'>('packages');
   const [cveSeverity, setCveSeverity] = useState<CveSeverity | ''>('');
   const [cveComponent, setCveComponent] = useState<'all' | 'host' | 'container'>('all');
-  const [cvePage, setCvePage] = useState(1);
-  const [cvePageSize, setCvePageSize] = useState(50);
-  const [cveSearchText, setCveSearchText] = useState(''); // live quick-search box text
-  const [cveQ, setCveQ] = useState('');                  // committed (debounced) → server `q`
 
-  // Debounce the quick-search box into the server-side `q` param.
-  useEffect(() => {
-    const t = setTimeout(() => setCveQ(cveSearchText.trim()), 300);
-    return () => clearTimeout(t);
-  }, [cveSearchText]);
-
-  const cveParams = useMemo(
+  // Shared filters — a STABLE object (the hooks use its JSON as change key).
+  const cveExtra = useMemo(
     () => ({
       severityRank: (cveSeverity || undefined) as CveSeverity | undefined,
       component: (cveComponent === 'all' ? undefined : cveComponent) as 'host' | 'container' | undefined,
-      q: cveQ || undefined,
-      page: cvePage,
-      pageSize: cvePageSize,
     }),
-    [cveSeverity, cveComponent, cveQ, cvePage, cvePageSize]
+    [cveSeverity, cveComponent]
   );
 
-  const cvePackagesQuery = useQuery({
-    queryKey: ['cvePackages', cveParams],
-    queryFn: () => api.cvePackages(cveParams),
-    refetchInterval: 30_000,
+  // Column key → API sort field per view (DataTable passes column keys).
+  const PKG_SORT_MAP: Record<string, string> = { component: 'componentName', packageName: 'packageName', ecosystem: 'ecosystem', cveCount: 'cveCount', worstRank: 'worstRank' };
+  const VULN_SORT_MAP: Record<string, string> = { component: 'componentName', packageName: 'packageName', cveId: 'cveId', severityRank: 'severityRank', ecosystem: 'ecosystem' };
+
+  const pkgTable = useServerTable({
+    fetcher: (p) => api.cvePackages({ ...p, sort: p.sort ? PKG_SORT_MAP[p.sort.key] : undefined, dir: p.sort?.dir }),
+    extra: cveExtra,
+    storageKey: 'security-cves-packages',
   });
-  const cveVulnsQuery = useQuery({
-    queryKey: ['cveVulnerabilities', cveParams],
-    queryFn: () => api.cveVulnerabilities(cveParams),
-    refetchInterval: 30_000,
+  const vulnTable = useServerTable({
+    fetcher: (p) => api.cveVulnerabilities({ ...p, sort: p.sort ? VULN_SORT_MAP[p.sort.key] : undefined, dir: p.sort?.dir }),
+    extra: cveExtra,
+    storageKey: 'security-cves',
   });
 
-  // Any filter change goes back to page 1.
-  function resetCvePage() {
-    setCvePage(1);
-  }
   function toggleCveSeverity(rank: CveSeverity) {
-    setCveSeverity((prev) => (prev === rank ? '' : rank));
-    resetCvePage();
+    setCveSeverity((prev) => (prev === rank ? '' : rank)); // hooks reset to page 1 on filter change
   }
 
   // Drill-down: a grouped package row → the raw CVE list pre-filtered to that package.
   function drillIntoPackage(row: CvePackageRow) {
     setCveView('vulns');
-    setCveSearchText(row.packageName); // debounce commits q; externalSearch syncs the box
-    resetCvePage();
+    vulnTable.setQ(row.packageName); // externalSearch syncs the box on view switch
   }
 
   // "Refresh advisories" runs one full fetch cycle server-side (~3.5 min) — fire
@@ -192,8 +180,8 @@ export default function Security() {
     try {
       await api.refreshCveAdvisories();
       void queryClient.invalidateQueries({ queryKey: ['cveSummary'] });
-      void queryClient.invalidateQueries({ queryKey: ['cvePackages'] });
-      void queryClient.invalidateQueries({ queryKey: ['cveVulnerabilities'] });
+      // Both CVE tables share the 'serverTable' key prefix.
+      void queryClient.invalidateQueries({ queryKey: ['serverTable'] });
     } catch (err) {
       // The cycle itself never throws — a 502 here means the fetch FAILED and
       // its error is already in lastError. Still surface it as a notice.
@@ -205,14 +193,6 @@ export default function Security() {
   }
 
   const summary = cveSummaryQuery.data;
-
-  // Clamp the page when the filtered total shrinks under it (e.g. advisories pruned).
-  const activeTotal = cveView === 'packages' ? (cvePackagesQuery.data?.total ?? 0) : (cveVulnsQuery.data?.total ?? 0);
-  useEffect(() => {
-    if (activeTotal > 0 && (cvePage - 1) * cvePageSize >= activeTotal) {
-      setCvePage(Math.max(1, Math.ceil(activeTotal / cvePageSize)));
-    }
-  }, [activeTotal, cvePage, cvePageSize]);
 
   // Findings | Vulnerabilities (CVEs) | Threat Intel — each section is a
   // self-contained tab so the page reads top-down instead of one long scroll.
@@ -290,9 +270,12 @@ export default function Security() {
 
   const cveColumns: DataTableColumn<CveVulnerabilityRow>[] = [
     {
+      // Not sortable server-side (would need a join to devices) — the API's
+      // allowlist decides what headers can sort in server-pagination mode.
       header: 'Device',
       key: 'deviceName',
       width: 240,
+      sortable: false,
       exportValue: (row) => `${row.deviceName ?? '?'} (${row.managementAddress ?? '?'})`,
       render: (row) => (
         <DeviceChip
@@ -365,6 +348,7 @@ export default function Security() {
       header: 'Summary',
       key: 'summary',
       width: 420,
+      sortable: false, // free text — not a server sort field
       exportValue: (row) => row.summary ?? '',
       render: (row) =>
         row.summary && row.summary.trim() !== '' ? (
@@ -378,9 +362,11 @@ export default function Security() {
   // Grouped "smart default" view — one row per vulnerable package instance.
   const cvePackageColumns: DataTableColumn<CvePackageRow>[] = [
     {
+      // Not sortable server-side (would need a join to devices).
       header: 'Device',
       key: 'deviceName',
       width: 240,
+      sortable: false,
       exportValue: (row) => `${row.deviceName ?? '?'} (${row.managementAddress ?? '?'})`,
       render: (row) => (
         <DeviceChip
@@ -447,6 +433,7 @@ export default function Security() {
       header: 'Top CVEs',
       key: 'topCves',
       width: 320,
+      sortable: false, // aggregated list — not a server sort field
       exportValue: (row) => row.topCves.join(', '),
       render: (row) => (
         <span className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
@@ -603,15 +590,12 @@ export default function Security() {
               <button
                 key={v}
                 type="button"
-                onClick={() => {
-                  setCveView(v);
-                  resetCvePage();
-                }}
+                onClick={() => setCveView(v)} // each table keeps its own page/sort/search
                 className={clsx('rounded px-2.5 py-1', cveView === v ? 'bg-muted text-foreground' : 'text-secondary hover:text-foreground')}
               >
                 {v === 'packages'
-                  ? `Packages${cvePackagesQuery.data ? ` (${cvePackagesQuery.data.total.toLocaleString()})` : ''}`
-                  : `All CVEs${cveVulnsQuery.data ? ` (${cveVulnsQuery.data.total.toLocaleString()})` : ''}`}
+                  ? `Packages${pkgTable.data ? ` (${pkgTable.data.total.toLocaleString()})` : ''}`
+                  : `All CVEs${vulnTable.data ? ` (${vulnTable.data.total.toLocaleString()})` : ''}`}
               </button>
             ))}
           </div>
@@ -619,10 +603,7 @@ export default function Security() {
           <select
             id="cve-component-filter"
             value={cveComponent}
-            onChange={(e) => {
-              setCveComponent(e.target.value as 'all' | 'host' | 'container');
-              resetCvePage();
-            }}
+            onChange={(e) => setCveComponent(e.target.value as 'all' | 'host' | 'container')}
             className="rounded-md border border-border bg-background px-2 py-1 text-xs text-foreground"
           >
             <option value="all">All</option>
@@ -632,66 +613,66 @@ export default function Security() {
         </div>
 
         {cveView === 'packages' ? (
-          cvePackagesQuery.data ? (
+          pkgTable.data ? (
             <DataTable
               columns={cvePackageColumns}
-              rows={cvePackagesQuery.data.rows}
+              rows={pkgTable.data.rows}
               rowKey={(row) => `${row.deviceId}|${row.pluginId}|${row.component ?? 'host'}|${row.componentName ?? ''}|${row.ecosystem}|${row.packageName}`}
               storageKey="security-cves-packages"
               serverPagination={{
-                total: cvePackagesQuery.data.total,
-                page: cvePage,
-                pageSize: cvePageSize,
-                onPageChange: setCvePage,
-                onPageSizeChange: (n) => {
-                  setCvePageSize(n);
-                  resetCvePage();
-                },
+                total: pkgTable.data.total,
+                page: pkgTable.page,
+                pageSize: pkgTable.pageSize,
+                onPageChange: pkgTable.setPage,
+                onPageSizeChange: pkgTable.setPageSize,
+                sort: pkgTable.sort,
+                onSortChange: pkgTable.setSort,
               }}
-              onSearch={setCveSearchText}
-              externalSearch={cveSearchText}
+              isFetching={pkgTable.isFetching}
+              onSearch={pkgTable.setQ}
+              externalSearch={pkgTable.q}
               onRowClick={drillIntoPackage}
-              autoRefresh={{ intervalMs: 30_000, queries: [cvePackagesQuery] }}
+              autoRefresh={{ intervalMs: 30_000, queries: [pkgTable] }}
               searchPlaceholder="Search package or CVE id…"
               emptyMessage={
-                cveSeverity || cveComponent !== 'all' || cveQ
+                cveSeverity || cveComponent !== 'all' || pkgTable.q
                   ? 'No vulnerable packages match the current filters.'
                   : "No known vulnerabilities — packages are matched against OSV advisories once the fleet's installed-package inventory is collected and at least one advisory fetch has succeeded."
               }
             />
-          ) : cvePackagesQuery.isError ? (
-            <p className="text-sm text-danger-fg">Failed to load vulnerable packages: {(cvePackagesQuery.error as Error).message}</p>
+          ) : pkgTable.isError ? (
+            <p className="text-sm text-danger-fg">Failed to load vulnerable packages: {pkgTable.error?.message}</p>
           ) : (
             <p className="text-sm text-muted-foreground">Loading vulnerability data…</p>
           )
-        ) : cveVulnsQuery.data ? (
+        ) : vulnTable.data ? (
           <DataTable
             columns={cveColumns}
-            rows={cveVulnsQuery.data.rows}
+            rows={vulnTable.data.rows}
             rowKey={(row) => `${row.deviceId}|${row.pluginId}|${row.component ?? 'host'}|${row.componentName ?? ''}|${row.packageName}|${row.cveId}`}
             storageKey="security-cves"
             serverPagination={{
-              total: cveVulnsQuery.data.total,
-              page: cvePage,
-              pageSize: cvePageSize,
-              onPageChange: setCvePage,
-              onPageSizeChange: (n) => {
-                setCvePageSize(n);
-                resetCvePage();
-              },
+              total: vulnTable.data.total,
+              page: vulnTable.page,
+              pageSize: vulnTable.pageSize,
+              onPageChange: vulnTable.setPage,
+              onPageSizeChange: vulnTable.setPageSize,
+              sort: vulnTable.sort,
+              onSortChange: vulnTable.setSort,
             }}
-            onSearch={setCveSearchText}
-            externalSearch={cveSearchText}
-            autoRefresh={{ intervalMs: 30_000, queries: [cveVulnsQuery] }}
+            isFetching={vulnTable.isFetching}
+            onSearch={vulnTable.setQ}
+            externalSearch={vulnTable.q}
+            autoRefresh={{ intervalMs: 30_000, queries: [vulnTable] }}
             searchPlaceholder="Search package or CVE id…"
             emptyMessage={
-              cveSeverity || cveComponent !== 'all' || cveQ
+              cveSeverity || cveComponent !== 'all' || vulnTable.q
                 ? 'No CVE matches for the current filters.'
                 : "No known vulnerabilities — packages are matched against OSV advisories once the fleet's installed-package inventory is collected and at least one advisory fetch has succeeded."
             }
           />
-        ) : cveVulnsQuery.isError ? (
-          <p className="text-sm text-danger-fg">Failed to load CVE matches: {(cveVulnsQuery.error as Error).message}</p>
+        ) : vulnTable.isError ? (
+          <p className="text-sm text-danger-fg">Failed to load CVE matches: {vulnTable.error?.message}</p>
         ) : (
           <p className="text-sm text-muted-foreground">Loading vulnerability data…</p>
         )}

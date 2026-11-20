@@ -979,6 +979,9 @@ export interface CveListParams {
   q?: string;
   page?: number;
   pageSize?: number;
+  /** Sort field — allowlisted per endpoint (packages: worstRank|cveCount|packageName|componentName|ecosystem; vulnerabilities: severityRank|packageName|cveId|ecosystem|componentName). */
+  sort?: string;
+  dir?: 'asc' | 'desc';
 }
 
 /** Server-side pagination envelope — total is the filtered count across ALL pages. */
@@ -4061,6 +4064,8 @@ function cveQuerySuffix(params?: CveListParams): string {
   if (params?.q) qs.set('q', params.q);
   if (params?.page && params.page > 1) qs.set('page', String(params.page));
   if (params?.pageSize && params.pageSize !== 50) qs.set('pageSize', String(params.pageSize)); // 50 = server default, omit to keep URLs clean
+  if (params?.sort) qs.set('sort', params.sort);
+  if (params?.dir && params.sort) qs.set('dir', params.dir); // dir without sort is meaningless — the API ignores it too
   const s = qs.toString();
   return s ? `?${s}` : '';
 }

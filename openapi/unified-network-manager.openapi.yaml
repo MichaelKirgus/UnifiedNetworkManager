@@ -6810,6 +6810,18 @@ paths:
           schema: { type: string }
           description: Case-insensitive substring match on package name or CVE id
         - in: query
+          name: sort
+          required: false
+          schema:
+            type: string
+            enum: [severityRank, packageName, cveId, ecosystem, componentName]
+          description: Sort field (overrides the default severity-first order); stable tiebreakers keep pages deterministic
+        - in: query
+          name: dir
+          required: false
+          schema: { type: string, enum: [asc, desc], default: asc }
+          description: Sort direction (only with `sort`)
+        - in: query
           name: page
           required: false
           schema: { type: integer, minimum: 1, default: 1 }
@@ -6882,6 +6894,18 @@ paths:
           required: false
           schema: { type: string }
           description: Case-insensitive substring match on package name or CVE id (narrows the CVE rows feeding each group)
+        - in: query
+          name: sort
+          required: false
+          schema:
+            type: string
+            enum: [worstRank, cveCount, packageName, componentName, ecosystem]
+          description: Sort field (overrides the default worst-severity-first order); `worstRank` sorts by the group's most severe rank
+        - in: query
+          name: dir
+          required: false
+          schema: { type: string, enum: [asc, desc], default: asc }
+          description: Sort direction (only with `sort`)
         - in: query
           name: page
           required: false

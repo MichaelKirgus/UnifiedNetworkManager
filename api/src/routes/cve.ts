@@ -7,7 +7,8 @@
  *      ecosystem, component ('host'|'container'), q (case-insensitive substring
  *      on package name or CVE id). SERVER-SIDE PAGINATED — page/pageSize
  *      (default 50, max 200); the response carries `total` for the pager. Rows
- *      are ordered severity-first so page 1 is always the most urgent matches.
+ *      are ordered severity-first so page 1 is always the most urgent matches;
+ *      an explicit sort/dir param (allowlisted per endpoint) overrides that.
  * GET  /cve/packages — the SMART DEFAULT view: one row per vulnerable package
  *      INSTANCE (device × component × package) with cveCount, worst severity
  *      and the top CVE ids. Same filters + pagination; here severityRank means
@@ -97,6 +98,40 @@ function parsePagination(query: Record<string, string | undefined>): { page: num
 /** Severity rank ordering — critical first, then high/medium/low/unknown. */
 const SEVERITY_ORDER = sql`CASE "severityRank" WHEN 'critical' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2 WHEN 'low' THEN 3 ELSE 4 END`;
 
+// Sortable fields per endpoint — anything else is a 400 (same strictness as the
+// other filters). Values are allowlisted, so quoted literals in ORDER BY are safe.
+const VULN_SORT_FIELDS = ['severityRank', 'packageName', 'cveId', 'ecosystem', 'componentName'];
+const PKG_SORT_FIELDS = ['worstRank', 'cveCount', 'packageName', 'componentName', 'ecosystem'];
+
+/** ORDER BY expressions per endpoint. camelCase aliases MUST stay quoted — an
+ * unquoted name folds to lowercase and the column "does not exist". */
+const VULN_SORT_MAP: Record<string, SQL> = {
+  severityRank: SEVERITY_ORDER,
+  packageName: sql`"packageName"`,
+  cveId: sql`"cveId"`,
+  ecosystem: sql`ecosystem`,
+  componentName: sql`"componentName"`,
+};
+const PKG_SORT_MAP: Record<string, SQL> = {
+  worstRank: sql`"worstRankOrder"`, // the aggregate alias behind the rank
+  cveCount: sql`"cveCount"`,
+  packageName: sql`"packageName"`,
+  componentName: sql`"componentName"`,
+  ecosystem: sql`ecosystem`,
+};
+
+function validateSort(sort?: string, dir?: string, fields: string[] = VULN_SORT_FIELDS): string | null {
+  if (sort && !fields.includes(sort)) return `"sort" must be one of: ${fields.join(', ')}`;
+  if (dir && !['asc', 'desc'].includes(dir)) return '"dir" must be "asc" or "desc"';
+  return null;}
+
+/** ORDER BY for a validated sort param, with stable tiebreakers. Empty = caller's default order. */
+function sortOrder(sort: string | undefined, dir: string | undefined, map: Record<string, SQL>, tiebreakers: SQL[]): SQL[] {
+  if (!sort) return [];
+  const direction = dir === 'desc' ? sql`DESC` : sql`ASC`;
+  return [sql`${map[sort]} ${direction}`, ...tiebreakers];
+}
+
 interface CveListFilters {
   severityRank?: string;
   ecosystem?: string;
@@ -139,6 +174,8 @@ router.get('/cve/vulnerabilities', requireAuth, requirePermission('security:read
 
     const filterError = validateCveFilters(query);
     if (filterError) { res.status(400).json({ error: filterError }); return; }
+    const sortError = validateSort(query.sort, query.dir, VULN_SORT_FIELDS);
+    if (sortError) { res.status(400).json({ error: sortError }); return; }
     const pg = parsePagination(query);
     if ('error' in pg) { res.status(400).json({ error: pg.error }); return; }
 
@@ -152,12 +189,18 @@ router.get('/cve/vulnerabilities', requireAuth, requirePermission('security:read
     if (query.severityRank) clauses.push(eq(schema.deviceCves.severityRank, query.severityRank)); // exact rank
     const where = clauses.length > 0 ? and(...(clauses as never[])) : undefined;
 
-    // One page of rows + the filtered total in parallel — severity-first order so
-    // page 1 is always the most urgent matches.
+    // Default order is severity-first so page 1 is always the most urgent matches;
+    // an explicit sort param wins (stable tiebreakers keep pages deterministic).
+    const sorted = sortOrder(query.sort, query.dir, VULN_SORT_MAP, [asc(schema.deviceCves.deviceId), asc(schema.deviceCves.cveId)]);
+    const orderBy: SQL[] = sorted.length > 0
+      ? sorted
+      : [SEVERITY_ORDER, asc(schema.deviceCves.deviceId), asc(schema.deviceCves.packageName), asc(schema.deviceCves.cveId)];
+
+    // One page of rows + the filtered total in parallel.
     const [rows, countRow] = await Promise.all([
       db.select().from(schema.deviceCves)
         .where(where)
-        .orderBy(SEVERITY_ORDER, asc(schema.deviceCves.deviceId), asc(schema.deviceCves.packageName), asc(schema.deviceCves.cveId))
+        .orderBy(...(orderBy as never[]))
         .limit(pg.pageSize)
         .offset((pg.page - 1) * pg.pageSize),
       db.select({ n: sql<number>`count(*)::int` }).from(schema.deviceCves).where(where),
@@ -203,6 +246,8 @@ router.get('/cve/packages', requireAuth, requirePermission('security:read'), asy
 
     const filterError = validateCveFilters(query);
     if (filterError) { res.status(400).json({ error: filterError }); return; }
+    const sortError = validateSort(query.sort, query.dir, PKG_SORT_FIELDS);
+    if (sortError) { res.status(400).json({ error: sortError }); return; }
     const pg = parsePagination(query);
     if ('error' in pg) { res.status(400).json({ error: pg.error }); return; }
 
@@ -255,12 +300,18 @@ router.get('/cve/packages', requireAuth, requirePermission('security:read'), asy
           schema.deviceCves.packageName
         );
 
+    // Default order: worst severity first, then most CVEs (the triage view);
+    // an explicit sort param wins with a stable tiebreaker.
+    const pkgSorted = sortOrder(query.sort, query.dir, PKG_SORT_MAP, [asc(schema.deviceCves.packageName)]);
+    const pkgOrderBy: SQL[] = pkgSorted.length > 0
+      ? pkgSorted
+      : [sql`"worstRankOrder" ASC`, sql`"cveCount" DESC`, asc(schema.deviceCves.packageName)];
+
     // Page of groups + group count in parallel (count over the SAME grouped
     // subquery — total is the number of package instances, not CVE rows).
     const [groups, countRow] = await Promise.all([
       (having ? makeGroupBase().having(having) : makeGroupBase())
-        // Quoted: the aliases are camelCase, and unquoted ORDER BY names fold to lowercase.
-        .orderBy(sql`"worstRankOrder" ASC`, sql`"cveCount" DESC`, asc(schema.deviceCves.packageName))
+        .orderBy(...(pkgOrderBy as never[]))
         .limit(pg.pageSize)
         .offset((pg.page - 1) * pg.pageSize),
       db.select({ n: sql<number>`count(*)::int` })
