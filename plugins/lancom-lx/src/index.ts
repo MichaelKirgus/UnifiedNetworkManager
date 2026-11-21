@@ -31,6 +31,7 @@ import {
   catalogFirmwareRow,
   CertificateRow,
   type QuickAction,
+  type AutomationTemplate,
 } from '@unm/plugin-sdk';
 import { LANCOM_LX_DEVICE_SUPPORT } from './deviceSupport';
 import { SnmpCredentials, buildSnmpCredentials } from '@unm/snmp-client';
@@ -267,6 +268,27 @@ const QUICK_ACTIONS: QuickAction[] = [
   },
 ];
 
+/** Ready-made automation rule drafts — served by GET /automations/templates. */
+const AUTOMATION_TEMPLATES: AutomationTemplate[] = [
+  {
+    id: 'daily-config-backup',
+    name: 'Daily config backup (03:00)',
+    description:
+      "Every day at 03:00, download the running configuration of every LANCOM LX access point managed by this plugin into UNM's central file repository — read-only on the APs. Requires a bound web-UI credential per device (ubus GetConfig). Adjust the time or scope before saving.",
+    draft: {
+      name: 'Daily config backup — LANCOM LX',
+      description: 'Fleet-wide scheduled config backup (read-only) via config.backup.download.',
+      enabled: true,
+      cooldownSec: 3600,
+      triggers: [{ id: 't-sched', type: 'schedule', schedule: { kind: 'dailyAt', time: '03:00' } }],
+      actions: [
+        // Empty scope = every device; the engine narrows it to devices this plugin is assigned to.
+        { id: 'a-backup', type: 'intent', pluginId: PLUGIN_UUID, actionId: 'config.backup.download', devices: {} },
+      ],
+    },
+  },
+];
+
 // Pre-wired app: cors + json + /healthz + /discover (+ static icons, mDNS on
 // listen) come from @unm/plugin-sdk — this file only registers its own routes.
 const server = createPluginServer({
@@ -308,6 +330,7 @@ const server = createPluginServer({
     deviceModels: DEVICE_MODELS,
     // License/help/docs metadata for UNM's Plugins page (see ./deviceSupport.ts).
     deviceSupport: LANCOM_LX_DEVICE_SUPPORT,
+    automationTemplates: AUTOMATION_TEMPLATES,
   },
 });
 const app = server.app;

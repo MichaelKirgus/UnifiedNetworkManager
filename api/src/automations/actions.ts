@@ -60,6 +60,12 @@ async function resolveScopeDeviceIds(scope?: { siteIds?: string[]; tags?: string
     .map((d) => d.id);
 }
 
+/** Device ids that carry an assignment row for this plugin (explicit or primary). */
+async function assignedDeviceIds(pluginId: string): Promise<Set<string>> {
+  const rows = await db.query.devicePlugins.findMany({ where: (r, { eq }) => eq(r.pluginId, pluginId) });
+  return new Set(rows.map((r) => r.deviceId));
+}
+
 /** Runs one action block. Never throws — failures are reported in the result. */
 export async function executeAction(automationId: string, automationName: string, action: ActionBlock, ctx: TriggerContext): Promise<ActionResult> {
   const firedAtIso = new Date().toISOString();
@@ -242,7 +248,16 @@ export async function resolveIntentTargets(action: IntentAction, ctx: TriggerCon
     if (!pluginId || !intentActionId) return { ok: false, error: 'pluginId and actionId are required (or use resolveFromTrigger)', pluginId: '', intentActionId: '', inputs: {}, deviceIds: [] };
     const scoped = await resolveScopeDeviceIds(action.devices.scope);
     // Explicit device ids narrow/override the scope.
-    deviceIds = action.devices.deviceIds?.length ? action.devices.deviceIds : scoped;
+    let candidates = action.devices.deviceIds?.length ? action.devices.deviceIds : scoped;
+    // An intent can only run where this plugin is ASSIGNED — an empty scope means
+    // "every device", not "every device of this plugin". Without this filter a
+    // fleet-wide rule (e.g. the daily config-backup templates) would hard-fail in
+    // createPlanCore on the first unassigned device in a mixed fleet.
+    const assigned = await assignedDeviceIds(pluginId);
+    deviceIds = candidates.filter((id) => assigned.has(id));
+    if (deviceIds.length === 0 && candidates.length > 0) {
+      return { ok: false, error: `none of the ${candidates.length} in-scope device(s) are assigned to this plugin`, pluginId, intentActionId: intentActionId!, inputs, deviceIds };
+    }
   }
 
   if (deviceIds.length === 0) return { ok: false, error: 'No devices matched the intent scope', pluginId: pluginId ?? '', intentActionId: intentActionId ?? '', inputs, deviceIds: [] };

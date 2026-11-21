@@ -49,6 +49,7 @@ import {
   type SshTerminalSession,
   type UpdateRow,
   type QuickAction,
+  type AutomationTemplate,
   SshError,
 } from '@unm/plugin-sdk';
 import { IX_TRUENAS_DEVICE_SUPPORT } from './deviceSupport';
@@ -816,6 +817,27 @@ const QUICK_ACTIONS: QuickAction[] = [
   },
 ];
 
+/** Ready-made automation rule drafts — served by GET /automations/templates. */
+const AUTOMATION_TEMPLATES: AutomationTemplate[] = [
+  {
+    id: 'daily-config-backup',
+    name: 'Daily config backup (03:00)',
+    description:
+      "Every day at 03:00, download the appliance's full configuration database (config.save) of every TrueNAS SCALE system managed by this plugin into UNM's central file repository — read-only on the appliance. Adjust the time or scope before saving.",
+    draft: {
+      name: 'Daily config backup — TrueNAS SCALE',
+      description: 'Fleet-wide scheduled config backup (read-only) via config.backup.download.',
+      enabled: true,
+      cooldownSec: 3600,
+      triggers: [{ id: 't-sched', type: 'schedule', schedule: { kind: 'dailyAt', time: '03:00' } }],
+      actions: [
+        // Empty scope = every device; the engine narrows it to devices this plugin is assigned to.
+        { id: 'a-backup', type: 'intent', pluginId: PLUGIN_UUID, actionId: 'config.backup.download', devices: {} },
+      ],
+    },
+  },
+];
+
 // Pre-wired app: cors + json + /healthz + /discover (+ static icons, mDNS on
 // listen) come from @unm/plugin-sdk — this file only registers its own routes.
 const server = createPluginServer({
@@ -866,6 +888,7 @@ const server = createPluginServer({
     iconUrl: '/icons/truenas.svg',
     // License/help/docs metadata for UNM's Plugins page (see ./deviceSupport.ts).
     deviceSupport: IX_TRUENAS_DEVICE_SUPPORT,
+    automationTemplates: AUTOMATION_TEMPLATES,
   },
 });
 const app = server.app;

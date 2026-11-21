@@ -25,6 +25,7 @@ import {
   resolveUserPass,
   catalogFirmwareRow,
   type QuickAction,
+  type AutomationTemplate,
 } from '@unm/plugin-sdk';
 import { MIKROTIK_SWOS_DEVICE_SUPPORT } from './deviceSupport';
 import { SwosClient, SwosAuthError } from './swosClient';
@@ -152,6 +153,27 @@ const QUICK_ACTIONS: QuickAction[] = [
   },
 ];
 
+/** Ready-made automation rule drafts — served by GET /automations/templates. */
+const AUTOMATION_TEMPLATES: AutomationTemplate[] = [
+  {
+    id: 'daily-config-backup',
+    name: 'Daily config backup (03:00)',
+    description:
+      "Every day at 03:00, download the complete binary configuration backup (.swb) of every MikroTik SwOS switch managed by this plugin into UNM's central file repository — read-only on the switches. Adjust the time or scope before saving.",
+    draft: {
+      name: 'Daily config backup — MikroTik SwOS',
+      description: 'Fleet-wide scheduled config backup (read-only) via swos.backup.download.',
+      enabled: true,
+      cooldownSec: 3600,
+      triggers: [{ id: 't-sched', type: 'schedule', schedule: { kind: 'dailyAt', time: '03:00' } }],
+      actions: [
+        // Empty scope = every device; the engine narrows it to devices this plugin is assigned to.
+        { id: 'a-backup', type: 'intent', pluginId: PLUGIN_UUID, actionId: 'swos.backup.download', devices: {} },
+      ],
+    },
+  },
+];
+
 // Pre-wired app: cors + json (32mb — backup downloads can be several MB) +
 // /healthz + /discover (+ static icons, mDNS on listen) come from @unm/plugin-sdk
 // — this file only registers its own routes.
@@ -179,6 +201,7 @@ const server = createPluginServer({
     deviceModels: DEVICE_MODELS,
     // License/help/docs metadata for UNM's Plugins page (see ./deviceSupport.ts).
     deviceSupport: MIKROTIK_SWOS_DEVICE_SUPPORT,
+    automationTemplates: AUTOMATION_TEMPLATES,
   },
 });
 const app = server.app;

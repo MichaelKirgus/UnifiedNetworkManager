@@ -30,6 +30,7 @@ import {
   isTransientTransportError,
   DETECTED_FEATURES_METRIC_KEY,
   type QuickAction,
+  type AutomationTemplate,
 } from '@unm/plugin-sdk';
 import { ROUTEROS_DEVICE_SUPPORT } from './deviceSupport';
 import { RouterOsAuthError, RouterOsClient } from './routerosClient';
@@ -317,6 +318,27 @@ const QUICK_ACTIONS: QuickAction[] = [
   },
 ];
 
+/** Ready-made automation rule drafts — served by GET /automations/templates. */
+const AUTOMATION_TEMPLATES: AutomationTemplate[] = [
+  {
+    id: 'daily-config-backup',
+    name: 'Daily config backup (03:00)',
+    description:
+      "Every day at 03:00, download a full configuration export (/export over SSH) of every MikroTik RouterOS device managed by this plugin into UNM's central file repository — read-only on the devices. Adjust the time or scope before saving.",
+    draft: {
+      name: 'Daily config backup — MikroTik RouterOS',
+      description: 'Fleet-wide scheduled config backup (read-only) via config.backup.download.',
+      enabled: true,
+      cooldownSec: 3600,
+      triggers: [{ id: 't-sched', type: 'schedule', schedule: { kind: 'dailyAt', time: '03:00' } }],
+      actions: [
+        // Empty scope = every device; the engine narrows it to devices this plugin is assigned to.
+        { id: 'a-backup', type: 'intent', pluginId: PLUGIN_UUID, actionId: 'config.backup.download', devices: {} },
+      ],
+    },
+  },
+];
+
 // Pre-wired app: cors + json + /healthz + /discover (+ static icons, mDNS on
 // listen) come from @unm/plugin-sdk — this file only registers its own routes.
 const server = createPluginServer({
@@ -362,6 +384,7 @@ const server = createPluginServer({
     // (wifi gated on detected radios, ssh console always effective via primary-
     // credential reuse). See ./deviceSupport.ts.
     deviceSupport: ROUTEROS_DEVICE_SUPPORT,
+    automationTemplates: AUTOMATION_TEMPLATES,
   },
 });
 const app = server.app;

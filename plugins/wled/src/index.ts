@@ -36,7 +36,7 @@ import {
   validateInput,
   isTransientTransportError,
 } from '@unm/plugin-sdk';
-import type { ActionResult } from '@unm/plugin-sdk';
+import type { ActionResult, AutomationTemplate } from '@unm/plugin-sdk';
 import { WledClientOptions, getCfg, getInfo, WledCfg, WledInfo } from './client';
 import { getWledUpdateRows } from './updates';
 import { wledActions, WledActionContext } from './actions';
@@ -141,6 +141,27 @@ const QUICK_ACTIONS: QuickAction[] = [
   },
 ];
 
+/** Ready-made automation rule drafts — served by GET /automations/templates. */
+const AUTOMATION_TEMPLATES: AutomationTemplate[] = [
+  {
+    id: 'daily-config-backup',
+    name: 'Daily config backup (03:00)',
+    description:
+      "Every day at 03:00, download the full running configuration of every WLED controller managed by this plugin into UNM's central file repository — read-only on the devices. Adjust the time or scope before saving.",
+    draft: {
+      name: 'Daily config backup — WLED',
+      description: 'Fleet-wide scheduled config backup (read-only) via wled.config.backup.',
+      enabled: true,
+      cooldownSec: 3600,
+      triggers: [{ id: 't-sched', type: 'schedule', schedule: { kind: 'dailyAt', time: '03:00' } }],
+      actions: [
+        // Empty scope = every device; the engine narrows it to devices this plugin is assigned to.
+        { id: 'a-backup', type: 'intent', pluginId: PLUGIN_UUID, actionId: 'wled.config.backup', devices: {} },
+      ],
+    },
+  },
+];
+
 const server = createPluginServer({
   identity,
   logTag: 'wled-plugin',
@@ -165,6 +186,7 @@ const server = createPluginServer({
     modules: wledActions.listModules(),
     quickActions: QUICK_ACTIONS,
     iconUrl: '/icons/wled.svg',
+    automationTemplates: AUTOMATION_TEMPLATES,
   },
 });
 const app = server.app;
