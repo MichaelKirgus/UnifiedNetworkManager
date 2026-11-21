@@ -699,11 +699,11 @@ export const SETTING_DESCRIPTORS: SettingDescriptor[] = [
     category: 'Security',
     unit: 'IOCs',
     min: 1_000,
-    max: 1_000_000,
-    default: 250_000,
+    max: 3_000_000,
+    default: 500_000,
     envVar: 'UNM_THREAT_INTEL_MAX_IOCS_PER_SOURCE',
     help:
-      'Safety cap on how many indicators one feed may contribute per fetch cycle (excess entries are skipped and counted in the source status). The download itself is additionally bounded by a 10 MiB size limit.',
+      'Safety cap on how many indicators one feed may contribute per fetch cycle (excess entries are skipped and counted in the source status — raise this if a large blocklist is truncated). The download itself is additionally bounded by a 64 MiB size limit.',
   },
 
   // Certificate monitoring (Certificates page).

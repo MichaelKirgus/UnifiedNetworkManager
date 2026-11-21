@@ -59,9 +59,10 @@ const BEAT_MS = 60_000;
 const BUCKET_MS = 300_000; // flow_agg_5m bucket size
 /** A bucket may be matched only once it closed at least one full rollup interval ago. */
 const PROCESS_LAG_MS = 2 * BUCKET_MS;
-/** Download bound per feed (the broker enforces it on the plugin side too). */
-const MAX_FETCH_BYTES = 10 * 1_048_576; // 10 MiB
-const FETCH_TIMEOUT_MS = 120_000;
+/** Download bound per feed (the broker enforces it on the plugin side too).
+ * Public blocklists run to many MB — keep this comfortably above them. */
+const MAX_FETCH_BYTES = 64 * 1_048_576; // 64 MiB
+const FETCH_TIMEOUT_MS = 300_000; // large lists stream slowly through proxies
 /** Active-IOC cache lifetime — also invalidated after every successful fetch. */
 const IOC_CACHE_TTL_MS = 15 * 60_000;
 /** An EMPTY set is re-checked much sooner — a newly added/enabled source should
