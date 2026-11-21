@@ -1,9 +1,10 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { Bug, Download, Globe, Loader2, RefreshCw, Radar, ShieldCheck, ShieldAlert, ShieldX, Info, Trash2 } from 'lucide-react';
+import { Bug, Download, Globe, Loader2, Pencil, RefreshCw, Radar, ShieldCheck, ShieldAlert, ShieldX, Info, Trash2 } from 'lucide-react';
 import { Link } from 'react-router-dom';
 import { useMemo, useState } from 'react';
 import clsx from 'clsx';
 import { Layout } from '../components/Layout';
+import { DialogShell } from '../components/DialogShell';
 import { DataTable, DataTableColumn } from '../components/DataTable';
 import { ALL_PAGES, useServerTable } from '../components/useServerTable';
 import { DeviceChip } from '../components/DeviceChip';
@@ -719,6 +720,80 @@ function saveBlob(blob: Blob, name: string): void {
   setTimeout(() => URL.revokeObjectURL(url), 10_000);
 }
 
+/** Edit dialog for one threat-intel source — URL/format/severity after creation. */
+function ThreatIntelSourceEditDialog({ source, onClose }: { source: ThreatIntelSource; onClose: () => void }) {
+  const queryClient = useQueryClient();
+  const [name, setName] = useState(source.name);
+  const [url, setUrl] = useState(source.url);
+  const [format, setFormat] = useState<'ip-list' | 'stix' | 'domain-list'>(source.format);
+  const [severity, setSeverity] = useState<'info' | 'warning' | 'critical'>(source.severity ?? 'warning');
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function save() {
+    if (saving || !name.trim() || !url.trim()) return;
+    setSaving(true);
+    setError(null);
+    try {
+      await api.updateThreatIntelSource(source.id, { name: name.trim(), url: url.trim(), format, severity });
+      void queryClient.invalidateQueries({ queryKey: ['threatIntel'] });
+      onClose();
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  const fieldCls = 'w-full rounded-md border border-border bg-background px-3 py-2 text-sm focus:border-focus-ring focus:outline-none';
+  return (
+    <DialogShell title={`Edit feed "${source.name}"`} subtitle="Changing the URL or format forces an immediate re-fetch." onClose={onClose} maxWidth="max-w-lg">
+      <div className="space-y-3">
+        {error && <p className="rounded-md border border-danger-border bg-danger px-3 py-2 text-xs text-danger-fg">{error}</p>}
+        <div>
+          <label className="mb-1 block text-sm font-medium text-secondary">Name</label>
+          <input value={name} onChange={(e) => setName(e.target.value)} maxLength={100} className={fieldCls} />
+        </div>
+        <div>
+          <label className="mb-1 block text-sm font-medium text-secondary">Feed URL</label>
+          <input value={url} onChange={(e) => setUrl(e.target.value)} className={`${fieldCls} font-mono`} />
+        </div>
+        <div className="grid grid-cols-2 gap-3">
+          <div>
+            <label className="mb-1 block text-sm font-medium text-secondary">Format</label>
+            <select value={format} onChange={(e) => setFormat(e.target.value as 'ip-list' | 'stix' | 'domain-list')} className={fieldCls}>
+              <option value="ip-list">IP list (one per line)</option>
+              <option value="stix">STIX 2.x bundle</option>
+              <option value="domain-list">Domain blocklist (Pi-hole / Adblock)</option>
+            </select>
+          </div>
+          <div>
+            <label className="mb-1 block text-sm font-medium text-secondary">Notification severity</label>
+            <select value={severity} onChange={(e) => setSeverity(e.target.value as 'info' | 'warning' | 'critical')} className={fieldCls}>
+              <option value="info">Info</option>
+              <option value="warning">Warning</option>
+              <option value="critical">Critical</option>
+            </select>
+          </div>
+        </div>
+        <p className="text-xs text-faint">Findings raised by this feed use the selected severity — a hit matching several feeds escalates to the highest one. Existing open findings are never downgraded.</p>
+        <div className="flex items-center justify-end gap-2 border-t border-border pt-3">
+          <button type="button" onClick={onClose} className="rounded-md px-3 py-1.5 text-sm text-secondary hover:bg-muted">Cancel</button>
+          <button
+            type="button"
+            onClick={() => void save()}
+            disabled={saving || !name.trim() || !url.trim()}
+            className="inline-flex items-center gap-1.5 rounded-md bg-primary px-3 py-1.5 text-sm font-medium text-white hover:bg-primary-hover disabled:opacity-50"
+          >
+            {saving && <Loader2 size={14} className="animate-spin" />}
+            Save changes
+          </button>
+        </div>
+      </div>
+    </DialogShell>
+  );
+}
+
 /** Threat-intel section: managed IOC feeds, per-source fetch state and recent hits. */
 function ThreatIntelSection() {
   const queryClient = useQueryClient();
@@ -732,6 +807,8 @@ function ThreatIntelSection() {
   const [name, setName] = useState('');
   const [url, setUrl] = useState('');
   const [format, setFormat] = useState<'ip-list' | 'stix' | 'domain-list'>('ip-list');
+  const [severity, setSeverity] = useState<'info' | 'warning' | 'critical'>('warning');
+  const [editing, setEditing] = useState<ThreatIntelSource | null>(null);
   const [adding, setAdding] = useState(false);
   const [addError, setAddError] = useState<string | null>(null);
 
@@ -756,9 +833,10 @@ function ThreatIntelSection() {
     setAdding(true);
     setAddError(null);
     try {
-      await api.addThreatIntelSource({ name: name.trim(), url: url.trim(), format });
+      await api.addThreatIntelSource({ name: name.trim(), url: url.trim(), format, severity });
       setName('');
       setUrl('');
+      setSeverity('warning');
       void queryClient.invalidateQueries({ queryKey: ['threatIntel'] });
     } catch (err) {
       setAddError((err as Error).message);
@@ -828,6 +906,20 @@ function ThreatIntelSection() {
       render: (row) => <span className="text-xs text-secondary">{row.format}</span>,
     },
     {
+      header: 'Severity',
+      key: 'severity',
+      width: 100,
+      exportValue: (row) => row.severity,
+      render: (row) => (
+        <span
+          className={`rounded px-1.5 py-0.5 text-xs font-medium uppercase ${row.severity === 'critical' ? 'bg-danger text-danger-fg' : row.severity === 'warning' ? 'bg-warning text-warning-fg' : 'bg-info text-info-fg'}`}
+          title="Notification severity for findings raised by this feed"
+        >
+          {row.severity}
+        </span>
+      ),
+    },
+    {
       header: 'IOCs',
       key: 'iocCount',
       width: 90,
@@ -880,6 +972,14 @@ function ThreatIntelSection() {
               <Download className="h-3.5 w-3.5" />
             </button>
           )}
+          <button
+            type="button"
+            onClick={() => setEditing(row)}
+            title={`Edit "${row.name}" (URL, format, severity)`}
+            className="rounded p-1 text-secondary hover:bg-muted"
+          >
+            <Pencil className="h-3.5 w-3.5" />
+          </button>
           <button
             type="button"
             onClick={() => void toggleSource(row)}
@@ -979,6 +1079,14 @@ function ThreatIntelSection() {
             <option value="domain-list">Domain blocklist (Pi-hole / Adblock)</option>
           </select>
         </label>
+        <label className="flex flex-col gap-1 text-xs font-medium text-secondary">
+          Severity
+          <select value={severity} onChange={(e) => setSeverity(e.target.value as 'info' | 'warning' | 'critical')} className="rounded-md border border-border bg-background px-2 py-1.5 text-sm text-foreground" title="Notification severity for findings raised by this feed">
+            <option value="info">Info</option>
+            <option value="warning">Warning</option>
+            <option value="critical">Critical</option>
+          </select>
+        </label>
         <button
           type="button"
           onClick={() => void addSource()}
@@ -1019,6 +1127,9 @@ function ThreatIntelSection() {
           </ul>
         </div>
       )}
+
+      {/* Edit dialog (URL / format / severity) */}
+      {editing && <ThreatIntelSourceEditDialog source={editing} onClose={() => setEditing(null)} />}
     </div>
   );
 }

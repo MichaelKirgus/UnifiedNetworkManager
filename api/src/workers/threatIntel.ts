@@ -128,6 +128,8 @@ export interface IocCache {
   cidrs: Array<{ words: number[]; prefix: number; family: 'v4' | 'v6'; sources: string[] }>;
   /** Normalized domain (lowercase, no trailing dot) → source names listing it. */
   domains: Map<string, string[]>;
+  /** Source name → notification severity for findings raised by that feed. */
+  severities: Map<string, string>;
   loadedAt: number;
   total: number;
 }
@@ -498,11 +500,11 @@ async function ensureIocCache(): Promise<IocCache | null> {
   // re-enable restores the indicators without a re-fetch). Both indicator
   // tables load in parallel — address feeds and domain-list feeds are common.
   const [res, domRes] = await Promise.all([
-    pool.query<{ ioc: string; name: string }>(
-      `SELECT t.ioc::text AS ioc, s.name FROM threat_iocs t JOIN threat_intel_sources s ON s.id = t."sourceId" WHERE s.enabled`
+    pool.query<{ ioc: string; name: string; severity: string }>(
+      `SELECT t.ioc::text AS ioc, s.name, s.severity FROM threat_iocs t JOIN threat_intel_sources s ON s.id = t."sourceId" WHERE s.enabled`
     ),
-    pool.query<{ domain: string; name: string }>(
-      `SELECT t.domain, s.name FROM threat_domain_iocs t JOIN threat_intel_sources s ON s.id = t."sourceId" WHERE s.enabled`
+    pool.query<{ domain: string; name: string; severity: string }>(
+      `SELECT t.domain, s.name, s.severity FROM threat_domain_iocs t JOIN threat_intel_sources s ON s.id = t."sourceId" WHERE s.enabled`
     ),
   ]);
   const exact = new Map<string, string[]>();
@@ -526,14 +528,30 @@ async function ensureIocCache(): Promise<IocCache | null> {
     list.push(r.name);
     domains.set(d, list);
   }
-  iocCache = { exact, cidrs, domains, loadedAt: Date.now(), total: res.rows.length + domRes.rows.length };
+  // Per-feed notification severity (a source only ever appears in ONE table,
+  // but set() is idempotent so merging both row sets is safe).
+  const severities = new Map<string, string>();
+  for (const r of res.rows) severities.set(r.name, String(r.severity));
+  for (const r of domRes.rows) severities.set(r.name, String(r.severity));
+  iocCache = { exact, cidrs, domains, severities, loadedAt: Date.now(), total: res.rows.length + domRes.rows.length };
   // eslint-disable-next-line no-console
   console.log(`[threat-intel] IOC cache built: ${iocCache.total} active indicator(s) (${domains.size} domain)`);
   return iocCache;
 }
 
 // ── Matching passes ──────────────────────────────────────────────────────────
+/** Severity ranks for finding escalation (a hit against any matched feed at a higher rank wins). */
+const SEVERITY_RANK: Record<'info' | 'warning' | 'critical', number> = { info: 0, warning: 1, critical: 2 };
 
+/** Worst notification severity among the matched sources — defaults to 'warning' when unknown. */
+export function worstSeverity(sources: string[], severities: Map<string, string>): 'info' | 'warning' | 'critical' {
+  let rank = -1;
+  for (const s of sources) {
+    const r = SEVERITY_RANK[(severities.get(s) ?? '') as 'info' | 'warning' | 'critical'];
+    if (r !== undefined && r > rank) rank = r;
+  }
+  return rank === 0 ? 'info' : rank === 2 ? 'critical' : 'warning';
+}
 function humanBytes(n: number): string {
   if (!Number.isFinite(n) || n <= 0) return '0 B';
   const units = ['B', 'KiB', 'MiB', 'GiB', 'TiB'];
@@ -553,7 +571,7 @@ async function notifyIocHit(f: FindingInput): Promise<void> {
     const listed = hits.length > 0 ? hits.map((h) => h.ip).join(', ') : String(f.dstIp ?? f.srcIp);
     const sources = [...new Set(hits.flatMap((h) => h.sources))].join(', ');
     await emitNotification({
-      severity: 'warning',
+      severity: f.severity, // per-feed severity (escalated across matched feeds)
       source: f.deviceId ? 'device' : 'system',
       deviceId: f.deviceId ?? undefined,
       title: `Threat-intel hit: ${listed}`,
@@ -605,7 +623,7 @@ async function matchFlows(fromIso: string, toIso: string): Promise<void> {
       kind: 'ioc-hit',
       srcIp,
       dstIp,
-      severity: 'warning',
+      severity: worstSeverity(m.sources, cache.severities),
       detail,
       context: { iocHits: [{ ip: m.ip, sources: m.sources }], estBytes, srcHostname: hostname },
       deviceId,
@@ -666,7 +684,7 @@ async function matchFirewallEvents(): Promise<void> {
       kind: 'ioc-hit',
       srcIp: t.src || t.hits.find((h) => h.side === 'src')?.ip || '0.0.0.0',
       dstIp: t.dst || (t.hits.some((h) => h.side === 'dst') ? t.hits.find((h) => h.side === 'dst')!.ip : null),
-      severity: 'warning',
+      severity: worstSeverity([...new Set(t.hits.flatMap((h) => h.sources))], cache.severities),
       detail,
       context: { iocHits: t.hits, action: t.action },
       deviceId: t.deviceId || null,
@@ -689,7 +707,7 @@ async function notifyDnsIocHit(f: FindingInput): Promise<void> {
     const listed = hits.length > 0 ? hits.map((h) => h.domain).join(', ') : String(f.context.domain ?? '');
     const sources = [...new Set(hits.flatMap((h) => h.sources))].join(', ');
     await emitNotification({
-      severity: 'warning',
+      severity: f.severity, // per-feed severity (escalated across matched feeds)
       source: f.deviceId ? 'device' : 'system',
       deviceId: f.deviceId ?? undefined,
       title: `Threat-intel hit: ${listed}`,
@@ -783,7 +801,7 @@ async function matchDnsQueries(): Promise<void> {
       kind: 'dns-ioc-hit',
       srcIp: clientIp,
       dstIp: null,
-      severity: 'warning',
+      severity: worstSeverity(t.hits.flatMap((h) => h.sources), cache.severities),
       detail,
       context: { iocHits: t.hits, domain: m.domain, client: t.client, qtype: t.qtype, action: t.action, rcode: t.rcode },
       deviceId: t.deviceId || null,

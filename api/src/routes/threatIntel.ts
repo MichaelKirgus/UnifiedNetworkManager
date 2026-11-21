@@ -34,12 +34,17 @@ async function loadDeviceNames(deviceIds: string[]): Promise<Map<string, string>
   return map;
 }
 
+/** Notification severities a feed may raise (drives finding + notification severity). */
+const THREAT_INTEL_SEVERITIES = ['info', 'warning', 'critical'] as const;
+type ThreatIntelSeverity = (typeof THREAT_INTEL_SEVERITIES)[number];
+
 interface SourceRow {
   id: string;
   name: string;
   url: string;
   format: ThreatIntelFormat;
   enabled: boolean;
+  severity: string;
   iocCount: number | string;
   lastSuccessAt: string | null;
   lastError: string | null;
@@ -55,6 +60,7 @@ function sourceToJson(r: SourceRow) {
     url: String(r.url),
     format: String(r.format) as ThreatIntelFormat,
     enabled: Boolean(r.enabled),
+    severity: (THREAT_INTEL_SEVERITIES as readonly string[]).includes(String(r.severity)) ? r.severity : 'warning',
     iocCount: Number(r.iocCount ?? 0),
     lastSuccessAt: r.lastSuccessAt ? String(r.lastSuccessAt) : null,
     lastError: r.lastError ? String(r.lastError) : null,
@@ -64,8 +70,8 @@ function sourceToJson(r: SourceRow) {
 }
 
 /** Validates a source create/update body; returns the clean fields or an error string. */
-function validateSourceBody(body: Record<string, unknown>, partial: boolean): { name?: string; url?: string; format?: ThreatIntelFormat } | string {
-  const out: { name?: string; url?: string; format?: ThreatIntelFormat } = {};
+function validateSourceBody(body: Record<string, unknown>, partial: boolean): { name?: string; url?: string; format?: ThreatIntelFormat; severity?: ThreatIntelSeverity } | string {
+  const out: { name?: string; url?: string; format?: ThreatIntelFormat; severity?: ThreatIntelSeverity } = {};
   if (!partial || body.name !== undefined) {
     const name = typeof body.name === 'string' ? body.name.trim() : '';
     if (name.length < 1 || name.length > 100) return '"name" is required (1-100 characters)';
@@ -88,6 +94,11 @@ function validateSourceBody(body: Record<string, unknown>, partial: boolean): { 
     if (!(THREAT_INTEL_FORMATS as readonly string[]).includes(format)) return `"format" must be one of: ${THREAT_INTEL_FORMATS.join(', ')}`;
     out.format = format as ThreatIntelFormat;
   }
+  if (!partial || body.severity !== undefined) {
+    const severity = typeof body.severity === 'string' ? body.severity : '';
+    if (!(THREAT_INTEL_SEVERITIES as readonly string[]).includes(severity)) return `"severity" must be one of: ${THREAT_INTEL_SEVERITIES.join(', ')}`;
+    out.severity = severity as ThreatIntelSeverity;
+  }
   return out;
 }
 
@@ -98,7 +109,7 @@ router.get('/threat-intel', requireAuth, requirePermission('security:read'), asy
     const limit = parseLimit(q.limit, 50, 200);
 
     const [srcRes, hitRes] = await Promise.all([
-      pool.query<SourceRow>(`SELECT id, name, url, format, enabled, "iocCount", "lastSuccessAt", "lastError", "repoFileId", "createdAt" FROM threat_intel_sources ORDER BY name`),
+      pool.query<SourceRow>(`SELECT id, name, url, format, enabled, severity, "iocCount", "lastSuccessAt", "lastError", "repoFileId", "createdAt" FROM threat_intel_sources ORDER BY name`),
       pool.query(
         `SELECT id, kind, severity, "srcIp", "dstIp", detail, context, "deviceId", "firstSeenAt", "lastSeenAt", occurrences, status
          FROM flow_security_findings WHERE kind IN ('ioc-hit', 'dns-ioc-hit') AND status = 'open'
@@ -164,15 +175,15 @@ router.post('/threat-intel/sources', requireAuth, requirePermission('system:writ
     const id = uuidv4();
     const nowIso = new Date().toISOString();
     await pool.query(
-      `INSERT INTO threat_intel_sources (id, name, url, format, enabled, "iocCount", "lastSuccessAt", "lastError", "createdAt")
-       VALUES ($1, $2, $3, $4, true, 0, NULL, NULL, $5)`,
-      [id, validated.name, validated.url, validated.format ?? 'ip-list', nowIso]
+      `INSERT INTO threat_intel_sources (id, name, url, format, severity, enabled, "iocCount", "lastSuccessAt", "lastError", "createdAt")
+       VALUES ($1, $2, $3, $4, $5, true, 0, NULL, NULL, $6)`,
+      [id, validated.name, validated.url, validated.format ?? 'ip-list', validated.severity ?? 'warning', nowIso]
     );
 
     // First fetch is immediate — the beat's interval logic would otherwise wait.
     void triggerThreatIntelFetch(id);
 
-    const created = await pool.query<SourceRow>(`SELECT id, name, url, format, enabled, "iocCount", "lastSuccessAt", "lastError", "repoFileId", "createdAt" FROM threat_intel_sources WHERE id = $1`, [id]);
+    const created = await pool.query<SourceRow>(`SELECT id, name, url, format, enabled, severity, "iocCount", "lastSuccessAt", "lastError", "repoFileId", "createdAt" FROM threat_intel_sources WHERE id = $1`, [id]);
     res.status(201).json(sourceToJson(created.rows[0]));
   } catch (error) {
     console.error('Error creating threat-intel source:', error);
@@ -180,7 +191,7 @@ router.post('/threat-intel/sources', requireAuth, requirePermission('system:writ
   }
 });
 
-/** PATCH /v1/threat-intel/sources/:id — update name/url/format/enabled. */
+/** PATCH /v1/threat-intel/sources/:id — update name/url/format/enabled/severity. */
 router.patch('/threat-intel/sources/:id', requireAuth, requirePermission('system:write'), async (req: Request, res: Response) => {
   try {
     const body = (req.body ?? {}) as Record<string, unknown>;
@@ -217,7 +228,7 @@ router.patch('/threat-intel/sources/:id', requireAuth, requirePermission('system
 
     params.push(req.params.id);
     const upd = await pool.query(
-      `UPDATE threat_intel_sources SET ${sets.join(', ')} WHERE id = $${params.length} RETURNING id, name, url, format, enabled, "iocCount", "lastSuccessAt", "lastError", "repoFileId", "createdAt"`,
+      `UPDATE threat_intel_sources SET ${sets.join(', ')} WHERE id = $${params.length} RETURNING id, name, url, format, enabled, severity, "iocCount", "lastSuccessAt", "lastError", "repoFileId", "createdAt"`,
       params
     );
     if (upd.rows.length === 0) {

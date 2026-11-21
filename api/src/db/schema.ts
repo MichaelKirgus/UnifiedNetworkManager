@@ -802,6 +802,8 @@ export const threatIntelSources = pgTable(
     // threat_domain_iocs, not the INET-typed threat_iocs).
     format: text('format').notNull().default('ip-list'),
     enabled: boolean('enabled').notNull().default(true),
+    /** Notification severity for findings raised by this feed (info/warning/critical). */
+    severity: text('severity').notNull().default('warning'),
     iocCount: integer('iocCount').notNull().default(0),
     lastSuccessAt: text('lastSuccessAt'),
     lastError: text('lastError'),

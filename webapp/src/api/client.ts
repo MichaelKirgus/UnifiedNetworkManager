@@ -3930,6 +3930,8 @@ export interface ThreatIntelSource {
   /** 'ip-list' = one IP/CIDR per line; 'stix' = STIX 2.x bundle; 'domain-list' = Pi-hole-style one-domain-per-line blocklist. */
   format: 'ip-list' | 'stix' | 'domain-list';
   enabled: boolean;
+  /** Notification severity for findings raised by this feed (a hit matching several feeds escalates to the highest). */
+  severity: 'info' | 'warning' | 'critical';
   iocCount: number;
   lastSuccessAt: string | null;
   lastError: string | null;
@@ -3943,6 +3945,7 @@ export interface ThreatIntelSourceInput {
   url?: string;
   format?: 'ip-list' | 'stix' | 'domain-list';
   enabled?: boolean;
+  severity?: 'info' | 'warning' | 'critical';
 }
 
 /** One recent threat-intel finding (traffic involving a feed-listed IP, or a DNS query for a listed domain). */

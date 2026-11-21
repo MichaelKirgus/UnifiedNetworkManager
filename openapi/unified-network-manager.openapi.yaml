@@ -5625,10 +5625,12 @@ paths:
   /threat-intel/sources/{id}:
     patch:
       tags: [Security]
-      summary: Update a feed source (name/url/format/enabled)
+      summary: Update a feed source (name/url/format/enabled/severity)
       description: >-
         Partial update. Changing `url` or `format` clears lastSuccessAt so the
-        worker re-fetches immediately (when the source is enabled). Gated on
+        worker re-fetches immediately (when the source is enabled). `severity`
+        sets the notification severity for findings raised by this feed (a hit
+        matching several feeds escalates to the highest one). Gated on
         `system:write`.
       parameters:
         - in: path
@@ -11352,6 +11354,7 @@ components:
         url: { type: string, description: 'http(s) URL of the feed' }
         format: { type: string, enum: [ip-list, stix, domain-list], description: "'ip-list' = one IP/CIDR per line; 'stix' = STIX 2.x bundle (indicator equality patterns); 'domain-list' = plain-text blocklist — bare domains (Pi-hole/AdGuard) and Adblock/EasyList filter rules" }
         enabled: { type: boolean }
+        severity: { type: string, enum: [info, warning, critical], description: 'Notification severity for findings raised by this feed — a hit matching several feeds escalates to the highest one' }
         iocCount: { type: integer, description: Indicators currently stored from this source }
         lastSuccessAt:
           type: [string, 'null']
@@ -11371,6 +11374,7 @@ components:
         name: { type: string, minLength: 1, maxLength: 100 }
         url: { type: string, description: 'http(s) URL of the feed' }
         format: { type: string, enum: [ip-list, stix, domain-list] }
+        severity: { type: string, enum: [info, warning, critical], default: warning }
 
     # One recent threat-intel finding (GET /threat-intel recentHits).
     ThreatIntelHit:

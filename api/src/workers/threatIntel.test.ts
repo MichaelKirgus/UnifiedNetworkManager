@@ -10,7 +10,7 @@
 // needs it for row ids, which these tests never assert on.
 jest.mock('uuid', () => ({ v4: () => '00000000-0000-4000-8000-000000000000' }));
 
-import { matchDomain, matchIoc, normalizeDomain, normalizeDomainLine, parseDomainList, parseIpList, parseIocValue, parseStix, threatIntelFileName } from './threatIntel';
+import { matchDomain, matchIoc, normalizeDomain, normalizeDomainLine, parseDomainList, parseIpList, parseIocValue, parseStix, threatIntelFileName, worstSeverity } from './threatIntel';
 import type { IocCache } from './threatIntel';
 
 describe('threatIntelFileName', () => {
@@ -35,7 +35,11 @@ describe('threatIntelFileName', () => {
 });
 
 /** Builds a cache the same way ensureIocCache does from parsed entries. */
-function makeCache(entries: Array<{ value: string; sources: string[] }>, domains?: Array<{ domain: string; sources: string[] }>): IocCache {
+function makeCache(
+  entries: Array<{ value: string; sources: string[] }>,
+  domains?: Array<{ domain: string; sources: string[] }>,
+  severities?: Map<string, string>
+): IocCache {
   const exact = new Map<string, string[]>();
   const cidrs: IocCache['cidrs'] = [];
   for (const e of entries) {
@@ -48,8 +52,21 @@ function makeCache(entries: Array<{ value: string; sources: string[] }>, domains
   for (const d of domains ?? []) {
     domainMap.set(d.domain, [...(domainMap.get(d.domain) ?? []), ...d.sources]);
   }
-  return { exact, cidrs, domains: domainMap, loadedAt: Date.now(), total: entries.length + (domains?.length ?? 0) };
+  return { exact, cidrs, domains: domainMap, severities: severities ?? new Map(), loadedAt: Date.now(), total: entries.length + (domains?.length ?? 0) };
 }
+
+describe('worstSeverity', () => {
+  it('escalates to the highest severity among the matched sources', () => {
+    const sev = new Map([['feed-a', 'info'], ['feed-b', 'critical']]);
+    expect(worstSeverity(['feed-a', 'feed-b'], sev)).toBe('critical');
+    expect(worstSeverity(['feed-a'], sev)).toBe('info');
+  });
+
+  it('defaults to warning for unknown sources and empty input', () => {
+    expect(worstSeverity(['unknown-feed'], new Map())).toBe('warning');
+    expect(worstSeverity([], new Map([['feed-a', 'critical']]))).toBe('warning');
+  });
+});
 
 describe('parseIocValue', () => {
   it('parses bare IPv4 as an exact host entry', () => {
