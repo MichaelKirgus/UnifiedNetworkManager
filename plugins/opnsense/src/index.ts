@@ -67,7 +67,7 @@ import {
   fetchPfStats,
   FirewallEventRow,
 } from './client/firewallEvents';
-import { fetchStateIdentities, countOpenStates, diffStates, buildHostStateRows } from './client/hostStates';
+import { walkAllStates, countOpenStates, diffStates, buildHostStateRows, fetchPfStateCount, shouldSkipStateWalk, DEFAULT_STATE_WALK_MAX_STATES } from './client/hostStates';
 import { decideUpdateSearch, DEFAULT_UPDATE_CHECK_INTERVAL_SEC, type UpdateSearchEntry } from './updateSearch';
 import { collectServices } from './services';
 import { collectZfsViaSsh } from './zfsSsh';
@@ -1242,6 +1242,16 @@ const PLUGIN_OPTIONS: PluginOptionDescriptor[] = [
       'How often the plugin walks the appliance\'s FULL live state table to track per-host open states + created/destroyed churn (Hosts/Networks "States" columns). Each walk is one big query_states call — a full table scan on the appliance (~30 s / ~115 MB on a 240k-state box), so keep this slow. 0 disables per-host state tracking.',
   },
   {
+    key: 'stateWalkMaxStates',
+    label: 'State-table walk max states',
+    type: 'integer' as const,
+    default: DEFAULT_STATE_WALK_MAX_STATES,
+    min: 10_000,
+    max: 1_000_000,
+    description:
+      'Skip the full state-table walk while live states exceed this count (load control). The walk is paginated with bounded per-page memory, but every page still costs one FULL table scan on the appliance (~13–35 s) — a 280k-state box needs ~6 scans / a few minutes each cycle. Lower it to cut load on busy firewalls; the default (1M) walks any realistic table completely.',
+  },
+  {
     key: 'updateCheckIntervalSec',
     label: 'Update search interval (seconds)',
     type: 'integer' as const,
@@ -2095,6 +2105,12 @@ async function collectAndPushDnsQueries(
 // the new one yields per-endpoint created/destroyed deltas. Only aggregated
 // rows are pushed to POST /plugin/host-states (never the raw states). A failed
 // or empty walk keeps the old baseline untouched — no bogus churn spike.
+//
+// LOAD GUARD: before starting the paginated walk, the cheap pf_states counter
+// is read; above `stateWalkMaxStates` live states the walk is skipped (warnOnce)
+// because each page costs one full table scan on the appliance — a 284k-state
+// box means ~6 scans / a few minutes per cycle. The walk itself is memory-bounded
+// (bounded pages), so this cap controls load, not OOM risk.
 
 interface HostStateWalkEntry {
   lastRunAt: number;
@@ -2134,7 +2150,8 @@ async function collectAndPushHostStates(
   apiSecret: string,
   transport?: OpnsenseTransport,
   ports?: OpnsensePorts,
-  intervalSec?: number
+  intervalSec?: number,
+  maxStates?: number
 ): Promise<void> {
   if (!deviceId) return; // no device scope → nothing to attribute rows to
   const everyMs = Math.max(0, Number(intervalSec ?? 900)) * 1000;
@@ -2150,11 +2167,38 @@ async function collectAndPushHostStates(
   entry.lastRunAt = now; // claim the slot BEFORE the slow walk — no overlap
 
   const client = createClient(host, { apiKey, apiSecret }, transport, ports);
-  const states = await fetchStateIdentities(client);
-  if (states === null) return; // walk failed — baseline untouched, retry next beat
+
+  // Appliance-side OOM guard: one query_states response for N states needs
+  // ~3–4 KB of PHP memory per row on the box; above the limit the Apache/PHP
+  // worker fatal-errors (memory_limit) and every concurrent API/UI request on
+  // the appliance dies with it. The counter probe is cheap — no table scan.
+  const total = await fetchPfStateCount(client);
+  if (shouldSkipStateWalk(total, Number(maxStates ?? DEFAULT_STATE_WALK_MAX_STATES))) {
+    warnOnce(
+      'opnsense-plugin',
+      `state-walk:${host}`,
+      `skipping state-table walk for ${host}: ${total!.toLocaleString()} live states exceed the limit of ${Number(maxStates ?? DEFAULT_STATE_WALK_MAX_STATES).toLocaleString()} — each page costs one full table scan on the appliance, so a huge table means minutes of load per cycle. Raise stateWalkMaxStates to collect it anyway.`
+    );
+    entry.prev = null; // stale baseline — resuming must NOT diff against it (bogus churn spike)
+    return;
+  }
+
+  const walk = await walkAllStates(client);
+  if (walk === null) return; // walk failed — baseline untouched, retry next beat
+  const { states } = walk;
+  // A table that visibly changed size DURING the multi-page walk makes
+  // created/destroyed deltas unreliable: still push fresh open-state counts, but
+  // with NULL churn so the API's window SUM skips them instead of counting noise.
+  if (!walk.consistent) {
+    warnOnce(
+      'opnsense-plugin',
+      `state-walk-drift:${host}`,
+      `state-table walk for ${host} saw the table change size mid-walk — open-state counts updated, churn deltas skipped this cycle`
+    );
+  }
 
   const open = countOpenStates(states);
-  const diff = diffStates(entry.prev, states);
+  const diff = walk.consistent ? diffStates(entry.prev, states) : null;
   const rows = buildHostStateRows(open, diff);
   if (rows.length === 0) {
     // Nothing to report — no internal endpoints in this snapshot AND no churn
@@ -2386,7 +2430,8 @@ app.post('/monitoring', async (req, res) => {
     // the previous snapshot in memory. Fire-and-forget like the events push —
     // a 30 s+ walk must never block or fail this poll.
     const stateWalkIntervalSec = typeof settings.stateWalkIntervalSec === 'number' ? settings.stateWalkIntervalSec : undefined;
-    void collectAndPushHostStates(managementAddress, deviceId, apiKey, apiSecret, transport, ports, stateWalkIntervalSec).catch(() => { /* best-effort */ });
+    const stateWalkMaxStates = typeof settings.stateWalkMaxStates === 'number' ? settings.stateWalkMaxStates : undefined;
+    void collectAndPushHostStates(managementAddress, deviceId, apiKey, apiSecret, transport, ports, stateWalkIntervalSec, stateWalkMaxStates).catch(() => { /* best-effort */ });
 
     // Automatic update search (option updateCheckIntervalSec): a fresh probe at
     // its own slow cadence so the appliance's CACHED check result — which the
