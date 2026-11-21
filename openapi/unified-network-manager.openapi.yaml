@@ -9133,6 +9133,49 @@ paths:
         '403':
           description: Missing system:read permission
 
+  /settings/plugin-providers:
+    get:
+      tags: [System]
+      summary: List plugin instances advertising a capability
+      description: >-
+        The registered plugin instances advertising `capability` (fileRepo or
+        webFetch) with their online state — feeds the comboboxes of settings
+        flagged `pluginCapability` in GET /settings (autoBackupProviderId,
+        fileRepoDefaultProviderId, updateFeedWebFetchProviderId). An empty
+        setting value keeps its auto-resolve meaning. Requires permission
+        `system:read`.
+      parameters:
+        - name: capability
+          in: query
+          required: true
+          schema: { type: string, enum: [fileRepo, webFetch] }
+      responses:
+        '200':
+          description: Matching plugin instances (online first)
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [capability, providers]
+                properties:
+                  capability: { type: string, enum: [fileRepo, webFetch] }
+                  providers:
+                    type: array
+                    items:
+                      type: object
+                      required: [id, name, endpoint, online]
+                      properties:
+                        id: { type: string }
+                        name: { type: string }
+                        endpoint: { type: string }
+                        online: { type: boolean }
+        '400':
+          description: Unknown capability value
+        '401':
+          description: Authentication required
+        '403':
+          description: Missing system:read permission
+
   /settings/{key}:
     put:
       tags: [System]
@@ -14735,6 +14778,11 @@ components:
         min: { type: integer, nullable: true }
         max: { type: integer, nullable: true }
         pattern: { type: string, nullable: true }
+        pluginCapability:
+          type: string
+          enum: [fileRepo, webFetch]
+          nullable: true
+          description: "Set when the value is a plugin instance id — the UI renders a combobox fed by GET /settings/plugin-providers; empty value = auto-resolve"
 
     SettingsListResponse:
       type: object

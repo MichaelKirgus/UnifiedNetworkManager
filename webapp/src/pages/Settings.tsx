@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Layout } from '../components/Layout';
 import { DataTable, DataTableColumn } from '../components/DataTable';
-import { api, SettingView } from '../api/client';
+import { api, PluginProviderOption, SettingView } from '../api/client';
 import { formatMs } from '../components/formatMetric';
 import { can } from '../auth/permissions';
 import { ChevronDown, ChevronRight, RotateCcw, Save, Settings2, X } from 'lucide-react';
@@ -67,11 +67,14 @@ function SettingEditor({
   canWrite,
   saving,
   onSave,
+  providers,
 }: {
   setting: SettingView;
   canWrite: boolean;
   saving: boolean;
   onSave: (value: number | string | boolean) => void;
+  /** Registered instances for `setting.pluginCapability` — undefined while loading. */
+  providers?: PluginProviderOption[];
 }) {
   const [draft, setDraft] = useState<string>(String(setting.value));
 
@@ -103,6 +106,55 @@ function SettingEditor({
   const parsed = Number(draft);
   const dirty = draft !== String(setting.value);
   const invalid = isInt && (!Number.isFinite(parsed) || (setting.min != null && parsed < setting.min) || (setting.max != null && parsed > setting.max));
+
+  // Plugin-instance settings render a combobox of registered instances — the
+  // empty value keeps its "auto-resolve" meaning, so it stays an explicit option.
+  if (setting.pluginCapability) {
+    if (!providers) {
+      return <span className="text-xs text-faint">Loading plugin instances…</span>;
+    }
+    const known = providers.some((p) => p.id === draft);
+    return (
+      <div className="flex flex-wrap items-center gap-2">
+        <select
+          value={draft}
+          disabled={saving}
+          onChange={(e) => setDraft(e.target.value)}
+          className="w-72 rounded-md border border-border bg-card px-3 py-1.5 text-sm focus:border-focus-ring focus:outline-none disabled:bg-background"
+        >
+          <option value="">Auto — built-in / first online instance</option>
+          {providers.map((p) => (
+            <option key={p.id} value={p.id}>
+              {p.name}{p.online ? '' : ' (offline)'}
+            </option>
+          ))}
+          {!known && draft !== '' && <option value={draft}>{draft} (not registered)</option>}
+        </select>
+        {dirty && (
+          <>
+            <button
+              type="button"
+              onClick={() => onSave(draft)}
+              disabled={saving}
+              className="inline-flex items-center gap-1.5 rounded-md bg-primary px-3 py-1.5 text-sm font-medium text-white hover:bg-primary-hover disabled:opacity-50"
+            >
+              <Save className="h-4 w-4" />
+              {saving ? 'Saving…' : 'Save'}
+            </button>
+            <button
+              type="button"
+              onClick={() => setDraft(String(setting.value))}
+              disabled={saving}
+              className="inline-flex items-center gap-1 rounded-md border border-border px-3 py-1.5 text-sm text-secondary hover:bg-muted disabled:opacity-50"
+            >
+              <X className="h-4 w-4" />
+              Cancel
+            </button>
+          </>
+        )}
+      </div>
+    );
+  }
 
   return (
     <div className="flex flex-wrap items-center gap-2">
@@ -197,6 +249,30 @@ export default function Settings() {
   const canWrite = can('system:write');
   const settings = settingsQuery.data?.settings ?? [];
 
+  // Provider comboboxes — one query per capability the registry uses for a
+  // setting value (currently fileRepo + webFetch). Disabled until we know the
+  // registry actually needs that capability.
+  const needsFileRepo = settings.some((s) => s.pluginCapability === 'fileRepo');
+  const needsWebFetch = settings.some((s) => s.pluginCapability === 'webFetch');
+  const fileRepoProvidersQ = useQuery({
+    queryKey: ['plugin-providers', 'fileRepo'],
+    queryFn: () => api.listPluginProviders('fileRepo'),
+    enabled: needsFileRepo,
+  });
+  const webFetchProvidersQ = useQuery({
+    queryKey: ['plugin-providers', 'webFetch'],
+    queryFn: () => api.listPluginProviders('webFetch'),
+    enabled: needsWebFetch,
+  });
+
+  /** Display name for a plugin-instance setting value ('' → Auto; unknown id → shortened). */
+  const providerLabel = (cap: 'fileRepo' | 'webFetch', id: string): string => {
+    if (!id) return 'Auto';
+    const list = cap === 'fileRepo' ? fileRepoProvidersQ.data?.providers : webFetchProvidersQ.data?.providers;
+    const p = list?.find((x) => x.id === id);
+    return p ? (p.online ? p.name : `${p.name} (offline)`) : id.length > 12 ? `${id.slice(0, 8)}…` : id;
+  };
+
   const toggle = (key: string) =>
     setExpandedKeys((prev) => {
       const next = new Set(prev);
@@ -250,11 +326,11 @@ export default function Settings() {
     {
       header: 'Value',
       key: 'value',
-      width: 140,
+      width: 170,
       sortAccessor: (row) => String(row.value),
       render: (row) => (
         <span className="font-mono text-sm">
-          {fmtValue(row.value, row.unit)}
+          {row.pluginCapability && typeof row.value === 'string' ? providerLabel(row.pluginCapability, row.value) : fmtValue(row.value, row.unit)}
           {row.isModified && <span className="ml-1.5 rounded bg-warning px-1 py-0.5 text-[10px] font-semibold text-warning-fg">modified</span>}
         </span>
       ),
@@ -263,7 +339,11 @@ export default function Settings() {
       header: 'Default',
       key: 'defaultValue',
       width: 140,
-      render: (row) => <span className="font-mono text-sm text-muted-foreground">{fmtValue(row.defaultValue, row.unit)}</span>,
+      render: (row) => (
+        <span className="font-mono text-sm text-muted-foreground">
+          {row.pluginCapability && typeof row.defaultValue === 'string' ? providerLabel(row.pluginCapability, row.defaultValue) : fmtValue(row.defaultValue, row.unit)}
+        </span>
+      ),
     },
     {
       header: 'Actions',
@@ -323,6 +403,13 @@ export default function Settings() {
                     canWrite={canWrite}
                     saving={saving}
                     onSave={(value) => updateMutation.mutate({ key: row.key, value })}
+                    providers={
+                      row.pluginCapability === 'fileRepo'
+                        ? fileRepoProvidersQ.data?.providers
+                        : row.pluginCapability === 'webFetch'
+                          ? webFetchProvidersQ.data?.providers
+                          : undefined
+                    }
                   />
                 </div>
               );

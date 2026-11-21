@@ -43,6 +43,14 @@ export interface SettingDescriptor {
   maxLength?: number;
   /** Display unit hint for the UI ("ms", "s", "days", "%"). */
   unit?: string;
+  /**
+   * When set, this value is a plugin instance id and the Settings page renders
+   * a combobox of registered instances advertising this capability (fetched via
+   * GET /settings/plugin-providers) instead of a free-text input. The empty
+   * value keeps its "auto-resolve" meaning — the broker picks the built-in or
+   * first online provider at resolve time.
+   */
+  pluginCapability?: 'fileRepo' | 'webFetch';
   /** When true, this value is injected into plugins via x-unm-global-settings. */
   exposeToPlugins?: boolean;
   /**
@@ -76,6 +84,8 @@ export interface SettingView {
   min?: number;
   max?: number;
   pattern?: string;
+  /** Set when the value is a plugin instance id — the UI renders a combobox. */
+  pluginCapability?: 'fileRepo' | 'webFetch';
 }
 
 // --- The registry -----------------------------------------------------------
@@ -144,8 +154,9 @@ export const SETTING_DESCRIPTORS: SettingDescriptor[] = [
     category: 'General',
     default: '',
     maxLength: 128,
+    pluginCapability: 'fileRepo',
     help:
-      'Full plugin id of the file-repo instance that receives scheduled backups — only used when autoBackupDestination is "repo". Empty = local volume.',
+      'The file-repo instance that receives scheduled backups (chosen from the registered instances in the picker); only used when autoBackupDestination is "repo". Empty = local volume.',
   },
 
   // Table pagination (server-paginated tables in the webapp — Logs, Firewall
@@ -877,8 +888,9 @@ export const SETTING_DESCRIPTORS: SettingDescriptor[] = [
     default: '',
     envVar: 'UNM_UPDATE_FEED_WEBFETCH_PROVIDER_ID',
     maxLength: 128,
+    pluginCapability: 'webFetch',
     help:
-      'The web-fetch plugin instance (capability `webFetch`) that downloads the update feed — the API itself never opens outbound internet connections. Empty = auto-resolve: the built-in Web Fetch plugin if online, otherwise any registered online web-fetch provider. Set a specific plugin id to pin the check to one instance (e.g. an egress proxy in another network segment).',
+      'The web-fetch plugin instance (capability `webFetch`) that downloads the update feed — the API itself never opens outbound internet connections. Empty = auto-resolve: the built-in Web Fetch plugin if online, otherwise any registered online web-fetch provider. Pick a specific instance to pin the check to it (e.g. an egress proxy in another network segment).',
   },
 
   // Central file repository — which file-repo plugin stores NEW uploads by default.
@@ -890,6 +902,7 @@ export const SETTING_DESCRIPTORS: SettingDescriptor[] = [
     default: '',
     envVar: 'FILE_REPO_PLUGIN_ID',
     maxLength: 128,
+    pluginCapability: 'fileRepo',
     help:
       'The file-repo plugin (capability `fileRepo`) that stores new uploads by default — the Files page preselects it so you normally never have to pick a repo per upload. Empty = auto-resolve (the built-in local-storage repo, or the first online provider). Individual uploads can still override this from the Files page.',
   },
@@ -1531,6 +1544,7 @@ function viewFor(d: SettingDescriptor, values: Record<string, SettingValue>): Se
     min: d.min,
     max: d.max,
     pattern: d.pattern,
+    pluginCapability: d.pluginCapability,
     value,
     defaultValue,
     isModified: value !== defaultValue,

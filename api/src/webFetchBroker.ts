@@ -103,6 +103,17 @@ export async function resolveWebFetchProvider(providerId?: string | null): Promi
   return record ? { id: record.id, name: record.name, endpoint: record.endpoint } : null;
 }
 
+/** Lists all registered web-fetch providers + online state (webapp pickers). */
+export async function listWebFetchProviders(): Promise<Array<{ id: string; name: string; endpoint: string; online: boolean }>> {
+  const rows = await db.query.plugins.findMany();
+  const now = Date.now();
+  return rows
+    .filter((r) => parseCapabilities(r.capabilities).includes('webFetch'))
+    .map(toRecord)
+    .sort((a, b) => Number(isOnline(b, now)) - Number(isOnline(a, now)) || a.name.localeCompare(b.name))
+    .map((p) => ({ id: p.id, name: p.name, endpoint: p.endpoint, online: isOnline(p, now) }));
+}
+
 /** One axios instance per provider — the /fetch call streams a large body back. */
 const httpCache = new Map<string, AxiosInstance>();
 function providerHttp(provider: WebFetchProvider): AxiosInstance {

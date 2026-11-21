@@ -2182,10 +2182,20 @@ export interface SettingView {
   min?: number | null;
   max?: number | null;
   pattern?: string | null;
+  /** Set when the value is a plugin instance id — render a combobox (GET /settings/plugin-providers). */
+  pluginCapability?: 'fileRepo' | 'webFetch' | null;
 }
 
 export interface SettingsListResponse {
   settings: SettingView[];
+}
+
+/** One registered plugin instance advertising a capability (Settings page pickers). */
+export interface PluginProviderOption {
+  id: string;
+  name: string;
+  endpoint: string;
+  online: boolean;
 }
 
 /** One distinct (band, channel) pair broadcasting an SSID. */
@@ -5403,6 +5413,9 @@ export const api = {
     apiFetch<{ setting: SettingView }>(`/settings/${encodeURIComponent(key)}`, { method: 'PUT', body: JSON.stringify({ value }) }),
   resetSetting: (key: string) =>
     apiFetch<{ setting: SettingView }>(`/settings/${encodeURIComponent(key)}`, { method: 'DELETE' }),
+  /** Registered plugin instances advertising a capability — feeds the provider comboboxes. */
+  listPluginProviders: (capability: 'fileRepo' | 'webFetch') =>
+    apiFetch<{ capability: string; providers: PluginProviderOption[] }>(`/settings/plugin-providers?capability=${capability}`),
   // Actions & Schedules (automation rules).
   automations: () => apiFetch<{ automations: Automation[] }>('/automations'),
   /** Template catalog — built-ins + plugin-advertised rule drafts. */

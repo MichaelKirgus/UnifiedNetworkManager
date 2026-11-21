@@ -1,6 +1,8 @@
 import { Router, Response } from 'express';
 import { requireAuth, requirePermission } from '../auth/middleware';
 import { listAllSettings, updateSetting, resetSetting } from '../systemSettings';
+import { listFileRepoProviders } from '../fileRepoBroker';
+import { listWebFetchProviders } from '../webFetchBroker';
 
 /**
  * Central system settings (the Settings page). These are the app-wide knobs that
@@ -12,12 +14,39 @@ import { listAllSettings, updateSetting, resetSetting } from '../systemSettings'
  *   GET    /settings      -> every setting with its effective value + metadata
  *   PUT    /settings/:key -> update one (validated + clamped server-side)
  *   DELETE /settings/:key -> reset one to its env/default baseline
+ *   GET    /settings/plugin-providers?capability=fileRepo|webFetch
+ *          -> registered plugin instances advertising the capability, for the
+ *             comboboxes of settings flagged `pluginCapability` in the registry
  *
  * Reading requires `system:read`; writing requires `system:write`. Changes take
  * effect on the next worker beat — no restart.
  */
 
 const router = Router();
+
+// GET /settings/plugin-providers - registered plugin instances advertising one
+// capability + their online state (the Settings page's provider comboboxes).
+// Gated by system:read like the rest of this router so a settings-only user can
+// fill in the pickers without needing plugins:read.
+router.get(
+  '/settings/plugin-providers',
+  requireAuth,
+  requirePermission('system:read'),
+  async (req, res: Response) => {
+    try {
+      const capability = String(req.query.capability ?? '');
+      if (capability !== 'fileRepo' && capability !== 'webFetch') {
+        res.status(400).json({ error: "capability must be 'fileRepo' or 'webFetch'" });
+        return;
+      }
+      const providers = capability === 'fileRepo' ? await listFileRepoProviders() : await listWebFetchProviders();
+      res.status(200).json({ capability, providers });
+    } catch (err) {
+      const e = err as { status?: number; message?: string };
+      res.status(e.status ?? 500).json({ error: e.message ?? 'Failed to list plugin providers' });
+    }
+  }
+);
 
 // GET /settings - all settings with effective values + metadata for the UI.
 router.get(
