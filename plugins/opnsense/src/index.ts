@@ -2056,7 +2056,13 @@ async function collectAndPushDnsQueries(
   } catch {
     return; // best-effort — a dead endpoint must never break the poll
   }
-  if (rows.length === 0) return;
+  if (rows.length === 0) {
+    // The qstats endpoint is absent (older firmware) or the appliance has no
+    // logged queries at all — warn ONCE per host so operators can tell why DNS
+    // data isn't flowing, without spamming every beat.
+    warnOnce('opnsense-plugin', `dns-queries:${host}`, `unbound qstats returned no rows for ${host} — the query logger may be disabled on the appliance`);
+    return;
+  }
 
   const fresh = cursorSec === null ? rows : rows.filter((r) => r.time > cursorSec);
   if (fresh.length === 0) return;
