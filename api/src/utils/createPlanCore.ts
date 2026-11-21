@@ -73,6 +73,12 @@ async function loadCatalog(pluginId: string): Promise<CatalogEntry[]> {
   return Array.isArray(parsed) ? (parsed as CatalogEntry[]) : [];
 }
 
+/** The catalog's declared device count for one intent (undefined = no contract, 'N' = canonical fan-out). */
+export async function catalogDeviceCount(pluginId: string, actionId: string): Promise<number | 'N' | undefined> {
+  const catalog = await loadCatalog(pluginId);
+  return catalog.find((c) => c.id === actionId)?.deviceCount;
+}
+
 /** Resolves the assignment of `pluginId` on a device (explicit or primary). */
 async function resolveAssignment(deviceId: string, pluginId: string) {
   const rows = await db.query.devicePlugins.findMany({

@@ -13,10 +13,11 @@
 import axios from 'axios';
 import { randomUUID } from 'crypto';
 import { and, eq, like, ne } from 'drizzle-orm';
+import { isCanonicalIntent } from '@unm/plugin-sdk';
 import { db } from '../db';
 import * as schema from '../db/schema';
 import { emitNotification } from '../notifications';
-import { createPlanCore, PlanBuildError } from '../utils/createPlanCore';
+import { catalogDeviceCount, createPlanCore, PlanBuildError } from '../utils/createPlanCore';
 import { enqueuePlanExecution } from '../workers/planExecutor';
 import { PRESETS, buildArchive, gzipArchive, scopeForSections, storeLocalBackup } from '../backup';
 import { runTargetSync } from '../replication';
@@ -97,16 +98,10 @@ export async function executeAction(automationId: string, automationName: string
         if (res.skipped) return { ok: true, skipped: res.skipped, planIds: [] };
         if (!res.ok || !res.pluginId || !res.intentActionId) return { ok: false, error: res.error ?? 'unresolvable intent target', planIds: [] };
         try {
-          const { planId } = await createPlanCore({
-            pluginId: res.pluginId,
-            intentActionId: res.intentActionId,
-            inputs: res.inputs,
-            deviceIds: res.deviceIds,
-            createdBy: 'system',
-          });
-          // Fire-and-forget execution — the plan executor runs it sequentially.
-          await enqueuePlanExecution(planId, null);
-          return { ok: true, planIds: [planId] };
+          const plans = await buildIntentPlans(res);
+          // Fire-and-forget execution — the plan executor runs them sequentially.
+          for (const p of plans) await enqueuePlanExecution(p.planId, null);
+          return { ok: true, planIds: plans.map((p) => p.planId) };
         } catch (err) {
           const e = err as PlanBuildError;
           return { ok: false, error: e.message ?? 'Failed to create plan', planIds: [] };
@@ -246,22 +241,64 @@ export async function resolveIntentTargets(action: IntentAction, ctx: TriggerCon
     deviceIds = [u.deviceId];
   } else {
     if (!pluginId || !intentActionId) return { ok: false, error: 'pluginId and actionId are required (or use resolveFromTrigger)', pluginId: '', intentActionId: '', inputs: {}, deviceIds: [] };
-    const scoped = await resolveScopeDeviceIds(action.devices.scope);
+    const explicitIds = action.devices.deviceIds?.length ? action.devices.deviceIds : null;
+    const scope = action.devices.scope;
+    const scopeEmpty = !scope || ((scope.siteIds?.length ?? 0) === 0 && (scope.tags?.length ?? 0) === 0 && (scope.deviceIds?.length ?? 0) === 0);
     // Explicit device ids narrow/override the scope.
-    let candidates = action.devices.deviceIds?.length ? action.devices.deviceIds : scoped;
+    const candidates = explicitIds ?? (await resolveScopeDeviceIds(scope));
     // An intent can only run where this plugin is ASSIGNED — an empty scope means
     // "every device", not "every device of this plugin". Without this filter a
     // fleet-wide rule (e.g. the daily config-backup templates) would hard-fail in
     // createPlanCore on the first unassigned device in a mixed fleet.
     const assigned = await assignedDeviceIds(pluginId);
     deviceIds = candidates.filter((id) => assigned.has(id));
-    if (deviceIds.length === 0 && candidates.length > 0) {
-      return { ok: false, error: `none of the ${candidates.length} in-scope device(s) are assigned to this plugin`, pluginId, intentActionId: intentActionId!, inputs, deviceIds };
+    if (deviceIds.length === 0) {
+      // "All devices of this plugin" mode (no explicit ids, empty scope): zero
+      // assignments is a legitimate no-op, not an error — the unified daily
+      // config-backup rule must stay green on days when one of its plugins has
+      // no device yet. Explicit selections and narrowed scopes keep failing.
+      if (!explicitIds && scopeEmpty) {
+        return { ok: true, skipped: 'no devices are assigned to this plugin', pluginId, intentActionId: intentActionId!, inputs, deviceIds };
+      }
+      if (candidates.length > 0) {
+        return { ok: false, error: `none of the ${candidates.length} in-scope device(s) are assigned to this plugin`, pluginId, intentActionId: intentActionId!, inputs, deviceIds };
+      }
     }
   }
 
   if (deviceIds.length === 0) return { ok: false, error: 'No devices matched the intent scope', pluginId: pluginId ?? '', intentActionId: intentActionId ?? '', inputs, deviceIds: [] };
   return { ok: true, skipped: null, pluginId: pluginId!, intentActionId: intentActionId!, inputs, deviceIds };
+}
+
+/** One built (not yet enqueued) plan for a resolved intent target. */
+interface BuiltIntentPlan {
+  planId: string;
+  steps: Array<{ stepIndex: number; deviceId: string; actionId: string }>;
+}
+
+/**
+ * Builds the REAL plan(s) for a resolved intent target WITHOUT enqueuing them.
+ * Shared by executeAction (enqueues afterwards) and simulateAction (tears down)
+ * so both see identical plans. Single-device intents (catalog deviceCount=1,
+ * non-canonical — e.g. per-vendor config backups) FAN OUT to one plan per
+ * device, so fleet-wide rules like the unified daily config-backup work with
+ * them too; canonical fleet intents and multi-device intents stay one plan.
+ */
+async function buildIntentPlans(res: IntentResolution): Promise<BuiltIntentPlan[]> {
+  const pluginId = res.pluginId!;
+  const intentActionId = res.intentActionId!;
+  const dc = await catalogDeviceCount(pluginId, intentActionId);
+  const fanOut = dc === 1 && !isCanonicalIntent(intentActionId) && res.deviceIds.length > 1;
+  if (!fanOut) {
+    const built = await createPlanCore({ pluginId, intentActionId, inputs: res.inputs, deviceIds: res.deviceIds, createdBy: 'system' });
+    return [{ planId: built.planId, steps: built.steps }];
+  }
+  const out: BuiltIntentPlan[] = [];
+  for (const deviceId of res.deviceIds) {
+    const built = await createPlanCore({ pluginId, intentActionId, inputs: res.inputs, deviceIds: [deviceId], createdBy: 'system' });
+    out.push({ planId: built.planId, steps: built.steps });
+  }
+  return out;
 }
 
 /** One simulated action outcome (dry run). */
@@ -316,16 +353,22 @@ export async function simulateAction(automationId: string, automationName: strin
       if (res.skipped) return { id: action.id, type: 'intent', status: 'skipped', summary: `skip — ${res.skipped}`, detail: res.skipped };
       if (!res.ok || !res.pluginId || !res.intentActionId) return { id: action.id, type: 'intent', status: 'error', summary: res.error ?? 'unresolvable intent target', detail: res.error ?? null };
 
-      // Build the REAL plan (same call a real apply makes), then tear it down.
+      // Build the REAL plan(s) (same call a real apply makes), then tear them down.
       try {
-        const built = await createPlanCore({ pluginId: res.pluginId, intentActionId: res.intentActionId, inputs: res.inputs, deviceIds: res.deviceIds, createdBy: 'system' });
-        // Do NOT enqueue — a plan that is never enqueued stays inert (status 'ready').
-        const teardown = await deletePlanWithSecrets(built.planId).catch((err) => ({ ok: false as const, error: (err as Error).message }));
+        const plans = await buildIntentPlans(res);
+        let teardownError: string | null = null;
+        for (const p of plans) {
+          // Do NOT enqueue — a plan that is never enqueued stays inert (status 'ready').
+          const teardown = await deletePlanWithSecrets(p.planId).catch((err) => ({ ok: false as const, error: (err as Error).message }));
+          if (!teardown.ok && !teardownError) teardownError = `plan previewed but cleanup failed: ${teardown.error}`;
+        }
+        let stepIndex = 0;
+        const steps = plans.flatMap((p) => p.steps.map((s) => ({ ...s, stepIndex: stepIndex++ })));
         return {
           id: action.id, type: 'intent', status: 'would-run',
-          summary: `apply ${res.intentActionId} on ${res.deviceIds.length} device(s)`,
-          plan: { pluginId: res.pluginId, actionId: res.intentActionId, deviceIds: res.deviceIds, steps: built.steps },
-          detail: teardown.ok ? null : `plan previewed but cleanup failed: ${teardown.error}`,
+          summary: `apply ${res.intentActionId} on ${res.deviceIds.length} device(s)` + (plans.length > 1 ? ` (${plans.length} single-device plans)` : ''),
+          plan: { pluginId: res.pluginId, actionId: res.intentActionId, deviceIds: res.deviceIds, steps },
+          detail: teardownError,
         };
       } catch (err) {
         const e = err as PlanBuildError;

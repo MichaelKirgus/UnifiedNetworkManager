@@ -46,8 +46,20 @@ function newSecurityFindingTrigger(): AutomationTriggerBlock {
   return { id: newId('t'), type: 'securityFinding' };
 }
 
+/** True when a DeviceScope carries any narrowing (site / tag / explicit ids). */
+function scopeHasContent(s?: { siteIds?: string[]; tags?: string[]; deviceIds?: string[] }): boolean {
+  return Boolean(s && ((s.siteIds?.length ?? 0) > 0 || (s.tags?.length ?? 0) > 0 || (s.deviceIds?.length ?? 0) > 0));
+}
+
+/** True when an intent action targets EVERY device assigned to its plugin — no explicit ids and an empty scope (the engine's "all devices" mode, incl. future assignments). */
+function intentTargetsAll(a: Extract<AutomationActionBlock, { type: 'intent' }>): boolean {
+  return a.devices.all === true || ((a.devices.deviceIds ?? []).length === 0 && !scopeHasContent(a.devices.scope));
+}
+
 function newIntentAction(): AutomationActionBlock {
-  return { id: newId('a'), type: 'intent', pluginId: '', actionId: '', devices: { deviceIds: [] }, input: {} };
+  // Default to "all devices of this plugin" — fleet-wide rules (e.g. the daily
+  // config-backup templates) must not force per-device checkbox selection.
+  return { id: newId('a'), type: 'intent', pluginId: '', actionId: '', devices: { all: true }, input: {} };
 }
 function newWebhookAction(): AutomationActionBlock {
   return { id: newId('a'), type: 'webhook', url: '', method: 'POST' };
@@ -144,7 +156,9 @@ function validateDraft(draft: AutomationDraft): string[] {
         if (a.resolveFromTrigger !== 'update') {
           if (!a.pluginId) errors.push(`${where}: pick a plugin`);
           else if (!a.actionId) errors.push(`${where}: pick an action`);
-          else if ((a.devices.deviceIds ?? []).length === 0) errors.push(`${where}: select at least one device`);
+          // "All devices" mode (empty scope, no explicit ids) is valid — the engine
+          // targets every assigned device and skips as a no-op when none exist yet.
+          else if ((a.devices.deviceIds ?? []).length === 0 && !intentTargetsAll(a) && !scopeHasContent(a.devices.scope)) errors.push(`${where}: select at least one device or enable "all devices"`);
         }
         break;
       }
@@ -689,6 +703,7 @@ function IntentActionEditor({ block, onChange, plugins }: { block: Extract<Autom
     [devicesQuery.data, block.pluginId],
   );
   const selectedIds = block.devices.deviceIds ?? [];
+  const isAll = intentTargetsAll(block);
 
   function toggleDevice(id: string) {
     const next = selectedIds.includes(id) ? selectedIds.filter((d) => d !== id) : [...selectedIds, id];
@@ -701,7 +716,7 @@ function IntentActionEditor({ block, onChange, plugins }: { block: Extract<Autom
     <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
       <div>
         <span className={labelCls}>Plugin</span>
-        <select className={`${inputCls} disabled:opacity-50`} value={block.pluginId ?? ''} onChange={(e) => onChange({ ...block, pluginId: e.target.value || undefined, actionId: '', input: {}, devices: { deviceIds: [] } })} disabled={fromTrigger}>
+        <select className={`${inputCls} disabled:opacity-50`} value={block.pluginId ?? ''} onChange={(e) => onChange({ ...block, pluginId: e.target.value || undefined, actionId: '', input: {}, devices: { all: true } })} disabled={fromTrigger}>
           <option value="" disabled>Select a plugin</option>
           {plugins.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
         </select>
@@ -734,18 +749,28 @@ function IntentActionEditor({ block, onChange, plugins }: { block: Extract<Autom
         <span className={labelCls}>Target devices ({eligibleDevices.length} with this plugin)</span>
         {fromTrigger ? (
           <p className={hintCls}>Ignored in trigger-resolved mode — the firing row's own device is always the target.</p>
-        ) : eligibleDevices.length === 0 ? (
-          <p className={hintCls}>{block.pluginId ? 'No device has this plugin assigned yet.' : 'Pick a plugin first.'}</p>
         ) : (
-          <div className="max-h-40 overflow-y-auto rounded-md border border-border p-2">
-            {eligibleDevices.map((d) => (
-              <label key={d.id} className="flex items-center gap-2 py-0.5 text-sm">
-                <input type="checkbox" checked={selectedIds.includes(d.id)} onChange={() => toggleDevice(d.id)} />
-                <span>{d.name}</span>
-                <span className="text-xs text-faint">{d.managementAddress}</span>
-              </label>
-            ))}
-          </div>
+          <>
+            <label className="mb-2 flex items-center gap-2 text-sm text-secondary">
+              <input type="checkbox" checked={isAll} onChange={(e) => onChange({ ...block, devices: e.target.checked ? { all: true } : { deviceIds: [] } })} />
+              All devices with this plugin (incl. future assignments)
+            </label>
+            {isAll ? (
+              <p className={hintCls}>Targets every device currently assigned to this plugin plus any assigned later — no per-device selection needed.</p>
+            ) : eligibleDevices.length === 0 ? (
+              <p className={hintCls}>{block.pluginId ? 'No device has this plugin assigned yet.' : 'Pick a plugin first.'}</p>
+            ) : (
+              <div className="max-h-40 overflow-y-auto rounded-md border border-border p-2">
+                {eligibleDevices.map((d) => (
+                  <label key={d.id} className="flex items-center gap-2 py-0.5 text-sm">
+                    <input type="checkbox" checked={selectedIds.includes(d.id)} onChange={() => toggleDevice(d.id)} />
+                    <span>{d.name}</span>
+                    <span className="text-xs text-faint">{d.managementAddress}</span>
+                  </label>
+                ))}
+              </div>
+            )}
+          </>
         )}
       </div>
       <div className="flex items-center gap-4 sm:col-span-2">

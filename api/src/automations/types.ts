@@ -243,7 +243,13 @@ export interface IntentAction {
   pluginId?: string;
   /** Catalog action id (plugins.actionDescriptors). Required unless resolveFromTrigger fills it. */
   actionId?: string;
-  devices: { scope?: DeviceScope; deviceIds?: string[] };
+  /**
+   * Target selection. `deviceIds` narrow/override `scope`; an empty scope with no
+   * explicit ids targets EVERY device assigned to the plugin (incl. future
+   * assignments) and is a no-op skip when none are assigned yet. `all` is a UI
+   * hint for that "all devices" mode — the engine derives it from the shape.
+   */
+  devices: { scope?: DeviceScope; deviceIds?: string[]; all?: boolean };
   input?: Record<string, unknown>;
   /** Fill pluginId/actionId/input from the firing update row's apply path. */
   resolveFromTrigger?: 'update';

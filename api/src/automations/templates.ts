@@ -5,7 +5,12 @@
  *  - BUILT-IN templates owned by the API (below) — generic update-automation
  *    recipes that work with any plugin whose device_updates rows carry an apply
  *    path (intent actions use resolveFromTrigger='update', so no per-plugin
- *    action ids are hardcoded).
+ *    action ids are hardcoded). Plus ONE synthesized built-in: "Daily config
+ *    backup — all devices", assembled at list time from every registered
+ *    plugin that advertises a `daily-config-backup` template, so a single rule
+ *    covers the whole fleet (one intent action per backup-capable plugin, each
+ *    targeting ALL of its assigned devices — new plugins and newly assigned
+ *    devices join automatically).
  *  - PLUGIN-advertised templates: plugins declare `automationTemplates[]` in
  *    /discover; discovery persists them on the plugin row and they are served
  *    here alongside the built-ins. Malformed entries (bad shape or a draft that
@@ -186,12 +191,18 @@ export function normalizeAutomationTemplates(raw: unknown): AutomationTemplate[]
 // ── Catalog assembly ──────────────────────────────────────────────────────────
 
 /**
- * The full template catalog: built-ins first, then plugin-advertised templates
+ * The full template catalog: built-ins first (including the synthesized
+ * all-devices config-backup rule), then plugin-advertised templates
  * (alphabetical by plugin name). Plugin rows with a stored list that fails to
  * parse contribute nothing.
  */
 export async function listAutomationTemplates(): Promise<ServedTemplate[]> {
   const out: ServedTemplate[] = BUILTIN_TEMPLATES.map((t) => ({ ...t, source: 'builtin', sourceName: 'Built-in' }));
+
+  // Source material for the synthesized unified backup rule — one entry per
+  // registered plugin advertising a `daily-config-backup` template.
+  const backupActions: Array<{ pluginId: string; actionId: string; input?: Record<string, unknown>; pluginName: string }> = [];
+  const seenPlugins = new Set<string>();
 
   const rows = await db.select({ id: schema.plugins.id, name: schema.plugins.name, automationTemplates: schema.plugins.automationTemplates }).from(schema.plugins);
   for (const row of rows) {
@@ -204,7 +215,46 @@ export async function listAutomationTemplates(): Promise<ServedTemplate[]> {
     }
     const normalized = normalizeAutomationTemplates(parsed);
     if (!normalized) continue;
-    for (const t of normalized) out.push({ ...t, source: row.id, sourceName: row.name });
+    for (const t of normalized) {
+      out.push({ ...t, source: row.id, sourceName: row.name });
+
+      // Source material for the unified rule — only the per-plugin daily backup recipe.
+      if (t.id !== 'daily-config-backup') continue;
+      // Defensive extraction — the entry already passed validateAutomationDraft,
+      // but the draft is opaque JSON, so verify the shape before trusting it.
+      const a = (t.draft.actions as ActionBlock[])[0];
+      if (!seenPlugins.has(row.id) && a && a.type === 'intent' && typeof a.pluginId === 'string' && a.pluginId !== '' && typeof a.actionId === 'string' && a.actionId !== '') {
+        seenPlugins.add(row.id);
+        backupActions.push({ pluginId: a.pluginId, actionId: a.actionId, input: a.input ?? undefined, pluginName: row.name });
+      }
+    }
+  }
+
+  if (backupActions.length > 0) {
+    out.push({
+      id: 'builtin-daily-config-backup-all',
+      name: 'Daily config backup — all devices (03:00)',
+      description:
+        `One rule that backs up the configuration of every device assigned to any plugin with a config-backup action, daily at 03:00. Currently covers: ${backupActions.map((b) => b.pluginName).join(', ')}. ` +
+        'New plugins advertising this capability and newly assigned devices are picked up automatically — no per-plugin rules or device selection needed.',
+      source: 'builtin',
+      sourceName: 'Built-in',
+      draft: {
+        name: 'Daily config backup — all devices',
+        description: 'Every device of every backup-capable plugin (incl. future assignments), daily at 03:00.',
+        enabled: true,
+        cooldownSec: 3600,
+        triggers: [{ id: 't-sched', type: 'schedule', schedule: { kind: 'dailyAt', time: '03:00' } }],
+        actions: backupActions.map((b, i) => ({
+          id: `a-${i}`,
+          type: 'intent',
+          pluginId: b.pluginId,
+          actionId: b.actionId,
+          devices: { all: true },
+          ...(b.input ? { input: b.input } : {}),
+        })),
+      },
+    });
   }
 
   // Built-ins stay first; plugin templates sort by source name then template name.

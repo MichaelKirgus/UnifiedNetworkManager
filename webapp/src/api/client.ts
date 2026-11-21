@@ -3996,7 +3996,8 @@ export interface AutomationIntentAction {
   pluginId?: string;
   /** Catalog action id (plugins.actionDescriptors). Required unless resolveFromTrigger fills it. */
   actionId?: string;
-  devices: { scope?: AutomationDeviceScope; deviceIds?: string[] };
+  /** Empty scope + no explicit ids = every device assigned to the plugin (incl. future); `all` is a UI hint for that mode. */
+  devices: { scope?: AutomationDeviceScope; deviceIds?: string[]; all?: boolean };
   input?: Record<string, unknown>;
   /** Fill pluginId/actionId/input from the firing update row's apply path (updateAvailable triggers only). */
   resolveFromTrigger?: 'update';

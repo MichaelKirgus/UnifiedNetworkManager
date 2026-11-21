@@ -80,7 +80,10 @@ function triggerSummary(t: AutomationTriggerBlock): string {
 function actionSummary(a: AutomationActionBlock): string {
   switch (a.type) {
     case 'intent': {
-      const what = a.resolveFromTrigger === 'update' ? 'apply update (from trigger)' : `${a.actionId ?? '?'} on ${a.devices.deviceIds?.length ?? 'scope'} device(s)`;
+      const s = a.devices.scope;
+      const scopeEmpty = !s || ((s.siteIds?.length ?? 0) === 0 && (s.tags?.length ?? 0) === 0 && (s.deviceIds?.length ?? 0) === 0);
+      const allMode = a.devices.all === true || (((a.devices.deviceIds ?? []).length === 0) && scopeEmpty);
+      const what = a.resolveFromTrigger === 'update' ? 'apply update (from trigger)' : `${a.actionId ?? '?'} on ${allMode ? 'ALL assigned devices' : `${a.devices.deviceIds?.length ?? 'scope'} device(s)`}`;
       return a.requireNoReboot ? `${what} (no-reboot only)` : what;
     }
     case 'webhook':

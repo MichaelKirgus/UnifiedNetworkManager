@@ -15491,7 +15491,11 @@ components:
         Creates + enqueues a plan (the same path the webapp's CreatePlan dialog
         uses). `pluginId`/`actionId` are required unless `resolveFromTrigger`
         is 'update', in which case they are filled at fire time from the firing
-        update row's apply path.
+        update row's apply path. When an automation fires this against multiple
+        devices and the catalog declares deviceCount=1 (non-canonical intent,
+        e.g. per-vendor config backups), the engine fans out to one plan per
+        device; an empty scope with no explicit ids targets every assigned
+        device (incl. future assignments) and is a no-op skip when none exist.
       properties:
         id: { type: string }
         type: { type: string, enum: [intent] }
@@ -15502,6 +15506,7 @@ components:
           properties:
             scope: { $ref: '#/components/schemas/AutomationDeviceScope' }
             deviceIds: { type: array, items: { type: string }, description: "Explicit ids narrow/override the scope" }
+            all: { type: boolean, description: "UI hint for 'all devices of this plugin (incl. future assignments)' mode — an empty scope with no explicit ids already means that; zero assigned devices is a no-op skip, not an error" }
         input: { type: object, additionalProperties: true, description: "Intent payload (validated against the catalog inputSchema in the UI). With resolveFromTrigger='update' it overrides the row's pre-filled applyInput." }
         resolveFromTrigger: { type: string, enum: [update], description: "Fill pluginId/actionId/input from the firing update row's apply path (updateAvailable triggers only)" }
         requireNoReboot: { type: boolean, default: false, description: "Skip execution when the firing update row requires a reboot" }
