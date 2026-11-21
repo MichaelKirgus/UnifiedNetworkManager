@@ -2,6 +2,8 @@ import { Fragment, MouseEvent as ReactMouseEvent, ReactNode, useCallback, useEff
 import clsx from 'clsx';
 import { ChevronDown, ChevronLeft, ChevronRight, Download, Filter, RefreshCw, RotateCcw, Search, SlidersHorizontal, X } from 'lucide-react';
 import { useTablePrefs } from './useTablePrefs';
+import { ALL_PAGES } from './useServerTable';
+import { useTablePageSizeOptions } from '../hooks/useTablePageSizes';
 
 /** Context handed to `expandable.renderChild` for one child row. The page uses
  * this to build a FULL `<tr>` (one cell per visible column) so expanded children
@@ -173,6 +175,9 @@ interface DataTableProps<T> {
   /** Parent-driven search text (e.g. drill-down from a grouped row into the raw list).
    * Synced into the search box whenever it changes; pass '' to clear. */
   externalSearch?: string | null;
+  /** Hide the toolbar quick-search input (default: shown). Use when the page
+   * carries its own filter-bar search that drives `onSearch`/`externalSearch`. */
+  showSearch?: boolean;
   /** Row click handler — adds cursor-pointer + onClick to data rows. */
   onRowClick?: (row: T) => void;
 }
@@ -298,10 +303,14 @@ export function DataTable<T>({
   serverPagination,
   onSearch,
   externalSearch,
+  showSearch = true,
   onRowClick,
   isFetching = false,
 }: DataTableProps<T>) {
   const { prefs, setPrefs, reset } = useTablePrefs(storageKey);
+  // Rows-per-page choices for server mode — the global `tablePageSizeOptions`
+  // setting (via /auth/me); an explicit serverPagination.pageSizeOptions wins.
+  const tablePageSizeOptions = useTablePageSizeOptions();
   const [menuOpen, setMenuOpen] = useState(false); // column visibility picker
   const [exportOpen, setExportOpen] = useState(false); // export dropdown
   const menuRef = useRef<HTMLDivElement>(null);
@@ -684,6 +693,7 @@ export function DataTable<T>({
     <div className={clsx('flex flex-col rounded-md border border-border bg-card shadow-sm', fillHeight ? 'h-full' : 'max-h-[calc(100vh-200px)]')}>
       {/* Toolbar: quick search + filter toggle | column picker + export */}
       <div className="relative flex shrink-0 flex-wrap items-center gap-2 border-b border-border px-3 py-1.5" ref={menuRef}>
+        {showSearch && (
         <div className="relative min-w-[180px] flex-1 sm:max-w-xs">
           <Search className="pointer-events-none absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-faint" />
           <input
@@ -695,6 +705,7 @@ export function DataTable<T>({
             className="w-full rounded-md border border-border py-1 pl-7 pr-2 text-xs text-secondary focus:border-focus-ring focus:outline-none"
           />
         </div>
+        )}
 
         {/* Per-column filters — client-side by default; in server-pagination mode
             they appear only when the parent wired onFiltersChange (applied on the
@@ -1162,7 +1173,7 @@ export function DataTable<T>({
                   aria-label="Rows per page"
                   className="rounded-md border border-border bg-background px-1.5 py-0.5 text-xs text-secondary focus:border-focus-ring focus:outline-none"
                 >
-                  {(serverPagination.pageSizeOptions ?? [25, 50, 100]).map((n) => (
+                  {(serverPagination.pageSizeOptions ?? [...tablePageSizeOptions, ALL_PAGES]).map((n) => (
                     <option key={n} value={n}>{n === 0 ? 'All' : n}</option>
                   ))}
                 </select>

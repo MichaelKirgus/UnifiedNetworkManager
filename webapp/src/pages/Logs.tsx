@@ -1,9 +1,10 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { Layout } from '../components/Layout';
 import { DataTable, DataTableColumn } from '../components/DataTable';
 import { DeviceChip } from '../components/DeviceChip';
 import { TimeRangeFilter, resolveTimeRangeIso, type TimeRangeValue } from '../components/TimeRangeFilter';
+import { ALL_PAGES, useServerTable } from '../components/useServerTable';
 import { api, LogEntry } from '../api/client';
 import { useTimeFormat } from '../utils/time';
 
@@ -34,31 +35,49 @@ export default function Logs() {
   const [level, setLevel] = useState('');
   const [pluginId, setPluginId] = useState('');
   const [deviceId, setDeviceId] = useState('');
-  const [search, setSearch] = useState('');
+  // Filter-bar search draft — debounced into the table's committed `q` below.
+  const [searchDraft, setSearchDraft] = useState('');
   const [range, setRange] = useState<TimeRangeValue>('24h');
 
   // Options for the filter selects.
   const pluginsQuery = useQuery({ queryKey: ['plugins'], queryFn: api.plugins });
   const devicesQuery = useQuery({ queryKey: ['devices'], queryFn: api.devices });
 
-  // The `from` bound is computed at fetch time so "last hour" keeps sliding as
-  // the page refetches. Newest-first, capped by the API (default 500 rows).
-  const logsQuery = useQuery({
-    queryKey: ['logs', level, pluginId, deviceId, search, range],
-    queryFn: () => {
+  // Page-owned filters; any change resets the table to page 1 (hook behavior).
+  const extra = useMemo(() => ({ level, pluginId, deviceId, range }), [level, pluginId, deviceId, range]);
+
+  // Server-side pagination — rows are fetched per page by the API. The `from`
+  // bound is computed at fetch time so "last hour" keeps sliding on refetch.
+  const table = useServerTable<{ level: string; pluginId: string; deviceId: string; range: TimeRangeValue }, LogEntry>({
+    fetcher: async (p) => {
       // Relative presets slide with the current time; custom ranges are absolute.
-      const { from, to } = resolveTimeRangeIso(range);
-      return api.logs({
-        level: (level || undefined) as LogEntry['level'] | undefined,
-        pluginId: pluginId || undefined,
-        deviceId: deviceId || undefined,
-        search: search.trim() || undefined,
+      const { from, to } = resolveTimeRangeIso(p.range);
+      const res = await api.logs({
+        level: (p.level || undefined) as LogEntry['level'] | undefined,
+        pluginId: p.pluginId || undefined,
+        deviceId: p.deviceId || undefined,
+        search: p.q,
         from,
         to,
+        page: p.pageSize === ALL_PAGES ? undefined : p.page,
+        pageSize: p.pageSize === ALL_PAGES ? undefined : p.pageSize,
+        all: p.pageSize === ALL_PAGES || undefined,
+        sort: p.sort?.key === 'emittedAt' ? 'emittedAt' : undefined,
+        dir: p.sort?.dir,
       });
+      // Paged mode always returns the envelope; guard for safety.
+      return Array.isArray(res) ? { rows: res, total: res.length } : { rows: res.rows, total: res.total };
     },
-    refetchInterval: 30_000,
+    extra,
+    storageKey: 'logs',
   });
+
+  // Debounce the filter-bar search into the committed server query (300 ms).
+  useEffect(() => {
+    const t = setTimeout(() => table.setQ(searchDraft.trim()), 300);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchDraft]);
 
   const plugins = useMemo(() => (pluginsQuery.data ?? []).slice().sort((a, b) => a.name.localeCompare(b.name)), [pluginsQuery.data]);
   const devices = useMemo(() => (devicesQuery.data ?? []).slice().sort((a, b) => a.name.localeCompare(b.name)), [devicesQuery.data]);
@@ -86,12 +105,14 @@ export default function Logs() {
       header: 'Level',
       key: 'level',
       width: 90,
+      sortable: false, // server only sorts by emittedAt
       render: (row) => <LevelBadge level={row.level} />,
     },
     {
       header: 'Plugin',
       key: 'pluginName',
       width: 200,
+      sortable: false,
       exportValue: (row) => row.pluginName ?? row.pluginId,
       render: (row) => (
         <span className="text-sm text-secondary" title={row.pluginId}>
@@ -103,6 +124,7 @@ export default function Logs() {
       header: 'Device',
       key: 'deviceName',
       width: 240,
+      sortable: false,
       exportValue: (row) => row.deviceName ?? '',
       render: (row) =>
         row.deviceId ? (
@@ -115,6 +137,7 @@ export default function Logs() {
       header: 'Message',
       key: 'message',
       width: 520,
+      sortable: false,
       render: (row) => (
         <div className="flex flex-col gap-1">
           <span className="break-words text-sm text-foreground">{row.message}</span>
@@ -183,27 +206,37 @@ export default function Logs() {
             type="text"
             className="w-full rounded-md border border-border px-2.5 py-1.5 text-sm"
             placeholder="Message or context…"
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
+            value={searchDraft}
+            onChange={(e) => setSearchDraft(e.target.value)}
           />
         </div>
       </div>
 
-      {logsQuery.isLoading && <p className="text-sm text-muted-foreground">Loading logs...</p>}
-      {logsQuery.isError && (
-        <p className="text-sm text-danger-fg">Failed to load logs: {(logsQuery.error as Error).message}</p>
+      {table.isError && (
+        <p className="text-sm text-danger-fg">Failed to load logs: {table.error?.message}</p>
       )}
-      {logsQuery.data && (
-        <DataTable
-          columns={columns}
-          rows={logsQuery.data}
-          rowKey={(row) => row.id}
-          storageKey="logs"
-          autoRefresh={{ intervalMs: 30_000, queries: [logsQuery] }}
-          searchPlaceholder="Search logs…"
-          emptyMessage="No log entries in this range yet — plugins ship failures and state changes here (poll errors, config/plan results)."
-        />
-      )}
+      <DataTable
+        columns={columns}
+        rows={table.data?.rows ?? []}
+        rowKey={(row) => row.id}
+        storageKey="logs"
+        isFetching={table.isFetching}
+        showSearch={false} // the filter bar above owns search (debounced into table.q)
+        onSearch={table.setQ}
+        externalSearch={table.q || null}
+        serverPagination={{
+          total: table.data?.total ?? 0,
+          page: table.page,
+          pageSize: table.pageSize,
+          onPageChange: table.setPage,
+          onPageSizeChange: table.setPageSize,
+          // pageSizeOptions omitted → global `tablePageSizeOptions` setting + built-in "All".
+          sort: table.sort,
+          onSortChange: table.setSort,
+        }}
+        autoRefresh={{ intervalMs: 30_000, queries: [table] }}
+        emptyMessage="No log entries in this range yet — plugins ship failures and state changes here (poll errors, config/plan results)."
+      />
     </Layout>
   );
 }

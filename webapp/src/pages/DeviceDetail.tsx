@@ -6,6 +6,7 @@ import { Copy, FolderOpen, Power, Plus, RefreshCw, Settings, Settings2, Star, Te
 import { DialogShell } from '../components/DialogShell';
 import { Layout } from '../components/Layout';
 import { DataTable, DataTableColumn } from '../components/DataTable';
+import { ALL_PAGES, useServerTable } from '../components/useServerTable';
 import { TimeRangeFilter, resolveTimeRangeIso, type TimeRangeValue } from '../components/TimeRangeFilter';
 import { ConsoleDialog } from '../components/ConsoleDialog';
 import { FileBrowserDialog } from '../components/FileBrowserDialog';
@@ -144,24 +145,36 @@ export default function DeviceDetail() {
   });
 
   // Per-device plugin log entries (gated by logs:read — logs can carry critical
-  // details). Newest first; the API caps at 500 rows, which is plenty for a
-  // single device's recent activity. Time range defaults to the last 24 hours.
+  // details). Server-side pagination; time range defaults to the last 24 hours.
   const [logLevelFilter, setLogLevelFilter] = useState('');
   const [logRange, setLogRange] = useState<TimeRangeValue>('24h');
-  const logsQuery = useQuery({
-    queryKey: ['deviceLogs', deviceId, logLevelFilter, logRange],
-    queryFn: () => {
+  const logsEnabled = Boolean(deviceId) && can('logs:read');
+  const logExtra = useMemo(
+    () => ({ deviceId: (deviceId as string) || '', level: logLevelFilter, range: logRange }),
+    [deviceId, logLevelFilter, logRange]
+  );
+  const logsTable = useServerTable<{ deviceId: string; level: string; range: TimeRangeValue }, LogEntry>({
+    fetcher: async (p) => {
       // Relative presets slide with the current time; custom ranges are absolute.
-      const { from, to } = resolveTimeRangeIso(logRange);
-      return api.logs({
-        deviceId: deviceId as string,
-        level: (logLevelFilter || undefined) as LogEntry['level'] | undefined,
+      const { from, to } = resolveTimeRangeIso(p.range);
+      const res = await api.logs({
+        deviceId: p.deviceId || undefined,
+        level: (p.level || undefined) as LogEntry['level'] | undefined,
         from,
         to,
+        page: p.pageSize === ALL_PAGES ? undefined : p.page,
+        pageSize: p.pageSize === ALL_PAGES ? undefined : p.pageSize,
+        all: p.pageSize === ALL_PAGES || undefined,
+        sort: p.sort?.key === 'emittedAt' ? 'emittedAt' : undefined,
+        dir: p.sort?.dir,
       });
+      // Paged mode always returns the envelope; guard for safety.
+      return Array.isArray(res) ? { rows: res, total: res.length } : { rows: res.rows, total: res.total };
     },
-    enabled: Boolean(deviceId) && can('logs:read'),
-    refetchInterval: 15_000,
+    extra: logExtra,
+    storageKey: 'device-detail-logs',
+    refetchIntervalMs: 15_000,
+    enabled: logsEnabled,
   });
 
   // Rows whose structured context is currently expanded (by row id).
@@ -189,12 +202,14 @@ export default function DeviceDetail() {
       header: 'Level',
       key: 'level',
       width: 90,
+      sortable: false, // server only sorts by emittedAt
       render: (row) => <LogLevelBadge level={row.level} />,
     },
     {
       header: 'Plugin',
       key: 'pluginName',
       width: 200,
+      sortable: false,
       exportValue: (row) => row.pluginName ?? row.pluginId,
       render: (row) => (
         <span className="text-sm text-secondary" title={row.pluginId}>
@@ -206,6 +221,7 @@ export default function DeviceDetail() {
       header: 'Message',
       key: 'message',
       width: 520,
+      sortable: false,
       render: (row) => (
         <div className="flex flex-col gap-1">
           <span className="break-words text-sm text-foreground">{row.message}</span>
@@ -844,21 +860,31 @@ export default function DeviceDetail() {
             </div>
           </div>
 
-          {logsQuery.isLoading && <p className="text-sm text-muted-foreground">Loading logs...</p>}
-          {logsQuery.isError && (
-            <p className="text-sm text-danger-fg">Failed to load logs: {(logsQuery.error as Error).message}</p>
+          {logsTable.isError && (
+            <p className="text-sm text-danger-fg">Failed to load logs: {logsTable.error?.message}</p>
           )}
-          {logsQuery.data && (
-            <DataTable<LogEntry>
-              columns={logColumns}
-              rows={logsQuery.data}
-              rowKey={(row) => row.id}
-              storageKey="device-detail-logs"
-              autoRefresh={{ intervalMs: 15_000, queries: [logsQuery] }}
-              searchPlaceholder="Search logs…"
-              emptyMessage="No log entries for this device in the selected range — plugins ship failures and state changes here."
-            />
-          )}
+          <DataTable<LogEntry>
+            columns={logColumns}
+            rows={logsTable.data?.rows ?? []}
+            rowKey={(row) => row.id}
+            storageKey="device-detail-logs"
+            isFetching={logsTable.isFetching}
+            onSearch={logsTable.setQ}
+            externalSearch={logsTable.q || null}
+            serverPagination={{
+              total: logsTable.data?.total ?? 0,
+              page: logsTable.page,
+              pageSize: logsTable.pageSize,
+              onPageChange: logsTable.setPage,
+              onPageSizeChange: logsTable.setPageSize,
+              // pageSizeOptions omitted → global `tablePageSizeOptions` setting + built-in "All".
+              sort: logsTable.sort,
+              onSortChange: logsTable.setSort,
+            }}
+            autoRefresh={{ intervalMs: 15_000, queries: [logsTable] }}
+            searchPlaceholder="Search logs…"
+            emptyMessage="No log entries for this device in the selected range — plugins ship failures and state changes here."
+          />
         </section>
       )}
 

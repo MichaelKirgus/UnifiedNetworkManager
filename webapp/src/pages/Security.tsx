@@ -637,7 +637,7 @@ export default function Security() {
                 pageSize: pkgTable.pageSize,
                 onPageChange: pkgTable.setPage,
                 onPageSizeChange: pkgTable.setPageSize,
-                pageSizeOptions: [25, 50, 100, ALL_PAGES], // "All" = unpaginated (all=true)
+                // pageSizeOptions omitted → global `tablePageSizeOptions` setting + built-in "All".
                 filters: pkgTable.filters,
                 onFiltersChange: pkgTable.setFilters,
                 sort: pkgTable.sort,
@@ -672,7 +672,7 @@ export default function Security() {
               pageSize: vulnTable.pageSize,
               onPageChange: vulnTable.setPage,
               onPageSizeChange: vulnTable.setPageSize,
-              pageSizeOptions: [25, 50, 100, ALL_PAGES], // "All" = unpaginated (all=true)
+              // pageSizeOptions omitted → global `tablePageSizeOptions` setting + built-in "All".
               filters: vulnTable.filters,
               onFiltersChange: vulnTable.setFilters,
               sort: vulnTable.sort,

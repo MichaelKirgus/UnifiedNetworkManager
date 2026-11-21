@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { keepPreviousData, useQuery } from '@tanstack/react-query';
+import { useTablePageSizeOptions } from '../hooks/useTablePageSizes';
 
 /** Sort state for server-paginated tables. `key` is a COLUMN KEY — the owning page
  * maps it to an API sort field inside its fetcher (DataTable never sees API names). */
@@ -58,9 +59,15 @@ function loadPersisted(storageKey?: string): PersistedPrefs {
  * Non-breaking by design: pages that don't use this keep their hand-rolled state;
  * DataTable's client-side pipeline is untouched for non-server tables.
  */
-export function useServerTable<TExtra extends object, TRow>(opts: {
+export function useServerTable<
+  TExtra extends object,
+  TRow,
+  // The fetcher may return extra fields alongside rows/total (e.g. a summary
+  // block) — they pass through to `data` untouched.
+  TData extends { rows: TRow[]; total: number } = { rows: TRow[]; total: number },
+>(opts: {
   /** Fetch one page given the full param set (extra + page/pageSize/q/sort). */
-  fetcher: (params: ServerTableParams<TExtra>) => Promise<{ rows: TRow[]; total: number }>;
+  fetcher: (params: ServerTableParams<TExtra>) => Promise<TData>;
   /** Caller-controlled filter params. Pass a STABLE object (useMemo) — its JSON
    * is the change-detection key for the page-1 reset and the query cache. */
   extra: TExtra;
@@ -68,8 +75,10 @@ export function useServerTable<TExtra extends object, TRow>(opts: {
   storageKey?: string;
   /** Background refetch cadence (default 30 s). `false` disables it. */
   refetchIntervalMs?: number | false;
+  /** Gate the fetch (e.g. a permission check) — default true. */
+  enabled?: boolean;
 }): {
-  data: { rows: TRow[]; total: number } | undefined;
+  data: TData | undefined;
   isFetching: boolean;
   isError: boolean;
   error: Error | null;
@@ -99,12 +108,25 @@ export function useServerTable<TExtra extends object, TRow>(opts: {
   const persisted = useRef<PersistedPrefs>(loadPersisted(opts.storageKey)).current;
 
   const [page, setPageRaw] = useState(1);
+  // Initial rows-per-page: the persisted preference wins; otherwise the
+  // configured default (FIRST option of the global `tablePageSizeOptions`
+  // setting) is adopted once /auth/me has loaded — see the effect below.
   const [pageSize, setPageSizeRaw] = useState(persisted.pageSize ?? 50);
   const [q, setQRaw] = useState('');
   const [sort, setSortRaw] = useState<ServerTableSort | null>(persisted.sort ?? null);
   // Committed per-column filters (COLUMN KEY → text). Session-only like `q` —
   // not persisted: a reload starts with a clean table.
   const [filters, setFiltersRaw] = useState<Record<string, string>>({});
+
+  // Adopt the configured default page size once settings load — only when there
+  // is no persisted preference and the user hasn't touched the control yet.
+  const tablePageSizeOptions = useTablePageSizeOptions();
+  const pageSizeTouched = useRef(false);
+  useEffect(() => {
+    if (persisted.pageSize !== undefined || pageSizeTouched.current) return;
+    const first = tablePageSizeOptions[0];
+    if (first && first !== pageSize) setPageSizeRaw(first);
+  }, [tablePageSizeOptions, persisted.pageSize, pageSize]);
 
   // Any caller-filter change goes back to page 1 (search/sort/filter resets are inline below).
   const extraKey = JSON.stringify(opts.extra);
@@ -130,6 +152,7 @@ export function useServerTable<TExtra extends object, TRow>(opts: {
     setPageRaw(1);
   }
   function setPageSize(n: number) {
+    pageSizeTouched.current = true; // the user chose — stop adopting the configured default
     setPageSizeRaw(n);
     setPageRaw(1);
   }
@@ -142,6 +165,7 @@ export function useServerTable<TExtra extends object, TRow>(opts: {
     // Keep the previous page visible while a new one loads — no flash to empty.
     placeholderData: keepPreviousData,
     refetchInterval: opts.refetchIntervalMs === false ? false : (opts.refetchIntervalMs ?? 30_000),
+    enabled: opts.enabled ?? true,
   });
 
   // Clamp the page when the filtered total shrinks under it (e.g. advisories pruned).

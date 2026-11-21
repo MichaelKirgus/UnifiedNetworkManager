@@ -1,5 +1,6 @@
 import { db, pool } from './db';
 import { parseCidrList } from './utils/ipClassification';
+import { parseTablePageSizeOptions } from './utils/pagination';
 
 /**
  * Central registry of runtime-tunable system settings (the Settings page).
@@ -145,6 +146,22 @@ export const SETTING_DESCRIPTORS: SettingDescriptor[] = [
     maxLength: 128,
     help:
       'Full plugin id of the file-repo instance that receives scheduled backups — only used when autoBackupDestination is "repo". Empty = local volume.',
+  },
+
+  // Table pagination (server-paginated tables in the webapp — Logs, Firewall
+  // Events, CVEs, …). The effective list is also served to every authenticated
+  // user via GET /auth/me (`tablePageSizeOptions`) so it needs no system:read.
+  {
+    key: 'tablePageSizeOptions',
+    label: 'Table page-size options',
+    type: 'string',
+    category: 'Tables',
+    default: '25,50,100',
+    envVar: 'UNM_TABLE_PAGE_SIZE_OPTIONS',
+    maxLength: 64,
+    validate: (v) => { parseTablePageSizeOptions(v); }, // throws on a malformed list → 400
+    help:
+      'Comma-separated rows-per-page choices offered in the page-size dropdown of server-paginated tables. The FIRST value is also used as the initial page size for new tables, and the UI always appends a built-in "All" option (unpaginated). Example: "25,50,100".',
   },
 
   // Actions & Schedules (automation engine; see workers/automations.ts). Master

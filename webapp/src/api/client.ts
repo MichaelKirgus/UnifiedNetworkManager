@@ -1270,6 +1270,12 @@ export interface FirewallEventsResponse {
   toMs: number;
   rows: FirewallEventRow[];
   summary: { blocked: number; passed: number; other: number };
+  /** Paged mode only (page/pageSize/all sent): total matching rows over the window/filters. */
+  total?: number;
+  /** Paged mode only: current 1-based page (1 in all-mode). */
+  page?: number;
+  /** Paged mode only: rows per page (equals total in all-mode). */
+  pageSize?: number;
 }
 
 /** Per-device live connection-state overview (Firewall page, Sessions section). */
@@ -1817,6 +1823,16 @@ export interface LogEntry {
   context?: Record<string, unknown> | null;
   /** ISO-8601 timestamp from the plugin's clock (stored as received). */
   emittedAt: string;
+}
+
+/** Paged-mode envelope for GET /logs — returned when page/pageSize/all are sent; legacy callers get a plain LogEntry[]. */
+export interface LogPagedResponse {
+  rows: LogEntry[];
+  total: number;
+  /** Current 1-based page (1 in all-mode). */
+  page: number;
+  /** Rows per page (equals total in all-mode). */
+  pageSize: number;
 }
 
 // --- Notification center ------------------------------------------------------
@@ -4094,7 +4110,7 @@ export const api = {
   verifyWebauthn: (body: { challengeToken: string; response: unknown; nonce: string }) =>
     apiFetch<VerifyResponse>('/auth/webauthn/verify', { method: 'POST', body: JSON.stringify(body) }),
   /** The caller's own profile (no users:read needed). */
-  me: () => apiFetch<User & { effectivePermissions: string[]; deviceAccessUnrestricted?: boolean; instanceName?: string }>('/auth/me'),
+  me: () => apiFetch<User & { effectivePermissions: string[]; deviceAccessUnrestricted?: boolean; instanceName?: string; /** Rows-per-page choices for server-paginated tables (global `tablePageSizeOptions` setting). */ tablePageSizeOptions?: number[] }>('/auth/me'),
   /** Server-computed session expiry + warning lead time (top-bar countdown chip). */
   sessionInfo: () => apiFetch<SessionInfo>('/auth/session'),
   // Session extension — ALWAYS requires re-proving a second factor (TOTP or
@@ -4465,8 +4481,8 @@ export const api = {
     const suffix = qs.toString() ? `?${qs.toString()}` : '';
     return apiFetch<FirewallRuleRow[]>(`/firewall-rules${suffix}`);
   },
-  /** Firewall event-log rows (blocked/allowed traffic) across devices. */
-  firewallEvents: (params?: { from?: string; to?: string; deviceId?: string; siteId?: string; action?: 'pass' | 'block' | 'rdr' | 'nat' | 'binat' | 'other'; search?: string; limit?: number }) => {
+  /** Firewall event-log rows (blocked/allowed traffic) across devices. Paged mode: pass page/pageSize/all → response gains total/page/pageSize. */
+  firewallEvents: (params?: { from?: string; to?: string; deviceId?: string; siteId?: string; action?: 'pass' | 'block' | 'rdr' | 'nat' | 'binat' | 'other'; search?: string; limit?: number; page?: number; pageSize?: number; all?: boolean; sort?: 'tsMs'; dir?: 'asc' | 'desc' }) => {
     const qs = new URLSearchParams();
     if (params?.from) qs.set('from', params.from);
     if (params?.to) qs.set('to', params.to);
@@ -4475,6 +4491,11 @@ export const api = {
     if (params?.action) qs.set('action', params.action);
     if (params?.search) qs.set('search', params.search);
     if (params?.limit) qs.set('limit', String(params.limit));
+    if (params?.page !== undefined) qs.set('page', String(params.page));
+    if (params?.pageSize !== undefined) qs.set('pageSize', String(params.pageSize));
+    if (params?.all) qs.set('all', 'true');
+    if (params?.sort) qs.set('sort', params.sort);
+    if (params?.dir) qs.set('dir', params.dir);
     const suffix = qs.toString() ? `?${qs.toString()}` : '';
     return apiFetch<FirewallEventsResponse>(`/firewall-events${suffix}`);
   },
@@ -4816,6 +4837,7 @@ export const api = {
     apiFetch<{ deleted: boolean }>(`/threat-intel/sources/${encodeURIComponent(id)}`, { method: 'DELETE' }),
   fetchThreatIntelNow: () => apiFetch<{ triggered: number }>('/threat-intel/fetch', { method: 'POST' }),
   // Plugin log entries (global Logs page + per-device section in DeviceDetail).
+  // Paged mode: pass page/pageSize/all → returns a LogPagedResponse envelope instead of a plain array.
   logs: (params?: {
     deviceId?: string;
     pluginId?: string;
@@ -4824,6 +4846,11 @@ export const api = {
     from?: string;
     to?: string;
     limit?: number;
+    page?: number;
+    pageSize?: number;
+    all?: boolean;
+    sort?: 'emittedAt';
+    dir?: 'asc' | 'desc';
   }) => {
     const qs = new URLSearchParams();
     if (params?.deviceId) qs.set('deviceId', params.deviceId);
@@ -4833,8 +4860,13 @@ export const api = {
     if (params?.from) qs.set('from', params.from);
     if (params?.to) qs.set('to', params.to);
     if (params?.limit) qs.set('limit', String(params.limit));
+    if (params?.page !== undefined) qs.set('page', String(params.page));
+    if (params?.pageSize !== undefined) qs.set('pageSize', String(params.pageSize));
+    if (params?.all) qs.set('all', 'true');
+    if (params?.sort) qs.set('sort', params.sort);
+    if (params?.dir) qs.set('dir', params.dir);
     const suffix = qs.toString() ? `?${qs.toString()}` : '';
-    return apiFetch<LogEntry[]>(`/logs${suffix}`);
+    return apiFetch<LogEntry[] | LogPagedResponse>(`/logs${suffix}`);
   },
   // Notification center (bell badge + panel + full page with filters).
   notifications: (params?: {

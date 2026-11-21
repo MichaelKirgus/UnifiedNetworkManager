@@ -401,6 +401,13 @@ paths:
                       instanceName:
                         type: string
                         description: "Instance display name (global `instanceName` setting) for the window title"
+                      tablePageSizeOptions:
+                        type: array
+                        items: { type: integer, minimum: 1, maximum: 1000 }
+                        description: >-
+                          Rows-per-page choices offered by server-paginated tables (global
+                          `tablePageSizeOptions` setting); the first entry is also the initial
+                          default page size. Served here so it needs no system:read permission.
         '401':
           description: Authentication required
 
@@ -7311,16 +7318,47 @@ paths:
           name: limit
           required: false
           schema: { type: integer, minimum: 1, maximum: 2000 }
-          description: Max rows to return (default 500)
+          description: Max rows to return (default 500) — legacy mode; ignored when page/pageSize/all are present
+        # NOTE: no `default:` on these — the validator injects schema defaults into
+        # MISSING params, which would flip legacy callers into paged mode. The code
+        # applies its own defaults once paged mode is detected.
+        - in: query
+          name: page
+          required: false
+          schema: { type: integer, minimum: 1 }
+          description: Page number (1-based, default 1); enables paged mode with `total`/`page`/`pageSize` envelope fields
+        - in: query
+          name: pageSize
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 200 }
+          description: Rows per page (default 50, clamped to 200 max)
+        - in: query
+          name: all
+          required: false
+          schema: { type: boolean }
+          description: "true = return ALL matching rows in one unpaginated response — for exports and small filtered sets; wins over page/pageSize"
+        - in: query
+          name: sort
+          required: false
+          schema: { type: string, enum: [tsMs] }
+          description: Sort field (only `tsMs` is supported) — only meaningful with dir=asc; default order is newest first
+        - in: query
+          name: dir
+          required: false
+          schema: { type: string, enum: [asc, desc] }
+          description: Sort direction (default desc = newest first)
       responses:
         '200':
-          description: Firewall event rows + per-action summary counts over the same window/filters
+          description: >-
+            Firewall event rows + per-action summary counts over the same window/filters.
+            With page/pageSize/all present, `rows` is limited to that slice and the response
+            additionally carries `total` (filtered row count) plus `page`/`pageSize`.
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/FirewallEventsResponse'
         '400':
-          description: Invalid action filter value
+          description: Invalid action filter value or invalid pagination values
         '401':
           description: Authentication required
 
@@ -7660,18 +7698,51 @@ paths:
           name: limit
           required: false
           schema: { type: integer, default: 500, maximum: 2000 }
-          description: Max rows to return (default 500, hard cap 2000)
+          description: Max rows to return (default 500, hard cap 2000) — legacy mode; ignored when page/pageSize/all are present
+        # NOTE: no `default:` on these — the validator injects schema defaults into
+        # MISSING params, which would flip legacy callers into paged mode. The code
+        # applies its own defaults once paged mode is detected.
+        - in: query
+          name: sort
+          required: false
+          schema: { type: string, enum: [emittedAt] }
+          description: Sort field (only `emittedAt` is supported) — only meaningful with dir=asc; default order is newest first
+        - in: query
+          name: dir
+          required: false
+          schema: { type: string, enum: [asc, desc] }
+          description: Sort direction (default desc = newest first)
+        - in: query
+          name: page
+          required: false
+          schema: { type: integer, minimum: 1 }
+          description: Page number (1-based, default 1); enables paged mode returning a `{ rows, total, page, pageSize }` envelope instead of a plain array
+        - in: query
+          name: pageSize
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 200 }
+          description: Rows per page (default 50, clamped to 200 max)
+        - in: query
+          name: all
+          required: false
+          schema: { type: boolean }
+          description: "true = return ALL matching rows in one unpaginated response — for exports and small filtered sets; wins over page/pageSize"
       responses:
         '200':
-          description: Log entries, newest first
+          description: >-
+            Log entries, newest first. Without pagination params the body is a plain array (legacy).
+            With page/pageSize/all present it is an envelope object with `rows` (the slice),
+            `total` (filtered row count) and `page`/`pageSize`.
           content:
             application/json:
               schema:
-                type: array
-                items:
-                  $ref: '#/components/schemas/LogEntry'
+                oneOf:
+                  - type: array
+                    items:
+                      $ref: '#/components/schemas/LogEntry'
+                  - $ref: '#/components/schemas/LogPagedResponse'
         '400':
-          description: Invalid level filter value
+          description: Invalid level filter value, invalid sort/dir or invalid pagination values
         '401':
           description: Authentication required
         '403':
@@ -10527,6 +10598,20 @@ components:
         context: { type: object, additionalProperties: true, nullable: true, description: "Structured details; null when absent" }
         emittedAt: { type: string, format: date-time, description: "ISO-8601 timestamp from the plugin's clock (stored as received)" }
 
+    LogPagedResponse:
+      type: object
+      description: Paged-mode envelope for GET /logs — returned when page/pageSize/all query params are present; legacy callers get a plain array instead.
+      required: [rows, total, page, pageSize]
+      properties:
+        rows:
+          type: array
+          items:
+            $ref: '#/components/schemas/LogEntry'
+          description: "The requested slice of log entries (newest first unless dir=asc)"
+        total: { type: integer, description: "Total matching rows over the filters/window" }
+        page: { type: integer, description: "Current 1-based page; equals 1 in all-mode" }
+        pageSize: { type: integer, description: "Rows per page; equals total in all-mode" }
+
     Notification:
       type: object
       description: >-
@@ -12321,6 +12406,9 @@ components:
             blocked: { type: integer, description: "Count of block events over the same window/filters (SQL-side)" }
             passed: { type: integer, description: "Count of pass events" }
             other: { type: integer, description: "Count of rdr/nat/binat events" }
+        total: { type: integer, description: "Total matching rows over the window/filters — only present in paged mode (page/pageSize/all)" }
+        page: { type: integer, description: "Current 1-based page — only present in paged mode" }
+        pageSize: { type: integer, description: "Rows per page — only present in paged mode; equals total in all-mode" }
 
     FirewallSessionRow:
       type: object

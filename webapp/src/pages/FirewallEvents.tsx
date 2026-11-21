@@ -1,10 +1,11 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { Layout } from '../components/Layout';
 import { DataTable, DataTableColumn } from '../components/DataTable';
 import { DeviceChip } from '../components/DeviceChip';
 import { TimeRangeFilter, resolveTimeRangeIso, type TimeRangeValue } from '../components/TimeRangeFilter';
-import { api, FirewallEventRow } from '../api/client';
+import { ALL_PAGES, useServerTable } from '../components/useServerTable';
+import { api, FirewallEventRow, FirewallEventsResponse } from '../api/client';
 import { useTimeFormat } from '../utils/time';
 
 /** Verdict pill — pass green, block red, NAT actions slate. */
@@ -56,32 +57,51 @@ export default function FirewallEvents() {
   const { formatDateTime } = useTimeFormat();
   const [action, setAction] = useState('');
   const [deviceId, setDeviceId] = useState('');
-  const [search, setSearch] = useState('');
+  // Filter-bar search draft — debounced into the table's committed `q` below.
+  const [searchDraft, setSearchDraft] = useState('');
   const [range, setRange] = useState<TimeRangeValue>('1h');
 
   // Options for the device filter select.
   const devicesQuery = useQuery({ queryKey: ['devices'], queryFn: api.devices });
 
-  // The `from` bound is computed at fetch time so "last hour" keeps sliding as
-  // the page refetches. Newest-first, capped by the API (default 500 rows).
-  const eventsQuery = useQuery({
-    queryKey: ['firewallEvents', action, deviceId, search, range],
-    queryFn: () => {
+  // Page-owned filters; any change resets the table to page 1 (hook behavior).
+  const extra = useMemo(() => ({ action, deviceId, range }), [action, deviceId, range]);
+
+  // Server-side pagination — rows are fetched per page by the API. The `from`
+  // bound is computed at fetch time so "last hour" keeps sliding on refetch.
+  // The response's summary (per-action counts over the FULL window/filters)
+  // rides along via TData and feeds the action chips below.
+  const table = useServerTable<{ action: string; deviceId: string; range: TimeRangeValue }, FirewallEventRow, FirewallEventsResponse & { total: number }>({
+    fetcher: async (p) => {
       // Relative presets slide with the current time; custom ranges are absolute.
-      const { from, to } = resolveTimeRangeIso(range);
-      return api.firewallEvents({
+      const { from, to } = resolveTimeRangeIso(p.range);
+      const res = await api.firewallEvents({
         from,
         to,
-        deviceId: deviceId || undefined,
-        action: (action || undefined) as 'pass' | 'block' | 'rdr' | 'nat' | 'binat' | 'other' | undefined,
-        search: search.trim() || undefined,
+        deviceId: p.deviceId || undefined,
+        action: (p.action || undefined) as 'pass' | 'block' | 'rdr' | 'nat' | 'binat' | 'other' | undefined,
+        search: p.q,
+        page: p.pageSize === ALL_PAGES ? undefined : p.page,
+        pageSize: p.pageSize === ALL_PAGES ? undefined : p.pageSize,
+        all: p.pageSize === ALL_PAGES || undefined,
+        sort: p.sort?.key === 'tsMs' ? 'tsMs' : undefined,
+        dir: p.sort?.dir,
       });
+      return { ...res, total: res.total ?? 0 };
     },
-    refetchInterval: 30_000,
+    extra,
+    storageKey: 'firewall-events',
   });
 
+  // Debounce the filter-bar search into the committed server query (300 ms).
+  useEffect(() => {
+    const t = setTimeout(() => table.setQ(searchDraft.trim()), 300);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchDraft]);
+
   const devices = useMemo(() => (devicesQuery.data ?? []).slice().sort((a, b) => a.name.localeCompare(b.name)), [devicesQuery.data]);
-  const summary = eventsQuery.data?.summary;
+  const summary = table.data?.summary;
 
   const columns: DataTableColumn<FirewallEventRow>[] = [
     {
@@ -95,12 +115,14 @@ export default function FirewallEvents() {
       header: 'Action',
       key: 'action',
       width: 90,
+      sortable: false, // server only sorts by tsMs
       render: (row) => <ActionBadge action={row.action} />,
     },
     {
       header: 'Device',
       key: 'deviceName',
       width: 220,
+      sortable: false,
       exportValue: (row) => row.deviceName ?? '',
       render: (row) =>
         row.deviceId ? (
@@ -113,6 +135,7 @@ export default function FirewallEvents() {
       header: 'Interface',
       key: 'interfaceName',
       width: 100,
+      sortable: false,
       render: (row) => <span className="font-mono text-xs">{orDash(row.interfaceName)}</span>,
     },
     {
@@ -120,6 +143,7 @@ export default function FirewallEvents() {
       header: 'Source → Destination',
       key: 'srcIp',
       width: 300,
+      sortable: false,
       exportValue: (row) => `${orDash(row.srcIp)} → ${orDash(row.dstIp)}`,
       render: (row) => (
         <span className="font-mono text-xs">
@@ -131,6 +155,7 @@ export default function FirewallEvents() {
       header: 'Proto',
       key: 'proto',
       width: 70,
+      sortable: false,
       render: (row) => <span className="text-xs uppercase">{orDash(row.proto)}</span>,
     },
     {
@@ -138,6 +163,7 @@ export default function FirewallEvents() {
       header: 'Rule',
       key: 'ruleName',
       width: 240,
+      sortable: false,
       render: (row) =>
         row.ruleName && row.ruleName.trim() !== '' ? (
           <span className="text-xs text-secondary">{row.ruleName}</span>
@@ -149,6 +175,7 @@ export default function FirewallEvents() {
       header: 'Reason',
       key: 'reason',
       width: 180,
+      sortable: false,
       render: (row) => <span className="text-xs text-muted-foreground">{orDash(row.reason)}</span>,
     },
   ];
@@ -196,27 +223,37 @@ export default function FirewallEvents() {
             type="text"
             className="w-full rounded-md border border-border px-2.5 py-1.5 text-sm"
             placeholder="Source/destination IP or rule name…"
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
+            value={searchDraft}
+            onChange={(e) => setSearchDraft(e.target.value)}
           />
         </div>
       </div>
 
-      {eventsQuery.isLoading && <p className="text-sm text-muted-foreground">Loading firewall events...</p>}
-      {eventsQuery.isError && (
-        <p className="text-sm text-danger-fg">Failed to load firewall events: {(eventsQuery.error as Error).message}</p>
+      {table.isError && (
+        <p className="text-sm text-danger-fg">Failed to load firewall events: {table.error?.message}</p>
       )}
-      {eventsQuery.data && (
-        <DataTable
-          columns={columns}
-          rows={eventsQuery.data.rows}
-          rowKey={(row) => row.id}
-          storageKey="firewall-events"
-          autoRefresh={{ intervalMs: 30_000, queries: [eventsQuery] }}
-          searchPlaceholder="Search firewall events…"
-          emptyMessage="No firewall events in this range yet — assign an OPNsense plugin to a device and wait for the next poll (logging must be enabled on the appliance)."
-        />
-      )}
+      <DataTable
+        columns={columns}
+        rows={table.data?.rows ?? []}
+        rowKey={(row) => row.id}
+        storageKey="firewall-events"
+        isFetching={table.isFetching}
+        showSearch={false} // the filter bar above owns search (debounced into table.q)
+        onSearch={table.setQ}
+        externalSearch={table.q || null}
+        serverPagination={{
+          total: table.data?.total ?? 0,
+          page: table.page,
+          pageSize: table.pageSize,
+          onPageChange: table.setPage,
+          onPageSizeChange: table.setPageSize,
+          // pageSizeOptions omitted → global `tablePageSizeOptions` setting + built-in "All".
+          sort: table.sort,
+          onSortChange: table.setSort,
+        }}
+        autoRefresh={{ intervalMs: 30_000, queries: [table] }}
+        emptyMessage="No firewall events in this range yet — assign an OPNsense plugin to a device and wait for the next poll (logging must be enabled on the appliance)."
+      />
     </Layout>
   );
 }

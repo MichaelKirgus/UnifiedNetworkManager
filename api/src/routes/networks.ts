@@ -10,6 +10,7 @@ import { suggestFreeRanges } from '../utils/networkCheck';
 import { buildFirewallInventoryIndex, enrichFirewallAddress, getCachedFirewallIndex } from '../utils/firewallEnrichment';
 import type { FirewallAddressResolution } from '../utils/firewallEnrichment';
 import { loadDeviceViews, loadPluginNames } from '../utils/deviceViews';
+import { envelopePage, hasPaginationParams, limitOffset, parsePagination, type ParsedPagination } from '../utils/pagination';
 
 /** One stored row of the `networks` table (per device + plugin instance). */
 type StoredNetwork = typeof schema.networks.$inferSelect;
@@ -1464,8 +1465,11 @@ router.get('/firewall-events', requireAuth, requirePermission('firewall:read'), 
 
     // --- Window (same pattern as routes/flows.ts resolveWindow) -------------
     const parseTimeParam = (v: unknown): number | null => {
+      if (typeof v === 'number' && Number.isFinite(v)) return Math.floor(v); // epoch ms, coerced by the validator
       if (typeof v !== 'string' || !v.trim()) return null;
-      const t = Date.parse(v);
+      const s = v.trim();
+      if (/^\d+$/.test(s)) return Number(s); // epoch ms sent as a plain numeric string
+      const t = Date.parse(s);
       return Number.isFinite(t) ? t : null;
     };
     const now = Date.now();
@@ -1474,6 +1478,36 @@ router.get('/firewall-events', requireAuth, requirePermission('firewall:read'), 
     if (fromMs >= toMs) fromMs = toMs - 3600_000;
     const MAX_RANGE_MS = 400 * 86_400_000;
     if (toMs - fromMs > MAX_RANGE_MS) fromMs = toMs - MAX_RANGE_MS;
+
+    // Paged mode — page/pageSize/all present → envelope fields in the response
+    // (+ total). Legacy calls keep the old shape + limit cap untouched.
+    const paged = hasPaginationParams(q);
+    let pg: ParsedPagination | null = null;
+    if (paged) {
+      const parsed = parsePagination(q, { defaultPageSize: 50, maxPageSize: 200 });
+      if ('error' in parsed) {
+        res.status(400).json({ error: parsed.error });
+        return;
+      }
+      pg = parsed;
+    }
+
+    // Sort — only tsMs is supported (the queryable time axis); default newest-first.
+    let orderDir: 'asc' | 'desc' = 'desc';
+    if (q.sort !== undefined) {
+      if (q.sort !== 'tsMs') {
+        res.status(400).json({ error: `"sort" must be "tsMs"` });
+        return;
+      }
+      if (q.dir === 'asc' || q.dir === 'desc') orderDir = q.dir;
+      else if (q.dir !== undefined) {
+        res.status(400).json({ error: `"dir" must be "asc" or "desc"` });
+        return;
+      }
+    }
+
+    // Envelope fields for the empty-scope early returns below (total is 0 there by definition).
+    const pagedEmpty = pg ? { total: 0, ...envelopePage(pg, 0) } : {};
 
     // --- Filters -------------------------------------------------------------
     let actionClause;
@@ -1499,11 +1533,11 @@ router.get('/firewall-events', requireAuth, requirePermission('firewall:read'), 
     // Device-level access control — scoped callers only see rows of their devices.
     const allowed = await allowedDeviceIds(_req);
     if (allowed !== null && allowed.size === 0) {
-      res.status(200).json({ fromMs, toMs, rows: [], summary: { blocked: 0, passed: 0, other: 0 } });
+      res.status(200).json({ fromMs, toMs, rows: [], summary: { blocked: 0, passed: 0, other: 0 }, ...pagedEmpty });
       return;
     }
     if (q.deviceId && allowed !== null && !allowed.has(q.deviceId)) {
-      res.status(200).json({ fromMs, toMs, rows: [], summary: { blocked: 0, passed: 0, other: 0 } });
+      res.status(200).json({ fromMs, toMs, rows: [], summary: { blocked: 0, passed: 0, other: 0 }, ...pagedEmpty });
       return;
     }
 
@@ -1511,7 +1545,7 @@ router.get('/firewall-events', requireAuth, requirePermission('firewall:read'), 
     if (q.deviceId && q.siteId) {
       const device = await db.query.devices.findFirst({ where: eq(schema.devices.id, q.deviceId) });
       if (!device || device.siteId !== q.siteId) {
-        res.status(200).json({ fromMs, toMs, rows: [], summary: { blocked: 0, passed: 0, other: 0 } });
+        res.status(200).json({ fromMs, toMs, rows: [], summary: { blocked: 0, passed: 0, other: 0 }, ...pagedEmpty });
         return;
       }
       deviceClause = eq(schema.firewallEvents.deviceId, q.deviceId);
@@ -1521,7 +1555,7 @@ router.get('/firewall-events', requireAuth, requirePermission('firewall:read'), 
       let siteDeviceIds = (await db.query.devices.findMany({ where: eq(schema.devices.siteId, q.siteId) })).map((d) => d.id);
       if (allowed !== null) siteDeviceIds = siteDeviceIds.filter((id) => allowed.has(id));
       if (siteDeviceIds.length === 0) {
-        res.status(200).json({ fromMs, toMs, rows: [], summary: { blocked: 0, passed: 0, other: 0 } });
+        res.status(200).json({ fromMs, toMs, rows: [], summary: { blocked: 0, passed: 0, other: 0 }, ...pagedEmpty });
         return;
       }
       deviceClause = inArray(schema.firewallEvents.deviceId, siteDeviceIds);
@@ -1530,7 +1564,10 @@ router.get('/firewall-events', requireAuth, requirePermission('firewall:read'), 
     }
 
     const limitParam = Number(q.limit);
-    const limit = Math.max(1, Math.min(2000, Number.isFinite(limitParam) ? Math.floor(limitParam) : 500));
+    const legacyLimit = Math.max(1, Math.min(2000, Number.isFinite(limitParam) ? Math.floor(limitParam) : 500));
+    // Paged: LIMIT/OFFSET from the parsed params (null = all-mode, unbounded).
+    // Legacy: the old limit cap. Both feed the same findMany below.
+    const lo = pg ? limitOffset(pg) : null;
 
     // tsMs is the queryable axis; rows with an unparseable timestamp (tsMs NULL)
     // are excluded from windowed queries rather than mis-ordered.
@@ -1541,14 +1578,21 @@ router.get('/firewall-events', requireAuth, requirePermission('firewall:read'), 
 
     const where = and(...baseClauses);
     // Rows + per-action counts over the SAME window/filters (SQL-side, cheap).
-    const [rows, summaryAgg] = await Promise.all([
-      db.query.firewallEvents.findMany({ where, orderBy: [desc(schema.firewallEvents.tsMs)], limit }),
+    // The total count only runs in paged mode — legacy callers don't need it.
+    const [rows, summaryAgg, countRow] = await Promise.all([
+      db.query.firewallEvents.findMany({
+        where,
+        orderBy: orderDir === 'asc' ? [asc(schema.firewallEvents.tsMs)] : [desc(schema.firewallEvents.tsMs)],
+        ...(pg ? (lo ? { limit: lo.limit, offset: lo.offset } : {}) : { limit: legacyLimit }),
+      }),
       db.select({
         blocked: sql<number>`count(*) filter (where ${schema.firewallEvents.action} = 'block')`,
         passed: sql<number>`count(*) filter (where ${schema.firewallEvents.action} = 'pass')`,
         other: sql<number>`count(*) filter (where ${schema.firewallEvents.action} in ('rdr','nat','binat'))`,
       }).from(schema.firewallEvents).where(where),
+      paged ? db.select({ n: sql<number>`count(*)::int` }).from(schema.firewallEvents).where(where) : null,
     ]);
+    const total = countRow ? Number(countRow[0]?.n ?? 0) : null;
 
     // Device + plugin display names for the rows.
     const deviceViews = await loadDeviceViews(Array.from(new Set(rows.map((r) => r.deviceId))));
@@ -1568,6 +1612,7 @@ router.get('/firewall-events', requireAuth, requirePermission('firewall:read'), 
         passed: Number(summaryAgg[0]?.passed ?? 0),
         other: Number(summaryAgg[0]?.other ?? 0),
       },
+      ...(pg && total !== null ? { total, ...envelopePage(pg, total) } : {}),
     });
   } catch (err) {
     const e = err as { status?: number; message?: string };

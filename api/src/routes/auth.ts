@@ -22,6 +22,7 @@ import {
 import { expandRolePermissions } from './roles';
 import { serializeUser } from './users';
 import { getEffectiveSettingValue } from '../systemSettings';
+import { parseTablePageSizeOptions } from '../utils/pagination';
 import { resolveCredentialPolicy, effectiveSessionTtl, effectiveMinPasswordLength } from '../auth/credentialPolicy';
 import { INITIAL_ADMIN_USERNAME } from '../auth/permissions';
 
@@ -161,11 +162,22 @@ router.get('/auth/me', requireAuth, async (req, res) => {
     /* keep the default — a settings hiccup must not break /auth/me */
   }
 
+  // Table page-size options (global setting) — served to every authenticated
+  // user so server-paginated tables can offer them without system:read.
+  let tablePageSizeOptions: number[] = [25, 50, 100];
+  try {
+    const v = await getEffectiveSettingValue('tablePageSizeOptions');
+    if (typeof v === 'string') tablePageSizeOptions = parseTablePageSizeOptions(v);
+  } catch {
+    /* keep the default — a settings hiccup must not break /auth/me */
+  }
+
   res.status(200).json({
     ...(await serializeUser(row)),
     effectivePermissions: req.user?.permissions ?? [],
     deviceAccessUnrestricted,
     instanceName,
+    tablePageSizeOptions,
   });
 });
 

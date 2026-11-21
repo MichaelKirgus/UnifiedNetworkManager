@@ -1,9 +1,10 @@
 import { Router, Response } from 'express';
-import { and, desc, eq, gte, inArray, ilike, lt, or } from 'drizzle-orm';
+import { and, asc, desc, eq, gte, inArray, ilike, lt, or, sql } from 'drizzle-orm';
 import { db } from '../db';
 import * as schema from '../db/schema';
 import { requireAuth, requirePermission } from '../auth/middleware';
 import { allowedDeviceIds } from '../deviceAccess';
+import { envelopePage, hasPaginationParams, limitOffset, parsePagination, type ParsedPagination } from '../utils/pagination';
 
 /**
  * Public read side of the plugin log pipeline (ingest lives in routes/internal.ts).
@@ -21,6 +22,9 @@ const MAX_LIMIT = 2000;
 // GET /logs - plugin log entries, newest first.
 // Query params: deviceId?, pluginId?, level? (comma list), search? (ILIKE on
 // message + context), from?/to? (ISO timestamps), limit (default 500, max 2000).
+// Paged mode — when page/pageSize/all is present the response becomes an
+// envelope {rows,total,page,pageSize} (legacy callers keep the plain array);
+// sort=emittedAt&dir=asc|desc flips the time order.
 router.get(
   '/logs',
   requireAuth,
@@ -28,6 +32,32 @@ router.get(
   async (_req, res: Response) => {
     try {
       const q = _req.query as Record<string, string | undefined>;
+
+      // Paged mode — envelope response; legacy calls keep the plain array.
+      const paged = hasPaginationParams(q);
+      let pg: ParsedPagination | null = null;
+      if (paged) {
+        const parsed = parsePagination(q, { defaultPageSize: 50, maxPageSize: 200 });
+        if ('error' in parsed) {
+          res.status(400).json({ error: parsed.error });
+          return;
+        }
+        pg = parsed;
+      }
+
+      // Time is the only meaningful sort axis for logs — anything else is a 400.
+      let orderDir: 'asc' | 'desc' = 'desc';
+      if (q.sort !== undefined) {
+        if (q.sort !== 'emittedAt') {
+          res.status(400).json({ error: `"sort" must be "emittedAt"` });
+          return;
+        }
+        if (q.dir && !['asc', 'desc'].includes(q.dir)) {
+          res.status(400).json({ error: '"dir" must be "asc" or "desc"' });
+          return;
+        }
+        orderDir = q.dir === 'asc' ? 'asc' : 'desc';
+      }
 
       const levels = (q.level ?? '')
         .split(',')
@@ -69,11 +99,19 @@ router.get(
         clauses.push(inArray(schema.pluginLogs.deviceId, [...allowed]));
       }
 
-      const rows = await db.query.pluginLogs.findMany({
-        ...(clauses.length > 0 ? { where: and(...clauses) } : {}),
-        orderBy: [desc(schema.pluginLogs.emittedAt)],
-        limit,
-      });
+      // Paged: LIMIT/OFFSET from the parsed params (null = all-mode, unbounded);
+      // legacy: the old limit cap. The total count only runs in paged mode.
+      const lo = pg ? limitOffset(pg) : null;
+      const where = clauses.length > 0 ? and(...clauses) : undefined;
+      const [rows, countRow] = await Promise.all([
+        db.query.pluginLogs.findMany({
+          ...(where ? { where } : {}),
+          orderBy: orderDir === 'asc' ? [asc(schema.pluginLogs.emittedAt)] : [desc(schema.pluginLogs.emittedAt)],
+          ...(pg ? (lo ? { limit: lo.limit, offset: lo.offset } : {}) : { limit }),
+        }),
+        paged ? db.select({ n: sql<number>`count(*)::int` }).from(schema.pluginLogs).where(where) : null,
+      ]);
+      const total = countRow ? Number(countRow[0]?.n ?? 0) : null;
 
       // Batch-load display names so the webapp can render plugin/device chips
       // without extra round-trips (same pattern as routes/networks.ts).
@@ -86,19 +124,24 @@ router.get(
       const deviceNameById = new Map(devices.map((d) => [d.id, d.name] as const));
       const pluginNameById = new Map(plugins.map((p) => [p.id, p.name] as const));
 
-      res.status(200).json(
-        rows.map((r) => ({
-          id: r.id,
-          pluginId: r.pluginId,
-          pluginName: pluginNameById.get(r.pluginId) ?? null,
-          deviceId: r.deviceId,
-          deviceName: r.deviceId ? (deviceNameById.get(r.deviceId) ?? null) : null,
-          level: r.level,
-          message: r.message,
-          context: r.context ? safeParseJson(r.context) : null,
-          emittedAt: r.emittedAt,
-        }))
-      );
+      const mapped = rows.map((r) => ({
+        id: r.id,
+        pluginId: r.pluginId,
+        pluginName: pluginNameById.get(r.pluginId) ?? null,
+        deviceId: r.deviceId,
+        deviceName: r.deviceId ? (deviceNameById.get(r.deviceId) ?? null) : null,
+        level: r.level,
+        message: r.message,
+        context: r.context ? safeParseJson(r.context) : null,
+        emittedAt: r.emittedAt,
+      }));
+
+      // Paged mode → envelope; legacy callers keep the plain array.
+      if (pg && total !== null) {
+        res.status(200).json({ rows: mapped, total, ...envelopePage(pg, total) });
+      } else {
+        res.status(200).json(mapped);
+      }
     } catch (err) {
       const e = err as { status?: number; message?: string };
       res.status(e.status ?? 500).json({ error: e.message ?? 'Internal server error' });
