@@ -3861,8 +3861,8 @@ export interface AutomationUpdateTrigger {
   defer?: { schedule: AutomationScheduleSpec; maxWaitHours?: number };
 }
 
-/** Finding kinds produced by the flow security worker (flow_security_findings.kind). 'ioc-hit' rows are written by the threat-intel worker. */
-export const FLOW_SECURITY_FINDING_KINDS = ['new-destination', 'port-scan', 'egress-baseline', 'ioc-hit'] as const;
+/** Finding kinds produced by the flow security worker (flow_security_findings.kind). 'ioc-hit' + 'dns-ioc-hit' rows are written by the threat-intel worker. */
+export const FLOW_SECURITY_FINDING_KINDS = ['new-destination', 'port-scan', 'egress-baseline', 'ioc-hit', 'dns-ioc-hit'] as const;
 export type FlowSecurityFindingKind = (typeof FLOW_SECURITY_FINDING_KINDS)[number];
 
 // ── Threat intelligence (GET /threat-intel) ────────────────────────────────
@@ -3872,8 +3872,8 @@ export interface ThreatIntelSource {
   id: string;
   name: string;
   url: string;
-  /** 'ip-list' = one IP/CIDR per line; 'stix' = STIX 2.x bundle (indicator equality patterns). */
-  format: 'ip-list' | 'stix';
+  /** 'ip-list' = one IP/CIDR per line; 'stix' = STIX 2.x bundle; 'domain-list' = Pi-hole-style one-domain-per-line blocklist. */
+  format: 'ip-list' | 'stix' | 'domain-list';
   enabled: boolean;
   iocCount: number;
   lastSuccessAt: string | null;
@@ -3884,16 +3884,20 @@ export interface ThreatIntelSource {
 export interface ThreatIntelSourceInput {
   name?: string;
   url?: string;
-  format?: 'ip-list' | 'stix';
+  format?: 'ip-list' | 'stix' | 'domain-list';
   enabled?: boolean;
 }
 
-/** One recent 'ioc-hit' finding (traffic involving a feed-listed IP). */
+/** One recent threat-intel finding (traffic involving a feed-listed IP, or a DNS query for a listed domain). */
 export interface ThreatIntelHit {
   id: string;
+  /** 'ioc-hit' = address match; 'dns-ioc-hit' = queried-domain match. */
+  kind: 'ioc-hit' | 'dns-ioc-hit';
   severity: 'info' | 'warning' | 'critical';
   srcIp: string;
   dstIp: string | null;
+  /** The listed domain for dns-ioc-hit findings (null for ioc-hit). */
+  domain: string | null;
   detail: string;
   deviceId: string | null;
   deviceName: string | null;

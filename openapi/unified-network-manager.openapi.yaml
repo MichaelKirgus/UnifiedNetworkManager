@@ -5280,8 +5280,8 @@ paths:
         - in: query
           name: kind
           required: false
-          schema: { type: string, enum: [new-destination, port-scan, egress-baseline, ioc-hit] }
-          description: Filter to one detector ('ioc-hit' rows are written by the threat-intel worker)
+          schema: { type: string, enum: [new-destination, port-scan, egress-baseline, ioc-hit, dns-ioc-hit] }
+          description: Filter to one detector ('ioc-hit' + 'dns-ioc-hit' rows are written by the threat-intel worker)
         - in: query
           name: status
           required: false
@@ -5351,7 +5351,8 @@ paths:
         count, every configured feed source with its per-source fetch state
         (iocCount / lastSuccessAt / lastError) and the most recent open
         'ioc-hit' findings — traffic observed between a peer and an IP listed
-        by one of the feeds. Gated on `security:read`.
+        by one of the feeds — plus 'dns-ioc-hit' findings for DNS queries to
+        domains listed by domain-list feeds. Gated on `security:read`.
       parameters:
         - in: query
           name: limit
@@ -5375,10 +5376,13 @@ paths:
       description: >-
         Registers a new indicator feed. Supported formats: `ip-list` (one
         IPv4/IPv6 address or CIDR per line; # and ; comments, blank lines and
-        URLs are skipped) and `stix` (STIX 2.x bundle — equality patterns of
-        ipv4/ipv6 indicators). Each fetch is an authoritative snapshot: the
-        worker upserts all parsed values and prunes indicators the feed no
-        longer lists. Gated on `system:write`.
+        URLs are skipped), `stix` (STIX 2.x bundle — equality patterns of
+        ipv4/ipv6 indicators) and `domain-list` (Pi-hole-style plain-text
+        blocklist, one domain per line — a listed domain matches itself AND
+        every subdomain; matched against DNS query events pushed by plugins).
+        Each fetch is an authoritative snapshot: the worker upserts all parsed
+        values and prunes indicators the feed no longer lists. Gated on
+        `system:write`.
       requestBody:
         required: true
         content:
@@ -11038,7 +11042,7 @@ components:
         id: { type: string }
         name: { type: string, description: 'Unique display name (1-100 chars)' }
         url: { type: string, description: 'http(s) URL of the feed' }
-        format: { type: string, enum: [ip-list, stix], description: "'ip-list' = one IP/CIDR per line; 'stix' = STIX 2.x bundle (indicator equality patterns)" }
+        format: { type: string, enum: [ip-list, stix, domain-list], description: "'ip-list' = one IP/CIDR per line; 'stix' = STIX 2.x bundle (indicator equality patterns); 'domain-list' = Pi-hole-style one-domain-per-line blocklist" }
         enabled: { type: boolean }
         iocCount: { type: integer, description: Indicators currently stored from this source }
         lastSuccessAt:
@@ -11055,18 +11059,22 @@ components:
       properties:
         name: { type: string, minLength: 1, maxLength: 100 }
         url: { type: string, description: 'http(s) URL of the feed' }
-        format: { type: string, enum: [ip-list, stix] }
+        format: { type: string, enum: [ip-list, stix, domain-list] }
 
-    # One recent 'ioc-hit' finding (GET /threat-intel recentHits).
+    # One recent threat-intel finding (GET /threat-intel recentHits).
     ThreatIntelHit:
       type: object
       properties:
         id: { type: string }
+        kind: { type: string, enum: [ioc-hit, dns-ioc-hit], description: "'ioc-hit' = address match; 'dns-ioc-hit' = DNS query for a listed domain" }
         severity: { type: string, enum: [info, warning, critical] }
         srcIp: { type: string, description: Peer address (0.0.0.0 when the event had no source)' }
         dstIp:
           type: [string, 'null']
           description: The other endpoint; null when the event had none
+        domain:
+          type: [string, 'null']
+          description: The listed domain (dns-ioc-hit findings only)
         detail: { type: string }
         deviceId: { type: [string, 'null'] }
         deviceName: { type: [string, 'null'] }
@@ -11087,6 +11095,7 @@ components:
             iocTotal: { type: integer, description: Active indicators across all sources (cached count) }
             cursorBucketMs: { type: integer, format: int64, description: Last matched flow_agg_5m bucket start (ms) — buckets after this are unscanned }
             fwWatermarkMs: { type: integer, format: int64, description: firewall_events tsMs watermark (epoch ms) — events with tsMs above this have been scanned }
+            dnsWatermarkMs: { type: integer, format: int64, description: dns_query_events tsMs watermark (epoch ms) — queries with tsMs above this have been scanned }
         sources:
           type: array
           items: { $ref: '#/components/schemas/ThreatIntelSource' }
@@ -11098,7 +11107,7 @@ components:
       type: object
       properties:
         id: { type: string }
-        kind: { type: string, enum: [new-destination, port-scan, egress-baseline, ioc-hit] }
+        kind: { type: string, enum: [new-destination, port-scan, egress-baseline, ioc-hit, dns-ioc-hit] }
         severity: { type: string, enum: [info, warning, critical] }
         srcIp: { type: string }
         dstIp:

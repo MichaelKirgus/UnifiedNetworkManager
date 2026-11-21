@@ -10,11 +10,11 @@
 // needs it for row ids, which these tests never assert on.
 jest.mock('uuid', () => ({ v4: () => '00000000-0000-4000-8000-000000000000' }));
 
-import { matchIoc, parseIpList, parseIocValue, parseStix } from './threatIntel';
+import { matchDomain, matchIoc, normalizeDomain, parseDomainList, parseIpList, parseIocValue, parseStix } from './threatIntel';
 import type { IocCache } from './threatIntel';
 
 /** Builds a cache the same way ensureIocCache does from parsed entries. */
-function makeCache(entries: Array<{ value: string; sources: string[] }>): IocCache {
+function makeCache(entries: Array<{ value: string; sources: string[] }>, domains?: Array<{ domain: string; sources: string[] }>): IocCache {
   const exact = new Map<string, string[]>();
   const cidrs: IocCache['cidrs'] = [];
   for (const e of entries) {
@@ -23,7 +23,11 @@ function makeCache(entries: Array<{ value: string; sources: string[] }>): IocCac
     if (p.prefix === null) exact.set(p.key, [...(exact.get(p.key) ?? []), ...e.sources]);
     else cidrs.push({ words: p.words, prefix: p.prefix, family: p.family, sources: e.sources });
   }
-  return { exact, cidrs, loadedAt: Date.now(), total: entries.length };
+  const domainMap = new Map<string, string[]>();
+  for (const d of domains ?? []) {
+    domainMap.set(d.domain, [...(domainMap.get(d.domain) ?? []), ...d.sources]);
+  }
+  return { exact, cidrs, domains: domainMap, loadedAt: Date.now(), total: entries.length + (domains?.length ?? 0) };
 }
 
 describe('parseIocValue', () => {
@@ -155,5 +159,88 @@ describe('parseStix', () => {
   it('throws descriptive errors for non-JSON or object-less bundles', () => {
     expect(() => parseStix(Buffer.from('not json'), 10_000)).toThrow(/not valid JSON/);
     expect(() => parseStix(Buffer.from(JSON.stringify({ type: 'bundle' })), 10_000)).toThrow(/no objects array/);
+  });
+});
+
+describe('normalizeDomain', () => {
+  it('lowercases and strips trailing FQDN dots', () => {
+    expect(normalizeDomain('Evil.Example.COM.')).toBe('evil.example.com');
+    expect(normalizeDomain('  bad-domain.net ')).toBe('bad-domain.net');
+  });
+
+  it('strips leading wildcard labels (they add nothing — subdomains match anyway)', () => {
+    expect(normalizeDomain('*.c2-malware.org')).toBe('c2-malware.org');
+  });
+
+  it('rejects bare labels, IP literals, single-letter TLDs and garbage', () => {
+    for (const bad of ['', 'localhost', '198.51.100.66', 'http://example.com/x', 'a.b.c.', '-bad.com', 'bad-.com', 'evil.x']) {
+      expect(normalizeDomain(bad)).toBeNull();
+    }
+  });
+});
+
+describe('parseDomainList', () => {
+  it('collects valid domains and skips comments/URLs silently but counts garbage (Pi-hole format)', () => {
+    const body = [
+      '! Pi-hole style comment',
+      '# hash comment line',
+      '; semicolon comment line',
+      '',
+      'http://example.com/junk',
+      'evil.example.com.',
+      '*.tracker.adware.net',
+      'not a domain',
+      'c2-malware.org',
+    ].join('\n');
+    const r = parseDomainList(Buffer.from(body), 10_000);
+    expect(r.values).toEqual(['evil.example.com', 'tracker.adware.net', 'c2-malware.org']);
+    expect(r.skipped).toBe(1); // only "not a domain" — comments/URLs/blanks are not counted
+  });
+
+  it('dedupes repeats (case + trailing-dot variants collapse)', () => {
+    const r = parseDomainList(Buffer.from('evil.com\nEVIL.COM.\nevil.com\n'), 10_000);
+    expect(r.values).toEqual(['evil.com']);
+    expect(r.skipped).toBe(0); // duplicates are valid entries, just not new ones
+  });
+
+  it('enforces the per-source cap and counts the remainder as skipped', () => {
+    const r = parseDomainList(Buffer.from(['evil.com', 'ok.net', 'cap.org', 'extra.org'].join('\n')), 3);
+    expect(r.values).toEqual(['evil.com', 'ok.net', 'cap.org']);
+    expect(r.skipped).toBe(1); // the line after the cap
+  });
+});
+
+describe('matchDomain', () => {
+  it('matches exact domains and returns their sources', () => {
+    const cache = makeCache([], [{ domain: 'evil.example.com', sources: ['feed-a'] }]);
+    expect(matchDomain('evil.example.com', cache)).toEqual({ domain: 'evil.example.com', sources: ['feed-a'] });
+  });
+
+  it('matches subdomains of listed domains (Pi-hole semantics)', () => {
+    const cache = makeCache([], [{ domain: 'c2-malware.org', sources: ['feed-b'] }]);
+    expect(matchDomain('a.b.c2-malware.org.', cache)).toEqual({ domain: 'c2-malware.org', sources: ['feed-b'] });
+  });
+
+  it('does NOT match sibling or parent domains of a listed name', () => {
+    const cache = makeCache([], [{ domain: 'evil.example.com', sources: ['feed-a'] }]);
+    expect(matchDomain('not-evil.example.com', cache)).toBeNull(); // different label, same parent
+    expect(matchDomain('example.com', cache)).toBeNull(); // the parent itself is not listed
+  });
+
+  it('reports the most specific match and unions sources across depths', () => {
+    const cache = makeCache([], [
+      { domain: 'evil.example.com', sources: ['feed-a'] },
+      { domain: 'example.com', sources: ['feed-b'] },
+    ]);
+    expect(matchDomain('deep.evil.example.com', cache)).toEqual({ domain: 'evil.example.com', sources: ['feed-a', 'feed-b'] });
+  });
+
+  it('returns null for unlisted names, empty input and an empty domain set', () => {
+    const cache = makeCache([], [{ domain: 'evil.example.com', sources: ['feed-a'] }]);
+    expect(matchDomain('clean.example.org', cache)).toBeNull();
+    expect(matchDomain(null, cache)).toBeNull();
+    expect(matchDomain('', cache)).toBeNull();
+    const empty = makeCache([]);
+    expect(matchDomain('evil.example.com', empty)).toBeNull();
   });
 });

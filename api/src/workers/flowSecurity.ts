@@ -51,9 +51,10 @@ const AUTO_RESOLVE_AFTER_MS = 86_400_000; // 24 h
 const EGRESS_CHECK_INTERVAL_MS = 30 * 60_000;
 
 // 'ioc-hit' rows are written by workers/threatIntel.ts (threat-intel matching)
+// and 'dns-ioc-hit' rows by its DNS pass (queried domains vs domain-list feeds)
 // — they share this table, the auto-resolve sweep and the securityFinding
 // automation trigger with the three flow detectors.
-export const FLOW_SECURITY_KINDS = ['new-destination', 'port-scan', 'egress-baseline', 'ioc-hit'] as const;
+export const FLOW_SECURITY_KINDS = ['new-destination', 'port-scan', 'egress-baseline', 'ioc-hit', 'dns-ioc-hit'] as const;
 export type FlowSecurityKind = (typeof FLOW_SECURITY_KINDS)[number];
 
 const SEVERITY_RANK: Record<'info' | 'warning' | 'critical', number> = { info: 0, warning: 1, critical: 2 };

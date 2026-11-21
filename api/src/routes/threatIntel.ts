@@ -97,7 +97,7 @@ router.get('/threat-intel', requireAuth, requirePermission('security:read'), asy
       pool.query<SourceRow>(`SELECT id, name, url, format, enabled, "iocCount", "lastSuccessAt", "lastError", "createdAt" FROM threat_intel_sources ORDER BY name`),
       pool.query(
         `SELECT id, kind, severity, "srcIp", "dstIp", detail, context, "deviceId", "firstSeenAt", "lastSeenAt", occurrences, status
-         FROM flow_security_findings WHERE kind = 'ioc-hit' AND status = 'open'
+         FROM flow_security_findings WHERE kind IN ('ioc-hit', 'dns-ioc-hit') AND status = 'open'
          ORDER BY "lastSeenAt" DESC LIMIT $1`,
         [limit]
       ),
@@ -110,19 +110,29 @@ router.get('/threat-intel', requireAuth, requirePermission('security:read'), asy
       enabled: (await getEffectiveSettingValue('threatIntelEnabled')) === true,
       worker: getThreatIntelStats(),
       sources: srcRes.rows.map(sourceToJson),
-      recentHits: hitRes.rows.map((r) => ({
-        id: String(r.id),
-        severity: String(r.severity),
-        // Quoted DDL column names keep their case in pg result rows (r.srcIp, not r.srcip).
-        srcIp: String(r.srcIp),
-        dstIp: r.dstIp === null ? null : String(r.dstIp),
-        detail: String(r.detail ?? ''),
-        deviceId: r.deviceId ? String(r.deviceId) : null,
-        deviceName: r.deviceId ? (names.get(String(r.deviceId)) ?? null) : null,
-        firstSeenAt: String(r.firstSeenAt),
-        lastSeenAt: String(r.lastSeenAt),
-        occurrences: Number(r.occurrences ?? 1),
-      })),
+      recentHits: hitRes.rows.map((r) => {
+        // The listed domain rides in the finding context for dns-ioc-hit rows.
+        let domain: string | null = null;
+        try {
+          const ctx = JSON.parse(String(r.context ?? '{}')) as { domain?: unknown };
+          if (typeof ctx.domain === 'string' && ctx.domain) domain = ctx.domain;
+        } catch { /* context is best-effort — never fail the listing on it */ }
+        return {
+          id: String(r.id),
+          kind: String(r.kind) as 'ioc-hit' | 'dns-ioc-hit',
+          severity: String(r.severity),
+          // Quoted DDL column names keep their case in pg result rows (r.srcIp, not r.srcip).
+          srcIp: String(r.srcIp),
+          dstIp: r.dstIp === null ? null : String(r.dstIp),
+          domain,
+          detail: String(r.detail ?? ''),
+          deviceId: r.deviceId ? String(r.deviceId) : null,
+          deviceName: r.deviceId ? (names.get(String(r.deviceId)) ?? null) : null,
+          firstSeenAt: String(r.firstSeenAt),
+          lastSeenAt: String(r.lastSeenAt),
+          occurrences: Number(r.occurrences ?? 1),
+        };
+      }),
     });
   } catch (error) {
     console.error('Error querying threat intel:', error);

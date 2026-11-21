@@ -7,19 +7,24 @@
  *     via POST /v1/threat-intel/sources) is re-fetched through the web-fetch
  *     broker (`webFetchBroker`, same egress path as OSV/GeoIP) at the
  *     `threatIntelFetchIntervalMinutes` cadence. Supported formats:
- *       - ip-list — one IPv4/IPv6 address or CIDR per line (# and ; comments,
+ *       - ip-list     — one IPv4/IPv6 address or CIDR per line (# and ; comments,
  *         blank lines and URLs skipped);
- *       - stix    — STIX 2.x bundle; equality patterns of type indicators are
- *         extracted ([ipv4-addr:value = '…'] / [ipv6-addr:…]).
+ *       - stix        — STIX 2.x bundle; equality patterns of type indicators are
+ *         extracted ([ipv4-addr:value = '…'] / [ipv6-addr:…]);
+ *       - domain-list — Pi-hole-style plain-text blocklist, one domain per line.
+ *         Domains land in threat_domain_iocs (threat_iocs.ioc is INET and cannot
+ *         hold names); a listed domain matches itself AND every subdomain.
  *     A fetch is an authoritative SNAPSHOT per source: all parsed values are
- *     upserted into threat_iocs, then rows not re-upserted in the cycle are
- *     pruned by lastSeenAt — indicators a feed drops disappear automatically.
+ *     upserted into the format's table, then rows not re-upserted in the cycle
+ *     are pruned by lastSeenAt — indicators a feed drops disappear automatically.
  *
  *   MATCH — flow destinations (flow_agg_5m, same bucket-lag convention as the
- *     rollup worker) and firewall-event IPs (firewall_events tsMs axis) are
- *     checked against the active indicator set, which is cached in memory
- *     (exact host addresses + CIDR containment for v4/v6). Every hit upserts a
- *     finding of kind 'ioc-hit' into flow_security_findings — the SAME table,
+ *     rollup worker), firewall-event IPs (firewall_events tsMs axis) and DNS
+ *     query events (dns_query_events tsMs axis, pushed by plugins from the
+ *     appliance resolver) are checked against the active indicator set, which
+ *     is cached in memory (exact host addresses + CIDR containment for v4/v6,
+ *     plus domain suffix matching). Every hit upserts a finding of kind
+ *     'ioc-hit' or 'dns-ioc-hit' into flow_security_findings — the SAME table,
  *     auto-resolve sweep and securityFinding automation trigger as the flow
  *     security detectors — so hits raise one notification when first seen and
  *     can drive automation rules (block plans, webhooks) without extra wiring.
@@ -55,8 +60,10 @@ const IOC_CACHE_TTL_MS = 15 * 60_000;
 const IOC_CACHE_EMPTY_TTL_MS = 30_000;
 /** Max firewall-event rows scanned per beat (the watermark advances past them). */
 const FW_SCAN_LIMIT = 20_000;
+/** Max DNS query rows scanned per beat (same convention as the firewall pass). */
+const DNS_SCAN_LIMIT = 20_000;
 
-export const THREAT_INTEL_FORMATS = ['ip-list', 'stix'] as const;
+export const THREAT_INTEL_FORMATS = ['ip-list', 'stix', 'domain-list'] as const;
 export type ThreatIntelFormat = (typeof THREAT_INTEL_FORMATS)[number];
 
 // ── State ────────────────────────────────────────────────────────────────────
@@ -65,6 +72,8 @@ export type ThreatIntelFormat = (typeof THREAT_INTEL_FORMATS)[number];
 let cursorBucketMs = Math.floor(Date.now() / BUCKET_MS) * BUCKET_MS;
 /** firewall_events tsMs watermark — rows with tsMs > this are unscanned. */
 let fwWatermarkMs = Date.now();
+/** dns_query_events tsMs watermark — rows with tsMs > this are unscanned. */
+let dnsWatermarkMs = Date.now();
 /** Per-source last fetch ATTEMPT (ms) — bounds retry frequency on failure. */
 const attemptAt = new Map<string, number>();
 let iocCache: IocCache | null = null;
@@ -79,8 +88,10 @@ export function getThreatIntelStats(): {
   cursorBucketMs: number;
   /** firewall_events tsMs watermark — events with tsMs > this have been scanned. */
   fwWatermarkMs: number;
+  /** dns_query_events tsMs watermark — queries with tsMs > this have been scanned. */
+  dnsWatermarkMs: number;
 } {
-  return { lastRunAt, lastError, iocTotal: iocCache?.total ?? 0, cursorBucketMs, fwWatermarkMs };
+  return { lastRunAt, lastError, iocTotal: iocCache?.total ?? 0, cursorBucketMs, fwWatermarkMs, dnsWatermarkMs };
 }
 
 // ── IP / CIDR matching (v4 + v6) ─────────────────────────────────────────────
@@ -88,11 +99,13 @@ export function getThreatIntelStats(): {
 // module only adds threat-intel semantics on top (exact-vs-CIDR entries, the
 // canonical exact-match key, source attribution).
 
-/** One active indicator set: exact host addresses + CIDR networks. */
+/** One active indicator set: exact host addresses + CIDR networks + domains. */
 export interface IocCache {
   /** Canonical address string → source names containing it. */
   exact: Map<string, string[]>;
   cidrs: Array<{ words: number[]; prefix: number; family: 'v4' | 'v6'; sources: string[] }>;
+  /** Normalized domain (lowercase, no trailing dot) → source names listing it. */
+  domains: Map<string, string[]>;
   loadedAt: number;
   total: number;
 }
@@ -139,6 +152,30 @@ export function matchIoc(ipRaw: string | null | undefined, cache: IocCache): { i
   }
   if (hits.length === 0) return null;
   return { ip: p.key, sources: [...new Set(hits)] };
+}
+
+/**
+ * Matches one queried name against the domain set with Pi-hole semantics: a
+ * listed domain matches itself AND every subdomain. Walks the name's parent
+ * suffixes (a.b.evil.com → b.evil.com → evil.com) collecting EVERY level that
+ * is listed, so source attribution covers feeds at multiple depths. Returns
+ * the most specific matched domain plus the union of listing sources.
+ */
+export function matchDomain(nameRaw: string | null | undefined, cache: IocCache): { domain: string; sources: string[] } | null {
+  if (!nameRaw || cache.domains.size === 0) return null;
+  let name = String(nameRaw).trim().toLowerCase().replace(/\.$/, '');
+  const hits: Array<{ domain: string; sources: string[] }> = [];
+  while (name.length > 0) {
+    const sources = cache.domains.get(name);
+    if (sources && sources.length > 0) hits.push({ domain: name, sources });
+    // Parent suffix = drop the FIRST label (a.b.evil.com → b.evil.com). The
+    // walk goes most-specific to least-specific, so hits[0] is the deepest match.
+    const dot = name.indexOf('.');
+    if (dot < 0) break; // single label left — checked above, no parent to walk to
+    name = name.slice(dot + 1);
+  }
+  if (hits.length === 0) return null;
+  return { domain: hits[0].domain, sources: [...new Set(hits.flatMap((h) => h.sources))] };
 }
 
 // ── Feed parsing ─────────────────────────────────────────────────────────────
@@ -207,6 +244,47 @@ export function parseStix(bytes: Buffer, maxIocs: number): ParsedFeed {
   return { values: [...values], skipped };
 }
 
+/**
+ * Normalizes one domain-list line to its matchable form, or null when it is not
+ * a usable domain. Lowercases, strips a leading "*." wildcard (a listed domain
+ * matches itself AND every subdomain — the wildcard adds nothing) and a
+ * trailing FQDN dot. Labels must be RFC-1035 alnum/hyphen; the TLD must be at
+ * least two letters (rejects bare labels like "localhost" and IP literals).
+ */
+export function normalizeDomain(raw: string): string | null {
+  let d = String(raw).trim().toLowerCase();
+  if (!d) return null;
+  d = d.replace(/^\*\./, '').replace(/\.$/, '');
+  if (d.length < 3 || d.length > 253) return null;
+  if (!/^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$/.test(d)) return null;
+  if (!d.includes('.')) return null; // bare labels (localhost, …) are not blocklist domains
+  const tld = d.slice(d.lastIndexOf('.') + 1);
+  if (!/^[a-z]{2,}$/.test(tld)) return null;
+  return d;
+}
+
+/** Plain-text domain blocklist: one domain per line (Pi-hole/AdGuard format). */
+export function parseDomainList(bytes: Buffer, maxIocs: number): ParsedFeed {
+  const values = new Set<string>();
+  let skipped = 0;
+  for (const rawLine of bytes.toString('utf8').split(/\r?\n/)) {
+    if (values.size >= maxIocs) {
+      skipped += 1; // count the remainder without parsing it
+      continue;
+    }
+    const line = rawLine.trim().replace(/,+$/, '');
+    // Pi-hole lists use "!" comments in addition to # and ;.
+    if (!line || line.startsWith('#') || line.startsWith(';') || line.startsWith('!') || /^https?:\/\//i.test(line)) continue;
+    const d = normalizeDomain(line);
+    if (d === null) {
+      skipped += 1;
+      continue;
+    }
+    values.add(d);
+  }
+  return { values: [...values], skipped };
+}
+
 // ── Fetch cycle ──────────────────────────────────────────────────────────────
 
 interface SourceRow {
@@ -241,7 +319,10 @@ async function fetchSource(source: SourceRow): Promise<void> {
   const cycleStartIso = new Date().toISOString(); // rows not re-upserted after this are stale
   const { bytes } = await fetchViaWebFetch(provider, { url: source.url, maxBytes: MAX_FETCH_BYTES, timeoutMs: FETCH_TIMEOUT_MS });
 
-  const parsed: ParsedFeed = source.format === 'stix' ? parseStix(bytes, maxIocs) : parseIpList(bytes, maxIocs);
+  // Domain-list feeds store names in threat_domain_iocs (threat_iocs.ioc is
+  // INET and cannot hold them); ip/stix feeds keep using the address table.
+  const isDomain = source.format === 'domain-list';
+  const parsed: ParsedFeed = isDomain ? parseDomainList(bytes, maxIocs) : source.format === 'stix' ? parseStix(bytes, maxIocs) : parseIpList(bytes, maxIocs);
   if (parsed.values.length === 0 && parsed.skipped > 0) {
     throw new Error(`feed returned no usable indicators (${parsed.skipped} unparseable entries)`);
   }
@@ -251,18 +332,29 @@ async function fetchSource(source: SourceRow): Promise<void> {
   for (let i = 0; i < parsed.values.length; i += 1_000) {
     const chunk = parsed.values.slice(i, i + 1_000);
     const ids = chunk.map(() => uuidv4());
-    await pool.query(
-      `INSERT INTO threat_iocs (id, "sourceId", ioc, "firstSeenAt", "lastSeenAt")
-       SELECT u.id, $1, u.val::inet, $2, $2
-       FROM unnest($3::text[], $4::text[]) AS u(id, val)
-       ON CONFLICT ("sourceId", ioc) DO UPDATE SET "lastSeenAt" = EXCLUDED."lastSeenAt"`,
-      [source.id, cycleStartIso, ids, chunk]
-    );
+    if (isDomain) {
+      await pool.query(
+        `INSERT INTO threat_domain_iocs (id, "sourceId", domain, "firstSeenAt", "lastSeenAt")
+         SELECT u.id, $1, u.val, $2, $2
+         FROM unnest($3::text[], $4::text[]) AS u(id, val)
+         ON CONFLICT ("sourceId", domain) DO UPDATE SET "lastSeenAt" = EXCLUDED."lastSeenAt"`,
+        [source.id, cycleStartIso, ids, chunk]
+      );
+    } else {
+      await pool.query(
+        `INSERT INTO threat_iocs (id, "sourceId", ioc, "firstSeenAt", "lastSeenAt")
+         SELECT u.id, $1, u.val::inet, $2, $2
+         FROM unnest($3::text[], $4::text[]) AS u(id, val)
+         ON CONFLICT ("sourceId", ioc) DO UPDATE SET "lastSeenAt" = EXCLUDED."lastSeenAt"`,
+        [source.id, cycleStartIso, ids, chunk]
+      );
+    }
   }
 
   // Snapshot prune — indicators the feed no longer lists.
-  await pool.query(`DELETE FROM threat_iocs WHERE "sourceId" = $1 AND "lastSeenAt" < $2`, [source.id, cycleStartIso]);
-  const countRes = await pool.query(`SELECT COUNT(*)::int AS n FROM threat_iocs WHERE "sourceId" = $1`, [source.id]);
+  const table = isDomain ? 'threat_domain_iocs' : 'threat_iocs';
+  await pool.query(`DELETE FROM ${table} WHERE "sourceId" = $1 AND "lastSeenAt" < $2`, [source.id, cycleStartIso]);
+  const countRes = await pool.query(`SELECT COUNT(*)::int AS n FROM ${table} WHERE "sourceId" = $1`, [source.id]);
   await pool.query(
     `UPDATE threat_intel_sources SET "iocCount" = $1, "lastSuccessAt" = $2, "lastError" = NULL WHERE id = $3`,
     [Number(countRes.rows[0]?.n ?? 0), cycleStartIso, source.id]
@@ -327,10 +419,16 @@ async function ensureIocCache(): Promise<IocCache | null> {
   const ttl = iocCache && iocCache.total === 0 ? IOC_CACHE_EMPTY_TTL_MS : IOC_CACHE_TTL_MS;
   if (iocCache && Date.now() - iocCache.loadedAt < ttl) return iocCache;
   // Disabled feeds do not contribute to matching (their rows stay stored so a
-  // re-enable restores the indicators without a re-fetch).
-  const res = await pool.query<{ ioc: string; name: string }>(
-    `SELECT t.ioc::text AS ioc, s.name FROM threat_iocs t JOIN threat_intel_sources s ON s.id = t."sourceId" WHERE s.enabled`
-  );
+  // re-enable restores the indicators without a re-fetch). Both indicator
+  // tables load in parallel — address feeds and domain-list feeds are common.
+  const [res, domRes] = await Promise.all([
+    pool.query<{ ioc: string; name: string }>(
+      `SELECT t.ioc::text AS ioc, s.name FROM threat_iocs t JOIN threat_intel_sources s ON s.id = t."sourceId" WHERE s.enabled`
+    ),
+    pool.query<{ domain: string; name: string }>(
+      `SELECT t.domain, s.name FROM threat_domain_iocs t JOIN threat_intel_sources s ON s.id = t."sourceId" WHERE s.enabled`
+    ),
+  ]);
   const exact = new Map<string, string[]>();
   const cidrs: IocCache['cidrs'] = [];
   for (const r of res.rows) {
@@ -344,9 +442,17 @@ async function ensureIocCache(): Promise<IocCache | null> {
       cidrs.push({ words: p.words, prefix: p.prefix, family: p.family, sources: [r.name] });
     }
   }
-  iocCache = { exact, cidrs, loadedAt: Date.now(), total: res.rows.length };
+  const domains = new Map<string, string[]>();
+  for (const r of domRes.rows) {
+    const d = normalizeDomain(String(r.domain));
+    if (!d) continue; // defensive — rows are normalized at parse time
+    const list = domains.get(d) ?? [];
+    list.push(r.name);
+    domains.set(d, list);
+  }
+  iocCache = { exact, cidrs, domains, loadedAt: Date.now(), total: res.rows.length + domRes.rows.length };
   // eslint-disable-next-line no-console
-  console.log(`[threat-intel] IOC cache built: ${iocCache.total} active indicator(s)`);
+  console.log(`[threat-intel] IOC cache built: ${iocCache.total} active indicator(s) (${domains.size} domain)`);
   return iocCache;
 }
 
@@ -500,6 +606,123 @@ async function matchFirewallEvents(): Promise<void> {
   fwWatermarkMs = maxTs; // advance past everything scanned — each row is examined once
 }
 
+/** Emits the one-shot notification for a freshly detected DNS IOC hit. Best-effort. */
+async function notifyDnsIocHit(f: FindingInput): Promise<void> {
+  try {
+    const hits = (f.context.iocHits as Array<{ domain: string; sources: string[] }> | undefined) ?? [];
+    const listed = hits.length > 0 ? hits.map((h) => h.domain).join(', ') : String(f.context.domain ?? '');
+    const sources = [...new Set(hits.flatMap((h) => h.sources))].join(', ');
+    await emitNotification({
+      severity: 'warning',
+      source: f.deviceId ? 'device' : 'system',
+      deviceId: f.deviceId ?? undefined,
+      title: `Threat-intel hit: ${listed}`,
+      message: `${f.detail}${sources ? ` (feed${sources.length > 1 ? 's' : ''}: ${sources})` : ''}`,
+      dedupeKey: `flow-security:dns-ioc-hit:${f.srcIp}:${String(f.context.domain ?? '')}`,
+      context: { ...f.context, srcIp: f.srcIp },
+    });
+  } catch (err) {
+    // Notifications are best-effort by contract — never break the beat.
+    lastError = `notification failed: ${(err as Error).message}`;
+    // eslint-disable-next-line no-console
+    console.error('[threat-intel] notification emission failed:', err);
+  }
+}
+
+/** Resolves hostname clients to IPs via the hosts table (one batched lookup,
+ * newest lastSeenAt wins per name). The appliance's REST API substitutes a
+ * reverse-resolved hostname for the client IP, so findings — which need an INET
+ * source address — require this hop. */
+async function resolveClientHostnames(names: string[]): Promise<Map<string, string>> {
+  if (names.length === 0) return new Map();
+  try {
+    const res = await pool.query<{ h: string; ip: string; seen: string }>(
+      `SELECT lower(hostname) AS h, ip, "lastSeenAt" AS seen FROM hosts WHERE hostname IS NOT NULL AND lower(hostname) = ANY($1::text[])`,
+      [names]
+    );
+    // A name can map to several IPs (DHCP churn across sources) — newest lastSeenAt wins.
+    const best = new Map<string, { ip: string; seen: string }>();
+    for (const r of res.rows) {
+      const cur = best.get(r.h);
+      if (!cur || String(r.seen) > cur.seen) best.set(r.h, { ip: String(r.ip), seen: String(r.seen) });
+    }
+    return new Map([...best.entries()].map(([h, v]) => [h, v.ip]));
+  } catch (err) {
+    // eslint-disable-next-line no-console
+    console.error('[threat-intel] client hostname resolution failed:', err);
+    return new Map();
+  }
+}
+
+/** DNS pass — queried domains since the watermark vs the active domain set. */
+async function matchDnsQueries(): Promise<void> {
+  const cache = await ensureIocCache();
+  if (!cache || cache.domains.size === 0) return; // no domain indicators yet — nothing to match
+
+  // tsMs is epoch ms (appliance unix seconds × 1000, always UTC); a +5 min guard
+  // keeps future-skewed rows from being scanned twice.
+  const res = await pool.query<{ client: string; domain: string; qtype: string | null; action: string; rcode: string | null; deviceId: string; tsMs: string | number }>(
+    `SELECT client, domain, qtype, action, rcode, "deviceId", "tsMs"
+     FROM dns_query_events
+     WHERE "tsMs" > $1 AND "tsMs" <= $2
+     ORDER BY "tsMs" ASC LIMIT ${DNS_SCAN_LIMIT}`,
+    [dnsWatermarkMs, Date.now() + 300_000]
+  );
+  if (res.rows.length === 0) return;
+
+  let maxTs = dnsWatermarkMs;
+  // eslint-disable-next-line no-console
+  console.log(`[threat-intel] dns scan: ${res.rows.length} quer(y/ies) since ${new Date(dnsWatermarkMs).toISOString()}`);
+  // One finding per observed (client, domain) tuple — context lists every matching feed.
+  const tuples = new Map<string, { client: string; domain: string; qtype: string | null; action: string; rcode: string | null; deviceId: string; hits: Array<{ domain: string; sources: string[] }> }>();
+  for (const row of res.rows) {
+    const ts = Number(row.tsMs);
+    if (Number.isFinite(ts)) maxTs = Math.max(maxTs, ts);
+    const m = matchDomain(row.domain, cache);
+    if (!m) continue;
+    const key = `${row.client}|${row.domain}`;
+    const existing = tuples.get(key);
+    if (existing) {
+      for (const h of [m]) if (!existing.hits.some((e) => e.domain === h.domain)) existing.hits.push(h);
+    } else {
+      tuples.set(key, { client: String(row.client), domain: String(row.domain), qtype: row.qtype ? String(row.qtype) : null, action: String(row.action ?? 'pass'), rcode: row.rcode ? String(row.rcode) : null, deviceId: String(row.deviceId), hits: [m] });
+    }
+  }
+  if (tuples.size === 0) {
+    dnsWatermarkMs = maxTs; // nothing matched — still advance past the scanned rows
+    return;
+  }
+
+  // Hostname clients need an IP for the finding's INET source column.
+  const unresolved = [...new Set([...tuples.values()].map((t) => t.client))].filter((c) => ipToWords(c) === null);
+  const resolved = await resolveClientHostnames(unresolved.map((n) => n.toLowerCase()));
+
+  for (const t of tuples.values()) {
+    const clientIp = ipToWords(t.client) !== null ? t.client : resolved.get(t.client.toLowerCase());
+    if (!clientIp) continue; // no address to attribute the finding to — the event stays visible in the DNS view
+    const m = t.hits[0];
+    const detail = `DNS query from ${t.client} to threat-listed domain ${m.domain}` +
+      (t.qtype ? ` (${t.qtype})` : '') + '.';
+    const input: FindingInput = {
+      kind: 'dns-ioc-hit',
+      srcIp: clientIp,
+      dstIp: null,
+      severity: 'warning',
+      detail,
+      context: { iocHits: t.hits, domain: m.domain, client: t.client, qtype: t.qtype, action: t.action, rcode: t.rcode },
+      deviceId: t.deviceId || null,
+    };
+    const isNew = await upsertFinding(input);
+    if (isNew) {
+      // eslint-disable-next-line no-console
+      console.log(`[threat-intel] dns-ioc-hit finding: ${t.client} → ${m.domain}`);
+      await notifyDnsIocHit(input);
+    }
+  }
+
+  dnsWatermarkMs = maxTs; // advance past everything scanned — each row is examined once
+}
+
 // ── Beat ─────────────────────────────────────────────────────────────────────
 
 async function beat(): Promise<void> {
@@ -521,6 +744,7 @@ async function beat(): Promise<void> {
     }
 
     await matchFirewallEvents();
+    await matchDnsQueries();
 
     lastRunAt = new Date().toISOString();
     lastError = null;

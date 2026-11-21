@@ -715,7 +715,7 @@ function ThreatIntelSection() {
   // Add-source form state.
   const [name, setName] = useState('');
   const [url, setUrl] = useState('');
-  const [format, setFormat] = useState<'ip-list' | 'stix'>('ip-list');
+  const [format, setFormat] = useState<'ip-list' | 'stix' | 'domain-list'>('ip-list');
   const [adding, setAdding] = useState(false);
   const [addError, setAddError] = useState<string | null>(null);
 
@@ -920,7 +920,7 @@ function ThreatIntelSection() {
           storageKey="threat-intel-sources"
           autoRefresh={{ intervalMs: 30_000, queries: [tiQuery] }}
           searchPlaceholder="Search feeds…"
-          emptyMessage={'No IOC feed sources yet — add one below (plain IP/CIDR list or STIX bundle). Each fetch is an authoritative snapshot; matched IPs raise "threat intel hit" findings.'}
+          emptyMessage={'No IOC feed sources yet — add one below (IP/CIDR list, STIX bundle or Pi-hole-style domain blocklist). Each fetch is an authoritative snapshot; matches raise "threat intel hit" findings.'}
         />
       )}
 
@@ -936,9 +936,10 @@ function ThreatIntelSection() {
         </label>
         <label className="flex flex-col gap-1 text-xs font-medium text-secondary">
           Format
-          <select value={format} onChange={(e) => setFormat(e.target.value as 'ip-list' | 'stix')} className="rounded-md border border-border bg-background px-2 py-1.5 text-sm text-foreground">
+          <select value={format} onChange={(e) => setFormat(e.target.value as 'ip-list' | 'stix' | 'domain-list')} className="rounded-md border border-border bg-background px-2 py-1.5 text-sm text-foreground">
             <option value="ip-list">IP list (one per line)</option>
             <option value="stix">STIX 2.x bundle</option>
+            <option value="domain-list">Domain blocklist (Pi-hole style)</option>
           </select>
         </label>
         <button
@@ -964,7 +965,13 @@ function ThreatIntelSection() {
                   {h.severity}
                 </span>
                 <span className="font-mono shrink-0">
-                  {h.srcIp} → {h.dstIp ?? '?'}
+                  {h.kind === 'dns-ioc-hit' && h.domain ? (
+                    <>
+                      {h.srcIp} queried <span className="text-danger-fg">{h.domain}</span>
+                    </>
+                  ) : (
+                    <>{h.srcIp} → {h.dstIp ?? '?'}</>
+                  )}
                 </span>
                 <span className="text-secondary break-words">{h.detail}</span>
                 <span className="ml-auto shrink-0 text-faint" title={new Date(h.lastSeenAt).toLocaleString()}>

@@ -69,6 +69,7 @@ const FINDING_KIND_LABEL: Record<FlowSecurityFindingKind, string> = {
   'port-scan': 'Port scan',
   'egress-baseline': 'Egress spike',
   'ioc-hit': 'Threat intel hit',
+  'dns-ioc-hit': 'DNS domain hit',
 };
 
 /** Severity pill — same palette as the Notifications page. */
