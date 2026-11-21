@@ -1,12 +1,14 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import clsx from 'clsx';
 import { BellRing, CheckCheck, Info, OctagonX, Settings2, TriangleAlert, X } from 'lucide-react';
 import { Layout } from '../components/Layout';
 import { DataTable, DataTableColumn } from '../components/DataTable';
+import { useServerTable } from '../components/useServerTable';
 import { PageTabs } from '../components/PageTabs';
 import { NotificationChannelsTab } from '../components/NotificationChannelsTab';
 import { NotificationRulesTab } from '../components/NotificationRulesTab';
+import { useTablePageSizeOptions } from '../hooks/useTablePageSizes';
 import { api, Notification, NotificationSeverity, NotificationSource } from '../api/client';
 import { can } from '../auth/permissions';
 import { useTimeFormat } from '../utils/time';
@@ -69,7 +71,8 @@ export default function Notifications() {
   const [severity, setSeverity] = useState('');
   const [source, setSource] = useState('');
   const [deviceId, setDeviceId] = useState('');
-  const [search, setSearch] = useState('');
+  // Filter-bar search draft — debounced into the table's committed `q` below.
+  const [searchDraft, setSearchDraft] = useState('');
   const [showSettings, setShowSettings] = useState(false);
   const [tab, setTab] = useState<'inbox' | 'rules' | 'channels'>('inbox');
 
@@ -80,22 +83,40 @@ export default function Notifications() {
     [devicesQuery.data]
   );
 
-  // Full history — `all=true` ignores personal visibility prefs so the page is
-  // the complete audit view; the bell/panel apply the user's filters.
-  const listQuery = useQuery({
-    queryKey: ['notifications', 'page', status, severity, source, deviceId, search],
-    queryFn: () =>
-      api.notifications({
-        status: status || undefined,
-        severity: severity || undefined,
-        source: source || undefined,
-        deviceId: deviceId || undefined,
-        search: search.trim() || undefined,
+  // Page-owned filters; any change resets the table to page 1 (hook behavior).
+  const extra = useMemo(() => ({ status, severity, source, deviceId }), [status, severity, source, deviceId]);
+
+  // Server-side pagination — rows are fetched per page by the API. `all=true`
+  // ignores personal visibility prefs so the page is the complete audit view;
+  // it is a VISIBILITY switch here, not pagination (paged mode is always bounded).
+  const tablePageSizeOptions = useTablePageSizeOptions();
+  const table = useServerTable<{ status: string; severity: string; source: string; deviceId: string }, Notification>({
+    fetcher: async (p) => {
+      const res = await api.notifications({
+        status: p.status || undefined,
+        severity: p.severity || undefined,
+        source: p.source || undefined,
+        deviceId: p.deviceId || undefined,
+        search: p.q,
         all: true,
-        limit: 500,
-      }),
-    refetchInterval: 30_000,
+        page: p.page,
+        pageSize: p.pageSize,
+        sort: p.sort?.key === 'lastSeenAt' ? 'lastSeenAt' : p.sort?.key === 'createdAt' ? 'createdAt' : undefined,
+        dir: p.sort?.dir,
+      });
+      // Paged mode always returns the envelope; guard for safety.
+      return Array.isArray(res) ? { rows: res, total: res.length } : { rows: res.rows, total: res.total };
+    },
+    extra,
+    storageKey: 'unm:notifications-table',
   });
+
+  // Debounce the filter-bar search into the committed server query (300 ms).
+  useEffect(() => {
+    const t = setTimeout(() => table.setQ(searchDraft.trim()), 300);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchDraft]);
 
   // Open-count badge for the Inbox tab — same cached query as the bell, so no
   // extra request is made when both are mounted.
@@ -106,7 +127,8 @@ export default function Notifications() {
   });
 
   const invalidate = () => {
-    void queryClient.invalidateQueries({ queryKey: ['notifications'] });
+    // The inbox table lives under the hook's own key (['serverTable', storageKey, …]).
+    void queryClient.invalidateQueries({ queryKey: ['serverTable', 'unm:notifications-table'] });
     void queryClient.invalidateQueries({ queryKey: ['notificationCount'] });
   };
 
@@ -136,7 +158,7 @@ export default function Notifications() {
           </span>
         );
       },
-      sortAccessor: (n) => n.severity,
+      sortable: false, // server only sorts by lastSeenAt/createdAt — severity has a filter select
     },
     {
       header: 'Source',
@@ -145,6 +167,7 @@ export default function Notifications() {
       render: (n) => (
         <span className={clsx('inline-flex rounded px-1.5 py-0.5 text-xs font-medium', SOURCE_STYLES[n.source])}>{n.source}</span>
       ),
+      sortable: false,
     },
     {
       header: 'Notification',
@@ -159,6 +182,7 @@ export default function Notifications() {
         </div>
       ),
       exportValue: (n) => `${n.title} ${n.message}`.trim(),
+      sortable: false,
     },
     {
       header: 'Device',
@@ -172,12 +196,14 @@ export default function Notifications() {
         ) : (
           <span className="text-faint">—</span>
         ),
+      sortable: false,
     },
     {
       header: 'Plugin',
       key: 'pluginName',
       width: 160,
       render: (n) => (n.pluginName ? <span className="text-xs text-muted-foreground">{n.pluginName}</span> : <span className="text-faint">—</span>),
+      sortable: false,
     },
     {
       header: 'Status',
@@ -186,6 +212,7 @@ export default function Notifications() {
       render: (n) => (
         <span className={clsx('inline-flex rounded px-1.5 py-0.5 text-xs font-medium capitalize', STATUS_STYLES[n.status])}>{n.status}</span>
       ),
+      sortable: false,
     },
     {
       header: 'Seen',
@@ -313,19 +340,38 @@ export default function Notifications() {
           </select>
           <input
             type="search"
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
+            value={searchDraft}
+            onChange={(e) => setSearchDraft(e.target.value)}
             placeholder="Search title or message…"
             className="w-64 rounded-md border border-border bg-card px-2 py-1.5 text-sm"
           />
         </div>
 
+        {table.isError && (
+          <p className="text-sm text-danger-fg">Failed to load notifications: {table.error?.message}</p>
+        )}
+
         <DataTable<Notification>
           columns={columns}
-          rows={listQuery.data ?? []}
+          rows={table.data?.rows ?? []}
           rowKey={(n) => n.id}
           storageKey="unm:notifications-table"
-          searchPlaceholder="Search notifications…"
+          isFetching={table.isFetching}
+          showSearch={false} // the filter bar above owns search (debounced into table.q)
+          onSearch={table.setQ}
+          externalSearch={table.q || null}
+          serverPagination={{
+            total: table.data?.total ?? 0,
+            page: table.page,
+            pageSize: table.pageSize,
+            onPageChange: table.setPage,
+            onPageSizeChange: table.setPageSize,
+            // No "All" option — the API always bounds paged mode; use the global setting as-is.
+            pageSizeOptions: tablePageSizeOptions,
+            sort: table.sort,
+            onSortChange: table.setSort,
+          }}
+          autoRefresh={{ intervalMs: 30_000, queries: [table] }}
           emptyMessage="No notifications match the current filters."
           selectable
           bulkActions={[

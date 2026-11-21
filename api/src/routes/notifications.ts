@@ -8,6 +8,7 @@ import {
   acknowledgeAllOpen,
   acknowledgeNotifications,
   closeNotifications,
+  countNotifications,
   countOpenForUser,
   getVisibilityPrefs,
   listNotifications,
@@ -15,6 +16,7 @@ import {
   resolveNotifications,
   setVisibilityPrefs,
 } from '../notifications';
+import { hasPaginationParams, parsePagination, type ParsedPagination } from '../utils/pagination';
 
 /**
  * Notification center — public read + user-scoped actions.
@@ -83,7 +85,9 @@ async function propagateCloseToAppliances(ids: string[]): Promise<void> {
 
 const router = Router();
 
-// GET /notifications — newest first, filtered.
+// GET /notifications — newest first, filtered. Dual-mode pagination:
+// page/pageSize present → {rows,total,page,pageSize} envelope; absent → plain
+// array (legacy shape for the bell panel + other existing callers).
 router.get(
   '/notifications',
   requireAuth,
@@ -94,23 +98,70 @@ router.get(
       // The OpenAPI validator COERCES query params to the spec-declared type —
       // `all` is declared boolean and arrives as a real JS boolean, so accept
       // BOTH forms (see topology.ts for the same pattern).
+      // NOTE: here `all` means "ignore personal visibility prefs" — it does NOT
+      // enable paged mode (hasPaginationParams below uses includeAll:false).
       const all = q.all === true || q.all === 'true';
-      const rows = await listNotifications(
-        {
-          status: typeof q.status === 'string' ? q.status : undefined,
-          severity: typeof q.severity === 'string' ? q.severity : undefined,
-          source: typeof q.source === 'string' ? q.source : undefined,
-          deviceId: typeof q.deviceId === 'string' ? q.deviceId : undefined,
-          pluginId: typeof q.pluginId === 'string' ? q.pluginId : undefined,
-          search: typeof q.search === 'string' ? q.search : undefined,
-          limit: typeof q.limit === 'string' && q.limit ? Number(q.limit) : undefined,
-          // The bell/dropdown want the user's filtered view; the full page passes
-          // `all=true` to see everything regardless of personal prefs.
-          respectPrefs: !all,
-        },
-        req.user?.sub
-      );
-      res.json(rows);
+
+      // Paged mode — page/pageSize present → envelope with total.
+      const paged = hasPaginationParams(q, { includeAll: false });
+      let pg: ParsedPagination | null = null;
+      if (paged) {
+        const parsed = parsePagination(q, { defaultPageSize: 50, maxPageSize: 200 });
+        if ('error' in parsed) {
+          res.status(400).json({ error: parsed.error });
+          return;
+        }
+        pg = parsed;
+      }
+
+      // Sort — allowlisted over the two time axes (severity has a filter select).
+      let sortCol: 'lastSeenAt' | 'createdAt' = 'lastSeenAt';
+      let orderDir: 'asc' | 'desc' = 'desc';
+      if (q.sort !== undefined) {
+        if (q.sort !== 'lastSeenAt' && q.sort !== 'createdAt') {
+          res.status(400).json({ error: `"sort" must be "lastSeenAt" or "createdAt"` });
+          return;
+        }
+        sortCol = q.sort as 'lastSeenAt' | 'createdAt';
+        if (q.dir === 'asc' || q.dir === 'desc') orderDir = q.dir;
+        else if (q.dir !== undefined) {
+          res.status(400).json({ error: `"dir" must be "asc" or "desc"` });
+          return;
+        }
+      }
+
+      const baseParams = {
+        status: typeof q.status === 'string' ? q.status : undefined,
+        severity: typeof q.severity === 'string' ? q.severity : undefined,
+        source: typeof q.source === 'string' ? q.source : undefined,
+        deviceId: typeof q.deviceId === 'string' ? q.deviceId : undefined,
+        pluginId: typeof q.pluginId === 'string' ? q.pluginId : undefined,
+        search: typeof q.search === 'string' ? q.search : undefined,
+        // The bell/dropdown want the user's filtered view; the full page passes
+        // `all=true` to see everything regardless of personal prefs.
+        respectPrefs: !all,
+      };
+
+      if (!pg) {
+        // Legacy mode — plain array, byte-identical shape for existing callers.
+        const rows = await listNotifications(
+          { ...baseParams, limit: typeof q.limit === 'string' && q.limit ? Number(q.limit) : undefined },
+          req.user?.sub
+        );
+        res.json(rows);
+        return;
+      }
+
+      // Paged mode — LIMIT/OFFSET from the parsed params (always bounded here:
+      // `all` only controls visibility prefs, never unbounded paging).
+      const [rows, total] = await Promise.all([
+        listNotifications(
+          { ...baseParams, limit: pg.pageSize, offset: (pg.page - 1) * pg.pageSize, orderBy: { col: sortCol, dir: orderDir } },
+          req.user?.sub
+        ),
+        countNotifications(baseParams, req.user?.sub),
+      ]);
+      res.json({ rows, total, page: pg.page, pageSize: pg.pageSize });
     } catch (err) {
       const e = err as { status?: number; message?: string };
       res.status(e.status ?? 500).json({ error: e.message ?? 'Internal server error' });

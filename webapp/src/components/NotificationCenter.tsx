@@ -48,10 +48,14 @@ export function NotificationCenter() {
     enabled: allowed,
   });
 
-  // Panel rows — only fetched while open (cheap to re-open).
+  // Panel rows — only fetched while open (cheap to re-open). Legacy call (no
+  // page/pageSize) → the API answers with a plain array; normalize for safety.
   const listQuery = useQuery({
     queryKey: ['notifications', 'panel'],
-    queryFn: () => api.notifications({ status: 'open,acknowledged', limit: 30 }),
+    queryFn: async () => {
+      const res = await api.notifications({ status: 'open,acknowledged', limit: 30 });
+      return Array.isArray(res) ? res : res.rows;
+    },
     enabled: open,
     refetchInterval: open ? 15_000 : false,
   });

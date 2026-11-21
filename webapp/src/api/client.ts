@@ -1864,6 +1864,16 @@ export interface Notification {
   resolvedAt?: string | null;
 }
 
+/** Paged-mode envelope for GET /notifications — returned when page/pageSize are sent; legacy callers get a plain Notification[]. */
+export interface NotificationPagedResponse {
+  rows: Notification[];
+  total: number;
+  /** Current 1-based page. */
+  page: number;
+  /** Rows per page. */
+  pageSize: number;
+}
+
 /** Per-user visibility prefs (source → allowed severities). */
 export interface NotificationPrefs {
   userId: string;
@@ -2740,6 +2750,16 @@ export interface RadiusAuthLogRow {
   calledStationId?: string | null;
   callingStationId?: string | null;
   authdate: string;
+}
+
+/** Paged-mode envelope for GET /radius/auth-log — returned when page/pageSize are sent; legacy callers get a plain RadiusAuthLogRow[]. */
+export interface RadiusAuthLogPagedResponse {
+  rows: RadiusAuthLogRow[];
+  total: number;
+  /** Current 1-based page. */
+  page: number;
+  /** Rows per page. */
+  pageSize: number;
 }
 
 /** Latest poll snapshot of ONE RADIUS failover slave (radius_slave_monitor row). */
@@ -4869,6 +4889,7 @@ export const api = {
     return apiFetch<LogEntry[] | LogPagedResponse>(`/logs${suffix}`);
   },
   // Notification center (bell badge + panel + full page with filters).
+  // Paged mode: pass page/pageSize → returns a NotificationPagedResponse envelope instead of a plain array.
   notifications: (params?: {
     status?: string;
     severity?: string;
@@ -4879,6 +4900,10 @@ export const api = {
     /** true = ignore personal visibility prefs (full history view). */
     all?: boolean;
     limit?: number;
+    page?: number;
+    pageSize?: number;
+    sort?: 'lastSeenAt' | 'createdAt';
+    dir?: 'asc' | 'desc';
   }) => {
     const qs = new URLSearchParams();
     if (params?.status) qs.set('status', params.status);
@@ -4889,8 +4914,12 @@ export const api = {
     if (params?.search) qs.set('search', params.search);
     if (params?.all) qs.set('all', 'true');
     if (params?.limit) qs.set('limit', String(params.limit));
+    if (params?.page !== undefined) qs.set('page', String(params.page));
+    if (params?.pageSize !== undefined) qs.set('pageSize', String(params.pageSize));
+    if (params?.sort) qs.set('sort', params.sort);
+    if (params?.dir) qs.set('dir', params.dir);
     const suffix = qs.toString() ? `?${qs.toString()}` : '';
-    return apiFetch<Notification[]>(`/notifications${suffix}`);
+    return apiFetch<Notification[] | NotificationPagedResponse>(`/notifications${suffix}`);
   },
   notificationCount: () => apiFetch<{ count: number }>('/notifications/count'),
   acknowledgeNotifications: (ids?: string[], all?: boolean) =>
@@ -5184,14 +5213,17 @@ export const api = {
   // --- RADIUS self-monitoring + auth log ------------------------------------
   /** Latest probe outcome of the sidecar (+ 24h accept/reject counters). */
   radiusStatus: () => apiFetch<RadiusStatus>('/radius/status'),
-  /** Recent auth attempts (accept AND reject) — the failed-login audit trail. */
-  radiusAuthLog: (params?: { result?: 'reject' | 'accept'; search?: string; limit?: number }) => {
+  /** Recent auth attempts (accept AND reject) — the failed-login audit trail.
+   * Paged mode: pass page/pageSize → returns a RadiusAuthLogPagedResponse envelope instead of a plain array. */
+  radiusAuthLog: (params?: { result?: 'reject' | 'accept'; search?: string; limit?: number; page?: number; pageSize?: number }) => {
     const q = new URLSearchParams();
     if (params?.result) q.set('result', params.result);
     if (params?.search) q.set('search', params.search);
     if (params?.limit) q.set('limit', String(params.limit));
+    if (params?.page !== undefined) q.set('page', String(params.page));
+    if (params?.pageSize !== undefined) q.set('pageSize', String(params.pageSize));
     const qs = q.toString();
-    return apiFetch<RadiusAuthLogRow[]>(`/radius/auth-log${qs ? `?${qs}` : ''}`);
+    return apiFetch<RadiusAuthLogRow[] | RadiusAuthLogPagedResponse>(`/radius/auth-log${qs ? `?${qs}` : ''}`);
   },
   // --- RADIUS failover slaves (monitored from the primary) -------------------
   /** Every push replication target carrying `radius`, with its monitor snapshot. */

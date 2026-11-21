@@ -1,5 +1,5 @@
 import { v4 as uuidv4 } from 'uuid';
-import { and, eq, ilike, inArray, or, sql } from 'drizzle-orm';
+import { and, eq, ilike, inArray, or, sql, type SQL } from 'drizzle-orm';
 import { db, pool } from './db';
 import * as schema from './db/schema';
 import { dispatchNotification } from './notificationDispatch';
@@ -328,17 +328,28 @@ export interface ListNotificationsParams {
   pluginId?: string;
   search?: string;
   limit?: number;
+  /** Row offset for paged mode (always paired with an explicit limit). */
+  offset?: number;
+  /** Allowlisted sort override; default is lastSeenAt DESC, createdAt DESC. */
+  orderBy?: { col: 'lastSeenAt' | 'createdAt'; dir: 'asc' | 'desc' };
   /** When true, only rows visible to the user's prefs are returned. */
   respectPrefs?: boolean;
 }
 
-/** List notifications (newest first) with optional filters + name enrichment. */
-export async function listNotifications(
-  params: ListNotificationsParams,
-  userId?: string
-): Promise<Array<NotificationRow & { deviceName?: string | null; pluginName?: string | null }>> {
-  const limit = Math.min(500, Math.max(1, Number(params.limit ?? 200) || 200));
+/** ORDER BY for listNotifications — allowlisted columns only (no interpolation). */
+function notificationOrderBy(params: ListNotificationsParams): SQL[] {
+  const asc = params.orderBy?.dir === 'asc';
+  if (params.orderBy?.col === 'createdAt') return [asc ? sql`"createdAt" ASC` : sql`"createdAt" DESC`];
+  return [
+    asc ? sql`"lastSeenAt" ASC` : sql`"lastSeenAt" DESC`,
+    asc ? sql`"createdAt" ASC` : sql`"createdAt" DESC`,
+  ];
+}
 
+/** Build the shared WHERE clause — filters + optional visibility-prefs filter.
+ * Used by BOTH listNotifications and countNotifications so paged totals always
+ * match the listed rows exactly. */
+async function notificationWhere(params: ListNotificationsParams, userId?: string): Promise<SQL | undefined> {
   const statuses = (params.status ?? 'open,acknowledged')
     .split(',')
     .map((s) => s.trim())
@@ -380,10 +391,22 @@ export async function listNotifications(
     if (visClauses.length > 0) clauses.push(or(...visClauses));
   }
 
+  return clauses.length > 0 ? and(...clauses) : undefined;
+}
+
+/** List notifications (newest first) with optional filters + name enrichment. */
+export async function listNotifications(
+  params: ListNotificationsParams,
+  userId?: string
+): Promise<Array<NotificationRow & { deviceName?: string | null; pluginName?: string | null }>> {
+  const limit = Math.min(500, Math.max(1, Number(params.limit ?? 200) || 200));
+  const where = await notificationWhere(params, userId);
+
   const rows = await db.query.notifications.findMany({
-    ...(clauses.length > 0 ? { where: and(...clauses) } : {}),
-    orderBy: [sql`"lastSeenAt" DESC`, sql`"createdAt" DESC`],
+    ...(where ? { where } : {}),
+    orderBy: notificationOrderBy(params),
     limit,
+    ...(params.offset !== undefined ? { offset: params.offset } : {}),
   });
 
   // Enrich with display names (same batch pattern as routes/logs.ts).
@@ -401,6 +424,13 @@ export async function listNotifications(
     deviceName: r.deviceId ? (deviceNameById.get(r.deviceId) ?? null) : null,
     pluginName: r.pluginId ? (pluginNameById.get(r.pluginId) ?? null) : null,
   }));
+}
+
+/** Count rows matching the SAME filters as listNotifications (paged-mode total). */
+export async function countNotifications(params: ListNotificationsParams, userId?: string): Promise<number> {
+  const where = await notificationWhere(params, userId);
+  const rows = await db.select({ n: sql<number>`count(*)::int` }).from(schema.notifications).where(where);
+  return Number(rows[0]?.n ?? 0);
 }
 
 /**

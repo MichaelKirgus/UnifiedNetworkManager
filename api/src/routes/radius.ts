@@ -1,10 +1,11 @@
 import { Router, Request, Response } from 'express';
-import { and, asc, desc, eq, ilike, inArray, like, ne } from 'drizzle-orm';
+import { and, asc, desc, eq, ilike, inArray, like, ne, sql } from 'drizzle-orm';
 import { db, pool } from '../db';
 import * as schema from '../db/schema';
 import { PROBE_USERNAME } from '../radius/probe';
 import { getEffectiveSettingValue } from '../systemSettings';
 import { requireAuth, requirePermission } from '../auth/middleware';
+import { hasPaginationParams, parsePagination, envelopePage } from '../utils/pagination';
 
 /**
  * RADIUS NAS clients + user profiles (the unm-radius sidecar — FreeRADIUS EAP-TLS).
@@ -203,13 +204,24 @@ router.get(
   }
 );
 
+/** One radpostauth row as served to the webapp (probe heartbeat rows are filtered out). */
+function toAuthLogView(r: typeof schema.radpostauth.$inferSelect) {
+  return {
+    id: Number(r.id),
+    username: r.username,
+    result: (r.reply ?? '').startsWith('Access-Reject') ? 'reject' : (r.reply ?? '').startsWith('Access-Accept') ? 'accept' : (r.reply ?? null),
+    calledStationId: r.calledStationId,
+    callingStationId: r.callingStationId,
+    authdate: r.authdate instanceof Date ? r.authdate.toISOString() : String(r.authdate),
+  };
+}
+
 // GET /radius/auth-log — recent auth attempts (the failed-login audit trail).
 router.get(
   '/radius/auth-log',
   requireAuth,
   requirePermission('radius:read'),
   async (req: Request, res: Response) => {
-    const limit = Math.min(500, Math.max(1, Number(req.query.limit ?? 100) || 100));
     const result = String(req.query.result ?? ''); // '' | 'reject' | 'accept'
     const search = typeof req.query.search === 'string' ? req.query.search.trim() : '';
 
@@ -217,22 +229,35 @@ router.get(
     if (result === 'reject') clauses.push(like(schema.radpostauth.reply, 'Access-Reject%'));
     else if (result === 'accept') clauses.push(like(schema.radpostauth.reply, 'Access-Accept%'));
     if (search) clauses.push(ilike(schema.radpostauth.username, `%${search}%`));
+    const where = clauses.length > 0 ? and(...clauses) : undefined;
 
-    const rows = await db.query.radpostauth.findMany({
-      where: clauses.length > 0 ? and(...clauses) : undefined,
-      orderBy: [desc(schema.radpostauth.id)],
-      limit,
-    });
-    res.status(200).json(
-      rows.map((r) => ({
-        id: Number(r.id),
-        username: r.username,
-        result: (r.reply ?? '').startsWith('Access-Reject') ? 'reject' : (r.reply ?? '').startsWith('Access-Accept') ? 'accept' : (r.reply ?? null),
-        calledStationId: r.calledStationId,
-        callingStationId: r.callingStationId,
-        authdate: r.authdate instanceof Date ? r.authdate.toISOString() : String(r.authdate),
-      }))
-    );
+    // Dual mode: page/pageSize present → { rows, total, page, pageSize } envelope;
+    // otherwise a plain array (legacy). No sort param — always newest first.
+    if (!hasPaginationParams(req.query, { includeAll: false })) {
+      const limit = Math.min(500, Math.max(1, Number(req.query.limit ?? 100) || 100));
+      const rows = await db.query.radpostauth.findMany({ where, orderBy: [desc(schema.radpostauth.id)], limit });
+      res.status(200).json(rows.map(toAuthLogView));
+      return;
+    }
+
+    const parsed = parsePagination(req.query);
+    if ('error' in parsed) {
+      res.status(400).json({ error: parsed.error });
+      return;
+    }
+    // Paged mode is always bounded — `all` has no meaning here (it would just
+    // re-fetch the whole audit trail, which the legacy limit=500 cap prevents).
+    const [rows, countRes] = await Promise.all([
+      db.query.radpostauth.findMany({
+        where,
+        orderBy: [desc(schema.radpostauth.id)],
+        limit: parsed.pageSize,
+        offset: (parsed.page - 1) * parsed.pageSize,
+      }),
+      db.select({ n: sql<number>`count(*)::int` }).from(schema.radpostauth).where(where),
+    ]);
+    const total = Number(countRes[0]?.n ?? 0);
+    res.status(200).json({ rows: rows.map(toAuthLogView), total, ...envelopePage(parsed, total) });
   }
 );
 

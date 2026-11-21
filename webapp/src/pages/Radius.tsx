@@ -1,9 +1,10 @@
-import { useState } from 'react';
+import { useMemo, useRef, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Activity, Check, ChevronDown, ChevronRight, Copy, Download, EyeOff, KeyRound, Loader2, Network, Pencil, Plus, RefreshCw, Server, ShieldOff, Trash2 } from 'lucide-react';
 import { Layout } from '../components/Layout';
 import { DialogShell } from '../components/DialogShell';
 import { DataTable, DataTableColumn } from '../components/DataTable';
+import { useServerTable } from '../components/useServerTable';
 import { ReauthDialog } from '../components/ReauthDialog';
 import { api, ApiError, CaStatus, CaKeyType, ClientCertTemplate, RadiusAuthLogRow, RadiusNasClient, RadiusSlaveMonitorSnapshot, RadiusSlaveStatus, RadiusStatus, RadiusUserProfile, Secret, WifiClientCert } from '../api/client';
 import { can } from '../auth/permissions';
@@ -1058,19 +1059,40 @@ function RadiusStatusSection() {
   });
 
   const [filter, setFilter] = useState<'all' | 'reject' | 'accept'>('all');
-  const logQuery = useQuery({
-    queryKey: ['radiusAuthLog', filter],
-    queryFn: () => api.radiusAuthLog(filter === 'all' ? { limit: 50 } : { result: filter, limit: 50 }),
+  // Page-owned filter; any change resets the table to page 1 (hook behavior).
+  const extra = useMemo(() => ({ result: filter === 'all' ? '' : filter }), [filter]);
+
+  // Server-side pagination — rows are fetched per page by the API. The endpoint
+  // has no sort param (always newest first), so header sorting stays disabled.
+  const table = useServerTable<{ result: string }, RadiusAuthLogRow>({
+    fetcher: async (p) => {
+      const res = await api.radiusAuthLog({
+        result: p.result === 'reject' || p.result === 'accept' ? p.result : undefined,
+        search: p.q,
+        page: p.page,
+        pageSize: p.pageSize,
+      });
+      // Paged mode always returns the envelope; guard for safety.
+      return Array.isArray(res) ? { rows: res, total: res.length } : { rows: res.rows, total: res.total };
+    },
+    extra,
+    storageKey: 'radius-auth-log',
     enabled: canRead && radiusLoaded,
-    refetchInterval: 30_000,
   });
+
+  // Debounce the table's built-in quick search into the committed server query (300 ms).
+  const qTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  function onSearchInput(v: string) {
+    if (qTimer.current) clearTimeout(qTimer.current);
+    qTimer.current = setTimeout(() => table.setQ(v.trim()), 300);
+  }
 
   if (!canRead) return null;
   if (!radiusLoaded) return null;
 
   const status: RadiusStatus | undefined = statusQuery.data;
   const probe = status?.probe ?? null;
-  const logRows: RadiusAuthLogRow[] = logQuery.data ?? [];
+  const logRows: RadiusAuthLogRow[] = table.data?.rows ?? [];
 
   const logColumns: DataTableColumn<RadiusAuthLogRow>[] = [
     {
@@ -1168,14 +1190,29 @@ function RadiusStatusSection() {
         </div>
       </div>
 
+      {table.isError && (
+        <p className="text-sm text-danger-fg">Failed to load the auth log: {table.error?.message}</p>
+      )}
+
       <DataTable
         columns={logColumns}
         rows={logRows}
         rowKey={(row) => String(row.id)}
         storageKey="radius-auth-log"
+        isFetching={table.isFetching}
         searchPlaceholder="Search auth attempts…"
+        onSearch={onSearchInput}
+        externalSearch={table.q || null}
+        serverPagination={{
+          total: table.data?.total ?? 0,
+          page: table.page,
+          pageSize: table.pageSize,
+          onPageChange: table.setPage,
+          onPageSizeChange: table.setPageSize,
+          // No sort param on this endpoint — header sorting stays disabled.
+        }}
+        autoRefresh={{ intervalMs: 30_000, queries: [table] }}
         emptyMessage={`No auth attempts logged yet${filter !== 'all' ? ` for this filter` : ''}.`}
-        autoRefresh={{ intervalMs: 30_000, queries: [logQuery] }}
       />
     </section>
   );

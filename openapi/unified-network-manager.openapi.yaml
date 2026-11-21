@@ -7757,7 +7757,10 @@ paths:
         open,acknowledged; pass e.g. status=open,acknowledged,resolved,closed
         for the full history. `all=true` ignores the caller's personal
         visibility prefs (the Notifications page uses it); without it only
-        severities allowed by the user's prefs are returned. Requires
+        severities allowed by the user's prefs are returned — note this is a
+        VISIBILITY switch, not pagination: paged mode is enabled by page/pageSize.
+        With page/pageSize present the body is a `{ rows, total, page, pageSize }`
+        envelope; without them it stays a plain array (legacy). Requires
         permission `notifications:read`.
       parameters:
         - in: query
@@ -7801,17 +7804,44 @@ paths:
         - in: query
           name: limit
           required: false
-          schema: { type: integer, default: 200, maximum: 500 }
-          description: Max rows to return (default 200, hard cap 500)
+          schema: { type: integer, maximum: 500 }
+          description: Max rows to return (default 200, hard cap 500) — legacy mode; ignored when page/pageSize are present
+        # NOTE: no `default:` on these — the validator injects schema defaults into
+        # MISSING params, which would flip legacy callers into paged mode. The code
+        # applies its own defaults once paged mode is detected.
+        - in: query
+          name: page
+          required: false
+          schema: { type: integer, minimum: 1 }
+          description: Page number (1-based, default 1); enables paged mode with the `{ rows, total, page, pageSize }` envelope
+        - in: query
+          name: pageSize
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 200 }
+          description: Rows per page (default 50, clamped to 200 max)
+        - in: query
+          name: sort
+          required: false
+          schema: { type: string, enum: [lastSeenAt, createdAt] }
+          description: Sort field (default lastSeenAt) — only meaningful with dir=asc; default order is newest first
+        - in: query
+          name: dir
+          required: false
+          schema: { type: string, enum: [asc, desc] }
+          description: Sort direction (default desc = newest first)
       responses:
         '200':
-          description: Notifications, newest first
+          description: Notifications, newest first — plain array in legacy mode; envelope object with page/pageSize present
           content:
             application/json:
               schema:
-                type: array
-                items:
-                  $ref: '#/components/schemas/Notification'
+                oneOf:
+                  - type: array
+                    items:
+                      $ref: '#/components/schemas/Notification'
+                  - $ref: '#/components/schemas/NotificationPagedResponse'
+        '400':
+          description: Invalid sort/dir or invalid pagination values
         '401':
           description: Authentication required
         '403':
@@ -9455,7 +9485,10 @@ paths:
         Recent rows from radpostauth — one per completed EAP-TLS auth attempt,
         ACCEPT and REJECT alike. This is the unsuccessful-login audit trail;
         failed logins also raise notifications. The probe's own heartbeat rows
-        are excluded. Requires permission `radius:read`.
+        are excluded. With page/pageSize present the body is a `{ rows, total,
+        page, pageSize }` envelope; without them it stays a plain array (legacy).
+        Always newest first — there is no sort param. Requires permission
+        `radius:read`.
       parameters:
         - in: query
           name: result
@@ -9467,16 +9500,34 @@ paths:
           description: "Substring match on the username"
         - in: query
           name: limit
-          schema: { type: integer, minimum: 1, maximum: 500, default: 100 }
+          schema: { type: integer, minimum: 1, maximum: 500 }
+          description: Max rows to return (default 100, hard cap 500) — legacy mode; ignored when page/pageSize are present
+        # NOTE: no `default:` on these — the validator injects schema defaults into
+        # MISSING params, which would flip legacy callers into paged mode. The code
+        # applies its own defaults once paged mode is detected.
+        - in: query
+          name: page
+          required: false
+          schema: { type: integer, minimum: 1 }
+          description: Page number (1-based, default 1); enables paged mode with the `{ rows, total, page, pageSize }` envelope
+        - in: query
+          name: pageSize
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 200 }
+          description: Rows per page (default 50, clamped to 200 max)
       responses:
         '200':
-          description: Auth attempts, newest first
+          description: Auth attempts, newest first — plain array in legacy mode; envelope object with page/pageSize present
           content:
             application/json:
               schema:
-                type: array
-                items:
-                  $ref: '#/components/schemas/RadiusAuthLogRow'
+                oneOf:
+                  - type: array
+                    items:
+                      $ref: '#/components/schemas/RadiusAuthLogRow'
+                  - $ref: '#/components/schemas/RadiusAuthLogPagedResponse'
+        '400':
+          description: Invalid pagination values
         '401':
           description: Authentication required
         '403':
@@ -10611,6 +10662,20 @@ components:
         total: { type: integer, description: "Total matching rows over the filters/window" }
         page: { type: integer, description: "Current 1-based page; equals 1 in all-mode" }
         pageSize: { type: integer, description: "Rows per page; equals total in all-mode" }
+
+    NotificationPagedResponse:
+      type: object
+      description: Paged-mode envelope for GET /notifications — returned when page/pageSize query params are present (the `all` param is a visibility switch here, not pagination); legacy callers get a plain array.
+      required: [rows, total, page, pageSize]
+      properties:
+        rows:
+          type: array
+          items:
+            $ref: '#/components/schemas/Notification'
+          description: "The requested slice of notifications (newest first unless dir=asc)"
+        total: { type: integer, description: "Total matching rows over the filters" }
+        page: { type: integer, description: "Current 1-based page" }
+        pageSize: { type: integer, description: "Rows per page" }
 
     Notification:
       type: object
@@ -14569,6 +14634,20 @@ components:
         calledStationId: { type: string, nullable: true, description: "NAS identifier (Called-Station-Id)" }
         callingStationId: { type: string, nullable: true, description: "Client MAC / Calling-Station-Id" }
         authdate: { type: string, format: date-time }
+
+    RadiusAuthLogPagedResponse:
+      type: object
+      description: Paged-mode envelope for GET /radius/auth-log — returned when page/pageSize query params are present; legacy callers get a plain array.
+      required: [rows, total, page, pageSize]
+      properties:
+        rows:
+          type: array
+          items:
+            $ref: '#/components/schemas/RadiusAuthLogRow'
+          description: "The requested slice of auth attempts (always newest first)"
+        total: { type: integer, description: "Total matching rows over the filters" }
+        page: { type: integer, description: "Current 1-based page" }
+        pageSize: { type: integer, description: "Rows per page" }
 
     RadiusSlaveMonitorSnapshot:
       type: object
