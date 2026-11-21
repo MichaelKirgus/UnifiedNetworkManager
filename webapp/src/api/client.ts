@@ -3878,6 +3878,8 @@ export interface ThreatIntelSource {
   iocCount: number;
   lastSuccessAt: string | null;
   lastError: string | null;
+  /** Central file-repo row holding the raw snapshot of the last successful fetch (downloadable); null until the first success. */
+  repoFileId?: string | null;
   createdAt: string;
 }
 

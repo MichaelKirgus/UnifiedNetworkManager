@@ -10,8 +10,29 @@
 // needs it for row ids, which these tests never assert on.
 jest.mock('uuid', () => ({ v4: () => '00000000-0000-4000-8000-000000000000' }));
 
-import { matchDomain, matchIoc, normalizeDomain, parseDomainList, parseIpList, parseIocValue, parseStix } from './threatIntel';
+import { matchDomain, matchIoc, normalizeDomain, parseDomainList, parseIpList, parseIocValue, parseStix, threatIntelFileName } from './threatIntel';
 import type { IocCache } from './threatIntel';
+
+describe('threatIntelFileName', () => {
+  it('builds a date-suffixed name with the format extension', () => {
+    const today = new Date().toISOString().slice(0, 10);
+    expect(threatIntelFileName('My Feed', 'ip-list')).toBe(`threat-intel-My-Feed-${today}.txt`);
+    expect(threatIntelFileName('My Feed', 'domain-list')).toBe(`threat-intel-My-Feed-${today}.txt`);
+    expect(threatIntelFileName('My Feed', 'stix')).toBe(`threat-intel-My-Feed-${today}.json`);
+  });
+
+  it('sanitizes unsafe characters and bounds the length', () => {
+    const name = threatIntelFileName('a/b\\c:d "quoted" feed', 'ip-list');
+    expect(name).toMatch(/^threat-intel-a-b-c-d-quoted-feed-\d{4}-\d{2}-\d{2}\.txt$/);
+    // 80-char cap on the source-name part + fixed suffix.
+    const long = threatIntelFileName('x'.repeat(500), 'stix');
+    expect(long.length).toBeLessThanOrEqual('threat-intel-'.length + 80 + '-YYYY-MM-DD.json'.length);
+  });
+
+  it('falls back to "feed" when the name sanitizes to nothing', () => {
+    expect(threatIntelFileName('///', 'ip-list')).toMatch(/^threat-intel-feed-\d{4}-\d{2}-\d{2}\.txt$/);
+  });
+});
 
 /** Builds a cache the same way ensureIocCache does from parsed entries. */
 function makeCache(entries: Array<{ value: string; sources: string[] }>, domains?: Array<{ domain: string; sources: string[] }>): IocCache {

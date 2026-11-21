@@ -2055,8 +2055,11 @@ await pool.query(`ALTER TABLE flow_micro ADD COLUMN IF NOT EXISTS "agentCount" I
       "iocCount" INTEGER NOT NULL DEFAULT 0,
       "lastSuccessAt" TEXT,
       "lastError" TEXT,
+      "repoFileId" TEXT,
       "createdAt" TEXT NOT NULL
     )`);
+  // Raw feed snapshot pointer (central file repo) — added after the table existed.
+  await pool.query(`ALTER TABLE threat_intel_sources ADD COLUMN IF NOT EXISTS "repoFileId" TEXT`);
   await pool.query(`
     CREATE TABLE IF NOT EXISTS threat_iocs (
       id TEXT PRIMARY KEY,

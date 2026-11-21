@@ -6,7 +6,13 @@
  *   FETCH — every enabled IOC feed source (threat_intel_sources rows, managed
  *     via POST /v1/threat-intel/sources) is re-fetched through the web-fetch
  *     broker (`webFetchBroker`, same egress path as OSV/GeoIP) at the
- *     `threatIntelFetchIntervalMinutes` cadence. Supported formats:
+ *     `threatIntelFetchIntervalMinutes` cadence. After each successful fetch
+ *     the RAW feed bytes are stored in the central file repository (category
+ *     'threat-intel', one current snapshot per source — superseded files are
+ *     pruned, identical content dedupes to a no-op) so the exact list behind
+ *     any finding is auditable/downloadable; the parsed indicator tables stay
+ *     authoritative for matching and a repo failure never breaks the cycle.
+ *     Supported formats:
  *       - ip-list     — one IPv4/IPv6 address or CIDR per line (# and ; comments,
  *         blank lines and URLs skipped);
  *       - stix        — STIX 2.x bundle; equality patterns of type indicators are
@@ -39,6 +45,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { pool } from '../db';
 import { getEffectiveValues } from '../systemSettings';
 import { emitNotification } from '../notifications';
+import { addRepoFile, deleteRepoFile } from '../fileRepo';
 import { resolveWebFetchProvider, fetchViaWebFetch } from '../webFetchBroker';
 import { LEADER_KEYS } from './leader';
 import { initWorker, trackBeat } from './stats';
@@ -65,6 +72,18 @@ const DNS_SCAN_LIMIT = 20_000;
 
 export const THREAT_INTEL_FORMATS = ['ip-list', 'stix', 'domain-list'] as const;
 export type ThreatIntelFormat = (typeof THREAT_INTEL_FORMATS)[number];
+
+/**
+ * File name for the raw feed snapshot stored in the central file repository
+ * (category 'threat-intel'). Date-suffixed like the geoip worker: a changed
+ * feed on the same day gets addRepoFile's numeric collision suffix instead of
+ * overwriting, and unchanged content dedupes to the existing row by sha256.
+ */
+export function threatIntelFileName(sourceName: string, format: ThreatIntelFormat): string {
+  const base = sourceName.replace(/[^\w.\-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 80) || 'feed';
+  const ext = format === 'stix' ? 'json' : 'txt';
+  return `threat-intel-${base}-${new Date().toISOString().slice(0, 10)}.${ext}`;
+}
 
 // ── State ────────────────────────────────────────────────────────────────────
 
@@ -294,6 +313,8 @@ interface SourceRow {
   format: ThreatIntelFormat;
   enabled: boolean;
   lastSuccessAt: string | null;
+  /** Central file-repo row holding the raw snapshot of the last successful fetch (null = none yet). */
+  repoFileId: string | null;
 }
 
 async function markSourceError(id: string, message: string): Promise<void> {
@@ -360,6 +381,28 @@ async function fetchSource(source: SourceRow): Promise<void> {
     [Number(countRes.rows[0]?.n ?? 0), cycleStartIso, source.id]
   );
 
+  // Raw snapshot → central file repository (category 'threat-intel'): the exact
+  // feed content behind this fetch stays auditable/downloadable. One current
+  // snapshot per source — a superseded file is pruned after the new one lands,
+  // and unchanged content dedupes to the existing row by sha256 (no-op). The
+  // parsed indicator tables above remain authoritative for matching, so a repo
+  // failure must never break or roll back the fetch cycle.
+  try {
+    const { entry } = await addRepoFile({
+      data: bytes,
+      name: threatIntelFileName(source.name, source.format),
+      category: 'threat-intel',
+      uploadedBy: 'plugin',
+    });
+    if (source.repoFileId && source.repoFileId !== entry.id) {
+      await deleteRepoFile(source.repoFileId).catch(() => undefined); // superseded — keep only the current snapshot
+    }
+    await pool.query(`UPDATE threat_intel_sources SET "repoFileId" = $1 WHERE id = $2`, [entry.id, source.id]);
+  } catch (err) {
+    // eslint-disable-next-line no-console
+    console.warn(`[threat-intel] raw snapshot for "${source.name}" not stored in the file repo:`, (err as Error).message);
+  }
+
   iocCache = null; // the active set changed — rebuild on next use
   // eslint-disable-next-line no-console
   console.log(`[threat-intel] fetched "${source.name}": ${parsed.values.length} indicators (${parsed.skipped} skipped)`);
@@ -368,7 +411,7 @@ async function fetchSource(source: SourceRow): Promise<void> {
 /** Fetches every enabled source whose interval has elapsed. One failure never breaks the beat. */
 async function fetchDueSources(intervalMs: number): Promise<void> {
   const now = Date.now();
-  const res = await pool.query<SourceRow>(`SELECT id, name, url, format, enabled, "lastSuccessAt" FROM threat_intel_sources WHERE enabled`);
+  const res = await pool.query<SourceRow>(`SELECT id, name, url, format, enabled, "lastSuccessAt", "repoFileId" FROM threat_intel_sources WHERE enabled`);
   for (const s of res.rows) {
     // Due when neither the last success nor the last attempt is recent — a
     // source that never succeeded fetches immediately; failures retry at the
@@ -394,7 +437,7 @@ async function fetchDueSources(intervalMs: number): Promise<void> {
  * the work is queued; outcomes surface in each source's lastSuccessAt/lastError.
  */
 export async function triggerThreatIntelFetch(sourceId?: string): Promise<{ triggered: number }> {
-  const sql = sourceId ? `SELECT id, name, url, format, enabled, "lastSuccessAt" FROM threat_intel_sources WHERE enabled AND id = $1` : `SELECT id, name, url, format, enabled, "lastSuccessAt" FROM threat_intel_sources WHERE enabled`;
+  const sql = sourceId ? `SELECT id, name, url, format, enabled, "lastSuccessAt", "repoFileId" FROM threat_intel_sources WHERE enabled AND id = $1` : `SELECT id, name, url, format, enabled, "lastSuccessAt", "repoFileId" FROM threat_intel_sources WHERE enabled`;
   const res = await pool.query<SourceRow>(sql, sourceId ? [sourceId] : []);
   for (const s of res.rows) {
     attemptAt.set(s.id, Date.now());

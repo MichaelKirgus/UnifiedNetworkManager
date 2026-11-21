@@ -805,6 +805,11 @@ export const threatIntelSources = pgTable(
     iocCount: integer('iocCount').notNull().default(0),
     lastSuccessAt: text('lastSuccessAt'),
     lastError: text('lastError'),
+    // Central file-repo row holding the RAW feed snapshot of the last successful
+    // fetch (category 'threat-intel') — audit/download convenience; the parsed
+    // indicator tables remain authoritative for matching. NULL until the first
+    // successful fetch (or when no file-repo backend is available).
+    repoFileId: text('repoFileId'),
     createdAt: text('createdAt').notNull(),
   },
   (table) => {

@@ -11110,6 +11110,9 @@ components:
         lastError:
           type: [string, 'null']
           description: Most recent fetch error message (cleared on success)
+        repoFileId:
+          type: [string, 'null']
+          description: Central file-repo row holding the RAW snapshot of the last successful fetch (downloadable via GET /files/{id}); null until the first success or when no file-repo backend is available
         createdAt: { type: string, format: date-time }
 
     ThreatIntelSourceInput:

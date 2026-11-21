@@ -4,6 +4,7 @@ import { pool } from '../db';
 import { getEffectiveSettingValue } from '../systemSettings';
 import { requireAuth, requirePermission } from '../auth/middleware';
 import { THREAT_INTEL_FORMATS, ThreatIntelFormat, getThreatIntelStats, invalidateIocCache, triggerThreatIntelFetch } from '../workers/threatIntel';
+import { deleteRepoFile } from '../fileRepo';
 
 /**
  * Threat intelligence — source management + status (Security page).
@@ -42,6 +43,8 @@ interface SourceRow {
   iocCount: number | string;
   lastSuccessAt: string | null;
   lastError: string | null;
+  /** Central file-repo row holding the raw snapshot of the last successful fetch (null = none yet). */
+  repoFileId?: string | null;
   createdAt: string;
 }
 
@@ -55,6 +58,7 @@ function sourceToJson(r: SourceRow) {
     iocCount: Number(r.iocCount ?? 0),
     lastSuccessAt: r.lastSuccessAt ? String(r.lastSuccessAt) : null,
     lastError: r.lastError ? String(r.lastError) : null,
+    repoFileId: r.repoFileId ? String(r.repoFileId) : null,
     createdAt: String(r.createdAt),
   };
 }
@@ -94,7 +98,7 @@ router.get('/threat-intel', requireAuth, requirePermission('security:read'), asy
     const limit = parseLimit(q.limit, 50, 200);
 
     const [srcRes, hitRes] = await Promise.all([
-      pool.query<SourceRow>(`SELECT id, name, url, format, enabled, "iocCount", "lastSuccessAt", "lastError", "createdAt" FROM threat_intel_sources ORDER BY name`),
+      pool.query<SourceRow>(`SELECT id, name, url, format, enabled, "iocCount", "lastSuccessAt", "lastError", "repoFileId", "createdAt" FROM threat_intel_sources ORDER BY name`),
       pool.query(
         `SELECT id, kind, severity, "srcIp", "dstIp", detail, context, "deviceId", "firstSeenAt", "lastSeenAt", occurrences, status
          FROM flow_security_findings WHERE kind IN ('ioc-hit', 'dns-ioc-hit') AND status = 'open'
@@ -168,7 +172,7 @@ router.post('/threat-intel/sources', requireAuth, requirePermission('system:writ
     // First fetch is immediate — the beat's interval logic would otherwise wait.
     void triggerThreatIntelFetch(id);
 
-    const created = await pool.query<SourceRow>(`SELECT id, name, url, format, enabled, "iocCount", "lastSuccessAt", "lastError", "createdAt" FROM threat_intel_sources WHERE id = $1`, [id]);
+    const created = await pool.query<SourceRow>(`SELECT id, name, url, format, enabled, "iocCount", "lastSuccessAt", "lastError", "repoFileId", "createdAt" FROM threat_intel_sources WHERE id = $1`, [id]);
     res.status(201).json(sourceToJson(created.rows[0]));
   } catch (error) {
     console.error('Error creating threat-intel source:', error);
@@ -213,7 +217,7 @@ router.patch('/threat-intel/sources/:id', requireAuth, requirePermission('system
 
     params.push(req.params.id);
     const upd = await pool.query(
-      `UPDATE threat_intel_sources SET ${sets.join(', ')} WHERE id = $${params.length} RETURNING id, name, url, format, enabled, "iocCount", "lastSuccessAt", "lastError", "createdAt"`,
+      `UPDATE threat_intel_sources SET ${sets.join(', ')} WHERE id = $${params.length} RETURNING id, name, url, format, enabled, "iocCount", "lastSuccessAt", "lastError", "repoFileId", "createdAt"`,
       params
     );
     if (upd.rows.length === 0) {
@@ -239,11 +243,16 @@ router.patch('/threat-intel/sources/:id', requireAuth, requirePermission('system
 /** DELETE /v1/threat-intel/sources/:id — remove the feed + its indicators. */
 router.delete('/threat-intel/sources/:id', requireAuth, requirePermission('system:write'), async (req: Request, res: Response) => {
   try {
+    // The raw snapshot file is pruned with the source (best-effort — a repo
+    // hiccup must not block deleting the feed itself).
+    const pre = await pool.query<{ "repoFileId": string | null }>(`SELECT "repoFileId" FROM threat_intel_sources WHERE id = $1`, [req.params.id]);
     const del = await pool.query(`DELETE FROM threat_intel_sources WHERE id = $1`, [req.params.id]);
     if (del.rowCount === 0) {
       res.status(404).json({ error: 'source not found' });
       return;
     }
+    const repoFileId = pre.rows[0]?.['repoFileId'];
+    if (repoFileId) await deleteRepoFile(String(repoFileId)).catch(() => undefined);
     // Deleted indicators must stop matching immediately, not on the cache TTL.
     invalidateIocCache();
     res.status(200).json({ deleted: true });

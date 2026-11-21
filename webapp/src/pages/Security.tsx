@@ -1,5 +1,5 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { Bug, Globe, Loader2, RefreshCw, Radar, ShieldCheck, ShieldAlert, ShieldX, Info, Trash2 } from 'lucide-react';
+import { Bug, Download, Globe, Loader2, RefreshCw, Radar, ShieldCheck, ShieldAlert, ShieldX, Info, Trash2 } from 'lucide-react';
 import { Link } from 'react-router-dom';
 import { useMemo, useState } from 'react';
 import clsx from 'clsx';
@@ -707,6 +707,18 @@ export default function Security() {
   );
 }
 
+/** Triggers a browser download of an already-fetched blob under `name` (same pattern as the Files page). */
+function saveBlob(blob: Blob, name: string): void {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = name;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 10_000);
+}
+
 /** Threat-intel section: managed IOC feeds, per-source fetch state and recent hits. */
 function ThreatIntelSection() {
   const queryClient = useQueryClient();
@@ -771,6 +783,17 @@ function ThreatIntelSection() {
       void queryClient.invalidateQueries({ queryKey: ['threatIntel'] });
     } catch (err) {
       console.warn('Failed to delete threat-intel source:', (err as Error).message);
+    }
+  }
+
+  /** Downloads the raw feed snapshot of the last successful fetch from the central file repo. */
+  async function downloadSnapshot(s: ThreatIntelSource) {
+    if (!s.repoFileId) return;
+    try {
+      const blob = await api.downloadRepoFile(s.repoFileId);
+      saveBlob(blob, `${s.name.replace(/[^\w.\-]+/g, '-').slice(0, 80) || 'feed'}.${s.format === 'stix' ? 'json' : 'txt'}`);
+    } catch (err) {
+      console.warn('Failed to download threat-intel snapshot:', (err as Error).message);
     }
   }
 
@@ -844,9 +867,19 @@ function ThreatIntelSection() {
     {
       header: '',
       key: 'actions',
-      width: 120,
+      width: 150,
       render: (row) => (
         <div className="flex items-center justify-end gap-1">
+          {row.repoFileId && (
+            <button
+              type="button"
+              onClick={() => void downloadSnapshot(row)}
+              title="Download the raw feed snapshot of the last successful fetch (from the file repo)"
+              className="rounded p-1 text-secondary hover:bg-muted"
+            >
+              <Download className="h-3.5 w-3.5" />
+            </button>
+          )}
           <button
             type="button"
             onClick={() => void toggleSource(row)}
@@ -1150,7 +1183,7 @@ function DnsSection() {
           storageKey="dns-queries"
           autoRefresh={{ intervalMs: 30_000, queries: [dnsQuery] }}
           searchPlaceholder="Search domain or client…"
-          emptyMessage={'No DNS query events in this window. The OPNsense plugin pushes the appliance\'s unbound qstats query log on each telemetry poll (requires the "DNS Query Log" feature enabled on the box); other platforms do not report per-query data yet.'}
+          emptyMessage={'No DNS query events in this window. Devices that expose a resolver query log push per-query rows to UNM on each telemetry poll — make sure DNS logging is enabled on the appliance and wait for the next poll.'}
         />
       )}
     </div>
