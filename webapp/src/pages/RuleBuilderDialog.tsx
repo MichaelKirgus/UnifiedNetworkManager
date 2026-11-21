@@ -847,9 +847,10 @@ function InternalActionEditor({ block, onChange }: { block: Extract<AutomationAc
     <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
       <div>
         <span className={labelCls}>Operation</span>
-        <select className={inputCls} value={block.kind} onChange={(e) => { const kind = e.target.value as 'backup' | 'replicationSync'; onChange({ ...block, kind, preset: kind === 'backup' ? (block.preset ?? 'config') : undefined, targetId: kind === 'replicationSync' ? block.targetId : undefined }); }}>
+        <select className={inputCls} value={block.kind} onChange={(e) => { const kind = e.target.value as 'backup' | 'replicationSync' | 'retentionSweep'; onChange({ ...block, kind, preset: kind === 'backup' ? (block.preset ?? 'config') : undefined, targetId: kind === 'replicationSync' ? block.targetId : undefined }); }}>
           <option value="backup">Backup UNM database</option>
           <option value="replicationSync">Replication sync push</option>
+          <option value="retentionSweep">File retention sweep</option>
         </select>
       </div>
       {block.kind === 'backup' && (
@@ -862,6 +863,9 @@ function InternalActionEditor({ block, onChange }: { block: Extract<AutomationAc
           </div>
           <p className="sm:col-span-2 text-xs text-faint">Stored on the local volume (same path as the auto-backup worker).</p>
         </>
+      )}
+      {block.kind === 'retentionSweep' && (
+        <p className="sm:col-span-2 text-xs text-faint">Deletes file-repo files that violate an enabled retention policy (age / per-device count). Files without a policy are kept forever.</p>
       )}
       {block.kind === 'replicationSync' && (
         <div>

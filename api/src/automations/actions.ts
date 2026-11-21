@@ -17,6 +17,7 @@ import { isCanonicalIntent } from '@unm/plugin-sdk';
 import { db } from '../db';
 import * as schema from '../db/schema';
 import { emitNotification } from '../notifications';
+import { sweepFileRepoRetention } from '../fileRepoRetention';
 import { catalogDeviceCount, createPlanCore, PlanBuildError } from '../utils/createPlanCore';
 import { enqueuePlanExecution } from '../workers/planExecutor';
 import { PRESETS, buildArchive, gzipArchive, scopeForSections, storeLocalBackup } from '../backup';
@@ -170,6 +171,13 @@ export async function executeAction(automationId: string, automationName: string
           if (!action.targetId) return { ok: false, error: 'targetId is required for replicationSync', planIds: [] };
           const report = await runTargetSync(action.targetId);
           if (report.status !== 'ok') return { ok: false, error: report.error ?? 'Replication sync failed', planIds: [] };
+          return { ok: true, planIds: [] };
+        }
+
+        if (action.kind === 'retentionSweep') {
+          // On-demand file-repo retention sweep — the same code path as the
+          // hourly worker, so a scheduled action can enforce policies on its own cadence.
+          await sweepFileRepoRetention();
           return { ok: true, planIds: [] };
         }
 

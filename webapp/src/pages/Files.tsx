@@ -1,12 +1,12 @@
 import { useEffect, useRef, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import clsx from 'clsx';
-import { Database, Download, FileUp, FolderOpen, History, Loader2, Trash2, X } from 'lucide-react';
+import { Database, Download, FileUp, FolderOpen, History, Loader2, Pencil, Plus, Timer, Trash2, X } from 'lucide-react';
 import { DialogShell } from '../components/DialogShell';
 import { Layout } from '../components/Layout';
 import { DataTable, DataTableColumn } from '../components/DataTable';
 import { formatBytes } from '../components/formatMetric';
-import { api, ApiError, RepoFileEntry, RepoFileUse } from '../api/client';
+import { api, ApiError, RepoFileEntry, RepoFileUse, RetentionPolicy, RetentionPolicyInput } from '../api/client';
 import { can } from '../auth/permissions';
 import { useTimeFormat } from '../utils/time';
 
@@ -35,6 +35,277 @@ function saveBlob(blob: Blob, name: string): void {
   a.click();
   a.remove();
   setTimeout(() => URL.revokeObjectURL(url), 10_000);
+}
+
+/** One-line human summary of a policy's enforcement dimensions. */
+function retentionSummary(p: RetentionPolicy): string {
+  const parts: string[] = [];
+  if (p.maxAgeDays) parts.push(`delete after ${p.maxAgeDays}d`);
+  if (p.keepLatestPerDevice) parts.push(`keep newest ${p.keepLatestPerDevice}/device`);
+  return parts.join(' + ');
+}
+
+/** One-line human summary of a policy's matchers. */
+function matcherSummary(p: RetentionPolicy): string {
+  const m: string[] = [];
+  if (p.category) m.push(p.category);
+  if (p.namePattern) m.push(`name ~ ${p.namePattern}`);
+  return m.length > 0 ? m.join(', ') : 'any file';
+}
+
+const fieldCls = 'w-full rounded-md border border-border bg-background px-2.5 py-1.5 text-xs focus:border-focus-ring focus:outline-none';
+const labelCls = 'mb-1 block text-[11px] font-medium uppercase tracking-wide text-faint';
+
+/** Retention lifecycle templates — create/edit/delete policies, bulk-assign them to
+ * matching files, and run the sweep on demand. Files with no policy are kept forever. */
+function RetentionPoliciesDialog({ onClose }: { onClose: () => void }) {
+  const queryClient = useQueryClient();
+  const canWrite = can('files:write');
+
+  const policiesQuery = useQuery({ queryKey: ['retentionPolicies'], queryFn: () => api.listRetentionPolicies() });
+  const policies = policiesQuery.data?.policies ?? [];
+
+  // Create/edit form state — editingId 'new' opens the empty form, a policy id pre-fills it.
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [form, setForm] = useState({ name: '', description: '', category: '', namePattern: '', maxAgeDays: '', keepLatestPerDevice: '' });
+  const [error, setError] = useState<string | null>(null);
+  const [sweepResult, setSweepResult] = useState<{ totalDeleted: number; perPolicy: Array<{ name: string; deleted: number }> } | null>(null);
+
+  function openCreate() {
+    setForm({ name: '', description: '', category: '', namePattern: '', maxAgeDays: '', keepLatestPerDevice: '' });
+    setEditingId('new');
+    setError(null);
+  }
+  function openEdit(p: RetentionPolicy) {
+    setForm({
+      name: p.name,
+      description: p.description ?? '',
+      category: p.category ?? '',
+      namePattern: p.namePattern ?? '',
+      maxAgeDays: p.maxAgeDays ? String(p.maxAgeDays) : '',
+      keepLatestPerDevice: p.keepLatestPerDevice ? String(p.keepLatestPerDevice) : '',
+    });
+    setEditingId(p.id);
+    setError(null);
+  }
+
+  const invalidate = () => {
+    queryClient.invalidateQueries({ queryKey: ['retentionPolicies'] });
+    queryClient.invalidateQueries({ queryKey: ['repoFiles'] });
+  };
+
+  const saveMutation = useMutation({
+    mutationFn: async (): Promise<RetentionPolicy> => {
+      const body: RetentionPolicyInput = {
+        name: form.name.trim(),
+        description: form.description.trim() || null,
+        category: form.category.trim().toLowerCase() || null,
+        namePattern: form.namePattern.trim() || null,
+        maxAgeDays: form.maxAgeDays.trim() === '' ? null : Number(form.maxAgeDays),
+        keepLatestPerDevice: form.keepLatestPerDevice.trim() === '' ? null : Number(form.keepLatestPerDevice),
+      };
+      if (editingId === 'new') return (await api.createRetentionPolicy(body)).policy;
+      const { policy } = await api.updateRetentionPolicy(editingId as string, body);
+      return policy;
+    },
+    onSuccess: () => {
+      setEditingId(null);
+      setError(null);
+      invalidate();
+    },
+    onError: (err) => setError(err instanceof Error ? err.message : String(err)),
+  });
+
+  const deleteMutation = useMutation({
+    mutationFn: (id: string) => api.deleteRetentionPolicy(id),
+    onSuccess: () => invalidate(),
+    onError: (err) => setError(err instanceof Error ? err.message : String(err)),
+  });
+
+  const applyMutation = useMutation({
+    mutationFn: (id: string) => api.applyRetentionPolicyToMatching(id),
+    onSuccess: ({ assigned }) => {
+      setSweepResult(null);
+      setError(null);
+      invalidate();
+      // eslint-disable-next-line no-console
+      console.log(`[files] retention policy applied to ${assigned} file(s)`);
+    },
+    onError: (err) => setError(err instanceof Error ? err.message : String(err)),
+  });
+
+  const toggleMutation = useMutation({
+    mutationFn: ({ id, enabled }: { id: string; enabled: boolean }) => api.updateRetentionPolicy(id, { enabled }),
+    onSuccess: () => invalidate(),
+    onError: (err) => setError(err instanceof Error ? err.message : String(err)),
+  });
+
+  const sweepMutation = useMutation({
+    mutationFn: () => api.runRetentionSweep(),
+    onSuccess: (res) => {
+      setSweepResult(res);
+      invalidate();
+    },
+    onError: (err) => setError(err instanceof Error ? err.message : String(err)),
+  });
+
+  return (
+    <DialogShell title="Retention policies" subtitle="Lifecycle templates for repo files — a file with no policy is kept forever." onClose={onClose} maxWidth="max-w-2xl" bodyMaxHeight="70vh">
+      <div className="space-y-3">
+        {error && (
+          <div className="flex items-center gap-2 rounded-md border border-danger-border bg-danger px-3 py-2 text-xs text-danger-fg">
+            <span className="flex-1">{error}</span>
+            <button type="button" aria-label="Dismiss error" onClick={() => setError(null)}><X size={12} /></button>
+          </div>
+        )}
+
+        {/* Policy list */}
+        {policiesQuery.isLoading ? (
+          <p className="flex items-center gap-2 text-sm text-muted-foreground"><Loader2 size={14} className="animate-spin" /> Loading…</p>
+        ) : policies.length === 0 && editingId !== 'new' ? (
+          <p className="text-sm text-faint">No retention policies yet. Create one below — e.g. "config backups: delete after 30 days + keep newest 7 per device".</p>
+        ) : (
+          <div className="space-y-1.5">
+            {policies.map((p) => (
+              <div key={p.id} className={clsx('rounded-md border px-3 py-2', p.enabled ? 'border-border bg-background/60' : 'border-border bg-muted/40 opacity-70')}>
+                <div className="flex items-center gap-2">
+                  {canWrite && (
+                    <input type="checkbox" checked={p.enabled} onChange={(e) => toggleMutation.mutate({ id: p.id, enabled: e.target.checked })} title={p.enabled ? 'Enabled — the worker enforces this policy' : 'Disabled — files are kept until re-enabled'} />
+                  )}
+                  <span className="text-sm font-medium text-secondary">{p.name}</span>
+                  <span className="rounded border border-border bg-background px-1.5 py-0.5 text-[10px] text-faint">{p.fileCount ?? 0} file(s)</span>
+                  <div className="ml-auto flex items-center gap-0.5">
+                    {canWrite && (
+                      <>
+                        <button type="button" title="Apply to matching unassigned files (backfill)" disabled={applyMutation.isPending}
+                          onClick={() => { if (window.confirm(`Assign "${p.name}" to all currently UNASSIGNED ${matcherSummary(p)}? They will then be cleaned up by this policy.`)) applyMutation.mutate(p.id); }}
+                          className="rounded-md p-1.5 text-secondary hover:bg-muted disabled:opacity-40"><Timer size={13} /></button>
+                        <button type="button" title="Edit" onClick={() => openEdit(p)} className="rounded-md p-1.5 text-secondary hover:bg-muted"><Pencil size={13} /></button>
+                        <button type="button" title={'Delete (files become "no policy → kept forever")'} disabled={deleteMutation.isPending}
+                          onClick={() => { if (window.confirm(`Delete policy "${p.name}"? Its ${p.fileCount ?? 0} file(s) are unassigned and KEPT FOREVER — nothing is deleted.`)) deleteMutation.mutate(p.id); }}
+                          className="rounded-md p-1.5 text-danger-fg hover:bg-muted disabled:opacity-40"><Trash2 size={13} /></button>
+                      </>
+                    )}
+                  </div>
+                </div>
+                <p className="mt-1 text-xs text-muted-foreground">{retentionSummary(p)} · matches {matcherSummary(p)}</p>
+                {p.description && <p className="mt-0.5 text-[11px] text-faint">{p.description}</p>}
+              </div>
+            ))}
+          </div>
+        )}
+
+        {/* Create / edit form */}
+        {editingId !== null ? (
+          <form className="space-y-2 rounded-md border border-border bg-background/60 p-3" onSubmit={(e) => { e.preventDefault(); saveMutation.mutate(); }}>
+            <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+              <div>
+                <label className={labelCls}>Name</label>
+                <input className={fieldCls} value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="Config backups (30 days)" required />
+              </div>
+              <div>
+                <label className={labelCls}>Category matcher (empty = any)</label>
+                <input className={fieldCls} value={form.category} onChange={(e) => setForm({ ...form, category: e.target.value })} placeholder="config-backup" list="retention-categories" />
+                <datalist id="retention-categories">
+                  {CATEGORIES.map((c) => <option key={c} value={c} />)}
+                </datalist>
+              </div>
+              <div>
+                <label className={labelCls}>Name pattern (regex, empty = any)</label>
+                <input className={fieldCls} value={form.namePattern} onChange={(e) => setForm({ ...form, namePattern: e.target.value })} placeholder=".*__config-backup-.*" />
+              </div>
+              <div>
+                <label className={labelCls}>Description (optional)</label>
+                <input className={fieldCls} value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} placeholder="Daily intent backups — keep a month" />
+              </div>
+              <div>
+                <label className={labelCls}>Max age (days, empty = no limit)</label>
+                <input className={fieldCls} type="number" min={1} value={form.maxAgeDays} onChange={(e) => setForm({ ...form, maxAgeDays: e.target.value })} placeholder="30" />
+              </div>
+              <div>
+                <label className={labelCls}>Keep newest per device (empty = no limit)</label>
+                <input className={fieldCls} type="number" min={1} value={form.keepLatestPerDevice} onChange={(e) => setForm({ ...form, keepLatestPerDevice: e.target.value })} placeholder="7" />
+              </div>
+            </div>
+            <p className="text-[11px] text-faint">At least one of max age / keep-newest is required. The matchers decide which files the policy applies to (default assignment + backfill) — the sweep only ever touches ASSIGNED files.</p>
+            <div className="flex items-center gap-2">
+              <button type="submit" disabled={saveMutation.isPending}
+                className="inline-flex items-center gap-1.5 rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-fg hover:opacity-90 disabled:opacity-50">
+                {saveMutation.isPending && <Loader2 size={12} className="animate-spin" />}
+                {editingId === 'new' ? 'Create policy' : 'Save changes'}
+              </button>
+              <button type="button" onClick={() => setEditingId(null)} className="rounded-md px-3 py-1.5 text-xs text-secondary hover:bg-muted">Cancel</button>
+            </div>
+          </form>
+        ) : (
+          canWrite && (
+            <button type="button" onClick={openCreate} className="inline-flex items-center gap-1.5 rounded-md border border-border px-3 py-1.5 text-xs font-medium text-secondary hover:bg-muted">
+              <Plus size={12} /> New policy
+            </button>
+          )
+        )}
+
+        {/* Manual sweep */}
+        {canWrite && (
+          <div className="flex items-center gap-3 border-t border-border pt-3">
+            <button type="button" onClick={() => sweepMutation.mutate()} disabled={sweepMutation.isPending}
+              className="inline-flex items-center gap-1.5 rounded-md border border-border px-3 py-1.5 text-xs font-medium text-secondary hover:bg-muted disabled:opacity-50">
+              {sweepMutation.isPending ? <Loader2 size={12} className="animate-spin" /> : <Timer size={12} />}
+              Run sweep now
+            </button>
+            {sweepResult && (
+              <span className="text-xs text-secondary">
+                Removed <b>{sweepResult.totalDeleted}</b> file(s)
+                {sweepResult.perPolicy.filter((p) => p.deleted > 0).map((p) => ` · ${p.name}: ${p.deleted}`).join('')}
+              </span>
+            )}
+          </div>
+        )}
+      </div>
+    </DialogShell>
+  );
+}
+
+/** Per-file retention assignment — pick a policy or "no policy (kept forever)". */
+function FileRetentionDialog({ entry, onClose }: { entry: RepoFileEntry; onClose: () => void }) {
+  const queryClient = useQueryClient();
+  const [policyId, setPolicyId] = useState<string>(entry.retentionPolicyId ?? '');
+  const [error, setError] = useState<string | null>(null);
+
+  const policiesQuery = useQuery({ queryKey: ['retentionPolicies'], queryFn: () => api.listRetentionPolicies() });
+  const policies = policiesQuery.data?.policies ?? [];
+
+  const saveMutation = useMutation({
+    mutationFn: () => api.setFileRetentionPolicy(entry.id, policyId === '' ? null : policyId),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['repoFiles'] });
+      onClose();
+    },
+    onError: (err) => setError(err instanceof Error ? err.message : String(err)),
+  });
+
+  return (
+    <DialogShell title="Retention policy" subtitle={<span className="block truncate font-mono" title={entry.name}>{entry.name}</span>} onClose={onClose} maxWidth="max-w-md">
+      <div className="space-y-3">
+        {error && <p className="text-xs text-danger-fg">{error}</p>}
+        <label className={labelCls}>Policy for this file</label>
+        <select className={fieldCls} value={policyId} onChange={(e) => setPolicyId(e.target.value)} disabled={policiesQuery.isLoading}>
+          <option value="">No policy — kept forever</option>
+          {policies.map((p) => (
+            <option key={p.id} value={p.id}>{p.name} ({retentionSummary(p)}){p.enabled ? '' : ' [disabled]'}</option>
+          ))}
+        </select>
+        <div className="flex items-center gap-2">
+          <button type="button" onClick={() => saveMutation.mutate()} disabled={saveMutation.isPending}
+            className="inline-flex items-center gap-1.5 rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-fg hover:opacity-90 disabled:opacity-50">
+            {saveMutation.isPending && <Loader2 size={12} className="animate-spin" />}
+            Save
+          </button>
+          <button type="button" onClick={onClose} className="rounded-md px-3 py-1.5 text-xs text-secondary hover:bg-muted">Cancel</button>
+        </div>
+      </div>
+    </DialogShell>
+  );
 }
 
 /** Usage-history dialog for one repo file (the "which device, when" audit trail). */
@@ -95,6 +366,8 @@ export default function Files() {
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [usesEntry, setUsesEntry] = useState<RepoFileEntry | null>(null);
+  const [retentionEntry, setRetentionEntry] = useState<RepoFileEntry | null>(null);
+  const [policiesOpen, setPoliciesOpen] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const filesQuery = useQuery({
@@ -204,6 +477,19 @@ export default function Files() {
       ),
     },
     {
+      header: 'Retention',
+      key: 'retentionPolicyId',
+      width: 160,
+      sortAccessor: (row) => row.retentionPolicyName ?? '',
+      render: (row) => row.retentionPolicyId ? (
+        <span className="block truncate text-xs text-secondary" title={`Retention policy "${row.retentionPolicyName ?? 'unknown'}"`}>
+          {row.retentionPolicyName ?? 'unknown policy'}
+        </span>
+      ) : (
+        <span className="text-[11px] text-faint" title="No retention policy — this file is kept forever">no policy · kept forever</span>
+      ),
+    },
+    {
       header: 'Size',
       key: 'sizeBytes',
       width: 100,
@@ -254,8 +540,12 @@ export default function Files() {
           <button type="button" aria-label={`Usage history of ${row.name}`} title="Usage history" onClick={() => setUsesEntry(row)}
             className="rounded-md p-1.5 text-secondary hover:bg-muted hover:text-foreground"><History size={14} /></button>
           {canWrite && (
-            <button type="button" aria-label={`Delete ${row.name}`} title="Delete" onClick={() => remove(row)} disabled={deleteMutation.isPending}
-              className="rounded-md p-1.5 text-danger-fg hover:bg-muted hover:text-danger-fg disabled:opacity-40"><Trash2 size={13} /></button>
+            <>
+              <button type="button" aria-label={`Retention policy for ${row.name}`} title="Set retention policy (no policy = kept forever)" onClick={() => setRetentionEntry(row)}
+                className="rounded-md p-1.5 text-secondary hover:bg-muted hover:text-foreground"><Timer size={13} /></button>
+              <button type="button" aria-label={`Delete ${row.name}`} title="Delete" onClick={() => remove(row)} disabled={deleteMutation.isPending}
+                className="rounded-md p-1.5 text-danger-fg hover:bg-muted hover:text-danger-fg disabled:opacity-40"><Trash2 size={13} /></button>
+            </>
           )}
         </div>
       ),
@@ -309,6 +599,16 @@ export default function Files() {
               )}
             </>
           )}
+
+          {/* Retention lifecycle templates — manage policies + run the sweep */}
+          <button
+            type="button"
+            onClick={() => setPoliciesOpen(true)}
+            className="inline-flex items-center gap-1.5 rounded-md border border-border px-3 py-1.5 text-xs font-medium text-secondary hover:bg-muted"
+          >
+            <Timer size={13} />
+            Retention policies
+          </button>
 
           {/* Category filter chips */}
           <div className="ml-auto flex items-center gap-1">
@@ -388,6 +688,8 @@ export default function Files() {
         )}
 
         {usesEntry && <UsesDialog entry={usesEntry} onClose={() => setUsesEntry(null)} />}
+        {retentionEntry && canWrite && <FileRetentionDialog entry={retentionEntry} onClose={() => setRetentionEntry(null)} />}
+        {policiesOpen && <RetentionPoliciesDialog onClose={() => setPoliciesOpen(false)} />}
       </div>
     </Layout>
   );

@@ -2184,6 +2184,8 @@ export interface SettingView {
   pattern?: string | null;
   /** Set when the value is a plugin instance id — render a combobox (GET /settings/plugin-providers). */
   pluginCapability?: 'fileRepo' | 'webFetch' | null;
+  /** Set when the value is a retention-policy id — render a policy combobox (GET /files/retention-policies); empty = no default. */
+  retentionPolicyPicker?: boolean | null;
 }
 
 export interface SettingsListResponse {
@@ -2638,6 +2640,10 @@ export interface RepoFileEntry {
   createdAt: string;
   /** File-repo plugin storing the bytes (capability `fileRepo`); null = api-local volume (legacy). */
   providerId?: string | null;
+  /** Assigned retention policy id; NULL = NO policy → the file is kept FOREVER. */
+  retentionPolicyId?: string | null;
+  /** Display name for retentionPolicyId (resolved in list calls). */
+  retentionPolicyName?: string | null;
   /** Display name for `uploadedBy` — user id resolved to username ('plugin' passes through). */
   uploadedByName?: string | null;
 }
@@ -2660,6 +2666,45 @@ export interface RepoFileUse {
   createdAt: string;
   /** Display name for `usedBy` — user id resolved to username ('plugin' passes through). */
   usedByName?: string | null;
+}
+
+/** One retention lifecycle template (GET /files/retention-policies).
+ * A file with NO assigned policy is kept forever; policies are ASSIGNED, never matched implicitly. */
+export interface RetentionPolicy {
+  id: string;
+  name: string;
+  description?: string | null;
+  /** Exact category slug this policy applies to (null = any). */
+  category?: string | null;
+  /** JS regex source matched against the file NAME (null = any). */
+  namePattern?: string | null;
+  /** Delete files older than this many days (null/0 = no age limit). */
+  maxAgeDays?: number | null;
+  /** Per device key, keep only the newest N matching files (null/0 = none). */
+  keepLatestPerDevice?: number | null;
+  enabled: boolean;
+  createdAt: string;
+  updatedAt: string;
+  /** Number of repo files currently assigned to this policy. */
+  fileCount?: number;
+}
+
+/** Create/update payload for a retention policy (at least one retention dimension required). */
+export interface RetentionPolicyInput {
+  name: string;
+  description?: string | null;
+  category?: string | null;
+  namePattern?: string | null;
+  maxAgeDays?: number | null;
+  keepLatestPerDevice?: number | null;
+  enabled?: boolean;
+}
+
+/** Result of one retention sweep (worker or manual). */
+export interface RetentionSweepResult {
+  sweptAt: string;
+  totalDeleted: number;
+  perPolicy: Array<{ policyId: string; name: string; deleted: number }>;
 }
 
 // --- Certificate Authority (unm-ca / step-ca) types --------------------------
@@ -4028,7 +4073,7 @@ export type BackupPresetValue = (typeof BACKUP_PRESETS)[number];
 export interface AutomationInternalAction {
   id: string;
   type: 'internal';
-  kind: 'backup' | 'replicationSync';
+  kind: 'backup' | 'replicationSync' | 'retentionSweep';
   preset?: BackupPresetValue;
   sections?: string[];
   destination?: 'local' | 'repo';
@@ -4748,6 +4793,22 @@ export const api = {
   deleteRepoFile: (id: string) => apiFetch<void>(`/files/${encodeURIComponent(id)}`, { method: 'DELETE' }),
   /** The usage audit trail of one repo file (newest first). */
   repoFileUses: (id: string) => apiFetch<{ fileId: string; uses: RepoFileUse[] }>(`/files/${encodeURIComponent(id)}/uses`),
+  // --- File-repo retention lifecycle -----------------------------------------
+  /** Lists all retention policies + assigned file counts. */
+  listRetentionPolicies: () => apiFetch<{ policies: RetentionPolicy[] }>('/files/retention-policies'),
+  /** Creates a retention policy template (409 on duplicate name). */
+  createRetentionPolicy: (body: RetentionPolicyInput) => apiFetch<{ policy: RetentionPolicy }>('/files/retention-policies', { method: 'POST', body: JSON.stringify(body) }),
+  /** Updates a retention policy (partial; null clears a field). */
+  updateRetentionPolicy: (id: string, body: Partial<RetentionPolicyInput>) => apiFetch<{ policy: RetentionPolicy }>(`/files/retention-policies/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify(body) }),
+  /** Deletes a policy — its files are unassigned (kept forever), never deleted. */
+  deleteRetentionPolicy: (id: string) => apiFetch<void>(`/files/retention-policies/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+  /** Bulk-assigns the policy to currently UNASSIGNED matching files (backfill). */
+  applyRetentionPolicyToMatching: (id: string, override?: { category?: string | null; namePattern?: string | null }) =>
+    apiFetch<{ assigned: number }>(`/files/retention-policies/${encodeURIComponent(id)}/apply`, { method: 'POST', body: JSON.stringify(override ?? {}) }),
+  /** Assigns (or clears with null) the retention policy of one file. */
+  setFileRetentionPolicy: (fileId: string, policyId: string | null) => apiFetch<{ file: RepoFileEntry }>(`/files/${encodeURIComponent(fileId)}/retention`, { method: 'PATCH', body: JSON.stringify({ policyId }) }),
+  /** Runs the retention sweep now (same code path as the hourly worker). */
+  runRetentionSweep: () => apiFetch<RetentionSweepResult>('/files/retention/sweep', { method: 'POST' }),
   // --- Backup / restore / replication ---------------------------------------
   /** Section keys, presets and excluded-table info for the backup UI. */
   backupMeta: () => apiFetch<BackupMeta>('/backups/meta'),

@@ -91,7 +91,9 @@ function actionSummary(a: AutomationActionBlock): string {
     case 'notification':
       return `notify (${a.severity})`;
     case 'internal':
-      return a.kind === 'backup' ? `backup ${a.preset ?? 'config'}` : `replication sync`;
+      if (a.kind === 'backup') return `backup ${a.preset ?? 'config'}`;
+      if (a.kind === 'retentionSweep') return 'file retention sweep';
+      return `replication sync`;
   }
 }
 

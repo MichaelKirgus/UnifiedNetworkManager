@@ -48,6 +48,10 @@ export interface RepoFileEntry {
   createdAt: string;
   /** The file-repo plugin storing the bytes (null = api-local volume, legacy). */
   providerId: string | null;
+  /** Assigned retention policy (null = NO policy → kept forever). */
+  retentionPolicyId: string | null;
+  /** Display name for `retentionPolicyId` — resolved in list calls. */
+  retentionPolicyName?: string | null;
   /** Display name for `uploadedBy` — user id resolved to username ('plugin' passes through). */
   uploadedByName?: string | null;
 }
@@ -93,6 +97,7 @@ function toEntry(row: typeof schema.repoFiles.$inferSelect): RepoFileEntry {
     // Which file-repo plugin stores the bytes (null = api-local volume). The
     // webapp uses this to show a per-file repo badge; device plugins ignore it.
     providerId: row.providerId ?? null,
+    retentionPolicyId: row.retentionPolicyId ?? null,
   };
 }
 
@@ -128,6 +133,18 @@ export async function listRepoFiles(category?: string): Promise<RepoFileEntry[]>
   for (const e of entries) {
     if (!e.uploadedBy || e.uploadedBy === 'plugin') continue;
     e.uploadedByName = usernames.get(e.uploadedBy) ?? e.uploadedBy;
+  }
+
+  // Batch-resolve retention policy ids to names (one query).
+  const policyIds = new Set<string>();
+  for (const e of entries) if (e.retentionPolicyId) policyIds.add(e.retentionPolicyId);
+  if (policyIds.size > 0) {
+    const policies = await db.query.repoRetentionPolicies.findMany({ where: (t, { inArray }) => inArray(t.id, [...policyIds]) });
+    const byId = new Map(policies.map((p) => [p.id, p.name]));
+    for (const e of entries) {
+      if (!e.retentionPolicyId) continue;
+      e.retentionPolicyName = byId.get(e.retentionPolicyId) ?? null; // policy deleted → unassigned look
+    }
   }
   return entries;
 }
@@ -166,6 +183,8 @@ export async function addRepoFile(args: {
   uploadedBy?: string | null;
   /** Explicit file-repo provider id (e.g. from an x-file-provider header). Omitted = default provider or local fallback. */
   providerId?: string | null;
+  /** Retention policy to assign at insert time (null/omitted = no policy → kept forever). */
+  retentionPolicyId?: string | null;
 }): Promise<{ entry: RepoFileEntry; deduplicated: boolean }> {
   const category = sanitizeCategory(args.category);
   const base = sanitizeFileName(args.name);
@@ -258,6 +277,7 @@ export async function addRepoFile(args: {
     uploadedBy: args.uploadedBy ?? null,
     createdAt,
     providerId: rowProviderId,
+    retentionPolicyId: args.retentionPolicyId ?? null,
   });
 
   const stored = await db.query.repoFiles.findFirst({ where: (t) => eq(t.id, id) });
@@ -356,7 +376,7 @@ export async function listRepoFileUses(fileId: string): Promise<RepoFileUse[]> {
 }
 
 /** Normalizes a category string for on-disk use (lowercase slug). */
-function sanitizeCategory(category?: string): string {
+export function sanitizeCategory(category?: string): string {
   const c = (category ?? '').trim().toLowerCase().replace(/[^a-z0-9\-_]+/g, '-').replace(/^-+|-+$/g, '');
   return c.length > 0 && c.length <= 40 ? c : 'other';
 }

@@ -1,3 +1,4 @@
+import { eq } from 'drizzle-orm';
 import { db, pool } from './db';
 import { parseCidrList } from './utils/ipClassification';
 import { parseTablePageSizeOptions } from './utils/pagination';
@@ -51,6 +52,12 @@ export interface SettingDescriptor {
    * first online provider at resolve time.
    */
   pluginCapability?: 'fileRepo' | 'webFetch';
+  /**
+   * When set, this value is a retention-policy id and the Settings page renders
+   * a combobox of existing policies (fetched via GET /files/retention-policies)
+   * instead of a free-text input. The empty value means "no default policy".
+   */
+  retentionPolicyPicker?: boolean;
   /** When true, this value is injected into plugins via x-unm-global-settings. */
   exposeToPlugins?: boolean;
   /**
@@ -61,10 +68,11 @@ export interface SettingDescriptor {
   onChange?: () => Promise<void> | void;
   /**
    * Optional structured validation for string settings that a regex cannot
-   * express (e.g. comma-separated CIDR lists). Called with the coerced value
-   * AFTER pattern/length checks; throwing rejects the update with a 400.
+   * express (e.g. comma-separated CIDR lists, or an id that must exist in the
+   * database). Called with the coerced value AFTER pattern/length checks;
+   * throwing rejects the update with a 400.
    */
-  validate?: (value: string) => void;
+  validate?: (value: string) => void | Promise<void>;
 }
 
 /** A setting as presented to the Settings page (effective value + metadata). */
@@ -86,6 +94,8 @@ export interface SettingView {
   pattern?: string;
   /** Set when the value is a plugin instance id — the UI renders a combobox. */
   pluginCapability?: 'fileRepo' | 'webFetch';
+  /** Set when the value is a retention-policy id — the UI renders a policy combobox. */
+  retentionPolicyPicker?: boolean;
 }
 
 // --- The registry -----------------------------------------------------------
@@ -906,6 +916,27 @@ export const SETTING_DESCRIPTORS: SettingDescriptor[] = [
     help:
       'The file-repo plugin (capability `fileRepo`) that stores new uploads by default — the Files page preselects it so you normally never have to pick a repo per upload. Empty = auto-resolve (the built-in local-storage repo, or the first online provider). Individual uploads can still override this from the Files page.',
   },
+  {
+    key: 'fileRepoDefaultRetentionPolicyId',
+    label: 'Default retention policy for plugin uploads',
+    type: 'string',
+    category: 'Files',
+    default: '',
+    envVar: 'FILE_REPO_DEFAULT_RETENTION_POLICY_ID',
+    maxLength: 128,
+    retentionPolicyPicker: true,
+    validate: async (value) => {
+      if (!value.trim()) return; // empty = no default → files are kept forever
+      const row = await db.query.repoRetentionPolicies.findFirst({ where: (t) => eq(t.id, value) });
+      if (!row) {
+        const e = new Error('"fileRepoDefaultRetentionPolicyId" must reference an existing retention policy');
+        (e as { status?: number }).status = 400;
+        throw e;
+      }
+    },
+    help:
+      'The retention policy automatically assigned to files that PLUGINS store in the repo — i.e. backups created by intents and scheduled actions (config backups, firmware images, …). The policy only applies when its own matchers (category / name pattern) fit the file, so a "config-backup"-scoped default never touches other categories. Files uploaded manually from the Files page are NOT affected; files with no policy at all are kept forever.',
+  },
 
   // Certificate Authority (the unm-ca service — step-ca, see api/src/ca/).
   // These knobs are rendered into the CA's ca.json by writeStepCaConfig() and
@@ -1545,6 +1576,7 @@ function viewFor(d: SettingDescriptor, values: Record<string, SettingValue>): Se
     max: d.max,
     pattern: d.pattern,
     pluginCapability: d.pluginCapability,
+    retentionPolicyPicker: d.retentionPolicyPicker,
     value,
     defaultValue,
     isModified: value !== defaultValue,
@@ -1590,7 +1622,7 @@ export async function updateSetting(key: string, rawValue: unknown): Promise<Set
       throw new Error(`"${key}" must be at most ${d.maxLength} characters`);
     if (d.pattern && !new RegExp(d.pattern).test(s))
       throw new Error(`"${key}" does not match the required pattern`);
-    d.validate?.(s); // structured check (e.g. CIDR list) — throws → 400
+    await d.validate?.(s); // structured check (e.g. CIDR list, existing id) — throws → 400
     value = s;
   }
 

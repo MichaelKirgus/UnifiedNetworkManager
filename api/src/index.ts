@@ -59,6 +59,7 @@ import { startPluginDiscovery } from './plugins/discovery';
 import { startPlanExecutorWorker } from './workers/planExecutor';
 import { startPlanSchedulerWorker } from './workers/planScheduler';
 import { startLogRetentionWorker } from './workers/logRetention';
+import { startFileRepoRetentionWorker } from './workers/fileRepoRetention';
 import { startPluginMetricsWorker } from './workers/pluginMetrics';
 import { startNtpReferencesWorker } from './workers/ntpReferences';
 import { startUpdateCheckWorker } from './workers/updateCheck';
@@ -440,6 +441,11 @@ async function main(): Promise<void> {
     // Per-host state snapshot retention (append-only log pushed via /plugin/host-states).
     void runAsLeader(LEADER_KEYS.hostStateRetention, 'hostStateRetention', () => {
       const timer = startHostStateRetentionWorker();
+      return () => clearInterval(timer);
+    }).then((stop) => workerStops.push(stop));
+    // File-repo retention: policy-driven sweep of repo files (no-policy files are kept forever).
+    void runAsLeader(LEADER_KEYS.fileRepoRetention, 'fileRepoRetention', () => {
+      const timer = startFileRepoRetentionWorker();
       return () => clearInterval(timer);
     }).then((stop) => workerStops.push(stop));
     void runAsLeader(LEADER_KEYS.pluginMetrics, 'pluginMetrics', () => startPluginMetricsWorker()).then((stop) => workerStops.push(stop));

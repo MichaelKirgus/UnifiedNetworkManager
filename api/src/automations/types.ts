@@ -291,14 +291,14 @@ export type BackupPreset = (typeof BACKUP_PRESETS)[number];
 
 /**
  * Runs an internal UNM operation: a section-based backup of this instance's own
- * database, or a sync push to one replication target. No 2FA gate — these are
- * read-only-from-the-fleet operations on UNM itself, same class as the
- * auto-backup worker.
+ * database, a sync push to one replication target, or an on-demand file-repo
+ * retention sweep. No 2FA gate — these are read-only-from-the-fleet operations
+ * on UNM itself, same class as the auto-backup worker.
  */
 export interface InternalAction {
   id: string;
   type: 'internal';
-  kind: 'backup' | 'replicationSync';
+  kind: 'backup' | 'replicationSync' | 'retentionSweep';
   /** backup only: preset (default 'config') or explicit section list. */
   preset?: BackupPreset;
   sections?: string[];

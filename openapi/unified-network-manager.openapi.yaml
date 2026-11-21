@@ -3883,6 +3883,212 @@ paths:
         '401':
           description: Authentication required (requires files:read)
 
+  /files/retention-policies:
+    get:
+      tags: [Files]
+      summary: List retention lifecycle templates for repo files
+      description: >-
+        Requires permission `files:read`. Every retention policy with the count
+        of repo files currently assigned to it. A file with NO assigned policy
+        is kept forever — policies never match implicitly, they are assigned
+        (explicitly per file, automatically at plugin-upload time via the
+        default-policy setting, or by bulk backfill).
+      responses:
+        '200':
+          description: Retention policies (name order)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  policies:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/RetentionPolicy'
+        '401':
+          description: Authentication required (requires files:read)
+    post:
+      tags: [Files]
+      summary: Create a retention policy template
+      description: >-
+        Requires permission `files:write`. At least one of maxAgeDays /
+        keepLatestPerDevice is required — a policy with no enforcement dimension
+        would never delete anything. 409 on duplicate name.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RetentionPolicyInput'
+      responses:
+        '201':
+          description: Policy created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  policy:
+                    $ref: '#/components/schemas/RetentionPolicy'
+        '400':
+          description: Invalid input (missing name, bad regex, no retention dimension)
+        '401':
+          description: Authentication required (requires files:write)
+        '409':
+          description: A policy with this name already exists
+
+  /files/retention-policies/{id}:
+    patch:
+      tags: [Files]
+      summary: Update a retention policy (partial)
+      description: >-
+        Requires permission `files:write`. Omitted fields keep their current
+        values; pass null to clear category/namePattern/maxAgeDays/
+        keepLatestPerDevice. 409 on duplicate name.
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RetentionPolicyInput'
+      responses:
+        '200':
+          description: Policy updated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  policy:
+                    $ref: '#/components/schemas/RetentionPolicy'
+        '400':
+          description: Invalid input
+        '401':
+          description: Authentication required (requires files:write)
+        '404':
+          description: Policy not found
+    delete:
+      tags: [Files]
+      summary: Delete a retention policy
+      description: >-
+        Requires permission `files:write`. The policy's files are UNASSIGNED
+        first (they become "no policy → kept forever" — never deleted by the act
+        of removing their template), and the default-policy setting is cleared
+        when it pointed at this policy.
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        '204':
+          description: Deleted (files unassigned, kept forever)
+        '401':
+          description: Authentication required (requires files:write)
+        '404':
+          description: Policy not found
+
+  /files/retention-policies/{id}/apply:
+    post:
+      tags: [Files]
+      summary: Bulk-assign a policy to matching unassigned files
+      description: >-
+        Requires permission `files:write`. Assigns the policy to currently
+        UNASSIGNED repo files that match — effective matchers are the request
+        overrides (when given) falling back to the policy's own category /
+        namePattern. At least one matcher must be effective, so an any/any
+        policy can never silently claim the whole repo in one click.
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                category: { type: string, nullable: true, description: "Override the policy's category matcher (null = use the policy's own)" }
+                namePattern: { type: string, nullable: true, description: "Override the policy's name regex (null = use the policy's own)" }
+      responses:
+        '200':
+          description: How many files were assigned
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  assigned: { type: integer }
+        '400':
+          description: No effective matcher (policy has none and no override given)
+        '401':
+          description: Authentication required (requires files:write)
+        '404':
+          description: Policy not found
+
+  /files/retention/sweep:
+    post:
+      tags: [Files]
+      summary: Run the file-repo retention sweep now
+      description: >-
+        Requires permission `files:write`. Runs the same policy-driven sweep as
+        the hourly worker (and the automations internal kind `retentionSweep`):
+        for every enabled policy, deletes its assigned files that violate
+        maxAgeDays and/or keepLatestPerDevice. Files with no policy are never
+        touched.
+      responses:
+        '200':
+          description: Sweep result (per-policy deletion counts)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RetentionSweepResult'
+        '401':
+          description: Authentication required (requires files:write)
+
+  /files/{id}/retention:
+    patch:
+      tags: [Files]
+      summary: Assign (or clear) the retention policy of one file
+      description: >-
+        Requires permission `files:write`. Set `policyId` to an existing policy
+        id, or null for "no policy → kept forever". 404 when the file or the
+        referenced policy is unknown.
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                policyId: { type: string, nullable: true, description: "Retention policy id, or null to clear (kept forever)" }
+      responses:
+        '200':
+          description: The updated file entry
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  file:
+                    $ref: '#/components/schemas/RepoFileEntry'
+        '401':
+          description: Authentication required (requires files:write)
+        '404':
+          description: File or policy not found
+
   /files/{id}:
     get:
       tags: [Files]
@@ -13833,6 +14039,60 @@ components:
         uploadedByName: { type: string, nullable: true, description: "Display name for uploadedBy — user id resolved to username ('plugin' passes through)" }
         createdAt: { type: string, format: date-time, description: "When the file was uploaded" }
         providerId: { type: string, nullable: true, description: "File-repo plugin storing the bytes (capability `fileRepo`); null = api-local volume (legacy)" }
+        retentionPolicyId: { type: string, nullable: true, description: "Assigned retention policy id; NULL = NO policy → the file is kept FOREVER" }
+        retentionPolicyName: { type: string, nullable: true, description: "Display name for retentionPolicyId (resolved in list calls)" }
+
+    RetentionPolicy:
+      type: object
+      required: [id, name, enabled, createdAt, updatedAt]
+      description: >-
+        A retention lifecycle template controlling how long its ASSIGNED repo
+        files are kept. Two optional enforcement dimensions (at least one is
+        required): maxAgeDays deletes older files; keepLatestPerDevice keeps
+        only the newest N per device key (name before "__", else name minus
+        extension). category/namePattern describe which files the policy is MEANT
+        for — they gate automatic default assignment and bulk backfill, never
+        the sweep itself.
+      properties:
+        id: { type: string }
+        name: { type: string, maxLength: 100 }
+        description: { type: string, nullable: true, maxLength: 500 }
+        category: { type: string, nullable: true, description: "Exact category slug this policy applies to (null = any)" }
+        namePattern: { type: string, nullable: true, description: "JS regex source matched against the file NAME (null = any)" }
+        maxAgeDays: { type: integer, nullable: true, minimum: 1, description: "Delete files older than this many days (null/0 = no age limit)" }
+        keepLatestPerDevice: { type: integer, nullable: true, minimum: 1, description: "Per device key, keep only the newest N matching files (null/0 = no count limit)" }
+        enabled: { type: boolean }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+        fileCount: { type: integer, description: "Number of repo files currently assigned to this policy (computed on list)" }
+
+    RetentionPolicyInput:
+      type: object
+      required: [name]
+      properties:
+        name: { type: string, minLength: 1, maxLength: 100 }
+        description: { type: string, nullable: true, maxLength: 500 }
+        category: { type: string, nullable: true }
+        namePattern: { type: string, nullable: true }
+        maxAgeDays: { type: integer, nullable: true, minimum: 1 }
+        keepLatestPerDevice: { type: integer, nullable: true, minimum: 1 }
+        enabled: { type: boolean, default: true }
+
+    RetentionSweepResult:
+      type: object
+      required: [sweptAt, totalDeleted, perPolicy]
+      properties:
+        sweptAt: { type: string, format: date-time }
+        totalDeleted: { type: integer }
+        perPolicy:
+          type: array
+          items:
+            type: object
+            required: [policyId, name, deleted]
+            properties:
+              policyId: { type: string }
+              name: { type: string }
+              deleted: { type: integer }
 
     RepoFileUse:
       type: object
@@ -14784,6 +15044,10 @@ components:
           enum: [fileRepo, webFetch]
           nullable: true
           description: "Set when the value is a plugin instance id — the UI renders a combobox fed by GET /settings/plugin-providers; empty value = auto-resolve"
+        retentionPolicyPicker:
+          type: boolean
+          nullable: true
+          description: "Set when the value is a retention-policy id — the UI renders a policy combobox fed by GET /files/retention-policies; empty value = no default policy"
 
     SettingsListResponse:
       type: object
@@ -15539,7 +15803,7 @@ components:
       properties:
         id: { type: string }
         type: { type: string, enum: [internal] }
-        kind: { type: string, enum: [backup, replicationSync] }
+        kind: { type: string, enum: [backup, replicationSync, retentionSweep], description: "retentionSweep runs the file-repo retention sweep on demand (no additional fields)" }
         preset: { type: string, enum: [config, planned, all], description: "backup only (default config)" }
         sections: { type: array, items: { type: string }, description: "backup only — explicit section list overrides preset" }
         destination: { type: string, enum: [local, repo], default: local, description: "backup only (v1 stores local)" }

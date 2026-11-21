@@ -2848,12 +2848,53 @@ export const repoFiles = pgTable(
     // NULL = legacy row on the api-local volume (FILE_REPO_PATH) — read path falls
     // back to local storage. Set for every new upload when a provider is online.
     providerId: text('providerId'),
+    // Retention policy governing this file's lifetime (repo_retention_policies.id).
+    // NULL = NO policy → the file is kept FOREVER (the retention worker only ever
+    // touches rows that carry a policy id — see workers/fileRepoRetention.ts).
+    retentionPolicyId: text('retentionPolicyId'),
   },
   (table) => {
     return {
       uqRepoFilesSha256: uniqueIndex('uq_repo_files_sha256').on(table.sha256),
       idxRepoFilesCategory: index('idx_repo_files_category').on(table.category),
       idxRepoFilesProvider: index('idx_repo_files_provider').on(table.providerId),
+      idxRepoFilesRetentionPolicy: index('idx_repo_files_retention_policy').on(table.retentionPolicyId),
+    };
+  }
+);
+
+// Retention lifecycle templates for repo files (see src/fileRepoRetention.ts).
+// A policy controls how long its ASSIGNED files are kept — two optional
+// dimensions, both enforced by the hourly retention worker:
+//   - maxAgeDays          → delete files older than this many days
+//   - keepLatestPerDevice → per device key (name before "__", else name minus
+//                           extension), keep only the newest N matching files
+// A file with NO assigned policy is kept forever — policies never match
+// implicitly, they are ASSIGNED (explicitly in the UI or automatically at
+// plugin-upload time via the default-policy setting). `category`/`namePattern`
+// describe WHICH files a policy is meant for: they gate the automatic default
+// assignment and the bulk "apply to matching files" backfill — never the sweep.
+export const repoRetentionPolicies = pgTable(
+  'repo_retention_policies',
+  {
+    id: text('id').primaryKey(),
+    name: text('name').notNull(),
+    description: text('description'),
+    // Exact category slug this policy applies to (null = any category).
+    category: text('category'),
+    // JS regex source matched against the file NAME (null = any name).
+    namePattern: text('namePattern'),
+    // Delete files older than this many days (null/0 = no age limit).
+    maxAgeDays: integer('maxAgeDays'),
+    // Per device key, keep only the newest N matching files (null/0 = no count limit).
+    keepLatestPerDevice: integer('keepLatestPerDevice'),
+    enabled: boolean('enabled').notNull().default(true),
+    createdAt: text('createdAt').notNull(),
+    updatedAt: text('updatedAt').notNull(),
+  },
+  (table) => {
+    return {
+      uqRepoRetentionPoliciesName: uniqueIndex('uq_repo_retention_policies_name').on(table.name),
     };
   }
 );

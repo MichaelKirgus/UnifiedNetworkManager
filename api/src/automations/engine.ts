@@ -215,8 +215,10 @@ function validateAction(a: ActionBlock, where: string): string[] {
         if (a.sections !== undefined && (!Array.isArray(a.sections) || a.sections.length === 0)) e.push(`${where}: sections must be a non-empty array`);
       } else if (a.kind === 'replicationSync') {
         if (!a.targetId || typeof a.targetId !== 'string') e.push(`${where}: targetId is required for replicationSync`);
+      } else if (a.kind === 'retentionSweep') {
+        // No additional fields — runs the file-repo retention sweep on demand.
       } else {
-        e.push(`${where}: kind must be "backup" or "replicationSync"`);
+        e.push(`${where}: kind must be "backup", "replicationSync" or "retentionSweep"`);
       }
       break;
     }

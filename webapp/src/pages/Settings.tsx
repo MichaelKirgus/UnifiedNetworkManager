@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Layout } from '../components/Layout';
 import { DataTable, DataTableColumn } from '../components/DataTable';
-import { api, PluginProviderOption, SettingView } from '../api/client';
+import { api, PluginProviderOption, RetentionPolicy, SettingView } from '../api/client';
 import { formatMs } from '../components/formatMetric';
 import { can } from '../auth/permissions';
 import { ChevronDown, ChevronRight, RotateCcw, Save, Settings2, X } from 'lucide-react';
@@ -47,6 +47,14 @@ function enumOptions(pattern?: string | null): string[] | null {
   return opts.length >= 2 ? opts : null;
 }
 
+/** One-line summary of a retention policy's rules (for option labels). */
+function retentionSummary(p: RetentionPolicy): string {
+  const parts: string[] = [];
+  if (p.maxAgeDays != null) parts.push(`max age ${p.maxAgeDays} d`);
+  if (p.keepLatestPerDevice != null) parts.push(`keep latest ${p.keepLatestPerDevice}/device`);
+  return `${parts.join(' · ')}${p.category ? ` · cat=${p.category}` : ''}${p.namePattern ? ` · name~${p.namePattern}` : ''}`;
+}
+
 const CATEGORY_STYLES: Record<string, string> = {
   General: 'bg-accent-purple text-accent-purple-fg',
   Telemetry: 'bg-info text-info-fg',
@@ -68,6 +76,7 @@ function SettingEditor({
   saving,
   onSave,
   providers,
+  policies,
 }: {
   setting: SettingView;
   canWrite: boolean;
@@ -75,6 +84,8 @@ function SettingEditor({
   onSave: (value: number | string | boolean) => void;
   /** Registered instances for `setting.pluginCapability` — undefined while loading. */
   providers?: PluginProviderOption[];
+  /** Retention policies for `setting.retentionPolicyPicker` — undefined while loading. */
+  policies?: RetentionPolicy[];
 }) {
   const [draft, setDraft] = useState<string>(String(setting.value));
 
@@ -129,6 +140,56 @@ function SettingEditor({
             </option>
           ))}
           {!known && draft !== '' && <option value={draft}>{draft} (not registered)</option>}
+        </select>
+        {dirty && (
+          <>
+            <button
+              type="button"
+              onClick={() => onSave(draft)}
+              disabled={saving}
+              className="inline-flex items-center gap-1.5 rounded-md bg-primary px-3 py-1.5 text-sm font-medium text-white hover:bg-primary-hover disabled:opacity-50"
+            >
+              <Save className="h-4 w-4" />
+              {saving ? 'Saving…' : 'Save'}
+            </button>
+            <button
+              type="button"
+              onClick={() => setDraft(String(setting.value))}
+              disabled={saving}
+              className="inline-flex items-center gap-1 rounded-md border border-border px-3 py-1.5 text-sm text-secondary hover:bg-muted disabled:opacity-50"
+            >
+              <X className="h-4 w-4" />
+              Cancel
+            </button>
+          </>
+        )}
+      </div>
+    );
+  }
+
+  // Retention-policy settings render a combobox of lifecycle templates — the
+  // empty value means "no default policy" (files without an explicit policy are
+  // kept forever), so it stays an explicit option.
+  if (setting.retentionPolicyPicker) {
+    if (!policies) {
+      return <span className="text-xs text-faint">Loading retention policies…</span>;
+    }
+    const known = policies.some((p) => p.id === draft);
+    return (
+      <div className="flex flex-wrap items-center gap-2">
+        <select
+          value={draft}
+          disabled={saving}
+          onChange={(e) => setDraft(e.target.value)}
+          className="w-96 rounded-md border border-border bg-card px-3 py-1.5 text-sm focus:border-focus-ring focus:outline-none disabled:bg-background"
+        >
+          <option value="">None — files without an explicit policy are kept forever</option>
+          {policies.map((p) => (
+            <option key={p.id} value={p.id}>
+              {p.name}{p.enabled ? '' : ' (disabled)'} — {retentionSummary(p)}
+            </option>
+          ))}
+          {!known && draft !== '' && <option value={draft}>{draft} (unknown policy)</option>}
         </select>
         {dirty && (
           <>
@@ -254,6 +315,7 @@ export default function Settings() {
   // registry actually needs that capability.
   const needsFileRepo = settings.some((s) => s.pluginCapability === 'fileRepo');
   const needsWebFetch = settings.some((s) => s.pluginCapability === 'webFetch');
+  const needsRetentionPicker = settings.some((s) => s.retentionPolicyPicker);
   const fileRepoProvidersQ = useQuery({
     queryKey: ['plugin-providers', 'fileRepo'],
     queryFn: () => api.listPluginProviders('fileRepo'),
@@ -264,6 +326,11 @@ export default function Settings() {
     queryFn: () => api.listPluginProviders('webFetch'),
     enabled: needsWebFetch,
   });
+  const retentionPoliciesQ = useQuery({
+    queryKey: ['retention-policies'],
+    queryFn: () => api.listRetentionPolicies(),
+    enabled: needsRetentionPicker,
+  });
 
   /** Display name for a plugin-instance setting value ('' → Auto; unknown id → shortened). */
   const providerLabel = (cap: 'fileRepo' | 'webFetch', id: string): string => {
@@ -271,6 +338,13 @@ export default function Settings() {
     const list = cap === 'fileRepo' ? fileRepoProvidersQ.data?.providers : webFetchProvidersQ.data?.providers;
     const p = list?.find((x) => x.id === id);
     return p ? (p.online ? p.name : `${p.name} (offline)`) : id.length > 12 ? `${id.slice(0, 8)}…` : id;
+  };
+
+  /** Display name for a retention-policy setting value ('' → None; unknown id → shortened). */
+  const retentionLabel = (id: string): string => {
+    if (!id) return 'None';
+    const p = retentionPoliciesQ.data?.policies.find((x) => x.id === id);
+    return p ? p.name : id.length > 12 ? `${id.slice(0, 8)}…` : id;
   };
 
   const toggle = (key: string) =>
@@ -330,7 +404,9 @@ export default function Settings() {
       sortAccessor: (row) => String(row.value),
       render: (row) => (
         <span className="font-mono text-sm">
-          {row.pluginCapability && typeof row.value === 'string' ? providerLabel(row.pluginCapability, row.value) : fmtValue(row.value, row.unit)}
+          {row.pluginCapability && typeof row.value === 'string' ? providerLabel(row.pluginCapability, row.value)
+            : row.retentionPolicyPicker && typeof row.value === 'string' ? retentionLabel(row.value)
+              : fmtValue(row.value, row.unit)}
           {row.isModified && <span className="ml-1.5 rounded bg-warning px-1 py-0.5 text-[10px] font-semibold text-warning-fg">modified</span>}
         </span>
       ),
@@ -341,7 +417,9 @@ export default function Settings() {
       width: 140,
       render: (row) => (
         <span className="font-mono text-sm text-muted-foreground">
-          {row.pluginCapability && typeof row.defaultValue === 'string' ? providerLabel(row.pluginCapability, row.defaultValue) : fmtValue(row.defaultValue, row.unit)}
+          {row.pluginCapability && typeof row.defaultValue === 'string' ? providerLabel(row.pluginCapability, row.defaultValue)
+            : row.retentionPolicyPicker && typeof row.defaultValue === 'string' ? retentionLabel(row.defaultValue)
+              : fmtValue(row.defaultValue, row.unit)}
         </span>
       ),
     },
@@ -410,6 +488,7 @@ export default function Settings() {
                           ? webFetchProvidersQ.data?.providers
                           : undefined
                     }
+                    policies={row.retentionPolicyPicker ? retentionPoliciesQ.data?.policies : undefined}
                   />
                 </div>
               );

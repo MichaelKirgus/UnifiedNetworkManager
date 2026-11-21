@@ -10,8 +10,20 @@ import {
   listRepoFileUses,
   openRepoFile,
   recordRepoFileUse,
+  sanitizeCategory,
 } from '../fileRepo';
 import { defaultFileRepoProviderId, listFileRepoProviders } from '../fileRepoBroker';
+import {
+  RetentionError,
+  applyPolicyToMatching,
+  createRetentionPolicy,
+  deleteRetentionPolicy,
+  listRetentionPolicies,
+  resolveDefaultPolicyId,
+  setFileRetentionPolicy,
+  sweepFileRepoRetention,
+  updateRetentionPolicy,
+} from '../fileRepoRetention';
 
 /**
  * Central file repository routes.
@@ -56,6 +68,12 @@ function readProviderHeader(req: Request): string | null {
 function isJsonBody(req: Request): boolean {
   const ct = String(req.headers['content-type'] ?? '');
   return ct.includes('application/json');
+}
+
+/** Maps a retention-module error to its HTTP status (same shape as FileRepoError). */
+function sendRetentionError(res: Response, err: unknown): void {
+  if (err instanceof RetentionError) res.status(err.status).json({ error: err.message });
+  else throw err;
 }
 
 // ---------------------------------------------------------------------------
@@ -121,6 +139,88 @@ filesRouter.post('/files', requireAuth, requirePermission('files:write'), async 
   } catch (err) {
     if (err instanceof FileRepoError) return void res.status(err.status).json({ error: err.message });
     throw err;
+  }
+});
+
+// ---------------------------------------------------------------------------
+// PUBLIC — /files/retention* (retention lifecycle templates; MUST be registered
+// before the /files/:id routes so 'retention-policies' is not captured as :id)
+// ---------------------------------------------------------------------------
+
+// GET /files/retention-policies — all retention policies + assigned file counts.
+filesRouter.get('/files/retention-policies', requireAuth, requirePermission('files:read'), async (_req: Request, res: Response) => {
+  try {
+    const policies = await listRetentionPolicies();
+    res.status(200).json({ policies });
+  } catch (err) {
+    sendRetentionError(res, err);
+  }
+});
+
+// POST /files/retention-policies — create a policy template.
+filesRouter.post('/files/retention-policies', requireAuth, requirePermission('files:write'), async (req: Request, res: Response) => {
+  try {
+    const policy = await createRetentionPolicy(req.body ?? {});
+    res.status(201).json({ policy });
+  } catch (err) {
+    sendRetentionError(res, err);
+  }
+});
+
+// PATCH /files/retention-policies/:id — update a policy (partial).
+filesRouter.patch('/files/retention-policies/:id', requireAuth, requirePermission('files:write'), async (req: Request, res: Response) => {
+  try {
+    const policy = await updateRetentionPolicy(String(req.params.id ?? ''), req.body ?? {});
+    res.status(200).json({ policy });
+  } catch (err) {
+    sendRetentionError(res, err);
+  }
+});
+
+// DELETE /files/retention-policies/:id — delete a policy. Its files are UNASSIGNED
+// (kept forever), never deleted; the default pointer is cleared if it referenced it.
+filesRouter.delete('/files/retention-policies/:id', requireAuth, requirePermission('files:write'), async (req: Request, res: Response) => {
+  try {
+    await deleteRetentionPolicy(String(req.params.id ?? ''));
+    res.status(204).end();
+  } catch (err) {
+    sendRetentionError(res, err);
+  }
+});
+
+// POST /files/retention-policies/:id/apply — bulk-assign the policy to currently
+// UNASSIGNED files matching its matchers (body may override category/namePattern).
+filesRouter.post('/files/retention-policies/:id/apply', requireAuth, requirePermission('files:write'), async (req: Request, res: Response) => {
+  try {
+    const body = (req.body ?? {}) as { category?: string | null; namePattern?: string | null };
+    const result = await applyPolicyToMatching(String(req.params.id ?? ''), body);
+    res.status(200).json(result);
+  } catch (err) {
+    sendRetentionError(res, err);
+  }
+});
+
+// POST /files/retention/sweep — run the retention sweep NOW (same code path as
+// the hourly worker; also reachable from automations via internal kind 'retentionSweep').
+filesRouter.post('/files/retention/sweep', requireAuth, requirePermission('files:write'), async (_req: Request, res: Response) => {
+  try {
+    const result = await sweepFileRepoRetention();
+    res.status(200).json(result);
+  } catch (err) {
+    sendRetentionError(res, err);
+  }
+});
+
+// PATCH /files/:id/retention — assign (or clear with null) the retention policy of one file.
+filesRouter.patch('/files/:id/retention', requireAuth, requirePermission('files:write'), async (req: Request, res: Response) => {
+  try {
+    const body = (req.body ?? {}) as { policyId?: string | null };
+    await setFileRetentionPolicy(String(req.params.id ?? ''), body.policyId ?? null);
+    const file = await getRepoFile(String(req.params.id ?? ''));
+    if (!file) return void res.status(404).json({ error: 'File not found' });
+    res.status(200).json({ file });
+  } catch (err) {
+    sendRetentionError(res, err);
   }
 });
 
@@ -218,11 +318,18 @@ internalFileRepoRouter.post('/plugin/files', pluginAuth, async (req: Request, re
     return;
   }
   try {
+    // Smart default retention — intent-created backups (and any other plugin
+    // upload) pick up the configured default policy when its matchers fit.
+    // Webapp uploads deliberately do NOT get this: manual files stay "no policy
+    // → kept forever" unless a policy is assigned explicitly.
+    const category = readCategoryHeader(req);
+    const retentionPolicyId = await resolveDefaultPolicyId(name, sanitizeCategory(category));
     const { entry, deduplicated } = await addRepoFile({
       data: req as unknown as Readable,
       name,
-      category: readCategoryHeader(req),
+      category,
       uploadedBy: null, // plugin upload — no user context on this hop
+      retentionPolicyId,
     });
     res.status(201).json(entry);
   } catch (err) {

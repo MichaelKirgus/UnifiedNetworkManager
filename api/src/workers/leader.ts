@@ -58,6 +58,7 @@ export const LEADER_KEYS = {
   reverseDns: 9024,
   mapBasemap: 9025,
   dnsQueryRetention: 9026,
+  fileRepoRetention: 9027,
 } as const;
 
 /**
