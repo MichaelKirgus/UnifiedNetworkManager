@@ -5377,8 +5377,9 @@ paths:
         Registers a new indicator feed. Supported formats: `ip-list` (one
         IPv4/IPv6 address or CIDR per line; # and ; comments, blank lines and
         URLs are skipped), `stix` (STIX 2.x bundle — equality patterns of
-        ipv4/ipv6 indicators) and `domain-list` (Pi-hole-style plain-text
-        blocklist, one domain per line — a listed domain matches itself AND
+        ipv4/ipv6 indicators) and `domain-list` (plain-text domain blocklist —
+        bare domains in Pi-hole/AdGuard style plus Adblock/EasyList filter rules
+        like ||evil.com^ or host$third-party; a listed domain matches itself AND
         every subdomain; matched against DNS query events pushed by plugins).
         Each fetch is an authoritative snapshot: the worker upserts all parsed
         values and prunes indicators the feed no longer lists. Gated on
@@ -11143,7 +11144,7 @@ components:
         id: { type: string }
         name: { type: string, description: 'Unique display name (1-100 chars)' }
         url: { type: string, description: 'http(s) URL of the feed' }
-        format: { type: string, enum: [ip-list, stix, domain-list], description: "'ip-list' = one IP/CIDR per line; 'stix' = STIX 2.x bundle (indicator equality patterns); 'domain-list' = Pi-hole-style one-domain-per-line blocklist" }
+        format: { type: string, enum: [ip-list, stix, domain-list], description: "'ip-list' = one IP/CIDR per line; 'stix' = STIX 2.x bundle (indicator equality patterns); 'domain-list' = plain-text blocklist — bare domains (Pi-hole/AdGuard) and Adblock/EasyList filter rules" }
         enabled: { type: boolean }
         iocCount: { type: integer, description: Indicators currently stored from this source }
         lastSuccessAt:

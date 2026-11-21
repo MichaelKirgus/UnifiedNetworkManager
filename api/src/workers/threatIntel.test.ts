@@ -10,7 +10,7 @@
 // needs it for row ids, which these tests never assert on.
 jest.mock('uuid', () => ({ v4: () => '00000000-0000-4000-8000-000000000000' }));
 
-import { matchDomain, matchIoc, normalizeDomain, parseDomainList, parseIpList, parseIocValue, parseStix, threatIntelFileName } from './threatIntel';
+import { matchDomain, matchIoc, normalizeDomain, normalizeDomainLine, parseDomainList, parseIpList, parseIocValue, parseStix, threatIntelFileName } from './threatIntel';
 import type { IocCache } from './threatIntel';
 
 describe('threatIntelFileName', () => {
@@ -228,6 +228,36 @@ describe('parseDomainList', () => {
     const r = parseDomainList(Buffer.from(['evil.com', 'ok.net', 'cap.org', 'extra.org'].join('\n')), 3);
     expect(r.values).toEqual(['evil.com', 'ok.net', 'cap.org']);
     expect(r.skipped).toBe(1); // the line after the cap
+  });
+
+  it('parses Adblock/EasyList filter rules alongside bare domains', () => {
+    const body = [
+      '[Adblock Plus]',
+      '! adblock comment',
+      '||evil.example.com^',
+      '|tracker.adware.net',
+      '*.popup.serve.net$third-party',
+      '||ads.vendor.org/path/to/thing^$script',
+      '@@||allowed.example.com^',
+      '/regex\\.filter\\.com/',
+    ].join('\n');
+    const r = parseDomainList(Buffer.from(body), 10_000);
+    expect(r.values).toEqual(['evil.example.com', 'tracker.adware.net', 'popup.serve.net', 'ads.vendor.org']);
+    expect(r.skipped).toBe(2); // unblock rule + regex filter — section headers/comments are not counted
+  });
+});
+
+describe('normalizeDomainLine', () => {
+  it('strips adblock anchors, boundaries and $options before domain validation', () => {
+    expect(normalizeDomainLine('||Evil.Example.COM^')).toBe('evil.example.com');
+    expect(normalizeDomainLine('|bare-anchor.net')).toBe('bare-anchor.net');
+    expect(normalizeDomainLine('plain-domain.org.')).toBe('plain-domain.org'); // bare Pi-hole style passes through
+    expect(normalizeDomainLine('||sub.host.io/deep/path^$document')).toBe('sub.host.io');
+  });
+
+  it('returns null for regex filters and domain-less rules', () => {
+    expect(normalizeDomainLine('/evil\\.com/')).toBeNull();
+    expect(normalizeDomainLine('$document')).toBeNull();
   });
 });
 

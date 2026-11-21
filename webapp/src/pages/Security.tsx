@@ -957,7 +957,7 @@ function ThreatIntelSection() {
           storageKey="threat-intel-sources"
           autoRefresh={{ intervalMs: 30_000, queries: [tiQuery] }}
           searchPlaceholder="Search feeds…"
-          emptyMessage={'No IOC feed sources yet — add one below (IP/CIDR list, STIX bundle or Pi-hole-style domain blocklist). Each fetch is an authoritative snapshot; matches raise "threat intel hit" findings.'}
+          emptyMessage={'No IOC feed sources yet — add one below (IP/CIDR list, STIX bundle or a domain blocklist in Pi-hole / Adblock style). Each fetch is an authoritative snapshot; matches raise "threat intel hit" findings.'}
         />
       )}
 
@@ -976,7 +976,7 @@ function ThreatIntelSection() {
           <select value={format} onChange={(e) => setFormat(e.target.value as 'ip-list' | 'stix' | 'domain-list')} className="rounded-md border border-border bg-background px-2 py-1.5 text-sm text-foreground">
             <option value="ip-list">IP list (one per line)</option>
             <option value="stix">STIX 2.x bundle</option>
-            <option value="domain-list">Domain blocklist (Pi-hole style)</option>
+            <option value="domain-list">Domain blocklist (Pi-hole / Adblock)</option>
           </select>
         </label>
         <button

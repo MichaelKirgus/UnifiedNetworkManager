@@ -17,9 +17,11 @@
  *         blank lines and URLs skipped);
  *       - stix        — STIX 2.x bundle; equality patterns of type indicators are
  *         extracted ([ipv4-addr:value = '…'] / [ipv6-addr:…]);
- *       - domain-list — Pi-hole-style plain-text blocklist, one domain per line.
- *         Domains land in threat_domain_iocs (threat_iocs.ioc is INET and cannot
- *         hold names); a listed domain matches itself AND every subdomain.
+ *       - domain-list — plain-text domain blocklist: bare domains (Pi-hole/
+ *         AdGuard style) plus Adblock/EasyList filter rules (||evil.com^, |host,
+ *         $options, [section] headers; unblock @@ rules and regex filters are
+ *         skipped). Domains land in threat_domain_iocs (threat_iocs.ioc is INET
+ *         and cannot hold names); a listed domain matches itself AND every subdomain.
  *     A fetch is an authoritative SNAPSHOT per source: all parsed values are
  *     upserted into the format's table, then rows not re-upserted in the cycle
  *     are pruned by lastSeenAt — indicators a feed drops disappear automatically.
@@ -282,7 +284,31 @@ export function normalizeDomain(raw: string): string | null {
   return d;
 }
 
-/** Plain-text domain blocklist: one domain per line (Pi-hole/AdGuard format). */
+/**
+ * Normalizes one domain-list line in EITHER style to its matchable form, or
+ * null when it carries no usable domain. Bare domains (Pi-hole/AdGuard) go
+ * straight through normalizeDomain; Adblock/EasyList filter rules are reduced
+ * first — $options dropped at the first `$`, leading URL anchors (`|` / `||`)
+ * and the trailing `^` boundary stripped, path-scoped rules collapsed to their
+ * host part (the same approximation Pi-hole makes when importing adblock
+ * lists). Regex filters (/…/) carry no literal domain.
+ */
+export function normalizeDomainLine(raw: string): string | null {
+  let line = String(raw);
+  if (line.startsWith('/')) return null; // regex filter — nothing to ingest
+  const dollar = line.indexOf('$');
+  if (dollar >= 0) line = line.slice(0, dollar); // $document, $third-party, …
+  line = line.replace(/^\|\|?/, ''); // leading URL anchor(s)
+  const cut = line.search(/[/^]/);
+  if (cut >= 0) line = line.slice(0, cut); // ^ boundary or /path… scope
+  return normalizeDomain(line);
+}
+
+/**
+ * Plain-text domain blocklist: bare domains (Pi-hole/AdGuard format) and
+ * Adblock/EasyList filter rules. [section] headers are structural; unblock
+ * rules (@@…) and regex filters are counted as skipped entries.
+ */
 export function parseDomainList(bytes: Buffer, maxIocs: number): ParsedFeed {
   const values = new Set<string>();
   let skipped = 0;
@@ -292,9 +318,15 @@ export function parseDomainList(bytes: Buffer, maxIocs: number): ParsedFeed {
       continue;
     }
     const line = rawLine.trim().replace(/,+$/, '');
-    // Pi-hole lists use "!" comments in addition to # and ;.
-    if (!line || line.startsWith('#') || line.startsWith(';') || line.startsWith('!') || /^https?:\/\//i.test(line)) continue;
-    const d = normalizeDomain(line);
+    // Pi-hole lists use "!" comments in addition to # and ;. Adblock lists add
+    // [section] headers ([Adblock Plus], [header], …) — structural, not entries.
+    if (!line || line.startsWith('#') || line.startsWith(';') || line.startsWith('!') || /^\[.*\]$/.test(line) || /^https?:\/\//i.test(line)) continue;
+    // Adblock unblock rules are allow-rules — never block indicators.
+    if (line.startsWith('@@') || line.startsWith('#@!')) {
+      skipped += 1;
+      continue;
+    }
+    const d = normalizeDomainLine(line);
     if (d === null) {
       skipped += 1;
       continue;
