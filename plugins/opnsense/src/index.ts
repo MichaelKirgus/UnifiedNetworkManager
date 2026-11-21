@@ -54,6 +54,7 @@ import { createClient, get as opnsenseGet, OpnsenseCredentials, OpnsensePorts, r
 import * as firmware from './client/firmware';
 import { resolveEdition } from './client/editions';
 import { detectDnsBackend, fetchUnboundQueries, searchHostRecords, parseHostRecordRows, DnsBackend } from './client/dns';
+import { parseSystemDiskRows } from './client/system';
 import { detectDhcpBackend, DhcpBackend, searchKeaLeases, searchDnsmasqLeases } from './client/dhcp';
 import { getInterfacesInfo, vlans } from './client/interfaces';
 import { searchGateways } from './client/routes';
@@ -535,81 +536,9 @@ async function collectDhcpConfig(
   return [networks, reservations];
 }
 
-/**
- * Parses the ZFS pool status + USB storage responses into Storage-page rows.
- * Both endpoints are version-dependent and only exist on appliances that have
- * the respective hardware — a missing/404 response yields empty arrays (the
- * caller then omits the metric keys entirely). Field names vary across
- * OPNsense releases, so every read is defensive multi-key.
- */
-/** Parses OPNsense's base-10 human size strings ("5.2G", "800M") into bytes —
- * the SAME format + units (K=1000) the appliance's own Disk widget uses in
- * `_convertToBytes`. Accepts a raw number too, for defensive multi-shape reads. */
-function parseBase10Bytes(v: unknown): number | null {
-  if (typeof v === 'number' && Number.isFinite(v)) return Math.round(v);
-  if (typeof v !== 'string') return null;
-  const m = v.trim().match(/^(\d+(?:\.\d+)?)([BKMGTPE]?)$/i);
-  if (!m) return null;
-  const num = parseFloat(m[1]);
-  if (!Number.isFinite(num)) return null;
-  const unit = (m[2] ?? '').toUpperCase();
-  const mult: Record<string, number> = { '': 1, B: 1, K: 1e3, M: 1e6, G: 1e9, T: 1e12, P: 1e15, E: 1e18 };
-  return Math.round(num * (mult[unit] ?? 1));
-}
-
-/** Maps OPNsense's mounted-filesystem `type` to a Storage-page filesystem type.
- * OPNsense exposes NO ZFS pool/dataset tree — only the mounted root (`zfs`) and
- * any other mounts, so the zfs root is surfaced as the top-level `zfs-pool`. */
-function opnsenseFsType(raw: string | null): string {
-  switch ((raw ?? '').toLowerCase()) {
-    case 'zfs': return 'zfs-pool';
-    case 'ext2':
-    case 'ext3':
-    case 'ext4': return 'ext4';
-    case 'squashfs': return 'squashfs';
-    default: return 'other'; // ufs and anything else — no dedicated badge
-  }
-}
-
-/**
- * Parses the mounted-filesystem overview (`/api/diagnostics/system/system_disk`)
- * into Storage-page rows. This is the ONLY storage data OPNsense's API exposes
- * (there is no ZFS pool/dataset listing endpoint). A missing/404 response yields
- * empty arrays — the caller then omits the metric keys entirely. Size fields are
- * base-10 human strings ("5.2G"); `blocks` = total capacity, `used`/`available`
- * as consumed by OPNsense's own Disk widget.
- */
-function collectStorage(
-  diskRes: { ok: boolean; data?: unknown } | undefined
-): { filesystems: Record<string, unknown>[]; disks: Record<string, unknown>[] } {
-  const filesystems: Record<string, unknown>[] = [];
-  if (!diskRes?.ok) return { filesystems, disks: [] };
-
-  // system_disk returns `{ devices: [...] }` (not a recordset). Be defensive.
-  const d = diskRes.data as Record<string, unknown> | undefined;
-  const rows = Array.isArray(d?.['devices']) ? (d!['devices'] as unknown[]) : [];
-  for (const raw of rows) {
-    if (!raw || typeof raw !== 'object') continue;
-    const r = raw as Record<string, unknown>;
-    const name = pickString(r, ['device', 'name']);
-    if (!name) continue;
-    // `blocks` = total capacity; `used`/`available` are base-10 human strings.
-    const sizeBytes = parseBase10Bytes(r['blocks']);
-    const usedBytes = parseBase10Bytes(r['used']);
-    const freeBytes = parseBase10Bytes(r['available']);
-    filesystems.push({
-      name,
-      type: opnsenseFsType(pickString(r, ['type']) ?? null),
-      mountpoint: pickString(r, ['mountpoint', 'mounted-on']) ?? null,
-      sizeBytes: sizeBytes ?? null,
-      usedBytes: usedBytes ?? (sizeBytes !== null && freeBytes !== null ? sizeBytes - freeBytes : null),
-      freeBytes: freeBytes ?? (sizeBytes !== null && usedBytes !== null ? Math.max(0, sizeBytes - usedBytes) : null),
-      status: 'online', // present in the mounted list = active + readable
-    });
-  }
-
-  return { filesystems, disks: [] };
-}
+// Storage parsing (system_disk → Storage-page rows) lives in client/system.ts
+// as the pure, unit-tested parseSystemDiskRows — including the ZFS pool-vs-
+// dataset split (df reports every mounted dataset as its own "zfs" entry).
 
 /**
  * Returns the inventory snapshot for a host, fetching from the appliance only
@@ -828,9 +757,9 @@ async function collectInventory(
 
   // Storage (mounted filesystems) — the only storage data OPNsense's API
   // exposes; empty array when the endpoint is missing/404 or the key lacks access.
-  const storage = collectStorage(diskRes);
-  snap.filesystems = storage.filesystems;
-  snap.disks = storage.disks;
+  // ZFS rows are split into pool vs dataset here (df reports every mounted
+  // dataset as its own "zfs" entry on a ZFS-rooted box).
+  snap.filesystems = parseSystemDiskRows(diskRes);
 
   // Certificates (Certificates page) — probe the management HTTPS cert (only when
   // the UI actually speaks TLS; a plain-http appliance has no cert to read) plus
@@ -870,8 +799,9 @@ async function collectInventory(
   // leave live pool alerts untouched (see notifications.ts anti-flap contract).
   snap.zfsSshCollected = sshZfs !== null;
   if (sshZfs && sshZfs.filesystems.length > 0) {
-    // Keep non-ZFS API rows; SSH rows win on name collisions (the zroot pool).
-    const apiNonZfs = snap.filesystems.filter((f) => f['type'] !== 'zfs-pool');
+    // Keep only NON-ZFS API rows — the SSH tree is authoritative for pools AND
+    // datasets; on name collisions the SSH row wins.
+    const apiNonZfs = snap.filesystems.filter((f) => f['type'] !== 'zfs-pool' && f['type'] !== 'zfs-dataset');
     const fsByName = new Map<string, Record<string, unknown>>();
     for (const row of [...apiNonZfs, ...sshZfs.filesystems]) {
       fsByName.set(String(row['name']), row as Record<string, unknown>);
