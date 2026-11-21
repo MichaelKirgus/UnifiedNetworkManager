@@ -149,3 +149,81 @@ export function getUnboundSettings(client: AxiosInstance): Promise<OpnsenseApiRe
 export function restartUnbound(client: AxiosInstance): Promise<OpnsenseApiResult> {
   return post(client, '/api/unbound/service/restart', {});
 }
+
+// --- Unbound query log (qstats) — per-query rows for security insights ---------------------
+// Since ~24.x OPNsense logs EVERY resolver query into a DuckDB database
+// (/var/unbound/data/unbound.duckdb, 7-day on-box retention) and exposes it via
+// /api/unbound/overview/search_queries. The response is a JSON array of the NEWEST
+// rows (limit hardcoded to 1000 in the controller when no client/time filter is
+// given), newest first. NOTE: `client` carries the reverse-resolved HOSTNAME instead
+// of the IP whenever the appliance could resolve it — consumers must handle both.
+
+/** One per-query row from the appliance's unbound qstats database. */
+export interface UnboundQueryRow {
+  /** The appliance's per-query uuid — stable dedupe key at UNM ingest. */
+  uuid: string;
+  /** Unix epoch SECONDS (UTC). */
+  time: number;
+  /** Client IP, or a hostname when the appliance reverse-resolved it. */
+  client: string;
+  family?: string | null;
+  type?: string | null;
+  domain: string;
+  /** 'Pass' | 'Block' | 'Drop'. */
+  action: string;
+  /** 'Recursion' | 'Local' | 'Local-data' | 'Cache'. */
+  source?: string | null;
+  /** The appliance's own DNSBL list that blocked this query (null when none). */
+  blocklist?: string | null;
+  rcode?: string | null;
+  resolveTimeMs?: number | null;
+  dnssecStatus?: string | null;
+  ttl?: number | null;
+}
+
+/**
+ * Normalizes the search_queries response body into usable rows. Tolerates both
+ * a bare array (the controller's shape) and a {rows: [...]} wrapper, and skips
+ * anything missing its uuid/time/client/domain — feed noise never throws.
+ */
+export function parseUnboundQueryRows(data: unknown): UnboundQueryRow[] {
+  const arr: unknown[] = Array.isArray(data) ? data : (data && typeof data === 'object' && Array.isArray((data as { rows?: unknown }).rows) ? ((data as { rows: unknown[] }).rows) : []);
+  const out: UnboundQueryRow[] = [];
+  for (const r of arr) {
+    if (!r || typeof r !== 'object') continue;
+    const row = r as Record<string, unknown>;
+    const uuid = typeof row['uuid'] === 'string' ? row['uuid'].trim() : '';
+    const time = Number(row['time']);
+    const clientIp = typeof row['client'] === 'string' ? row['client'].trim() : '';
+    const domain = typeof row['domain'] === 'string' ? row['domain'].trim() : '';
+    if (!uuid || !Number.isFinite(time) || time <= 0 || !clientIp || !domain) continue; // unusable row — skip
+    out.push({
+      uuid,
+      time: Math.trunc(time),
+      client: clientIp,
+      domain,
+      action: typeof row['action'] === 'string' ? row['action'] : 'Pass',
+      family: typeof row['family'] === 'string' ? row['family'] : null,
+      type: typeof row['type'] === 'string' ? row['type'] : null,
+      source: typeof row['source'] === 'string' ? row['source'] : null,
+      blocklist: typeof row['blocklist'] === 'string' && row['blocklist'].trim() !== '' ? row['blocklist'] : null,
+      rcode: typeof row['rcode'] === 'string' ? row['rcode'] : null,
+      resolveTimeMs: Number.isFinite(Number(row['resolve_time_ms'])) ? Math.trunc(Number(row['resolve_time_ms'])) : null,
+      dnssecStatus: typeof row['dnssec_status'] === 'string' ? row['dnssec_status'] : null,
+      ttl: Number.isFinite(Number(row['ttl'])) ? Math.trunc(Number(row['ttl'])) : null,
+    });
+  }
+  return out;
+}
+
+/**
+ * Fetches the newest per-query rows (GET /api/unbound/overview/search_queries,
+ * no params = latest 1000). Returns [] when the endpoint is absent (older
+ * firmware without the query logger) or on any failure — callers treat that as
+ * "feature not available here", never an error.
+ */
+export async function fetchUnboundQueries(client: AxiosInstance): Promise<UnboundQueryRow[]> {
+  const res = await get<{ rows?: unknown } | unknown[]>(client, '/api/unbound/overview/search_queries');
+  if (!res.ok) return []; // 404 on firmware without qstats — feature stays silent
+  return parseUnboundQueryRows(res.data);
+}

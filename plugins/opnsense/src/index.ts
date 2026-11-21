@@ -53,7 +53,7 @@ import { DEVICE_MODELS, RELEASES } from './deviceModels';
 import { createClient, get as opnsenseGet, OpnsenseCredentials, OpnsensePorts, resolveBase } from './client/http';
 import * as firmware from './client/firmware';
 import { resolveEdition } from './client/editions';
-import { detectDnsBackend, searchHostRecords, parseHostRecordRows, DnsBackend } from './client/dns';
+import { detectDnsBackend, fetchUnboundQueries, searchHostRecords, parseHostRecordRows, DnsBackend } from './client/dns';
 import { detectDhcpBackend, DhcpBackend, searchKeaLeases, searchDnsmasqLeases } from './client/dhcp';
 import { getInterfacesInfo, vlans } from './client/interfaces';
 import { searchGateways } from './client/routes';
@@ -1985,6 +1985,103 @@ async function collectAndPushFirewallEvents(
   } catch { /* best-effort — worst case the next beat re-sends and dedupe absorbs it */ }
 }
 
+// --- DNS query-event push pipeline (fire-and-forget batches) -------------------
+// The appliance's unbound qstats database is an append-only per-query log; we
+// PUSH new rows to the API's internal /plugin/dns-queries endpoint (same pattern
+// as firewall events). Incremental reads use a TIME cursor: search_queries has no
+// digest param and returns only the newest 1000 rows, so we store the max epoch
+// seconds seen in the shared state store and push rows strictly newer than it.
+// Dedupe by vendorEventId (the appliance's per-query uuid) at ingest makes any
+// re-send harmless; a missing cursor takes a ≤1000-row baseline of the newest
+// queries (same first-run semantics as firewall events).
+
+const DNS_STATE_NAMESPACE = 'dns-queries';
+
+/** Pushes one batch with a single retry; resolves true when the API accepted it. */
+async function pushDnsBatch(deviceId: string, events: Array<Record<string, unknown>>): Promise<boolean> {
+  const body = { pluginId: identity.effectiveUuid, deviceId, events };
+  try {
+    await eventApi.post('/plugin/dns-queries', body);
+    return true;
+  } catch {
+    await new Promise((r) => setTimeout(r, 500));
+    try {
+      await eventApi.post('/plugin/dns-queries', body);
+      return true;
+    } catch (err) {
+      logger.warn(`Dropped dns-query batch of ${events.length} rows for device ${deviceId}`, { context: { error: String((err as Error)?.message ?? err) } });
+      return false; // cursor NOT advanced — the same rows are re-fetched next beat
+    }
+  }
+}
+
+/**
+ * Collects new DNS query events for one host and pushes them to the API. Runs
+ * fire-and-forget from /monitoring (never blocks or fails the poll). Only
+ * unbound-backed appliances have the qstats endpoint — a quick backend probe
+ * keeps dnsmasq fleets silent. The time cursor lives in the shared state store
+ * keyed by management address, so it survives container restarts.
+ */
+async function collectAndPushDnsQueries(
+  host: string,
+  deviceId: string | null | undefined,
+  apiKey: string,
+  apiSecret: string,
+  transport?: OpnsenseTransport,
+  ports?: OpnsensePorts
+): Promise<void> {
+  if (!deviceId) return; // no device scope → nothing to attribute rows to
+  const key = host;
+
+  const client = createClient(host, { apiKey, apiSecret }, transport, ports);
+  let backend: DnsBackend;
+  try {
+    backend = await detectDnsBackend(client);
+  } catch {
+    return; // best-effort — a dead endpoint must never break the poll
+  }
+  if (backend !== 'unbound') return;
+
+  let cursorSec: number | null = null;
+  try {
+    const stored = await stateStore.get(DNS_STATE_NAMESPACE, key);
+    if (stored && typeof stored === 'object' && Number.isFinite(Number((stored as Record<string, unknown>)['timeSec']))) {
+      cursorSec = Number((stored as Record<string, unknown>)['timeSec']);
+    }
+  } catch { /* best-effort — no cursor means a fresh baseline */ }
+
+  let rows;
+  try {
+    rows = await fetchUnboundQueries(client);
+  } catch {
+    return; // best-effort — a dead endpoint must never break the poll
+  }
+  if (rows.length === 0) return;
+
+  const fresh = cursorSec === null ? rows : rows.filter((r) => r.time > cursorSec);
+  if (fresh.length === 0) return;
+
+  // Compact wire shape: u=uuid, t=epoch seconds, c=client (IP or hostname —
+  // verbatim), d=domain, q=qtype, a=action, s=source, r=rcode, b=blocklist,
+  // x=dnssec status, m=resolveTimeMs, l=ttl.
+  const events = fresh.map((r) => ({
+    u: r.uuid, t: r.time, c: r.client, d: r.domain, q: r.type ?? null, a: r.action,
+    s: r.source ?? null, r: r.rcode ?? null, b: r.blocklist ?? null, x: r.dnssecStatus ?? null,
+    m: r.resolveTimeMs ?? null, l: r.ttl ?? null,
+  }));
+
+  const ok = await pushDnsBatch(String(deviceId), events);
+  if (!ok) return; // cursor NOT advanced — the same rows are re-fetched next beat
+
+  // Advance the cursor only after a successful push. The API dedupes by
+  // (deviceId, pluginId, vendorEventId), so even a lost-ack race can't create
+  // duplicate rows.
+  const newestSec = Math.max(...fresh.map((r) => r.time));
+  try {
+    await stateStore.put([{ namespace: DNS_STATE_NAMESPACE, key, value: { timeSec: newestSec }, deviceId: String(deviceId) }]);
+  } catch { /* best-effort — worst case the next beat re-sends and dedupe absorbs it */ }
+}
+
 // --- Per-host state-table walk (Hosts/Networks "States" columns) --------------
 // The appliance's live pf state table is walked at its own cadence (option
 // `stateWalkIntervalSec`, default 15 min — each walk is a full table scan on the
@@ -2271,6 +2368,12 @@ app.post('/monitoring', async (req, res) => {
     // runs in parallel with the response below and can never block or fail this
     // poll; all failures are contained inside collectAndPushFirewallEvents.
     void collectAndPushFirewallEvents(managementAddress, deviceId, apiKey, apiSecret, transport, ports).catch(() => { /* best-effort */ });
+
+    // DNS query events (unbound qstats): fetch new per-query rows since the last
+    // time cursor and push them to /plugin/dns-queries — feeds threat-intel
+    // domain-list matching + the Security page DNS view. Fire-and-forget like
+    // the events push; silent on dnsmasq-backed appliances (no qstats endpoint).
+    void collectAndPushDnsQueries(managementAddress, deviceId, apiKey, apiSecret, transport, ports).catch(() => { /* best-effort */ });
 
     // Per-host state-table walk (Hosts/Networks "States" columns): full table
     // scan at its own slow cadence (option stateWalkIntervalSec), diffed against
