@@ -57,6 +57,7 @@ export const LEADER_KEYS = {
   threatIntel: 9023,
   reverseDns: 9024,
   mapBasemap: 9025,
+  dnsQueryRetention: 9026,
 } as const;
 
 /**

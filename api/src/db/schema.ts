@@ -797,7 +797,9 @@ export const threatIntelSources = pgTable(
     id: text('id').primaryKey(),
     name: text('name').notNull().unique(),
     url: text('url').notNull(),
-    // 'ip-list' (one IP/CIDR per line) | 'stix' (STIX 2.x bundle, indicator patterns).
+    // 'ip-list' (one IP/CIDR per line) | 'stix' (STIX 2.x bundle) |
+    // 'domain-list' (Pi-hole-style one-domain-per-line; indicators land in
+    // threat_domain_iocs, not the INET-typed threat_iocs).
     format: text('format').notNull().default('ip-list'),
     enabled: boolean('enabled').notNull().default(true),
     iocCount: integer('iocCount').notNull().default(0),
@@ -825,6 +827,81 @@ export const threatIocs = pgTable(
     return {
       uqThreatIocsSourceIoc: uniqueIndex('uq_threat_iocs_source_ioc').on(table.sourceId, table.ioc),
       idxThreatIocsSource: index('idx_threat_iocs_source').on(table.sourceId),
+    };
+  }
+);
+
+// Domain indicators for 'domain-list' feed sources (Pi-hole-style blocklists).
+// threat_iocs.ioc is INET and cannot hold names, so domains live here with the
+// SAME snapshot semantics: each fetch upserts all parsed domains then prunes
+// rows not re-upserted by lastSeenAt. `domain` is normalized at parse time —
+// lowercase, trailing dot stripped, leading "*." wildcard removed (a listed
+// domain matches itself AND every subdomain).
+export const threatDomainIocs = pgTable(
+  'threat_domain_iocs',
+  {
+    id: text('id').primaryKey(),
+    sourceId: text('sourceId')
+      .notNull()
+      .references(() => threatIntelSources.id, { onDelete: 'cascade' }),
+    domain: text('domain').notNull(),
+    firstSeenAt: text('firstSeenAt').notNull(),
+    lastSeenAt: text('lastSeenAt').notNull(),
+  },
+  (table) => {
+    return {
+      uqThreatDomainIocsSourceDomain: uniqueIndex('uq_threat_domain_iocs_source_domain').on(table.sourceId, table.domain),
+      idxThreatDomainIocsSource: index('idx_threat_domain_iocs_source').on(table.sourceId),
+    };
+  }
+);
+
+// DNS query events pushed by plugins via POST /plugin/dns-queries (see
+// routes/internal.ts) — append-only per-query log from the appliance's resolver
+// (OPNsense unbound qstats: client, domain, action pass/block/drop, rcode, which
+// blocklist matched). `client` is verbatim as reported — an IP, or a hostname
+// when the appliance reverse-resolved it; consumers resolve hostnames against
+// the hosts table. Dedupe key = vendorEventId (the appliance's per-query uuid),
+// unique per device+plugin; growth bounded by the dnsQueryRetentionDays sweep
+// (workers/dnsQueryRetention.ts).
+export const dnsQueryEvents = pgTable(
+  'dns_query_events',
+  {
+    id: text('id').primaryKey(),
+    // Self-reported by the sender (its effectiveUuid); validated against the
+    // plugins table at ingest — unknown ids are rejected with a 400.
+    pluginId: text('pluginId').notNull(),
+    deviceId: text('deviceId').notNull(),
+    // Epoch ms of the appliance's per-query timestamp (unix seconds × 1000).
+    tsMs: bigint('tsMs', { mode: 'number' }).notNull(),
+    client: text('client').notNull(),
+    // Lowercase, trailing dot stripped — the matchable form.
+    domain: text('domain').notNull(),
+    qtype: text('qtype'),
+    // pass | block | drop (normalized from the appliance's Pass/Block/Drop).
+    action: text('action').notNull().default('pass'),
+    // recursion | local | local-data | cache — where the answer came from.
+    source: text('source'),
+    // NOERROR | NXDOMAIN | SERVFAIL | … (normalized names for display/filtering).
+    rcode: text('rcode'),
+    // The appliance's own DNSBL list that blocked this query (null when none).
+    blocklist: text('blocklist'),
+    // unchecked | bogus | indeterminate | insecure | secure.
+    dnssecStatus: text('dnssecStatus'),
+    resolveTimeMs: integer('resolveTimeMs'),
+    ttl: integer('ttl'),
+    // The appliance's per-query uuid — dedupe key at ingest.
+    vendorEventId: text('vendorEventId').notNull(),
+  },
+  (table) => {
+    return {
+      uqDnsQueryEventsVendor: uniqueIndex('uq_dns_query_events_vendor').on(
+        table.deviceId,
+        table.pluginId,
+        table.vendorEventId,
+      ),
+      idxDnsQueryEventsTsMs: index('idx_dns_query_events_ts_ms').on(table.tsMs),
+      idxDnsQueryEventsDeviceTsMs: index('idx_dns_query_events_device_ts_ms').on(table.deviceId, table.tsMs),
     };
   }
 );

@@ -758,6 +758,107 @@ export function internalRouter() {
     }
   });
 
+  // POST /plugin/dns-queries - accept a batch of per-query rows from one plugin's
+  // resolver (OPNsense unbound qstats via GET /api/unbound/overview/search_queries).
+  // Append-only log, same contract as firewall-events: on-conflict-ignore keyed on
+  // the appliance's per-query uuid (vendorEventId), so re-sent batches after a lost
+  // ack are harmless. Growth is bounded by the dnsQueryRetentionDays sweep.
+  // Compact wire keys (DNS volume can be high): u=uuid, t=epoch seconds, c=client
+  // (IP or appliance-resolved hostname — verbatim), d=domain, q=qtype, a=action
+  // (Pass/Block/Drop), s=source, r=rcode, b=blocklist name, x=dnssec status,
+  // m=resolveTimeMs, l=ttl. The appliance's `time` is unix epoch SECONDS (UTC —
+  // no local-clock offset correction needed, unlike firewall events).
+  const MAX_DNS_QUERIES_PER_REQUEST = 5_000;
+  router.post('/plugin/dns-queries', pluginAuth, async (req: Request, res: Response) => {
+    const body = req.body ?? {};
+    const pluginId = typeof body.pluginId === 'string' ? body.pluginId : '';
+    if (!pluginId) {
+      return res.status(400).json({ error: 'pluginId is required' });
+    }
+    const events = Array.isArray(body.events) ? body.events : null;
+    if (!events || events.length === 0) {
+      return res.status(400).json({ error: '"events" array with at least one entry is required' });
+    }
+
+    try {
+      const plugin = await db.query.plugins.findFirst({ where: eq(schema.plugins.id, pluginId) });
+      if (!plugin) {
+        return res.status(400).json({ error: `Unknown plugin id: ${pluginId}` });
+      }
+
+      let accepted = 0;
+      const batch = events.slice(0, MAX_DNS_QUERIES_PER_REQUEST);
+      if (events.length > MAX_DNS_QUERIES_PER_REQUEST) {
+        // eslint-disable-next-line no-console
+        console.warn(
+          `[dns-queries] plugin ${pluginId} sent ${events.length} rows in one request; ` +
+            `dropping the last ${events.length - MAX_DNS_QUERIES_PER_REQUEST}`
+        );
+      }
+
+      const str = (v: unknown, maxLen = 253): string | null => {
+        if (typeof v !== 'string') return null;
+        const t = v.trim();
+        return t === '' ? null : t.slice(0, maxLen);
+      };
+      const intOrNull = (v: unknown, min: number, max: number): number | null => {
+        const n = typeof v === 'number' ? v : Number(v);
+        return Number.isFinite(n) && n >= min && n <= max ? Math.trunc(n) : null;
+      };
+
+      // One batch always carries ONE device (body.deviceId) — the plugin's push
+      // is per-appliance, so there is no per-row override to resolve.
+      const deviceId = typeof body.deviceId === 'string' ? body.deviceId.trim() : '';
+      if (!deviceId) {
+        return res.status(400).json({ error: 'deviceId is required' });
+      }
+
+      const rows = [];
+      for (const e of batch) {
+        if (!e || typeof e !== 'object') continue;
+        const vendorEventId = str(e.u, 128);
+        const tsSec = intOrNull(e.t, 0, 4_102_444_800); // sane epoch-seconds bound (year 2100)
+        if (!vendorEventId || tsSec === null) continue; // unusable row — skip
+
+        const client = str(e.c, 253);
+        let domain = str(e.d, 253);
+        if (!client || !domain) continue;
+        domain = domain.toLowerCase().replace(/\.$/, ''); // matchable form (trailing dot stripped)
+
+        rows.push({
+          id: uuidv4(),
+          pluginId,
+          deviceId,
+          tsMs: tsSec * 1000,
+          client,
+          domain,
+          qtype: str(e.q, 32)?.toUpperCase() ?? null,
+          action: (str(e.a, 16) ?? 'pass').toLowerCase(),
+          source: str(e.s, 32),
+          rcode: str(e.r, 32),
+          blocklist: str(e.b, 128),
+          dnssecStatus: str(e.x, 32),
+          resolveTimeMs: intOrNull(e.m, 0, 600_000),
+          ttl: intOrNull(e.l, 0, 65_535),
+          vendorEventId,
+        });
+      }
+
+      if (rows.length > 0) {
+        // One batched insert; on-conflict-ignore makes re-sent batches harmless.
+        await db.insert(schema.dnsQueryEvents).values(rows).onConflictDoNothing({
+          target: [schema.dnsQueryEvents.deviceId, schema.dnsQueryEvents.pluginId, schema.dnsQueryEvents.vendorEventId],
+        });
+      }
+      accepted = rows.length;
+
+      res.status(201).json({ accepted });
+    } catch (error) {
+      console.error('Error ingesting dns queries:', error);
+      res.status(500).json({ error: 'Internal server error' });
+    }
+  });
+
   // POST /plugin/security-events - accept a batch of syslog security-event rows
   // from the syslog-collector plugin (UDP/TCP 514, RFC5424 + BSD parsing done in
   // the plugin). Append-only log: rows are inserted with on-conflict-ignore

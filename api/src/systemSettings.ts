@@ -297,6 +297,19 @@ export const SETTING_DESCRIPTORS: SettingDescriptor[] = [
       'How many days of per-host firewall state snapshots (open states + created/destroyed churn pushed by plugins) are kept before the hourly retention sweep deletes them. The Hosts/Networks pages show a 24h churn window, so 7 days leaves a week of history.',
   },
   {
+    key: 'dnsQueryRetentionDays',
+    label: 'DNS query event retention',
+    type: 'integer',
+    category: 'Retention',
+    unit: 'days',
+    min: 1,
+    max: 365,
+    default: 7,
+    envVar: 'DNS_QUERY_RETENTION_DAYS',
+    help:
+      'How many days of per-query DNS events (client → domain rows pushed by plugins from the appliance resolver) are kept before the hourly retention sweep deletes them. The Security page shows recent activity and threat-intel matching scans new rows; 7 days mirrors OPNsense\'s own on-box query-log retention.',
+  },
+  {
     key: 'notificationRetentionDays',
     label: 'Notification retention',
     type: 'integer',

@@ -2069,6 +2069,55 @@ await pool.query(`ALTER TABLE flow_micro ADD COLUMN IF NOT EXISTS "agentCount" I
   await pool.query(`
     CREATE INDEX IF NOT EXISTS idx_threat_iocs_source ON threat_iocs ("sourceId")`);
 
+  // Domain indicators for 'domain-list' feed sources (Pi-hole-style blocklists) —
+  // the INET column in threat_iocs cannot hold names, so domains live in their
+  // own table with identical snapshot semantics (upsert + lastSeenAt prune per
+  // fetch cycle). Matching walks queried-name suffixes against this set.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS threat_domain_iocs (
+      id TEXT PRIMARY KEY,
+      "sourceId" TEXT NOT NULL REFERENCES threat_intel_sources(id) ON DELETE CASCADE,
+      domain TEXT NOT NULL,
+      "firstSeenAt" TEXT NOT NULL,
+      "lastSeenAt" TEXT NOT NULL,
+      UNIQUE ("sourceId", domain)
+    )`);
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS idx_threat_domain_iocs_source ON threat_domain_iocs ("sourceId")`);
+
+  // DNS query events pushed by plugins via POST /plugin/dns-queries (see
+  // routes/internal.ts) — append-only log of per-query rows from the appliance's
+  // resolver (OPNsense unbound qstats). `client` is verbatim as reported: an IP,
+  // or a hostname when the appliance reverse-resolved it. Dedupe key = vendorEventId
+  // (the appliance's per-query uuid), unique per device+plugin; growth bounded by
+  // the dnsQueryRetentionDays sweep (workers/dnsQueryRetention.ts).
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS dns_query_events (
+      id TEXT PRIMARY KEY,
+      "pluginId" TEXT NOT NULL,
+      "deviceId" TEXT NOT NULL,
+      "tsMs" BIGINT NOT NULL,
+      client TEXT NOT NULL,
+      domain TEXT NOT NULL,
+      qtype TEXT,
+      action TEXT NOT NULL DEFAULT 'pass',
+      source TEXT,
+      rcode TEXT,
+      blocklist TEXT,
+      dnssecStatus TEXT,
+      "resolveTimeMs" INTEGER,
+      ttl INTEGER,
+      "vendorEventId" TEXT NOT NULL
+    )`);
+  await pool.query(`
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_dns_query_events_vendor
+      ON dns_query_events ("deviceId", "pluginId", "vendorEventId")`);
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS idx_dns_query_events_ts_ms ON dns_query_events ("tsMs")`);
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS idx_dns_query_events_device_ts_ms
+      ON dns_query_events ("deviceId", "tsMs")`);
+
   // WebAuthn passkeys per user + credential policies (see schema.ts). The
   // global policy row (userId IS NULL) is seeded once; it defaults to the
   // pre-passkey behavior: TOTP required at login, only `totp` satisfies the

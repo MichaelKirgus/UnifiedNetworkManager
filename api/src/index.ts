@@ -49,6 +49,7 @@ import { startNotificationsWorker } from './workers/notifications';
 import { startTelemetryWorker } from './workers/telemetry';
 import { startTelemetryRetentionWorker } from './workers/telemetryRetention';
 import { startFirewallEventRetentionWorker } from './workers/firewallEventRetention';
+import { startDnsQueryRetentionWorker } from './workers/dnsQueryRetention';
 import { startSecurityEventRetentionWorker } from './workers/securityEventRetention';
 import { startHostStateRetentionWorker } from './workers/hostStateRetention';
 import { startPluginDiscovery } from './plugins/discovery';
@@ -423,6 +424,11 @@ async function main(): Promise<void> {
     // Syslog security-event retention (append-only log pushed via /plugin/security-events).
     void runAsLeader(LEADER_KEYS.securityEventRetention, 'securityEventRetention', () => {
       const timer = startSecurityEventRetentionWorker();
+      return () => clearInterval(timer);
+    }).then((stop) => workerStops.push(stop));
+    // DNS query-event retention (append-only log pushed via /plugin/dns-queries).
+    void runAsLeader(LEADER_KEYS.dnsQueryRetention, 'dnsQueryRetention', () => {
+      const timer = startDnsQueryRetentionWorker();
       return () => clearInterval(timer);
     }).then((stop) => workerStops.push(stop));
     // Per-host state snapshot retention (append-only log pushed via /plugin/host-states).

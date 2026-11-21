@@ -103,6 +103,7 @@ export const EXCLUDED_TABLES: ReadonlySet<string> = new Set([
   'telemetry',
   'plugin_logs',
   'firewall_events',
+  'dns_query_events',
   'host_states',
   'plugin_metrics',
   'ntp_reference_readings',
