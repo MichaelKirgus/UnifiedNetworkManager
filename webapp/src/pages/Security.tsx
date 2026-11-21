@@ -1,5 +1,5 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { Bug, Loader2, RefreshCw, Radar, ShieldCheck, ShieldAlert, ShieldX, Info, Trash2 } from 'lucide-react';
+import { Bug, Globe, Loader2, RefreshCw, Radar, ShieldCheck, ShieldAlert, ShieldX, Info, Trash2 } from 'lucide-react';
 import { Link } from 'react-router-dom';
 import { useMemo, useState } from 'react';
 import clsx from 'clsx';
@@ -8,7 +8,7 @@ import { DataTable, DataTableColumn } from '../components/DataTable';
 import { ALL_PAGES, useServerTable } from '../components/useServerTable';
 import { DeviceChip } from '../components/DeviceChip';
 import { PageTabs } from '../components/PageTabs';
-import { api, SecurityCheckRow, CvePackageRow, CveVulnerabilityRow, ThreatIntelSource } from '../api/client';
+import { api, SecurityCheckRow, CvePackageRow, CveVulnerabilityRow, ThreatIntelSource, DnsQueryEvent } from '../api/client';
 
 /** Check-kind pill — the vocabulary is shared across all plugins (SDK contract). */
 const KIND_STYLES: Record<string, string> = {
@@ -202,9 +202,9 @@ export default function Security() {
 
   const summary = cveSummaryQuery.data;
 
-  // Findings | Vulnerabilities (CVEs) | Threat Intel — each section is a
+  // Findings | Vulnerabilities (CVEs) | Threat Intel | DNS — each section is a
   // self-contained tab so the page reads top-down instead of one long scroll.
-  const [tab, setTab] = useState<'findings' | 'vulnerabilities' | 'threat-intel'>('findings');
+  const [tab, setTab] = useState<'findings' | 'vulnerabilities' | 'threat-intel' | 'dns'>('findings');
 
   const columns: DataTableColumn<SecurityCheckRow>[] = [
     {
@@ -469,6 +469,7 @@ export default function Security() {
           { id: 'findings', label: 'Findings', icon: <ShieldAlert className="h-3.5 w-3.5" />, count: securityQuery.data ? rows.length : null },
           { id: 'vulnerabilities', label: 'Vulnerabilities (CVEs)', icon: <Bug className="h-3.5 w-3.5" />, count: summary?.totalMatches ?? null },
           { id: 'threat-intel', label: 'Threat Intel', icon: <Radar className="h-3.5 w-3.5" /> },
+          { id: 'dns', label: 'DNS', icon: <Globe className="h-3.5 w-3.5" /> },
         ]}
         value={tab}
         onChange={setTab}
@@ -699,6 +700,9 @@ export default function Security() {
 
       {/* Threat intelligence — IOC feed sources + recent hits */}
       {tab === 'threat-intel' && <ThreatIntelSection />}
+
+      {/* DNS query events from appliance resolvers (unbound qstats) */}
+      {tab === 'dns' && <DnsSection />}
     </Layout>
   );
 }
@@ -981,6 +985,173 @@ function ThreatIntelSection() {
             ))}
           </ul>
         </div>
+      )}
+    </div>
+  );
+}
+
+/** Resolver action pill — pass (normal), block (DNSBL hit), drop (policy). */
+function DnsActionBadge({ action }: { action: string }) {
+  if (action === 'block') {
+    return <span className="inline-flex rounded px-1.5 py-0.5 text-xs font-medium bg-danger/20 text-danger-fg">block</span>;
+  }
+  if (action === 'drop') {
+    return <span className="inline-flex rounded px-1.5 py-0.5 text-xs font-medium bg-warning/20 text-warning-fg">drop</span>;
+  }
+  return <span className="inline-flex rounded px-1.5 py-0.5 text-xs font-medium bg-muted text-secondary">pass</span>;
+}
+
+/** DNS section — per-query resolver log from appliances (OPNsense unbound qstats)
+ *  plus window aggregates: action counts and the top blocked domains. */
+function DnsSection() {
+  const [sinceHours, setSinceHours] = useState<24 | 168>(24);
+  const [action, setAction] = useState<'all' | 'pass' | 'block' | 'drop'>('all');
+
+  const dnsQuery = useQuery({
+    queryKey: ['dnsQueries', sinceHours, action],
+    queryFn: () => api.dnsQueries({ sinceHours, action: action === 'all' ? undefined : action }),
+    refetchInterval: 30_000,
+  });
+
+  const data = dnsQuery.data;
+  const rows = data?.rows ?? [];
+  const summary = data?.summary;
+
+  const columns: DataTableColumn<DnsQueryEvent>[] = [
+    {
+      header: 'Time',
+      key: 'tsMs',
+      width: 130,
+      sortAccessor: (row) => row.tsMs,
+      exportValue: (row) => new Date(row.tsMs).toISOString(),
+      render: (row) => (
+        <span className="text-xs text-secondary" title={new Date(row.tsMs).toLocaleString()}>
+          {timeAgo(new Date(row.tsMs).toISOString())}
+        </span>
+      ),
+    },
+    {
+      header: 'Client',
+      key: 'client',
+      width: 180,
+      exportValue: (row) => row.client,
+      render: (row) => <span className="font-mono text-xs">{row.client}</span>,
+    },
+    {
+      header: 'Domain',
+      key: 'domain',
+      width: 260,
+      exportValue: (row) => row.domain,
+      render: (row) => <span className="font-mono text-xs break-all">{row.domain}</span>,
+    },
+    {
+      header: 'Type',
+      key: 'qtype',
+      width: 70,
+      exportValue: (row) => row.qtype ?? '',
+      render: (row) => <span className="text-xs text-secondary">{orDash(row.qtype)}</span>,
+    },
+    {
+      header: 'Action',
+      key: 'action',
+      width: 90,
+      exportValue: (row) => row.action,
+      render: (row) => <DnsActionBadge action={row.action} />,
+    },
+    {
+      header: 'Rcode',
+      key: 'rcode',
+      width: 100,
+      exportValue: (row) => row.rcode ?? '',
+      render: (row) => <span className="text-xs text-secondary">{orDash(row.rcode)}</span>,
+    },
+    {
+      header: 'Blocklist',
+      key: 'blocklist',
+      width: 140,
+      exportValue: (row) => row.blocklist ?? '',
+      render: (row) => <span className="text-xs text-secondary">{orDash(row.blocklist)}</span>,
+    },
+    {
+      header: 'Device',
+      key: 'deviceName',
+      width: 180,
+      exportValue: (row) => row.deviceName ?? '?',
+      render: (row) => <span className="text-xs">{orDash(row.deviceName)}</span>,
+    },
+  ];
+
+  return (
+    <div>
+      {/* Controls — window + action filter (both server-side). */}
+      <div className="mb-3 flex flex-wrap items-center gap-3">
+        <label htmlFor="dns-window" className="text-xs text-faint">Window</label>
+        <select
+          id="dns-window"
+          value={String(sinceHours)}
+          onChange={(e) => setSinceHours(Number(e.target.value) as 24 | 168)}
+          className="rounded-md border border-border bg-background px-2 py-1 text-xs text-foreground"
+        >
+          <option value="24">Last 24 hours</option>
+          <option value="168">Last 7 days</option>
+        </select>
+        <label htmlFor="dns-action" className="text-xs text-faint">Action</label>
+        <select
+          id="dns-action"
+          value={action}
+          onChange={(e) => setAction(e.target.value as 'all' | 'pass' | 'block' | 'drop')}
+          className="rounded-md border border-border bg-background px-2 py-1 text-xs text-foreground"
+        >
+          <option value="all">All</option>
+          <option value="pass">Pass</option>
+          <option value="block">Block</option>
+          <option value="drop">Drop</option>
+        </select>
+      </div>
+
+      {/* Summary chips — action counts + what the appliance's DNSBL is catching */}
+      {dnsQuery.isLoading && <p className="text-sm text-muted-foreground">Loading DNS query events…</p>}
+      {dnsQuery.isError && (
+        <p className="text-sm text-danger-fg">Failed to load DNS query events: {(dnsQuery.error as Error).message}</p>
+      )}
+      {summary && (
+        <div className="mb-4 flex flex-wrap items-center gap-3 text-sm">
+          <span className="inline-flex items-center gap-1 rounded-md bg-muted px-2 py-1 text-xs font-medium text-secondary">
+            <Globe className="h-3.5 w-3.5" /> {summary.total.toLocaleString()} queries
+          </span>
+          {summary.blocked > 0 && (
+            <span className="inline-flex items-center gap-1 rounded-md bg-danger/20 px-2 py-1 text-xs font-medium text-danger-fg">
+              {summary.blocked.toLocaleString()} blocked
+            </span>
+          )}
+          {summary.dropped > 0 && (
+            <span className="inline-flex items-center gap-1 rounded-md bg-warning/20 px-2 py-1 text-xs font-medium text-warning-fg">
+              {summary.dropped.toLocaleString()} dropped
+            </span>
+          )}
+          {summary.topBlocked.length > 0 && (
+            <span className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-secondary" title="Top blocked domains in the window — what the appliance's own DNSBL is catching">
+              <span className="text-faint">top blocked:</span>
+              {summary.topBlocked.map((t) => (
+                <span key={`${t.domain}|${t.blocklist ?? ''}`} className="inline-flex items-center gap-1 rounded bg-muted px-1.5 py-0.5 font-mono" title={t.blocklist ? `blocked by ${t.blocklist}` : undefined}>
+                  {t.domain} <span className="text-faint">×{t.count}</span>
+                </span>
+              ))}
+            </span>
+          )}
+        </div>
+      )}
+
+      {data && (
+        <DataTable
+          columns={columns}
+          rows={rows}
+          rowKey={(row) => row.id}
+          storageKey="dns-queries"
+          autoRefresh={{ intervalMs: 30_000, queries: [dnsQuery] }}
+          searchPlaceholder="Search domain or client…"
+          emptyMessage={'No DNS query events in this window. The OPNsense plugin pushes the appliance\'s unbound qstats query log on each telemetry poll (requires the "DNS Query Log" feature enabled on the box); other platforms do not report per-query data yet.'}
+        />
       )}
     </div>
   );

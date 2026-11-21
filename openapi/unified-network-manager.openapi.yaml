@@ -7354,6 +7354,64 @@ paths:
         '401':
           description: Authentication required
 
+  /dns-queries:
+    get:
+      tags: [Security]
+      summary: DNS query events across devices (unbound qstats per-query log)
+      description: >-
+        Cross-device view of the `dns_query_events` table, populated by plugins via
+        POST /plugin/dns-queries — currently the OPNsense plugin, which pushes the
+        appliance's unbound qstats query log (client, domain, action pass/block/drop,
+        rcode, matching blocklist). Each row is one DNS query as seen by the
+        resolver; `client` is verbatim as reported (an IP, or a hostname when the
+        appliance reverse-resolved it). Rows are windowed on `tsMs` (epoch ms of the
+        appliance's per-query timestamp) and deduped on the appliance's per-query uuid.
+        The response also carries SQL-side aggregates over the same window/filters:
+        action counts plus the top-5 blocked domains (what the appliance's own DNSBL
+        is catching). Device-scoped callers only see rows attributed to their own
+        devices. Retention is swept hourly (default 7 days, dnsQueryRetentionDays
+        setting). Threat-intel domain matching over this table raises 'dns-ioc-hit'
+        findings in workers/threatIntel.ts.
+      parameters:
+        - in: query
+          name: sinceHours
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 168 }
+          description: "Window size in hours (default 24)"
+        - in: query
+          name: deviceId
+          required: false
+          schema: { type: string }
+          description: Filter to one device
+        - in: query
+          name: action
+          required: false
+          schema:
+            type: string
+            enum: [pass, block, drop, all]
+          description: "Filter by resolver action (default: all)"
+        - in: query
+          name: q
+          required: false
+          schema: { type: string }
+          description: Case-insensitive match on domain or client
+        - in: query
+          name: limit
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 1000 }
+          description: Max rows to return (default 200)
+      responses:
+        '200':
+          description: DNS query event rows + window aggregates over the same window/filters
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DnsQueriesResponse'
+        '400':
+          description: Invalid action filter value
+        '401':
+          description: Authentication required
+
   /firewall-events:
     get:
       tags: [Inventory]
@@ -12571,6 +12629,55 @@ components:
                 info: { type: integer }
                 warn: { type: integer }
                 error: { type: integer }
+
+    DnsQueryEventRow:
+      type: object
+      required: [id, deviceId, tsMs, client, domain, action]
+      properties:
+        id: { type: string }
+        deviceId: { type: string }
+        deviceName: { type: [string, 'null'] }
+        tsMs: { type: integer, format: int64, description: "Epoch ms of the appliance's per-query timestamp" }
+        client: { type: string, description: "Verbatim as reported — an IP, or a hostname when the appliance reverse-resolved it" }
+        domain: { type: string, description: "Normalized (lowercase, trailing dot stripped)" }
+        qtype: { type: [string, 'null'], description: "Query type (A, AAAA, TXT, …)" }
+        action: { type: string, enum: [pass, block, drop], description: "Resolver action" }
+        source: { type: [string, 'null'], description: "recursion | local | local-data | cache — where the answer came from" }
+        rcode: { type: [string, 'null'], description: "NOERROR | NXDOMAIN | SERVFAIL | …" }
+        blocklist: { type: [string, 'null'], description: "The appliance's own DNSBL list that blocked this query; null when none" }
+        dnssecStatus: { type: [string, 'null'], description: "unchecked | bogus | indeterminate | insecure | secure" }
+        resolveTimeMs: { type: [integer, 'null'] }
+        ttl: { type: [integer, 'null'] }
+
+    DnsQueriesResponse:
+      type: object
+      required: [fromMs, toMs, rows, summary]
+      properties:
+        fromMs: { type: integer, format: int64, description: "Effective window start (epoch ms) after clamping" }
+        toMs: { type: integer, format: int64, description: "Effective window end (epoch ms)" }
+        rows:
+          type: array
+          items:
+            $ref: '#/components/schemas/DnsQueryEventRow'
+          description: "Newest-first query rows within the window"
+        summary:
+          type: object
+          required: [total, passed, blocked, dropped, topBlocked]
+          properties:
+            total: { type: integer, description: "Total rows over the same window/filters (SQL-side)" }
+            passed: { type: integer }
+            blocked: { type: integer }
+            dropped: { type: integer }
+            topBlocked:
+              type: array
+              items:
+                type: object
+                required: [domain, count]
+                properties:
+                  domain: { type: string }
+                  blocklist: { type: [string, 'null'] }
+                  count: { type: integer }
+              description: "Top-5 blocked domains in the window (what the appliance's DNSBL is catching)"
 
     FirewallEventsResponse:
       type: object

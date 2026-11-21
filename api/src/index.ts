@@ -31,6 +31,9 @@ import securityChecksRouter from './routes/securityChecks';
 import cveRouter from './routes/cve';
 import securityEventsRouter from './routes/securityEvents';
 import threatIntelRouter from './routes/threatIntel';
+// DNS query events (/dns-queries) — read view of the per-query log pushed via
+// POST /plugin/dns-queries (OPNsense unbound qstats); feeds the Security page.
+import dnsQueriesRouter from './routes/dnsQueries';
 import topologyRouter from './routes/topology';
 import logsRouter from './routes/logs';
 import notificationsRouter from './routes/notifications';
@@ -350,6 +353,9 @@ async function main(): Promise<void> {
   // Threat intelligence (/threat-intel) — IOC feed sources + status; matching
   // runs in workers/threatIntel.ts and raises 'ioc-hit' findings.
   api.use(threatIntelRouter);
+  // DNS query events (/dns-queries) — windowed read view of the per-query log
+  // (OPNsense unbound qstats); aggregates + top blocked domains for the UI.
+  api.use(dnsQueriesRouter);
 
   // OpenAPI validation error handler.
   api.use(

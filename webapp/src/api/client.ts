@@ -3913,6 +3913,43 @@ export interface ThreatIntelResponse {
   recentHits: ThreatIntelHit[];
 }
 
+// ── DNS query events (GET /dns-queries) ────────────────────────────────────
+
+/** One DNS query as seen by an appliance's resolver (OPNsense unbound qstats). */
+export interface DnsQueryEvent {
+  id: string;
+  deviceId: string;
+  deviceName: string | null;
+  /** Epoch ms of the appliance's per-query timestamp. */
+  tsMs: number;
+  /** Verbatim as reported — an IP, or a hostname when the appliance reverse-resolved it. */
+  client: string;
+  /** Normalized (lowercase, trailing dot stripped). */
+  domain: string;
+  qtype: string | null;
+  action: 'pass' | 'block' | 'drop';
+  source: string | null;
+  rcode: string | null;
+  /** The appliance's own DNSBL list that blocked this query (null when none). */
+  blocklist: string | null;
+  dnssecStatus: string | null;
+  resolveTimeMs: number | null;
+  ttl: number | null;
+}
+
+export interface DnsQueriesResponse {
+  fromMs: number;
+  toMs: number;
+  rows: DnsQueryEvent[];
+  summary: {
+    total: number;
+    passed: number;
+    blocked: number;
+    dropped: number;
+    topBlocked: { domain: string; blocklist: string | null; count: number }[];
+  };
+}
+
 /**
  * Fires when the flow security worker records a NEW open finding after this
  * trigger's watermark (first run seeds without firing — no history replay).
@@ -4915,6 +4952,17 @@ export const api = {
   deleteThreatIntelSource: (id: string) =>
     apiFetch<{ deleted: boolean }>(`/threat-intel/sources/${encodeURIComponent(id)}`, { method: 'DELETE' }),
   fetchThreatIntelNow: () => apiFetch<{ triggered: number }>('/threat-intel/fetch', { method: 'POST' }),
+  /** DNS query events from appliance resolvers (unbound qstats) + window aggregates. */
+  dnsQueries: (params?: { sinceHours?: number; deviceId?: string; action?: 'pass' | 'block' | 'drop'; q?: string; limit?: number }) => {
+    const qs = new URLSearchParams();
+    if (params?.sinceHours) qs.set('sinceHours', String(params.sinceHours));
+    if (params?.deviceId) qs.set('deviceId', params.deviceId);
+    if (params?.action) qs.set('action', params.action);
+    if (params?.q) qs.set('q', params.q);
+    if (params?.limit) qs.set('limit', String(params.limit));
+    const suffix = qs.toString() ? `?${qs.toString()}` : '';
+    return apiFetch<DnsQueriesResponse>(`/dns-queries${suffix}`);
+  },
   // Plugin log entries (global Logs page + per-device section in DeviceDetail).
   // Paged mode: pass page/pageSize/all → returns a LogPagedResponse envelope instead of a plain array.
   logs: (params?: {
