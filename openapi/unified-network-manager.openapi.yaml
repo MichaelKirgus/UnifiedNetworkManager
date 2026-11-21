@@ -5576,7 +5576,12 @@ paths:
         Cross-device view of the normalized `hosts` inventory table, populated
         by the telemetry worker from each plugin's ARP/NDP neighbor tables and
         DHCP leases. Rows are upserted per poll; entries not refreshed within
-        24h are swept away.
+        24h are swept away. With page/pageSize/all present the body is a
+        `{ rows, total, page, pageSize }` envelope (rows sorted by lastSeenAt
+        desc unless sort/dir say otherwise); without them it stays a plain
+        array of every merged host (legacy — e.g. the DHCP page's lease
+        reference data). `q` matches ip/mac/hostname at the raw-row level
+        pre-merge, so a hit on ANY of a host's rows keeps the whole merged host.
       parameters:
         - in: query
           name: deviceId
@@ -5595,17 +5600,52 @@ paths:
             type: string
             enum: [arp, ndp, dhcp, wlan, self]
           description: "Filter by discovery source ('self' = the appliance's own interfaces)"
+        - in: query
+          name: q
+          required: false
+          schema: { type: string }
+          description: Case-insensitive substring match on ip, mac or hostname (pre-merge)
+        # NOTE: no `default:` on these — the validator injects schema defaults into
+        # MISSING params, which would flip legacy callers into paged mode. The code
+        # applies its own defaults once paged mode is detected.
+        - in: query
+          name: page
+          required: false
+          schema: { type: integer, minimum: 1 }
+          description: Page number (1-based, default 1); enables paged mode with the `{ rows, total, page, pageSize }` envelope
+        - in: query
+          name: pageSize
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 200 }
+          description: Rows per page (default 50, clamped to 200 max)
+        - in: query
+          name: all
+          required: false
+          schema: { type: boolean }
+          description: "true = return every merged host in one envelope (page=1, pageSize=total)"
+        - in: query
+          name: sort
+          required: false
+          schema: { type: string, enum: [mac, hostname, lastSeenAt] }
+          description: Sort field of the MERGED list (default lastSeenAt)
+        - in: query
+          name: dir
+          required: false
+          schema: { type: string, enum: [asc, desc] }
+          description: Sort direction (default desc = most recently seen first)
       responses:
         '200':
-          description: Host rows (device + plugin identity included)
+          description: Host rows (device + plugin identity included) — plain array in legacy mode; envelope object with page/pageSize/all present
           content:
             application/json:
               schema:
-                type: array
-                items:
-                  $ref: '#/components/schemas/HostRow'
+                oneOf:
+                  - type: array
+                    items:
+                      $ref: '#/components/schemas/HostRow'
+                  - $ref: '#/components/schemas/HostPagedResponse'
         '400':
-          description: Invalid source filter value
+          description: Invalid source, sort or dir value, or invalid pagination values
         '401':
           description: Authentication required
 
@@ -5702,22 +5742,64 @@ paths:
         referenced against the live inventory at read time and marked
         `discovered` when a matching MAC or IP was observed recently. A
         documented MAC that differs from what is currently observed for its
-        address is flagged as `macMismatch`.
+        address is flagged as `macMismatch`. With page/pageSize/all present the
+        body is a `{ rows, total, page, pageSize }` envelope (rows sorted by
+        updatedAt desc unless sort/dir say otherwise); without them it stays a
+        plain array of every row (legacy — e.g. this page's duplicate-detection
+        + free-IP reference data). `q` matches dnsNames/friendlyName/
+        description/ip case-insensitively.
       parameters:
         - in: query
           name: siteId
           required: false
           schema: { type: string }
           description: Filter to hosts placed at a site
+        - in: query
+          name: q
+          required: false
+          schema: { type: string }
+          description: Case-insensitive substring match on DNS names, friendly name, description or any documented address
+        # NOTE: no `default:` on these — the validator injects schema defaults into
+        # MISSING params, which would flip legacy callers into paged mode. The code
+        # applies its own defaults once paged mode is detected.
+        - in: query
+          name: page
+          required: false
+          schema: { type: integer, minimum: 1 }
+          description: Page number (1-based, default 1); enables paged mode with the `{ rows, total, page, pageSize }` envelope
+        - in: query
+          name: pageSize
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 200 }
+          description: Rows per page (default 50, clamped to 200 max)
+        - in: query
+          name: all
+          required: false
+          schema: { type: boolean }
+          description: "true = return every row in one envelope (page=1, pageSize=total)"
+        - in: query
+          name: sort
+          required: false
+          schema: { type: string, enum: [updatedAt, createdAt, lastSeenAt] }
+          description: Sort field (default updatedAt)
+        - in: query
+          name: dir
+          required: false
+          schema: { type: string, enum: [asc, desc] }
+          description: Sort direction (default desc = most recently updated first)
       responses:
         '200':
-          description: Documented host rows (with live discovery info)
+          description: Documented host rows (with live discovery info) — plain array in legacy mode; envelope object with page/pageSize/all present
           content:
             application/json:
               schema:
-                type: array
-                items:
-                  $ref: '#/components/schemas/DocumentedHost'
+                oneOf:
+                  - type: array
+                    items:
+                      $ref: '#/components/schemas/DocumentedHost'
+                  - $ref: '#/components/schemas/DocumentedHostPagedResponse'
+        '400':
+          description: Invalid sort/dir value, or invalid pagination values
         '401':
           description: Authentication required
     post:
@@ -11252,6 +11334,20 @@ components:
                 items: { type: string }
                 description: "Interface(s) on the observing device where the host was seen (e.g. [lan], [wlan0])"
 
+    HostPagedResponse:
+      type: object
+      description: Paged-mode envelope for GET /hosts — returned when page/pageSize/all query params are present; legacy callers get a plain array of every merged host.
+      required: [rows, total, page, pageSize]
+      properties:
+        rows:
+          type: array
+          items:
+            $ref: '#/components/schemas/HostRow'
+          description: "The requested slice of merged hosts (default order: most recently seen first)"
+        total: { type: integer, description: "Total merged hosts over the filters" }
+        page: { type: integer, description: "Current 1-based page; equals 1 in all-mode" }
+        pageSize: { type: integer, description: "Rows per page; equals total in all-mode" }
+
     DnsRow:
       type: object
       required: [name, ips, devices]
@@ -11383,6 +11479,20 @@ components:
         macMismatch:
           type: boolean
           description: "Documented MAC is set AND differs from what is currently observed here"
+
+    DocumentedHostPagedResponse:
+      type: object
+      description: Paged-mode envelope for GET /documented-hosts — returned when page/pageSize/all query params are present; legacy callers get a plain array of every row.
+      required: [rows, total, page, pageSize]
+      properties:
+        rows:
+          type: array
+          items:
+            $ref: '#/components/schemas/DocumentedHost'
+          description: "The requested slice (default order: most recently updated first)"
+        total: { type: integer, description: "Total matching rows over the filters" }
+        page: { type: integer, description: "Current 1-based page; equals 1 in all-mode" }
+        pageSize: { type: integer, description: "Rows per page; equals total in all-mode" }
 
     DocumentedHost:
       type: object

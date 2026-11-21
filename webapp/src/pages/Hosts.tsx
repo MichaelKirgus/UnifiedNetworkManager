@@ -1,7 +1,8 @@
-import { useMemo } from 'react';
+import { useMemo, useRef } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { Layout } from '../components/Layout';
 import { DataTable, DataTableColumn } from '../components/DataTable';
+import { ALL_PAGES, useServerTable } from '../components/useServerTable';
 import { DeviceChip } from '../components/DeviceChip';
 import { IpGroupChips } from '../components/IpGroups';
 import { formatBytes } from '../components/formatMetric';
@@ -54,13 +55,37 @@ function SourceBadges({ sources }: { sources: HostRow['sources'] }) {
 
 export default function Hosts() {
   const { formatDateTime } = useTimeFormat();
-  // Rows are upserted by the API's telemetry worker (30s poll) — refresh at
-  // the same cadence so the view tracks live neighbor/lease tables.
-  const hostsQuery = useQuery({
-    queryKey: ['hosts'],
-    queryFn: () => api.hosts(),
-    refetchInterval: 30_000,
+
+  // Server-side pagination — rows are fetched per page by the API (the merge
+  // into one row per MAC happens server-side; sort + slice apply to the merged
+  // list). Rows are upserted by the telemetry worker (30s poll) — the hook's
+  // default 30s refetch keeps the view tracking live neighbor/lease tables.
+  const table = useServerTable<object, HostRow>({
+    fetcher: async (p) => {
+      // Only mac/hostname/lastSeenAt are server-sortable columns — anything else
+      // (e.g. stale persisted state) falls back to the API's default order.
+      const k = p.sort?.key;
+      const res = await api.hosts({
+        q: p.q,
+        page: p.pageSize === ALL_PAGES ? undefined : p.page,
+        pageSize: p.pageSize === ALL_PAGES ? undefined : p.pageSize,
+        all: p.pageSize === ALL_PAGES || undefined,
+        sort: k === 'mac' || k === 'hostname' || k === 'lastSeenAt' ? k : undefined,
+        dir: p.sort?.dir,
+      });
+      // Paged mode always returns the envelope; guard for safety.
+      return Array.isArray(res) ? { rows: res, total: res.length } : { rows: res.rows, total: res.total };
+    },
+    extra: useMemo(() => ({}), []),
+    storageKey: 'hosts',
   });
+
+  // Debounce the table's built-in quick search into the committed server query (300 ms).
+  const qTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  function onSearchInput(v: string) {
+    if (qTimer.current) clearTimeout(qTimer.current);
+    qTimer.current = setTimeout(() => table.setQ(v.trim()), 300);
+  }
 
   // Traffic over the last 24h per endpoint IP — summed across each host's
   // addresses below. Rollups land every 5 minutes; refresh on that cadence.
@@ -149,6 +174,7 @@ export default function Hosts() {
       width: 200,
       exportValue: (row) => row.ips.join(' '),
       render: (row) => <IpGroupChips ips={row.ips} />,
+      sortable: false, // server sorts by mac/hostname/lastSeenAt only
     },
     {
       header: 'Hostname',
@@ -161,11 +187,13 @@ export default function Hosts() {
       width: 120,
       exportValue: (row) => row.sources.join(' '),
       render: (row) => <SourceBadges sources={row.sources} />,
+      sortable: false,
     },
     {
       header: 'Manufacturer',
       key: 'manufacturer',
       render: (row) => row.manufacturer ?? <span className="text-faint">—</span>,
+      sortable: false,
     },
     {
       // Every device+plugin that observed this MAC, with the interface(s) seen on.
@@ -187,12 +215,13 @@ export default function Hosts() {
           ))}
         </div>
       ),
+      sortable: false,
     },
     {
       header: 'Lease expiry',
       key: 'expiry',
       width: 180,
-      sortAccessor: (row) => (row.expiry ? new Date(row.expiry).getTime() : null),
+      sortable: false, // not a server sort field
       render: (row) => (row.expiry ? formatDateTime(row.expiry) : <span className="text-faint">—</span>),
     },
     {
@@ -208,10 +237,7 @@ export default function Hosts() {
       header: 'Traffic (24h)',
       key: 'traffic',
       width: 170,
-      sortAccessor: (row) => {
-        const t = hostTraffic(row);
-        return t ? t.sent + t.received : null;
-      },
+      sortable: false, // client-side enrichment — not a server sort field
       exportValue: (row) => {
         const t = hostTraffic(row);
         return t ? `${t.sent} sent / ${t.received} received` : '';
@@ -235,10 +261,7 @@ export default function Hosts() {
       header: 'States',
       key: 'states',
       width: 170,
-      sortAccessor: (row) => {
-        const s = hostStates(row);
-        return s ? s.open : null;
-      },
+      sortable: false, // client-side enrichment — not a server sort field
       exportValue: (row) => {
         const s = hostStates(row);
         if (!s) return '';
@@ -264,21 +287,32 @@ export default function Hosts() {
   return (
     <Layout title="Hosts">
 
-      {hostsQuery.isLoading && <p className="text-sm text-muted-foreground">Loading hosts...</p>}
-      {hostsQuery.isError && (
-        <p className="text-sm text-danger-fg">Failed to load hosts: {(hostsQuery.error as Error).message}</p>
+      {table.isError && (
+        <p className="text-sm text-danger-fg">Failed to load hosts: {table.error?.message}</p>
       )}
-      {hostsQuery.data && (
-        <DataTable
-          columns={columns}
-          rows={hostsQuery.data}
-          rowKey={(row) => row.mac}
-          storageKey="hosts"
-          autoRefresh={{ intervalMs: 30_000, queries: [hostsQuery] }}
-          searchPlaceholder="Search hosts…"
-          emptyMessage="No hosts discovered yet — assign a plugin (e.g. OPNsense) to a device and wait for the next poll."
-        />
-      )}
+
+      <DataTable
+        columns={columns}
+        rows={table.data?.rows ?? []}
+        rowKey={(row) => row.mac}
+        storageKey="hosts"
+        isFetching={table.isFetching}
+        searchPlaceholder="Search hosts…"
+        onSearch={onSearchInput}
+        externalSearch={table.q || null}
+        serverPagination={{
+          total: table.data?.total ?? 0,
+          page: table.page,
+          pageSize: table.pageSize,
+          onPageChange: table.setPage,
+          onPageSizeChange: table.setPageSize,
+          // pageSizeOptions omitted → global `tablePageSizeOptions` setting + built-in "All".
+          sort: table.sort,
+          onSortChange: table.setSort,
+        }}
+        autoRefresh={{ intervalMs: 30_000, queries: [table] }}
+        emptyMessage="No hosts discovered yet — assign a plugin (e.g. OPNsense) to a device and wait for the next poll."
+      />
     </Layout>
   );
 }

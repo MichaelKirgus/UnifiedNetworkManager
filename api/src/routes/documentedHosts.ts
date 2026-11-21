@@ -10,6 +10,7 @@ import { mergeHostRows, mergeNetworkRows, type MergedHost } from './networks';
 import { loadSuggestedLayers } from './topology';
 import { classifyLayer } from '../utils/topology';
 import { readStringArray, parseStringArrayField } from '../utils/stringArrays';
+import { envelopePage, hasPaginationParams, parsePagination, type ParsedPagination } from '../utils/pagination';
 
 const router = Router();
 
@@ -542,14 +543,73 @@ async function loadOneHost(id: string): Promise<HostWithIps | null> {
 }
 
 // GET /documented-hosts — list all documented hosts with live discovery info.
-// Query params: siteId (filter by placement).
-router.get('/documented-hosts', requireAuth, requirePermission('documented-hosts:read'), async (_req: Request, res: Response) => {
+// Query params: siteId (filter by placement), q (search on dnsNames/friendlyName/
+// description/ip) and page/pageSize/all/sort/dir for paged mode. Search + sort
+// are applied to the BUILT views in JS — the table is small and user-maintained,
+// and matching across JSON dnsNames / per-address rows is far simpler post-build.
+// Legacy callers (no page/pageSize/all) keep the plain full-list array, e.g. the
+// duplicate-detection + free-IP reference data on this very page.
+router.get('/documented-hosts', requireAuth, requirePermission('documented-hosts:read'), async (req: Request, res: Response) => {
   try {
-    const { siteId } = _req.query as Record<string, string | undefined>;
+    const { siteId } = req.query as Record<string, string | undefined>;
+
+    // Paged mode is detected up front so the empty case can answer in the right shape.
+    let pg: ParsedPagination | null = null;
+    if (hasPaginationParams(req.query)) {
+      const parsed = parsePagination(req.query);
+      if ('error' in parsed) {
+        res.status(400).json({ error: parsed.error });
+        return;
+      }
+      pg = parsed;
+      const sortRaw = typeof req.query.sort === 'string' ? req.query.sort : '';
+      if (sortRaw !== '' && !['updatedAt', 'createdAt', 'lastSeenAt'].includes(sortRaw)) {
+        res.status(400).json({ error: '"sort" must be one of: updatedAt, createdAt, lastSeenAt' });
+        return;
+      }
+      const dirRaw = typeof req.query.dir === 'string' ? req.query.dir : '';
+      if (dirRaw !== '' && dirRaw !== 'asc' && dirRaw !== 'desc') {
+        res.status(400).json({ error: '"dir" must be "asc" or "desc"' });
+        return;
+      }
+    }
+
     const hosts = await loadHostsWithIps(siteId);
-    const views = await buildViews(hosts);
-    // Most recently updated first — the page is a working inventory.
-    views.sort((a, b) => (b.updatedAt > a.updatedAt ? 1 : -1));
+    let views = await buildViews(hosts);
+
+    // Quick search — case-insensitive substring over DNS names, friendly name,
+    // description and every documented address.
+    const q = typeof req.query.q === 'string' ? req.query.q.trim().toLowerCase() : '';
+    if (q) {
+      views = views.filter(
+        (v) =>
+          v.dnsNames.some((n) => n.toLowerCase().includes(q)) ||
+          (v.friendlyName ?? '').toLowerCase().includes(q) ||
+          (v.description ?? '').toLowerCase().includes(q) ||
+          v.ips.some((ip) => ip.address.toLowerCase().includes(q))
+      );
+    }
+
+    // Default order: most recently updated first — the page is a working inventory.
+    const sortRaw = typeof req.query.sort === 'string' ? req.query.sort : '';
+    const dir = (typeof req.query.dir === 'string' && req.query.dir === 'asc' ? 'asc' : 'desc') as 'asc' | 'desc';
+    const col: 'updatedAt' | 'createdAt' | 'lastSeenAt' = sortRaw === '' ? 'updatedAt' : (sortRaw as 'updatedAt' | 'createdAt' | 'lastSeenAt');
+    views.sort((a, b) => {
+      // lastSeenAt is nullable — never-seen rows sort first in asc, last in desc.
+      const av = a[col] ?? '';
+      const bv = b[col] ?? '';
+      return dir === 'asc' ? av.localeCompare(bv) : bv.localeCompare(av);
+    });
+
+    if (pg) {
+      const total = views.length;
+      // all=true → the whole list in one envelope (page 1, pageSize=total).
+      const pageRows = pg.all ? views : views.slice((pg.page - 1) * pg.pageSize, pg.page * pg.pageSize);
+      res.status(200).json({ rows: pageRows, total, ...envelopePage(pg, total) });
+      return;
+    }
+
+    // Legacy — the full list (unchanged shape for existing consumers).
     res.status(200).json(views);
   } catch (err) {
     const e = err as { status?: number; message?: string };

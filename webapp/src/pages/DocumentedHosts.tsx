@@ -5,6 +5,7 @@ import { Archive, CircleCheck, CircleX, DatabaseZap, Dices, GitMerge, NotebookPe
 import { DialogShell } from '../components/DialogShell';
 import { Layout } from '../components/Layout';
 import { DataTable, DataTableColumn } from '../components/DataTable';
+import { ALL_PAGES, useServerTable } from '../components/useServerTable';
 import { ChipInput } from '../components/ChipInput';
 import { IpCidrInput } from '../components/IpCidrInput';
 import { api, Device, DocumentedHost, DocumentedHostRequest, NetworkLayer, Site } from '../api/client';
@@ -1038,6 +1039,8 @@ function PlacementPickerModal({ kind, ids, sites, layers, onClose }: PlacementPi
     api.bulkSetDocumentedHostPlacement(ids, kind === 'site' ? { siteId: targetId } : { layerId: targetId })
       .then((res) => {
         queryClient.invalidateQueries({ queryKey: ['documentedHosts'] });
+        // The table is server-paginated under its own key — refresh it too.
+        void queryClient.invalidateQueries({ queryKey: ['serverTable', 'documented-hosts'] });
         if (res.missing.length > 0) alert(`${res.updated} updated, ${res.missing.length} id(s) no longer exist.`);
       })
       .catch((err) => alert(`Failed to set ${label.toLowerCase()}: ${(err as Error).message}`));
@@ -1096,13 +1099,59 @@ export default function DocumentedHosts() {
 
   // Documented hosts + the reference data the form needs. The live host rows
   // power MAC auto-fill in the form and keep "discovered" fresh (30 s cadence).
-  const hostsQuery = useQuery({ queryKey: ['documentedHosts'], queryFn: () => api.documentedHosts(), refetchInterval: 30_000 });
+  // Legacy call (no page/pageSize) → plain array of every row; this full list is
+  // still needed for duplicate detection + free-IP suggestions, so it stays.
+  const hostsQuery = useQuery({
+    queryKey: ['documentedHosts'],
+    queryFn: async () => {
+      const res = await api.documentedHosts();
+      return Array.isArray(res) ? res : res.rows;
+    },
+    refetchInterval: 30_000,
+  });
+
+  // Server-side pagination for the table itself — rows are fetched per page by
+  // the API (search + sort apply to the built views server-side).
+  const table = useServerTable<object, DocumentedHost>({
+    fetcher: async (p) => {
+      // Only lastSeenAt/createdAt/updatedAt are server-sortable columns — anything
+      // else (e.g. stale persisted state) falls back to the API's default order.
+      const k = p.sort?.key;
+      const res = await api.documentedHosts({
+        q: p.q,
+        page: p.pageSize === ALL_PAGES ? undefined : p.page,
+        pageSize: p.pageSize === ALL_PAGES ? undefined : p.pageSize,
+        all: p.pageSize === ALL_PAGES || undefined,
+        sort: k === 'lastSeenAt' || k === 'createdAt' || k === 'updatedAt' ? k : undefined,
+        dir: p.sort?.dir,
+      });
+      // Paged mode always returns the envelope; guard for safety.
+      return Array.isArray(res) ? { rows: res, total: res.length } : { rows: res.rows, total: res.total };
+    },
+    extra: useMemo(() => ({}), []),
+    storageKey: 'documented-hosts',
+  });
+
+  // Debounce the table's built-in quick search into the committed server query (300 ms).
+  const qTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  function onSearchInput(v: string) {
+    if (qTimer.current) clearTimeout(qTimer.current);
+    qTimer.current = setTimeout(() => table.setQ(v.trim()), 300);
+  }
   const sitesQuery = useQuery({ queryKey: ['sites'], queryFn: api.sites });
   const layersQuery = useQuery({ queryKey: ['layers'], queryFn: api.layers });
   // Registered devices — a documented host whose name matches one can inherit its placement.
   const devicesQuery = useQuery({ queryKey: ['devices'], queryFn: api.devices });
   const networksQuery = useQuery({ queryKey: ['networks'], queryFn: () => api.networks() });
-  const liveHostsQuery = useQuery({ queryKey: ['hosts'], queryFn: () => api.hosts(), refetchInterval: 30_000 });
+  // Legacy call (no page/pageSize) → plain array of every merged host; normalize for safety.
+  const liveHostsQuery = useQuery({
+    queryKey: ['hosts'],
+    queryFn: async () => {
+      const res = await api.hosts();
+      return Array.isArray(res) ? res : res.rows;
+    },
+    refetchInterval: 30_000,
+  });
   // Topology graph — device nodes carry the RESOLVED layer (override > plugin
   // suggestion > heuristic), which powers the form's layer pre-fill.
   const topologyQuery = useQuery({ queryKey: ['topology'], queryFn: () => api.topology() });
@@ -1201,8 +1250,15 @@ export default function DocumentedHosts() {
     setFormOpen(false);
     setEditing(null);
   }
+  // Invalidate BOTH the legacy full-list query (duplicate detection + free-IP
+  // reference data) and the server-paginated table.
+  const invalidateAll = () => {
+    void queryClient.invalidateQueries({ queryKey: ['documentedHosts'] });
+    void queryClient.invalidateQueries({ queryKey: ['serverTable', 'documented-hosts'] });
+  };
+
   function handleSaved() {
-    queryClient.invalidateQueries({ queryKey: ['documentedHosts'] });
+    invalidateAll();
     closeForm();
   }
   function handleDelete(row: DocumentedHost) {
@@ -1212,7 +1268,7 @@ export default function DocumentedHosts() {
   }
   const deleteMutation = useMutation({
     mutationFn: (id: string) => api.deleteDocumentedHost(id),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['documentedHosts'] }),
+    onSuccess: () => invalidateAll(),
   });
 
   // Active/stale lifecycle — optimistic flip, rolled back on failure.
@@ -1223,7 +1279,7 @@ export default function DocumentedHosts() {
       old?.map((h) => (h.id === row.id ? { ...h, isActive: next } : h)) ?? old
     );
     toggleActiveMutation.mutate({ id: row.id, isActive: next }, {
-      onSettled: () => queryClient.invalidateQueries({ queryKey: ['documentedHosts'] }),
+      onSettled: () => invalidateAll(),
       onError: () => {
         if (prevData) queryClient.setQueryData(['documentedHosts'], prevData);
       },
@@ -1237,14 +1293,14 @@ export default function DocumentedHosts() {
   // are kept); addresses are unioned with per-address data preserved.
   const mergeMutation = useMutation({
     mutationFn: (ids: string[]) => api.mergeDocumentedHosts(ids),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['documentedHosts'] }),
+    onSuccess: () => invalidateAll(),
   });
 
   // MAC sync — replace documented per-address MACs with what the live inventory
   // currently observes (re-keyed clients: docker re-creation, randomized MACs).
   const macSyncMutation = useMutation({
     mutationFn: (ids: string[]) => api.syncDocumentedHostMacs(ids),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['documentedHosts'] }),
+    onSuccess: () => invalidateAll(),
   });
 
   /** Number of per-address MAC mismatches on one host. */
@@ -1277,6 +1333,7 @@ export default function DocumentedHosts() {
       width: 240,
       exportValue: (row) => row.dnsNames.join(', '),
       searchText: (row) => [row.dnsNames.join(' '), row.friendlyName ?? '', row.description ?? ''].join(' '),
+      sortable: false, // server sorts by lastSeenAt/createdAt/updatedAt only
       render: (row) => {
         const dups = duplicateGroups.get(row.id);
         return (
@@ -1308,6 +1365,7 @@ export default function DocumentedHosts() {
       width: 230,
       exportValue: (row) => row.ips.map((ip) => `${ip.address} ${ip.mac ?? ''}`).join(' '),
       render: (row) => <IpBlock row={row} />,
+      sortable: false,
     },
     {
       header: 'Network',
@@ -1315,6 +1373,7 @@ export default function DocumentedHosts() {
       width: 170,
       exportValue: (row) => Array.from(new Set(row.ips.map((ip) => ip.networkName ?? ip.networkLabel).filter(Boolean))).join(', '),
       render: (row) => <NetworkCell row={row} />,
+      sortable: false,
     },
     {
       header: 'VLAN',
@@ -1322,18 +1381,21 @@ export default function DocumentedHosts() {
       width: 150,
       exportValue: (row) => row.ips.map((ip) => `${ip.address}: ${ip.vlanId ?? ''}`).join(', '),
       render: (row) => <VlanCell row={row} />,
+      sortable: false,
     },
     {
       header: 'Site',
       key: 'siteName',
       width: 120,
       render: (row) => row.siteName ?? <span className="text-faint">—</span>,
+      sortable: false,
     },
     {
       header: 'Layer',
       key: 'layerName',
       width: 110,
       render: (row) => row.layerName ?? <span className="text-faint">—</span>,
+      sortable: false,
     },
     {
       // Free-form user tags — same data basis as devices.
@@ -1355,6 +1417,7 @@ export default function DocumentedHosts() {
           </div>
         );
       },
+      sortable: false,
     },
     {
       header: 'Status',
@@ -1362,12 +1425,14 @@ export default function DocumentedHosts() {
       width: 150,
       exportValue: (row) => (row.discovered ? 'discovered' : 'not seen'),
       render: (row) => <StatusCell row={row} />,
+      sortable: false,
     },
     {
       header: 'Observed hostname',
       key: 'observedHostname',
       width: 160,
       render: (row) => row.observedHostname ?? <span className="text-faint">—</span>,
+      sortable: false,
     },
     {
       header: 'Last seen',
@@ -1380,6 +1445,7 @@ export default function DocumentedHosts() {
       header: 'Description',
       key: 'description',
       hiddenByDefault: true,
+      sortable: false,
       render: (row) => row.description ?? <span className="text-faint">—</span>,
     },
     {
@@ -1480,90 +1546,101 @@ export default function DocumentedHosts() {
           onSaved={handleSaved}
         />
       )}
-      {hostsQuery.isLoading && <p className="text-sm text-muted-foreground">Loading documented hosts…</p>}
-      {hostsQuery.isError && (
-        <p className="text-sm text-danger-fg">Failed to load documented hosts: {(hostsQuery.error as Error).message}</p>
+      {table.isError && (
+        <p className="text-sm text-danger-fg">Failed to load documented hosts: {table.error?.message}</p>
       )}
-      {hostsQuery.data && (
-        <DataTable
-          columns={columns}
-          rows={hostsQuery.data}
-          rowKey={(row) => row.id}
-          storageKey="documented-hosts"
-          autoRefresh={{ intervalMs: 30_000, queries: [hostsQuery, liveHostsQuery] }}
-          searchPlaceholder="Search documented hosts…"
-          emptyMessage="No documented hosts yet — create one with “New host” or import your spreadsheet as CSV."
-          selectable={canWrite}
-          rowClassName={(row) => (row.isActive ? undefined : 'opacity-50')}
-          selectionRef={tableSelection}
-          bulkActions={
-            canWrite
-              ? [
-                  {
-                    label: 'Merge selected',
-                    enabled: (rows) => rows.length >= 2,
-                    confirm: (count) => `Merge ${count} documented host${count === 1 ? '' : 's'} into ONE row?\nThe oldest row survives; addresses are combined and the other rows are deleted. This cannot be undone.`,
-                    onClick: async (selected) => {
-                      try {
-                        const res = await mergeMutation.mutateAsync(selected.map((h) => h.id));
-                        alert(`Merged ${res.count} row(s) into “${res.merged.dnsNames[0]}”.`);
-                      } catch (err) {
-                        alert(`Merge failed: ${(err as Error).message}`);
-                      }
-                    },
+
+      <DataTable
+        columns={columns}
+        rows={table.data?.rows ?? []}
+        rowKey={(row) => row.id}
+        storageKey="documented-hosts"
+        isFetching={table.isFetching}
+        searchPlaceholder="Search documented hosts…"
+        onSearch={onSearchInput}
+        externalSearch={table.q || null}
+        serverPagination={{
+          total: table.data?.total ?? 0,
+          page: table.page,
+          pageSize: table.pageSize,
+          onPageChange: table.setPage,
+          onPageSizeChange: table.setPageSize,
+          // pageSizeOptions omitted → global `tablePageSizeOptions` setting + built-in "All".
+          sort: table.sort,
+          onSortChange: table.setSort,
+        }}
+        autoRefresh={{ intervalMs: 30_000, queries: [table, hostsQuery, liveHostsQuery] }}
+        emptyMessage="No documented hosts yet — create one with “New host” or import your spreadsheet as CSV."
+        selectable={canWrite}
+        rowClassName={(row) => (row.isActive ? undefined : 'opacity-50')}
+        selectionRef={tableSelection}
+        bulkActions={
+          canWrite
+            ? [
+                {
+                  label: 'Merge selected',
+                  enabled: (rows) => rows.length >= 2,
+                  confirm: (count) => `Merge ${count} documented host${count === 1 ? '' : 's'} into ONE row?\nThe oldest row survives; addresses are combined and the other rows are deleted. This cannot be undone.`,
+                  onClick: async (selected) => {
+                    try {
+                      const res = await mergeMutation.mutateAsync(selected.map((h) => h.id));
+                      alert(`Merged ${res.count} row(s) into “${res.merged.dnsNames[0]}”.`);
+                    } catch (err) {
+                      alert(`Merge failed: ${(err as Error).message}`);
+                    }
                   },
-                  {
-                    label: 'Sync MACs from inventory',
-                    enabled: (rows) => rows.some((r) => r.macMismatch),
-                    confirm: (count) => `Replace the documented MAC(s) of ${count} selected host${count === 1 ? '' : 's'} with what is currently observed in the live inventory? Stale additional-MAC entries are pruned at the same time.`,
-                    onClick: async (selected: DocumentedHost[]) => handleSyncMacs(selected),
+                },
+                {
+                  label: 'Sync MACs from inventory',
+                  enabled: (rows) => rows.some((r) => r.macMismatch),
+                  confirm: (count) => `Replace the documented MAC(s) of ${count} selected host${count === 1 ? '' : 's'} with what is currently observed in the live inventory? Stale additional-MAC entries are pruned at the same time.`,
+                  onClick: async (selected: DocumentedHost[]) => handleSyncMacs(selected),
+                },
+                {
+                  label: 'Set site…',
+                  onClick: async (selected: DocumentedHost[]) => setPlacementPicker({ kind: 'site', ids: selected.map((h) => h.id) }),
+                },
+                {
+                  label: 'Set layer…',
+                  onClick: async (selected: DocumentedHost[]) => setPlacementPicker({ kind: 'layer', ids: selected.map((h) => h.id) }),
+                },
+                {
+                  label: 'Mark active',
+                  onClick: async (selected: DocumentedHost[]) => {
+                    const res = await api.bulkUpdateDocumentedHosts(selected.map((h) => h.id), true);
+                    invalidateAll();
+                    if (res.missing.length > 0) alert(`${res.updated} marked active, ${res.missing.length} id(s) no longer exist.`);
                   },
-                  {
-                    label: 'Set site…',
-                    onClick: async (selected: DocumentedHost[]) => setPlacementPicker({ kind: 'site', ids: selected.map((h) => h.id) }),
+                },
+                {
+                  label: 'Mark stale',
+                  confirm: (count) => `Mark ${count} documented host${count === 1 ? '' : 's'} as a stale item? They stay documented but are dimmed in the list.`,
+                  onClick: async (selected: DocumentedHost[]) => {
+                    const res = await api.bulkUpdateDocumentedHosts(selected.map((h) => h.id), false);
+                    invalidateAll();
+                    if (res.missing.length > 0) alert(`${res.updated} marked stale, ${res.missing.length} id(s) no longer exist.`);
                   },
-                  {
-                    label: 'Set layer…',
-                    onClick: async (selected: DocumentedHost[]) => setPlacementPicker({ kind: 'layer', ids: selected.map((h) => h.id) }),
+                },
+                {
+                  label: 'Delete selected',
+                  confirm: (count) => `Delete ${count} documented host${count === 1 ? '' : 's'}? This cannot be undone.`,
+                  onClick: async (selected: DocumentedHost[]) => {
+                    const res = await api.bulkDeleteDocumentedHosts(selected.map((h) => h.id));
+                    invalidateAll();
+                    if (res.missing.length > 0) alert(`Deleted ${res.deleted} of ${selected.length}. ${res.missing.length} id(s) no longer exist.`);
                   },
-                  {
-                    label: 'Mark active',
-                    onClick: async (selected: DocumentedHost[]) => {
-                      const res = await api.bulkUpdateDocumentedHosts(selected.map((h) => h.id), true);
-                      queryClient.invalidateQueries({ queryKey: ['documentedHosts'] });
-                      if (res.missing.length > 0) alert(`${res.updated} marked active, ${res.missing.length} id(s) no longer exist.`);
-                    },
-                  },
-                  {
-                    label: 'Mark stale',
-                    confirm: (count) => `Mark ${count} documented host${count === 1 ? '' : 's'} as a stale item? They stay documented but are dimmed in the list.`,
-                    onClick: async (selected: DocumentedHost[]) => {
-                      const res = await api.bulkUpdateDocumentedHosts(selected.map((h) => h.id), false);
-                      queryClient.invalidateQueries({ queryKey: ['documentedHosts'] });
-                      if (res.missing.length > 0) alert(`${res.updated} marked stale, ${res.missing.length} id(s) no longer exist.`);
-                    },
-                  },
-                  {
-                    label: 'Delete selected',
-                    confirm: (count) => `Delete ${count} documented host${count === 1 ? '' : 's'}? This cannot be undone.`,
-                    onClick: async (selected: DocumentedHost[]) => {
-                      const res = await api.bulkDeleteDocumentedHosts(selected.map((h) => h.id));
-                      queryClient.invalidateQueries({ queryKey: ['documentedHosts'] });
-                      if (res.missing.length > 0) alert(`Deleted ${res.deleted} of ${selected.length}. ${res.missing.length} id(s) no longer exist.`);
-                    },
-                  },
-                ]
-              : undefined
-          }
-        />
-      )}
+                },
+              ]
+            : undefined
+        }
+      />
 
       {importOpen && (
         <ImportModal
           sites={sitesQuery.data ?? []}
           layers={layersQuery.data ?? []}
           onClose={() => setImportOpen(false)}
-          onDone={() => queryClient.invalidateQueries({ queryKey: ['documentedHosts'] })}
+          onDone={invalidateAll}
         />
       )}
 

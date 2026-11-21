@@ -575,10 +575,14 @@ export default function Dhcp() {
   });
 
   // Live leases (hosts table, source 'dhcp') — joined by MAC to badge which
-  // reservations are currently handed out and show lease expiry.
+  // reservations are currently handed out and show lease expiry. Legacy call
+  // (no page/pageSize) → the API answers with a plain array; normalize for safety.
   const hostsQuery = useQuery({
     queryKey: ['hosts', 'dhcp-source'],
-    queryFn: () => api.hosts({ source: 'dhcp' }),
+    queryFn: async () => {
+      const res = await api.hosts({ source: 'dhcp' });
+      return Array.isArray(res) ? res : res.rows;
+    },
     refetchInterval: 60_000,
   });
   const liveByMac = useMemo(() => {

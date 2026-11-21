@@ -1,5 +1,5 @@
 import { Router, Request, Response } from 'express';
-import { and, asc, desc, eq, gte, inArray, like, lt, or, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, gte, ilike, inArray, like, lt, or, sql } from 'drizzle-orm';
 import { db, pool } from '../db';
 import * as schema from '../db/schema';
 import { requireAuth, requirePermission } from '../auth/middleware';
@@ -478,10 +478,15 @@ router.get('/networks/suggestions', requireAuth, requirePermission('networks:rea
 });
 
 // GET /hosts - All discovered hosts across devices (ARP/NDP neighbors + DHCP leases).
-// Query params: deviceId, siteId, source ('arp'|'ndp'|'dhcp'|'wlan').
-router.get('/hosts', requireAuth, requirePermission('hosts:read'), async (_req, res: Response) => {
+// Query params: deviceId, siteId, source ('arp'|'ndp'|'dhcp'|'wlan'), q (search on
+// ip/mac/hostname), and page/pageSize/all/sort/dir for paged mode. The merge into
+// one row per MAC happens in JS, so sort + slice are applied to the MERGED list;
+// `q` is matched at the raw-row level pre-merge (a hit on ANY of a host's rows
+// keeps the whole merged host). Legacy callers (no page/pageSize/all) keep the
+// plain full-list array — e.g. the DHCP page's lease reference data.
+router.get('/hosts', requireAuth, requirePermission('hosts:read'), async (req, res: Response) => {
   try {
-    const { deviceId, siteId, source } = _req.query as Record<string, string | undefined>;
+    const { deviceId, siteId, source } = req.query as Record<string, string | undefined>;
 
     // 'self' = the appliance's own interfaces (plugins emit them with their hostname).
     if (source && !['arp', 'ndp', 'dhcp', 'wlan', 'self'].includes(source)) {
@@ -489,14 +494,37 @@ router.get('/hosts', requireAuth, requirePermission('hosts:read'), async (_req, 
       return;
     }
 
+    // Paged mode is detected up front so the access-control early returns below can
+    // answer in the right shape (envelope vs plain array).
+    const paged = hasPaginationParams(req.query);
+    let pg: ParsedPagination | null = null;
+    if (paged) {
+      const parsed = parsePagination(req.query);
+      if ('error' in parsed) {
+        res.status(400).json({ error: parsed.error });
+        return;
+      }
+      pg = parsed;
+      const sortRaw = typeof req.query.sort === 'string' ? req.query.sort : '';
+      if (sortRaw !== '' && !['mac', 'hostname', 'lastSeenAt'].includes(sortRaw)) {
+        res.status(400).json({ error: '"sort" must be one of: mac, hostname, lastSeenAt' });
+        return;
+      }
+      const dirRaw = typeof req.query.dir === 'string' ? req.query.dir : '';
+      if (dirRaw !== '' && dirRaw !== 'asc' && dirRaw !== 'desc') {
+        res.status(400).json({ error: '"dir" must be "asc" or "desc"' });
+        return;
+      }
+    }
+
     // Device-level access control — scoped callers only see rows of their devices.
-    const allowed = await allowedDeviceIds(_req);
+    const allowed = await allowedDeviceIds(req);
     if (allowed !== null && allowed.size === 0) {
-      res.status(200).json([]);
+      res.status(200).json(pg ? { rows: [], total: 0, ...envelopePage(pg, 0) } : []);
       return;
     }
     if (deviceId && allowed !== null && !allowed.has(deviceId)) {
-      res.status(200).json([]);
+      res.status(200).json(pg ? { rows: [], total: 0, ...envelopePage(pg, 0) } : []);
       return;
     }
 
@@ -506,7 +534,7 @@ router.get('/hosts', requireAuth, requirePermission('hosts:read'), async (_req, 
       // Both filters: verify the device belongs to the site first.
       const device = await db.query.devices.findFirst({ where: eq(schema.devices.id, deviceId) });
       if (!device || device.siteId !== siteId) {
-        res.status(200).json([]);
+        res.status(200).json(pg ? { rows: [], total: 0, ...envelopePage(pg, 0) } : []);
         return;
       }
       where = sourceClause ? and(eq(schema.hosts.deviceId, deviceId), sourceClause) : eq(schema.hosts.deviceId, deviceId);
@@ -516,7 +544,7 @@ router.get('/hosts', requireAuth, requirePermission('hosts:read'), async (_req, 
       let deviceIds = (await db.query.devices.findMany({ where: eq(schema.devices.siteId, siteId) })).map((d) => d.id);
       if (allowed !== null) deviceIds = deviceIds.filter((id) => allowed.has(id));
       if (deviceIds.length === 0) {
-        res.status(200).json([]);
+        res.status(200).json(pg ? { rows: [], total: 0, ...envelopePage(pg, 0) } : []);
         return;
       }
       const deviceClause = inArray(schema.hosts.deviceId, deviceIds);
@@ -527,6 +555,18 @@ router.get('/hosts', requireAuth, requirePermission('hosts:read'), async (_req, 
       where = inArray(schema.hosts.deviceId, [...allowed]);
     }
 
+    // Quick search — matched at the RAW row level (pre-merge), so a hit on any of
+    // a host's addresses/MAC/hostname keeps the whole merged host.
+    const q = typeof req.query.q === 'string' ? req.query.q.trim() : '';
+    if (q) {
+      const qClause = or(
+        ilike(schema.hosts.ip, `%${q}%`),
+        ilike(schema.hosts.mac, `%${q}%`),
+        ilike(schema.hosts.hostname, `%${q}%`)
+      );
+      where = where ? and(where, qClause) : qClause;
+    }
+
     const rows = await db.query.hosts.findMany({
       ...(where ? { where } : {}),
       orderBy: [asc(schema.hosts.deviceId), asc(schema.hosts.ip)],
@@ -535,13 +575,13 @@ router.get('/hosts', requireAuth, requirePermission('hosts:read'), async (_req, 
     // Merge per-source rows into one row per physical host (same MAC).
     const merged = mergeHostRows(rows);
 
-    const [deviceViews, pluginNames] = await Promise.all([
-      loadDeviceViews(Array.from(new Set(merged.flatMap((m) => m.devices.map((d) => d.deviceId))))),
-      loadPluginNames(Array.from(new Set(merged.flatMap((m) => m.devices.map((d) => d.pluginId))))),
-    ]);
-
-    res.status(200).json(
-      merged.map((m) => ({
+    /** Joins the device/plugin display names onto a list of merged hosts. */
+    async function withDeviceViews(list: MergedHost[]) {
+      const [deviceViews, pluginNames] = await Promise.all([
+        loadDeviceViews(Array.from(new Set(list.flatMap((m) => m.devices.map((d) => d.deviceId))))),
+        loadPluginNames(Array.from(new Set(list.flatMap((m) => m.devices.map((d) => d.pluginId))))),
+      ]);
+      return list.map((m) => ({
         ...m,
         devices: m.devices.map((d) => {
           const device = deviceViews.get(d.deviceId);
@@ -553,8 +593,38 @@ router.get('/hosts', requireAuth, requirePermission('hosts:read'), async (_req, 
             pluginName: pluginNames.get(d.pluginId) ?? null,
           };
         }),
-      }))
-    );
+      }));
+    }
+
+    // Paged mode — sort + slice the MERGED list in JS (the merge is what makes
+    // this endpoint non-trivial; the raw table stays small enough to fetch whole).
+    if (pg) {
+      const sortRaw = typeof req.query.sort === 'string' ? req.query.sort : '';
+      const dir = (typeof req.query.dir === 'string' && req.query.dir === 'asc' ? 'asc' : 'desc') as 'asc' | 'desc';
+      // Default order: most recently seen first.
+      const col: 'mac' | 'hostname' | 'lastSeenAt' = sortRaw === '' ? 'lastSeenAt' : (sortRaw as 'mac' | 'hostname' | 'lastSeenAt');
+      const sorted = [...merged].sort((a, b) => {
+        let cmp: number;
+        if (col === 'lastSeenAt') cmp = a.lastSeenAt.localeCompare(b.lastSeenAt);
+        else if (col === 'mac') cmp = a.mac.localeCompare(b.mac);
+        else cmp = (a.hostname ?? '').localeCompare(b.hostname ?? '');
+        return dir === 'asc' ? cmp : -cmp;
+      });
+
+      const total = sorted.length;
+      // all=true → the whole merged list in one envelope (page 1, pageSize=total).
+      const pageRows = pg.all ? sorted : sorted.slice((pg.page - 1) * pg.pageSize, pg.page * pg.pageSize);
+
+      res.status(200).json({
+        rows: await withDeviceViews(pageRows),
+        total,
+        ...envelopePage(pg, total),
+      });
+      return;
+    }
+
+    // Legacy — the full merged list (unchanged shape for existing consumers).
+    res.status(200).json(await withDeviceViews(merged));
   } catch (err) {
     const e = err as { status?: number; message?: string };
     res.status(e.status ?? 500).json({ error: e.message ?? 'Internal server error' });

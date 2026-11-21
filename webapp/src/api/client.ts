@@ -394,6 +394,16 @@ export interface HostRow {
   devices: HostDeviceMember[];
 }
 
+/** Paged-mode envelope for GET /hosts — returned when page/pageSize/all are sent; legacy callers get a plain HostRow[]. */
+export interface HostPagedResponse {
+  rows: HostRow[];
+  total: number;
+  /** Current 1-based page (1 in all-mode). */
+  page: number;
+  /** Rows per page (equals total in all-mode). */
+  pageSize: number;
+}
+
 /** One endpoint's firewall state snapshot from GET /host-states.
  * `openStates` is the LATEST walk for this device+IP ("open now"); the churn
  * fields are SUMs over the requested window and null when no walk in the
@@ -469,6 +479,16 @@ export interface DocumentedHost {
   isActive: boolean;
   createdAt: string;
   updatedAt: string;
+}
+
+/** Paged-mode envelope for GET /documented-hosts — returned when page/pageSize/all are sent; legacy callers get a plain DocumentedHost[]. */
+export interface DocumentedHostPagedResponse {
+  rows: DocumentedHost[];
+  total: number;
+  /** Current 1-based page (1 in all-mode). */
+  page: number;
+  /** Rows per page (equals total in all-mode). */
+  pageSize: number;
 }
 
 /** One IP entry of a documented-host create/update payload. */
@@ -4353,13 +4373,32 @@ export const api = {
   },
   /** Free-range suggestions from gaps in the live inventory (rollout dialog one-click fills). */
   networksSuggestions: () => apiFetch<NetworkSuggestions>('/networks/suggestions'),
-  hosts: (params?: { deviceId?: string; siteId?: string; source?: 'arp' | 'ndp' | 'dhcp' | 'wlan' }) => {
+  /** Cross-device host inventory. Paged mode: pass page/pageSize/all → returns a
+   * HostPagedResponse envelope instead of a plain array (legacy callers, e.g.
+   * the DHCP page's lease reference data, keep the full plain list). */
+  hosts: (params?: {
+    deviceId?: string;
+    siteId?: string;
+    source?: 'arp' | 'ndp' | 'dhcp' | 'wlan';
+    q?: string;
+    page?: number;
+    pageSize?: number;
+    all?: boolean;
+    sort?: 'mac' | 'hostname' | 'lastSeenAt';
+    dir?: 'asc' | 'desc';
+  }) => {
     const qs = new URLSearchParams();
     if (params?.deviceId) qs.set('deviceId', params.deviceId);
     if (params?.siteId) qs.set('siteId', params.siteId);
     if (params?.source) qs.set('source', params.source);
+    if (params?.q) qs.set('q', params.q);
+    if (params?.page !== undefined) qs.set('page', String(params.page));
+    if (params?.pageSize !== undefined) qs.set('pageSize', String(params.pageSize));
+    if (params?.all) qs.set('all', 'true');
+    if (params?.sort) qs.set('sort', params.sort);
+    if (params?.dir) qs.set('dir', params.dir);
     const suffix = qs.toString() ? `?${qs.toString()}` : '';
-    return apiFetch<HostRow[]>(`/hosts${suffix}`);
+    return apiFetch<HostRow[] | HostPagedResponse>(`/hosts${suffix}`);
   },
   /** Per-endpoint firewall state snapshots + churn over a window (default 24h).
    * Powers the "States" columns on the Hosts and Networks pages. */
@@ -4372,11 +4411,27 @@ export const api = {
     return apiFetch<{ rows: HostStateRow[]; devices: Record<string, HostStateDeviceView>; windowHours: number }>(`/host-states${suffix}`);
   },
   // Documented hosts — the user-maintained host documentation page.
-  documentedHosts: (params?: { siteId?: string }) => {
+  // Paged mode: pass page/pageSize/all → returns a DocumentedHostPagedResponse
+  // envelope instead of a plain array (legacy callers keep the full list).
+  documentedHosts: (params?: {
+    siteId?: string;
+    q?: string;
+    page?: number;
+    pageSize?: number;
+    all?: boolean;
+    sort?: 'updatedAt' | 'createdAt' | 'lastSeenAt';
+    dir?: 'asc' | 'desc';
+  }) => {
     const qs = new URLSearchParams();
     if (params?.siteId) qs.set('siteId', params.siteId);
+    if (params?.q) qs.set('q', params.q);
+    if (params?.page !== undefined) qs.set('page', String(params.page));
+    if (params?.pageSize !== undefined) qs.set('pageSize', String(params.pageSize));
+    if (params?.all) qs.set('all', 'true');
+    if (params?.sort) qs.set('sort', params.sort);
+    if (params?.dir) qs.set('dir', params.dir);
     const suffix = qs.toString() ? `?${qs.toString()}` : '';
-    return apiFetch<DocumentedHost[]>(`/documented-hosts${suffix}`);
+    return apiFetch<DocumentedHost[] | DocumentedHostPagedResponse>(`/documented-hosts${suffix}`);
   },
   createDocumentedHost: (body: DocumentedHostRequest) =>
     apiFetch<DocumentedHost>('/documented-hosts', { method: 'POST', body: JSON.stringify(body) }),

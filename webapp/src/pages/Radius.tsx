@@ -394,7 +394,15 @@ function WifiCertsPanel({ radiusLoaded, onHide }: { radiusLoaded: boolean; onHid
 
   // Host autofill — pick a known host (device or documented host) to derive name + CN.
   const devicesQuery = useQuery({ queryKey: ['devices'], queryFn: api.devices, staleTime: 5 * 60_000 });
-  const docHostsQuery = useQuery({ queryKey: ['documentedHosts'], queryFn: () => api.documentedHosts(), staleTime: 5 * 60_000 });
+  // Legacy call (no page/pageSize) → plain array of every row; normalize for safety.
+  const docHostsQuery = useQuery({
+    queryKey: ['documentedHosts'],
+    queryFn: async () => {
+      const res = await api.documentedHosts();
+      return Array.isArray(res) ? res : res.rows;
+    },
+    staleTime: 5 * 60_000,
+  });
 
   interface HostOption { value: string; label: string }
   const hostOptions: HostOption[] = [
