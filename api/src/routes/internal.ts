@@ -867,7 +867,10 @@ export function internalRouter() {
   // security-event retention worker (securityEventRetentionDays). The API
   // resolves each row's deviceId from its originating hostname — hosts table
   // first (hostname or IP match, newest lastSeenAt wins), then devices
-  // (name/managementAddress) — so the plugin stays device-agnostic.
+  // (name/managementAddress) — so the plugin stays device-agnostic. Plugins
+  // that already know their own device scope (e.g. generic-ssh file-tail) may
+  // send a top-level `deviceId` instead; it is used as the fallback for rows
+  // whose hostname does not resolve (a per-row `deviceId` still wins).
   const MAX_SECURITY_EVENTS_PER_REQUEST = 5_000;
   router.post('/plugin/security-events', pluginAuth, async (req: Request, res: Response) => {
     const body = req.body ?? {};
@@ -885,6 +888,11 @@ export function internalRouter() {
       if (!plugin) {
         return res.status(400).json({ error: `Unknown plugin id: ${pluginId}` });
       }
+
+      // Optional top-level device scope (mirrors /plugin/firewall-events): the
+      // sender already knows which device the rows belong to, so hostname
+      // resolution is only a fallback for rows it cannot attribute itself.
+      const topDeviceId = typeof body.deviceId === 'string' ? body.deviceId.trim() : '';
 
       let accepted = 0;
       const batch = events.slice(0, MAX_SECURITY_EVENTS_PER_REQUEST);
@@ -948,10 +956,17 @@ export function internalRouter() {
         if (!vendorEventId || !message || !Number.isFinite(tsMsRaw)) continue; // unusable row — skip
 
         const hostname = str(e.hostname, 255) ?? '';
+        // Precedence: per-row deviceId > sender's top-level scope (explicit —
+        // the plugin was handed this device id by the API at poll time) >
+        // hostname inference. Legacy senders omit body.deviceId → unchanged.
+        const rowDeviceId =
+          str(e.deviceId, 128) ??
+          (topDeviceId || (hostname ? deviceByHost.get(hostname) : undefined)) ??
+          null;
         rows.push({
           id: uuidv4(),
           pluginId,
-          deviceId: hostname ? (deviceByHost.get(hostname) ?? null) : null,
+          deviceId: rowDeviceId,
           tsMs: Math.trunc(tsMsRaw),
           level: levelOf(e.level),
           severity: str(e.severity, 32)?.toLowerCase() ?? null,

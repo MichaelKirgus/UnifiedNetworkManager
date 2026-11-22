@@ -1,9 +1,9 @@
 {
   "name": "unm-plugin-ix-truenas",
-  "version": "0.8.0",
+  "version": "0.9.0",
   "license": "EUPL-1.2",
   "private": true,
-  "description": "UnifiedNetworkManager plugin for TrueNAS SCALE appliances (JSON-RPC API monitoring).",
+  "description": "UnifiedNetworkManager plugin for TrueNAS SCALE appliances (JSON-RPC API monitoring + rotation-aware log tailing over SSH).",
   "main": "dist/src/index.js",
   "scripts": {
     "dev": "ts-node-dev --respawn src/index.ts",

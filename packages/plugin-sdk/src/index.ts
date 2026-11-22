@@ -96,6 +96,11 @@ export type { DhcpNetworkRow, DhcpReservationRow } from './dhcp';
 // sysfs + nvidia-smi / rocm-smi parsers — vendor-neutral (NVIDIA/AMD/Intel). See gpu.ts.
 export { collectGpuRows, buildGpuProbeScript, parsePciGpuSection, parseNvidiaSmiSection, normalizeNvidiaSlot, detectGpuVendor, gpuNameFromPci } from './gpu';
 export type { GpuRow, GpuExecBackend, PciGpuEntry } from './gpu';
+// Rotation-aware plain log file tailing — shared core for any plugin with a
+// shell-exec primitive (config grammar, rotation decision table, host read
+// script + sectioned output codec, line heuristics, security-events push). See fileTail.ts.
+export { FILE_TAIL_STATE_NAMESPACE, FILE_TAIL_MAX_FILES_PER_BEAT, FILE_TAIL_MAX_BYTES_PER_FILE, FILE_TAIL_DEFAULT_BASELINE_LINES, FILE_TAIL_DEFAULT_INTERVAL_MS, FILE_TAIL_BASELINE_BYTES, FILE_TAIL_MARKER_OFFSET, FILE_TAIL_MARKER_STAT, FILE_TAIL_MARKER_FILE, FILE_TAIL_MARKER_DATA_BEGIN, FILE_TAIL_MARKER_DATA_END, parseLogSources, decideFileTailActions, decodeBase64Block, buildFileTailReadScript, parseFileTailOutput, parseHostZuluOffset, parseLogLineTimestampMs, detectLogLevel, fileTailVendorEventId, buildFileTailRows, logSourcePatternToRegex, matchLogSource, collectAndPushFileTailLines } from './fileTail';
+export type { LogLineLevel, LogSourceSpec, FileTailCursor, FileTailStat, FileTailPlan, FileTailDecision, FileTailReadOptions, FileTailSection, ParsedFileTailRead, FileTailEventRow, BuildFileTailRowsArgs, BuildFileTailRowsResult, FileTailExecResult, FileTailExec, FileTailCollectOptions } from './fileTail';
 // Generic plugin state store — persistent opaque JSON blobs in the UNM database
 // across polls/restarts (baselines, counters, TOFU fingerprints). See stateStore.ts.
 export { createPluginStateStore } from './stateStore';

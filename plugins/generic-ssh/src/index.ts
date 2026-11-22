@@ -40,6 +40,7 @@ import {
   buildDeviceTimeInfo,
   ianaZoneToOffsetMinutes,
   createSftpPool,
+  collectAndPushFileTailLines,
   warnOnce,
   type QuickAction,
 } from '@unm/plugin-sdk';
@@ -62,7 +63,7 @@ import { buildGenericSshState } from './state';
 
 // Base UUID + shared state store live in ./stateStore so the monitoring path and
 // the security actions both bind to the SAME instance-scoped effective uuid.
-import { PLUGIN_UUID } from './stateStore';
+import { PLUGIN_UUID, EFFECTIVE_UUID } from './stateStore';
 export { PLUGIN_UUID };
 export const PLUGIN_NAME = 'Generic SSH Plugin (Linux)';
 
@@ -249,6 +250,34 @@ const PLUGIN_OPTIONS: PluginOptionDescriptor[] = [
     max: 100_000,
     description:
       'Maximum journal entries scanned per read (backlog protection on busy boxes). When the cap is hit the read resumes from the last pushed event on the next beat — nothing is skipped, only spread over more beats.',
+  },
+  {
+    key: 'logSources',
+    label: 'Log file sources (one per line)',
+    type: 'string' as const,
+    default: '',
+    description:
+      'Plain log files to tail rotation-aware and push into UNM\'s security-events pipeline — for app logs that never reach stdout or the journal. One source per line: <absolute-path-or-glob> [label] [level]. Globs (* and recursive **) are expanded on the host, so subdirs scale: /var/log/nginx/*.log, /opt/app/logs/**/*.out app-x, /var/log/auth.log auth error. Compressed archives (.gz/.xz/…) and binary files (wtmp & co.) are skipped automatically — broad patterns like /var/log/*.log are safe; large files only ever contribute their newest lines or capped byte ranges per read. Empty = disabled.',
+  },
+  {
+    key: 'logTailIntervalMs',
+    label: 'Log tail read interval (ms)',
+    type: 'integer' as const,
+    default: 300_000,
+    min: 10_000,
+    max: 86_400_000,
+    description:
+      'Minimum time between log-file reads per host. New lines are delayed by up to one interval on quiet hosts; in return busy hosts stay free of stat/tail churn between reads.',
+  },
+  {
+    key: 'logTailBaselineLines',
+    label: 'Log tail baseline lines',
+    type: 'integer' as const,
+    default: 200,
+    min: 1,
+    max: 5_000,
+    description:
+      'When a file is first seen (or rotated), only its newest N lines are ingested — older content is skipped and the cursor starts at EOF.',
   },
   {
     key: 'collectServices',
@@ -543,6 +572,21 @@ app.post('/monitoring', async (req, res) => {
       void collectAndPushFirewallEvents(host, deviceId, backend, {
         intervalMs: Number(settings.firewallEventsIntervalMs),
         scanLimit: Number(settings.firewallEventsScanLimit),
+      }).catch(() => { /* best-effort */ });
+    }
+
+    // Log-file tailing: rotation-aware incremental reads of the configured plain
+    // log files (per-app logs that never reach stdout/journal), pushed into the
+    // security-events pipeline. Fire-and-forget like firewall events; no-ops when
+    // `logSources` is empty, and the host read itself is throttled per host by
+    // `logTailIntervalMs`. The core lives in @unm/plugin-sdk (fileTail) so other
+    // plugins with a shell-exec primitive can reuse it.
+    if (String(settings.logSources ?? '').trim() !== '') {
+      void collectAndPushFileTailLines(host, deviceId, (cmd, t) => backend.exec(cmd, t), stateStore, {
+        pluginId: EFFECTIVE_UUID,
+        sourcesText: String(settings.logSources),
+        intervalMs: Number(settings.logTailIntervalMs),
+        baselineLines: Number(settings.logTailBaselineLines),
       }).catch(() => { /* best-effort */ });
     }
 

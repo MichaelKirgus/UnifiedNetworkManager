@@ -15,6 +15,8 @@ import {
   pickString,
   readSettings,
   resolvePluginIdentity,
+  createPluginStateStore,
+  collectAndPushFileTailLines,
   stateHandler,
   probeHandler,
   filesystemHandler,
@@ -345,6 +347,10 @@ const identity = resolvePluginIdentity({
   capabilities: ['monitoring', 'configuration', 'planning', 'deviceState', 'ssh', 'probe', 'filesystem', 'sshConsole', 'updates', 'quickActions'],
 });
 
+// Instance-scoped state store (SDK, DB-backed) — file-tail cursors + throttle
+// stamps live here so a container rebuild never re-baselines watched files.
+const pluginStateStore = createPluginStateStore(identity);
+
 /**
  * The options this plugin exposes for configuration. Declared in /discover so
  * the API can persist + validate user-set values and the webapp can render a
@@ -462,6 +468,34 @@ const PLUGIN_OPTIONS: PluginOptionDescriptor[] = [
     default: true,
     description:
       'Stream file-repo uploads (e.g. ISOs for VM CD-ROM attach) over the bound SSH slot instead of the appliance\'s /_upload HTTP endpoint — bypassing middlewared/nginx entirely, which stalls on some appliances (uploads killed after ~60 s, 0-byte files). Requires a bound "SSH" secret; without one the HTTP path is used. Disable to force the classic /_upload path.',
+  },
+  {
+    key: 'logSources',
+    label: 'Log file sources (one per line)',
+    type: 'string' as const,
+    default: '',
+    description:
+      'Plain log files on the appliance to tail rotation-aware and push into UNM\'s security-events pipeline — for logs that never reach stdout or the journal. One source per line: <absolute-path-or-glob> [label] [level]. Globs (* and recursive **) are expanded over SSH, so subdirs scale: /var/log/apps/**/*.log app-logs, /var/log/middlewared.log middleware error. Compressed archives (.gz/.xz/…) and binary files are skipped automatically — broad patterns like /var/log/*.log are safe; large files only ever contribute their newest lines or capped byte ranges per read. Empty = disabled.',
+  },
+  {
+    key: 'logTailIntervalMs',
+    label: 'Log tail read interval (ms)',
+    type: 'integer' as const,
+    default: 300_000,
+    min: 10_000,
+    max: 86_400_000,
+    description:
+      'Minimum time between log-file reads per appliance. New lines are delayed by up to one interval on quiet hosts; in return busy appliances stay free of stat/tail churn between reads.',
+  },
+  {
+    key: 'logTailBaselineLines',
+    label: 'Log tail baseline lines',
+    type: 'integer' as const,
+    default: 200,
+    min: 1,
+    max: 5_000,
+    description:
+      'When a file is first seen (or rotated), only its newest N lines are ingested — older content is skipped and the cursor starts at EOF.',
   },
 ];
 
@@ -2172,6 +2206,28 @@ async function handleMonitoring(req: Request, res: Response): Promise<void> {
       metricDescriptors: [textMetric('system.error', 'Error', { group: 'System' })],
     });
     return;
+  }
+
+  // Rotation-aware plain log tailing (SDK fileTail core) — fire-and-forget over
+  // the shared SSH pool, same contract as generic-ssh: one bounded read per
+  // interval, cursors in the instance-scoped state store, rows pushed to
+  // /plugin/security-events with this device's scope. No-op when `logSources`
+  // is empty or no SSH credential is bound; never affects poll health.
+  const logTailCreds = resolveSshCredentials(body.credentials as Record<string, unknown> | undefined, { slotOnly: true });
+  if (String(settings.logSources ?? '').trim() !== '' && logTailCreds) {
+    void collectAndPushFileTailLines(host, deviceId ?? null, async (cmd, t) => {
+      try {
+        const c = await sshPool.get(host, hostSshPort(host), logTailCreds, { hostKeyVerifier: dynamicSshHostVerifier(host, hostSshPort(host)) });
+        return await c.exec(cmd, logTailCreds, t);
+      } catch {
+        return null; // appliance unreachable / SSH refused — SDK throttles + retries next interval
+      }
+    }, pluginStateStore, {
+      pluginId: identity.effectiveUuid,
+      sourcesText: String(settings.logSources),
+      intervalMs: Number(settings.logTailIntervalMs),
+      baselineLines: Number(settings.logTailBaselineLines),
+    }).catch(() => { /* best-effort — never break the poll */ });
   }
 
   const client = getClient(host, transport, timeoutMs, ports);

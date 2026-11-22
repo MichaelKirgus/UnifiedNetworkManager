@@ -749,9 +749,11 @@ export const firewallEvents = pgTable(
 // /plugin/security-events (see routes/internal.ts) — append-only log of device
 // log lines. `level` is the RFC5424 severity normalized to UNM levels so the
 // automation log trigger's level filter works uniformly across all sources;
-// `severity`/`facility` keep the raw names for display. deviceId is resolved at
-// ingest from the originating hostname (NULL when unresolvable). vendorEventId
-// = plugin-computed stable hash of host+ts+message → idempotent re-pushes.
+// `severity`/`facility` keep the raw names for display. deviceId comes from a
+// per-row id, else the sender's top-level device scope (plugins that know
+// their own device), else ingest-time hostname resolution (NULL when
+// unresolvable). vendorEventId = plugin-computed stable hash of host+ts+message
+// → idempotent re-pushes.
 export const securityEvents = pgTable(
   'security_events',
   {
