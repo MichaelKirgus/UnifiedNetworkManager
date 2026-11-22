@@ -1855,6 +1855,35 @@ export interface LogPagedResponse {
   pageSize: number;
 }
 
+/** One row of the unified Logs view (GET /logs/unified) — plugin operational logs and device log lines merged into ONE time-ordered table. */
+export interface UnifiedLogEntry {
+  /** Source-prefixed id ("plugin:<uuid>" / "device:<uuid>") — unique across both tables. */
+  id: string;
+  source: 'plugin' | 'device';
+  /** Epoch ms of the row's timestamp (normalized from each table's native format). */
+  tsMs: number;
+  level: 'debug' | 'info' | 'warn' | 'error';
+  message: string;
+  pluginId: string | null;
+  pluginName?: string | null;
+  deviceId: string | null;
+  deviceName?: string | null;
+  /** Device rows only — log file label / syslog tag. */
+  appname?: string | null;
+  /** Device rows only — originating hostname (management address). */
+  hostname?: string | null;
+  /** Plugin rows only — structured details ({endpoint, httpStatus, ...}). */
+  context?: Record<string, unknown> | null;
+}
+
+/** Paged envelope for GET /logs/unified. */
+export interface UnifiedLogsResponse {
+  rows: UnifiedLogEntry[];
+  total: number;
+  page: number;
+  pageSize: number;
+}
+
 // --- Notification center ------------------------------------------------------
 
 export type NotificationSeverity = 'info' | 'warning' | 'critical';
@@ -3917,7 +3946,7 @@ export interface AutomationUpdateTrigger {
 }
 
 /** Finding kinds produced by the flow security worker (flow_security_findings.kind). 'ioc-hit' + 'dns-ioc-hit' rows are written by the threat-intel worker. */
-export const FLOW_SECURITY_FINDING_KINDS = ['new-destination', 'port-scan', 'egress-baseline', 'ioc-hit', 'dns-ioc-hit'] as const;
+export const FLOW_SECURITY_FINDING_KINDS = ['new-destination', 'port-scan', 'egress-baseline', 'ioc-hit', 'dns-ioc-hit', 'log-rule'] as const;
 export type FlowSecurityFindingKind = (typeof FLOW_SECURITY_FINDING_KINDS)[number];
 
 // ── Threat intelligence (GET /threat-intel) ────────────────────────────────
@@ -3971,6 +4000,38 @@ export interface ThreatIntelResponse {
   worker: { lastRunAt: string | null; lastError: string | null; iocTotal: number };
   sources: ThreatIntelSource[];
   recentHits: ThreatIntelHit[];
+}
+
+// ── Log rules (GET /log-rules) — Sigma detection over ingested log lines ─────
+
+/** One log rule: a built-in seeded at boot, or a user-created/imported rule. */
+export interface LogRule {
+  id: string;
+  name: string;
+  /** 'builtin' = YAML managed by UNM (disable/override only); 'user' = created or imported via the UI. */
+  source: 'builtin' | 'user';
+  sigmaYaml: string;
+  enabled: boolean;
+  severityOverride: 'info' | 'warning' | 'critical' | null;
+  /** Parse/compile error from the last worker beat (null = healthy). */
+  lastError: string | null;
+  createdAt: string;
+  updatedAt: string;
+  /** Open-finding stats for this rule (lastHitAt null = never fired / already resolved). */
+  lastHitAt: string | null;
+  occurrences: number;
+}
+
+export interface LogRulesResponse {
+  enabled: boolean;
+  worker: { lastRunAt: string | null; lastError: string | null; watermarkMs: number; rulesEnabled: number | null; hitsLast24h: number };
+  rules: LogRule[];
+}
+
+export interface LogRuleImportResult {
+  name: string | null;
+  status: 'created' | 'duplicate' | 'error';
+  error?: string;
 }
 
 // ── DNS query events (GET /dns-queries) ────────────────────────────────────
@@ -4194,6 +4255,7 @@ async function apiFetch<T>(path: string, opts?: RequestInit): Promise<T> {
       if (typeof body?.code === 'string') code = body.code;
       if (Array.isArray(body?.candidates)) candidates = body.candidates as SessionCredentialCandidate[];
       if (Array.isArray(body?.details) && body.details.every((d: unknown) => typeof d === 'string')) details = body.details as string[];
+      else if (Array.isArray(body?.issues) && body.issues.every((d: unknown) => typeof d === 'string')) details = body.issues as string[]; // log-rule parse rejections
     } catch {
       // ignore body parse errors, fall back to generic message
     }
@@ -5029,6 +5091,16 @@ export const api = {
   deleteThreatIntelSource: (id: string) =>
     apiFetch<{ deleted: boolean }>(`/threat-intel/sources/${encodeURIComponent(id)}`, { method: 'DELETE' }),
   fetchThreatIntelNow: () => apiFetch<{ triggered: number }>('/threat-intel/fetch', { method: 'POST' }),
+  // Log rules (Security page) — Sigma detection over ingested log lines.
+  logRules: () => apiFetch<LogRulesResponse>('/log-rules'),
+  createLogRule: (body: { yaml: string; name?: string }) =>
+    apiFetch<LogRule>('/log-rules', { method: 'POST', body: JSON.stringify(body) }),
+  updateLogRule: (id: string, body: { enabled?: boolean; severityOverride?: 'info' | 'warning' | 'critical' | null; yaml?: string }) =>
+    apiFetch<LogRule>(`/log-rules/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify(body) }),
+  deleteLogRule: (id: string) =>
+    apiFetch<{ deleted: boolean }>(`/log-rules/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+  importLogRules: (yaml: string) =>
+    apiFetch<{ imported: number; total: number; results: LogRuleImportResult[] }>('/log-rules/import', { method: 'POST', body: JSON.stringify({ yaml }) }),
   /** DNS query events from appliance resolvers (unbound qstats) + window aggregates. */
   dnsQueries: (params?: { sinceHours?: number; deviceId?: string; action?: 'pass' | 'block' | 'drop'; q?: string; limit?: number }) => {
     const qs = new URLSearchParams();
@@ -5071,6 +5143,37 @@ export const api = {
     if (params?.dir) qs.set('dir', params.dir);
     const suffix = qs.toString() ? `?${qs.toString()}` : '';
     return apiFetch<LogEntry[] | LogPagedResponse>(`/logs${suffix}`);
+  },
+  /** Unified Logs view — plugin operational logs + device log lines (syslog, tailed files) in ONE time-ordered table. Paged mode only. */
+  unifiedLogs: (params?: {
+    source?: 'plugin' | 'device';
+    level?: string;
+    pluginId?: string;
+    deviceId?: string;
+    search?: string;
+    from?: string;
+    to?: string;
+    page?: number;
+    pageSize?: number;
+    all?: boolean;
+    sort?: 'emittedAt';
+    dir?: 'asc' | 'desc';
+  }) => {
+    const qs = new URLSearchParams();
+    if (params?.source) qs.set('source', params.source);
+    if (params?.level) qs.set('level', params.level);
+    if (params?.pluginId) qs.set('pluginId', params.pluginId);
+    if (params?.deviceId) qs.set('deviceId', params.deviceId);
+    if (params?.search) qs.set('search', params.search);
+    if (params?.from) qs.set('from', params.from);
+    if (params?.to) qs.set('to', params.to);
+    if (params?.page !== undefined) qs.set('page', String(params.page));
+    if (params?.pageSize !== undefined) qs.set('pageSize', String(params.pageSize));
+    if (params?.all) qs.set('all', 'true');
+    if (params?.sort) qs.set('sort', params.sort);
+    if (params?.dir) qs.set('dir', params.dir);
+    const suffix = qs.toString() ? `?${qs.toString()}` : '';
+    return apiFetch<UnifiedLogsResponse>(`/logs/unified${suffix}`);
   },
   // Notification center (bell badge + panel + full page with filters).
   // Paged mode: pass page/pageSize → returns a NotificationPagedResponse envelope instead of a plain array.

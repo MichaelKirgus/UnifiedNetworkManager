@@ -70,6 +70,7 @@ const FINDING_KIND_LABEL: Record<FlowSecurityFindingKind, string> = {
   'egress-baseline': 'Egress spike',
   'ioc-hit': 'Threat intel hit',
   'dns-ioc-hit': 'DNS domain hit',
+  'log-rule': 'Log rule hit',
 };
 
 /** Severity pill — same palette as the Notifications page. */

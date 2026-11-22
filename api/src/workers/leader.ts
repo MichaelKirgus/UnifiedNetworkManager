@@ -59,6 +59,7 @@ export const LEADER_KEYS = {
   mapBasemap: 9025,
   dnsQueryRetention: 9026,
   fileRepoRetention: 9027,
+  logRules: 9028,
 } as const;
 
 /**

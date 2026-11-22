@@ -1,5 +1,5 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { Bug, Download, Globe, Loader2, Pencil, RefreshCw, Radar, ShieldCheck, ShieldAlert, ShieldX, Info, Trash2 } from 'lucide-react';
+import { Bug, Download, Eye, FileSearch, Globe, Loader2, Pencil, RefreshCw, Radar, ShieldCheck, ShieldAlert, ShieldX, Info, Trash2 } from 'lucide-react';
 import { Link } from 'react-router-dom';
 import { useMemo, useState } from 'react';
 import clsx from 'clsx';
@@ -9,7 +9,7 @@ import { DataTable, DataTableColumn } from '../components/DataTable';
 import { ALL_PAGES, useServerTable } from '../components/useServerTable';
 import { DeviceChip } from '../components/DeviceChip';
 import { PageTabs } from '../components/PageTabs';
-import { api, SecurityCheckRow, CvePackageRow, CveVulnerabilityRow, ThreatIntelSource, DnsQueryEvent } from '../api/client';
+import { api, ApiError, SecurityCheckRow, CvePackageRow, CveVulnerabilityRow, ThreatIntelSource, LogRule, LogRuleImportResult, DnsQueryEvent } from '../api/client';
 
 /** Check-kind pill — the vocabulary is shared across all plugins (SDK contract). */
 const KIND_STYLES: Record<string, string> = {
@@ -209,7 +209,7 @@ export default function Security() {
 
   // Findings | Vulnerabilities (CVEs) | Threat Intel | DNS — each section is a
   // self-contained tab so the page reads top-down instead of one long scroll.
-  const [tab, setTab] = useState<'findings' | 'vulnerabilities' | 'threat-intel' | 'dns'>('findings');
+  const [tab, setTab] = useState<'findings' | 'vulnerabilities' | 'threat-intel' | 'log-rules' | 'dns'>('findings');
 
   const columns: DataTableColumn<SecurityCheckRow>[] = [
     {
@@ -474,6 +474,7 @@ export default function Security() {
           { id: 'findings', label: 'Findings', icon: <ShieldAlert className="h-3.5 w-3.5" />, count: securityQuery.data ? rows.length : null },
           { id: 'vulnerabilities', label: 'Vulnerabilities (CVEs)', icon: <Bug className="h-3.5 w-3.5" />, count: summary?.totalMatches ?? null },
           { id: 'threat-intel', label: 'Threat Intel', icon: <Radar className="h-3.5 w-3.5" /> },
+          { id: 'log-rules', label: 'Log rules', icon: <FileSearch className="h-3.5 w-3.5" /> },
           { id: 'dns', label: 'DNS', icon: <Globe className="h-3.5 w-3.5" /> },
         ]}
         value={tab}
@@ -705,6 +706,9 @@ export default function Security() {
 
       {/* Threat intelligence — IOC feed sources + recent hits */}
       {tab === 'threat-intel' && <ThreatIntelSection />}
+
+      {/* Log rules — Sigma detection over ingested log lines */}
+      {tab === 'log-rules' && <LogRulesSection />}
 
       {/* DNS query events from appliance resolvers (unbound qstats) */}
       {tab === 'dns' && <DnsSection />}
@@ -1135,6 +1139,375 @@ function ThreatIntelSection() {
       {/* Edit dialog (URL / format / severity) */}
       {editing && <ThreatIntelSourceEditDialog source={editing} onClose={() => setEditing(null)} />}
     </div>
+  );
+}
+
+/** Log rules section — Sigma detection over ingested log lines (built-in pack + user rules). */
+function LogRulesSection() {
+  const queryClient = useQueryClient();
+  const lrQuery = useQuery({
+    queryKey: ['logRules'],
+    queryFn: () => api.logRules(),
+    refetchInterval: 30_000,
+  });
+
+  const [creating, setCreating] = useState(false);
+  const [importing, setImporting] = useState(false);
+  const [viewingId, setViewingId] = useState<string | null>(null);
+
+  async function toggleRule(r: LogRule) {
+    try {
+      await api.updateLogRule(r.id, { enabled: !r.enabled });
+      void queryClient.invalidateQueries({ queryKey: ['logRules'] });
+    } catch (err) {
+      console.warn('Failed to toggle log rule:', (err as Error).message);
+    }
+  }
+
+  async function deleteRule(r: LogRule) {
+    if (!window.confirm(`Delete the "${r.name}" rule? Open findings it raised stay until they auto-resolve.`)) return;
+    try {
+      await api.deleteLogRule(r.id);
+      void queryClient.invalidateQueries({ queryKey: ['logRules'] });
+    } catch (err) {
+      console.warn('Failed to delete log rule:', (err as Error).message);
+    }
+  }
+
+  const data = lrQuery.data;
+  const rules = data?.rules ?? [];
+  const viewing = viewingId ? rules.find((r) => r.id === viewingId) : undefined;
+
+  const columns: DataTableColumn<LogRule>[] = [
+    {
+      header: 'Name',
+      key: 'name',
+      width: 260,
+      exportValue: (row) => row.name,
+      render: (row) => (
+        <span className="flex items-center gap-1.5">
+          <span className="text-sm font-medium">{row.name}</span>
+          {row.source === 'builtin' && (
+            <span className="rounded bg-muted px-1 py-0.5 text-[10px] font-medium uppercase tracking-wide text-faint" title="Seeded by UNM — the YAML is managed; disable the rule or override its severity instead">
+              builtin
+            </span>
+          )}
+        </span>
+      ),
+    },
+    {
+      header: 'Severity',
+      key: 'severityOverride',
+      width: 100,
+      exportValue: (row) => row.severityOverride ?? 'default',
+      render: (row) =>
+        row.severityOverride ? (
+          <span className={`rounded px-1.5 py-0.5 text-xs font-medium uppercase ${row.severityOverride === 'critical' ? 'bg-danger text-danger-fg' : row.severityOverride === 'warning' ? 'bg-warning text-warning-fg' : 'bg-info text-info-fg'}`}>
+            {row.severityOverride}
+          </span>
+        ) : (
+          <span className="text-xs text-faint" title="Uses the level declared in the rule's Sigma YAML">default</span>
+        ),
+    },
+    {
+      header: 'Last hit',
+      key: 'lastHitAt',
+      width: 150,
+      sortAccessor: (row) => Date.parse(row.lastHitAt ?? '') || 0,
+      render: (row) =>
+        row.lastHitAt ? (
+          <span className="text-xs text-secondary" title={new Date(row.lastHitAt).toLocaleString()}>
+            {timeAgo(row.lastHitAt)}{row.occurrences > 1 ? ` · ×${row.occurrences}` : ''}
+          </span>
+        ) : (
+          <span className="text-xs text-faint">never</span>
+        ),
+    },
+    {
+      header: 'Status',
+      key: 'status',
+      width: 240,
+      render: (row) =>
+        row.lastError ? (
+          <span className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-xs font-medium bg-danger/20 text-danger-fg" title={String(row.lastError)}>
+            {String(row.lastError).slice(0, 60)}{String(row.lastError).length > 60 ? '…' : ''}
+          </span>
+        ) : row.enabled ? (
+          <span className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-xs font-medium bg-success/20 text-success-fg">active</span>
+        ) : (
+          <span className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-xs font-medium bg-muted text-secondary">disabled</span>
+        ),
+    },
+    {
+      header: '',
+      key: 'actions',
+      width: 170,
+      render: (row) => (
+        <div className="flex items-center justify-end gap-1">
+          <button type="button" onClick={() => setViewingId(row.id)} title={`View the Sigma YAML of "${row.name}"`} className="rounded p-1 text-secondary hover:bg-muted">
+            <Eye className="h-3.5 w-3.5" />
+          </button>
+          {row.source === 'user' && (
+            <button type="button" onClick={() => setViewingId(row.id)} title={`Edit the Sigma YAML of "${row.name}"`} className="rounded p-1 text-secondary hover:bg-muted">
+              <Pencil className="h-3.5 w-3.5" />
+            </button>
+          )}
+          <button type="button" onClick={() => void toggleRule(row)} title={row.enabled ? 'Disable this rule' : 'Enable this rule'} className="rounded px-2 py-1 text-xs font-medium text-secondary hover:bg-muted">
+            {row.enabled ? 'Disable' : 'Enable'}
+          </button>
+          {row.source === 'user' && (
+            <button type="button" onClick={() => void deleteRule(row)} title={`Delete "${row.name}"`} className="rounded p-1 text-secondary hover:bg-danger/20 hover:text-danger-fg">
+              <Trash2 className="h-3.5 w-3.5" />
+            </button>
+          )}
+        </div>
+      ),
+    },
+  ];
+
+  return (
+    <div>
+      {/* New rule / import — right-aligned */}
+      <div className="mb-3 flex justify-end gap-2">
+        <button type="button" onClick={() => setImporting(true)} title="Paste one or more Sigma documents separated by ---" className="inline-flex items-center gap-2 rounded-md border border-border px-3 py-1.5 text-sm font-medium text-secondary hover:bg-muted">
+          Import YAML
+        </button>
+        <button type="button" onClick={() => setCreating(true)} className="inline-flex items-center gap-2 rounded-md bg-primary px-3 py-1.5 text-sm font-medium text-primary-fg hover:opacity-90">
+          New rule
+        </button>
+      </div>
+
+      {lrQuery.isLoading && <p className="text-sm text-muted-foreground">Loading log rules…</p>}
+      {lrQuery.isError && (
+        <p className="text-sm text-danger-fg">Failed to load log rules: {(lrQuery.error as Error).message}</p>
+      )}
+      {data && (
+        <div className="mb-4 flex flex-wrap items-center gap-3 text-sm">
+          {!data.enabled ? (
+            <Link
+              to="/settings"
+              title="Master switch + scan limit live in the central settings page (category Security)"
+              className="inline-flex items-center gap-1.5 rounded-md bg-muted px-2 py-1 text-xs font-medium text-secondary hover:bg-border hover:text-foreground"
+            >
+              Log-rule scanning is disabled — open Settings to enable it
+            </Link>
+          ) : (
+            <span className="inline-flex items-center gap-1.5 text-success-fg">
+              <FileSearch className="h-4 w-4" /> {data.worker.rulesEnabled ?? 0} active rules · {data.worker.hitsLast24h.toLocaleString()} hits in the last 24 h
+            </span>
+          )}
+          {data.worker.lastError && (
+            <span className="inline-flex items-center gap-1 rounded-md bg-danger/20 px-2 py-1 text-xs font-medium text-danger-fg" title={String(data.worker.lastError)}>
+              worker error: {String(data.worker.lastError).slice(0, 80)}{String(data.worker.lastError).length > 80 ? '…' : ''}
+            </span>
+          )}
+        </div>
+      )}
+
+      {data && (
+        <DataTable
+          columns={columns}
+          rows={rules}
+          rowKey={(row) => row.id}
+          storageKey="log-rules"
+          autoRefresh={{ intervalMs: 30_000, queries: [lrQuery] }}
+          searchPlaceholder="Search rules…"
+          emptyMessage={'No log rules yet — create one below or import Sigma YAML. Built-in rules are seeded automatically at boot.'}
+        />
+      )}
+
+      {creating && <LogRuleCreateDialog onClose={() => setCreating(false)} />}
+      {importing && <LogRuleImportDialog onClose={() => setImporting(false)} />}
+      {viewing && <LogRuleYamlDialog rule={viewing} onClose={() => setViewingId(null)} />}
+    </div>
+  );
+}
+
+/** Create dialog for one user rule from a single Sigma document. */
+function LogRuleCreateDialog({ onClose }: { onClose: () => void }) {
+  const queryClient = useQueryClient();
+  const [name, setName] = useState('');
+  const [yaml, setYaml] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [details, setDetails] = useState<string[]>([]);
+
+  async function save() {
+    if (saving || !yaml.trim()) return;
+    setSaving(true);
+    setError(null);
+    setDetails([]);
+    try {
+      await api.createLogRule({ yaml: yaml.trim(), ...(name.trim() ? { name: name.trim() } : {}) });
+      void queryClient.invalidateQueries({ queryKey: ['logRules'] });
+      onClose();
+    } catch (err) {
+      const e = err as ApiError;
+      setError(e.message);
+      setDetails(e.details ?? []);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  const fieldCls = 'w-full rounded-md border border-border bg-background px-3 py-2 text-sm focus:border-focus-ring focus:outline-none';
+  return (
+    <DialogShell title="New log rule" subtitle="One Sigma document — the single-line subset UNM supports." onClose={onClose} maxWidth="max-w-2xl">
+      <div className="space-y-3">
+        {error && (
+          <div className="rounded-md border border-danger-border bg-danger px-3 py-2 text-xs text-danger-fg">
+            <p>{error}</p>
+            {details.length > 0 && (
+              <ul className="mt-1 list-disc pl-4">
+                {details.map((d) => (
+                  <li key={d}>{d}</li>
+                ))}
+              </ul>
+            )}
+          </div>
+        )}
+        <label className="block text-sm font-medium text-secondary">
+          Name <span className="font-normal text-faint">(optional — defaults to the YAML title)</span>
+          <input value={name} onChange={(e) => setName(e.target.value)} maxLength={100} placeholder="my-log-rule" className={`${fieldCls} mt-1`} />
+        </label>
+        <div>
+          <label className="mb-1 block text-sm font-medium text-secondary">Sigma YAML</label>
+          <textarea value={yaml} onChange={(e) => setYaml(e.target.value)} rows={14} spellCheck={false} placeholder={'title: My rule\ndetection:\n  s:\n    message:\n      contains: "Failed password"\ncondition: s\nunm.threshold:\n  count: 5\n  withinMinutes: 5\n  groupBy: srcIp'} className={`${fieldCls} font-mono text-xs`} />
+        </div>
+        <p className="text-xs text-faint">
+          Supported fields: message, appname, facility, hostname, srcIp, dstIp. Matchers: plain value (case-insensitive equality), list (OR), contains, startswith, endswith, re.
+          Add <span className="font-mono">unm.threshold</span> for rolling-window counting (brute-force style).
+        </p>
+        <div className="flex items-center justify-end gap-2 border-t border-border pt-3">
+          <button type="button" onClick={onClose} className="rounded-md px-3 py-1.5 text-sm text-secondary hover:bg-muted">Cancel</button>
+          <button type="button" onClick={() => void save()} disabled={saving || !yaml.trim()} className="inline-flex items-center gap-1.5 rounded-md bg-primary px-3 py-1.5 text-sm font-medium text-white hover:bg-primary-hover disabled:opacity-50">
+            {saving && <Loader2 size={14} className="animate-spin" />}
+            Create rule
+          </button>
+        </div>
+      </div>
+    </DialogShell>
+  );
+}
+
+/** Import dialog — multi-document Sigma YAML; per-rule results, never all-or-nothing. */
+function LogRuleImportDialog({ onClose }: { onClose: () => void }) {
+  const queryClient = useQueryClient();
+  const [yaml, setYaml] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [results, setResults] = useState<LogRuleImportResult[] | null>(null);
+
+  async function run() {
+    if (saving || !yaml.trim()) return;
+    setSaving(true);
+    setError(null);
+    try {
+      const res = await api.importLogRules(yaml.trim());
+      setResults(res.results);
+      void queryClient.invalidateQueries({ queryKey: ['logRules'] });
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  const fieldCls = 'w-full rounded-md border border-border bg-background px-3 py-2 text-sm focus:border-focus-ring focus:outline-none';
+  return (
+    <DialogShell title="Import log rules" subtitle="Paste one or more Sigma documents separated by ---. Each document is validated independently." onClose={onClose} maxWidth="max-w-2xl">
+      <div className="space-y-3">
+        {error && <p className="rounded-md border border-danger-border bg-danger px-3 py-2 text-xs text-danger-fg">{error}</p>}
+        <textarea value={yaml} onChange={(e) => setYaml(e.target.value)} rows={14} spellCheck={false} placeholder={'title: First rule\n…\n---\ntitle: Second rule\n…'} className={`${fieldCls} font-mono text-xs`} />
+        {results && (
+          <div>
+            <h4 className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-faint">Results</h4>
+            <ul className="max-h-48 space-y-1 overflow-y-auto">
+              {results.map((r, i) => (
+                <li key={`${r.name ?? 'doc'}-${i}`} className="flex items-baseline gap-2 rounded-md border border-border bg-muted/20 px-3 py-1.5 text-xs" title={r.error}>
+                  <span className={`shrink-0 rounded px-1.5 py-0.5 font-medium uppercase ${r.status === 'created' ? 'bg-success/20 text-success-fg' : r.status === 'duplicate' ? 'bg-warning text-warning-fg' : 'bg-danger text-danger-fg'}`}>
+                    {r.status}
+                  </span>
+                  <span className="font-medium">{r.name ?? '(unparseable document)'}</span>
+                  {r.error && <span className="text-secondary break-words">{r.error}</span>}
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+        <div className="flex items-center justify-end gap-2 border-t border-border pt-3">
+          <button type="button" onClick={onClose} className="rounded-md px-3 py-1.5 text-sm text-secondary hover:bg-muted">{results ? 'Close' : 'Cancel'}</button>
+          {!results && (
+            <button type="button" onClick={() => void run()} disabled={saving || !yaml.trim()} className="inline-flex items-center gap-1.5 rounded-md bg-primary px-3 py-1.5 text-sm font-medium text-white hover:bg-primary-hover disabled:opacity-50">
+              {saving && <Loader2 size={14} className="animate-spin" />}
+              Import
+            </button>
+          )}
+        </div>
+      </div>
+    </DialogShell>
+  );
+}
+
+/** View (and for user rules, edit) the Sigma YAML of one rule; severity override applies to all. */
+function LogRuleYamlDialog({ rule, onClose }: { rule: LogRule; onClose: () => void }) {
+  const queryClient = useQueryClient();
+  const [yaml, setYaml] = useState(rule.sigmaYaml);
+  const [severityOverride, setSeverityOverride] = useState<string>(rule.severityOverride ?? '');
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const yamlChanged = rule.source === 'user' && yaml.trim() !== rule.sigmaYaml;
+  const sevChanged = (severityOverride || null) !== rule.severityOverride;
+
+  async function save() {
+    if (saving || (!yamlChanged && !sevChanged)) return;
+    setSaving(true);
+    setError(null);
+    try {
+      await api.updateLogRule(rule.id, {
+        ...(yamlChanged ? { yaml: yaml.trim() } : {}),
+        ...(sevChanged ? { severityOverride: (severityOverride || null) as 'info' | 'warning' | 'critical' | null } : {}),
+      });
+      void queryClient.invalidateQueries({ queryKey: ['logRules'] });
+      onClose();
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  const fieldCls = 'w-full rounded-md border border-border bg-background px-3 py-2 text-sm focus:border-focus-ring focus:outline-none';
+  return (
+    <DialogShell title={rule.source === 'user' ? `Edit rule "${rule.name}"` : `Rule "${rule.name}"`} subtitle={rule.source === 'builtin' ? 'Built-in rules are managed by UNM — the YAML is read-only; disable the rule or override its severity.' : 'The stored name stays stable when you replace the YAML.'} onClose={onClose} maxWidth="max-w-2xl">
+      <div className="space-y-3">
+        {error && <p className="rounded-md border border-danger-border bg-danger px-3 py-2 text-xs text-danger-fg">{error}</p>}
+        {rule.source === 'user' ? (
+          <textarea value={yaml} onChange={(e) => setYaml(e.target.value)} rows={14} spellCheck={false} className={`${fieldCls} font-mono text-xs`} />
+        ) : (
+          <pre className="max-h-96 overflow-y-auto rounded-md border border-border bg-muted/30 p-3 font-mono text-xs">{rule.sigmaYaml}</pre>
+        )}
+        <div>
+          <label className="mb-1 block text-sm font-medium text-secondary">Severity override</label>
+          <select value={severityOverride} onChange={(e) => setSeverityOverride(e.target.value)} className={`${fieldCls} w-48`}>
+            <option value="">Rule default (from YAML level)</option>
+            <option value="info">Info</option>
+            <option value="warning">Warning</option>
+            <option value="critical">Critical</option>
+          </select>
+        </div>
+        <div className="flex items-center justify-end gap-2 border-t border-border pt-3">
+          <button type="button" onClick={onClose} className="rounded-md px-3 py-1.5 text-sm text-secondary hover:bg-muted">{yamlChanged || sevChanged ? 'Cancel' : 'Close'}</button>
+          {(yamlChanged || sevChanged) && (
+            <button type="button" onClick={() => void save()} disabled={saving} className="inline-flex items-center gap-1.5 rounded-md bg-primary px-3 py-1.5 text-sm font-medium text-white hover:bg-primary-hover disabled:opacity-50">
+              {saving && <Loader2 size={14} className="animate-spin" />}
+              Save changes
+            </button>
+          )}
+        </div>
+      </div>
+    </DialogShell>
   );
 }
 

@@ -715,6 +715,29 @@ export const SETTING_DESCRIPTORS: SettingDescriptor[] = [
     help:
       'Safety cap on how many indicators one feed may contribute per fetch cycle (excess entries are skipped and counted in the source status — raise this if a large blocklist is truncated). The download itself is additionally bounded by a 64 MiB size limit.',
   },
+  {
+    key: 'logRulesEnabled',
+    label: 'Log rule detection',
+    type: 'boolean',
+    category: 'Security',
+    default: true,
+    envVar: 'UNM_LOG_RULES_ENABLED',
+    help:
+      'Master switch for Sigma log-rule matching over ingested device log lines (syslog forwarding + tailed files). Hits raise "log rule" findings into the same pipeline as threat-intel hits — notifications plus the securityFinding automation trigger. While off, scanning pauses and the scan watermark does NOT advance, so re-enabling resumes from where it stopped.',
+  },
+  {
+    key: 'logRulesScanLimitPerBeat',
+    label: 'Log rule scan limit per beat',
+    type: 'integer',
+    category: 'Security',
+    unit: 'lines/beat',
+    min: 1_000,
+    max: 200_000,
+    default: 20_000,
+    envVar: 'UNM_LOG_RULES_SCAN_LIMIT_PER_BEAT',
+    help:
+      'How many log lines the rule scanner may evaluate per minute. On a busy fleet the worker catches up over subsequent beats instead of spiking — raise this if you want faster catch-up after downtime.',
+  },
 
   // Certificate monitoring (Certificates page).
   {

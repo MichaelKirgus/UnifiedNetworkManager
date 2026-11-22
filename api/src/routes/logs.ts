@@ -1,6 +1,6 @@
 import { Router, Response } from 'express';
 import { and, asc, desc, eq, gte, inArray, ilike, lt, or, sql } from 'drizzle-orm';
-import { db } from '../db';
+import { db, pool } from '../db';
 import * as schema from '../db/schema';
 import { requireAuth, requirePermission } from '../auth/middleware';
 import { allowedDeviceIds } from '../deviceAccess';
@@ -142,6 +142,201 @@ router.get(
       } else {
         res.status(200).json(mapped);
       }
+    } catch (err) {
+      const e = err as { status?: number; message?: string };
+      res.status(e.status ?? 500).json({ error: e.message ?? 'Internal server error' });
+    }
+  }
+);
+
+// GET /logs/unified - ONE time-ordered table over BOTH log sources for the Logs
+// page: plugin operational logs (plugin_logs, POST /plugin/logs) and device log
+// lines (security_events — syslog ingestion + rotation-aware file tailing).
+// Gated by `logs:read`; security_events rows are included ONLY when the caller
+// also holds `security:read` (the two sources keep their separate gates).
+// Query params: source? ('plugin'|'device'), level? (comma list), pluginId?,
+// deviceId?, search? (ILIKE over message + context/appname/hostname/facility/IPs),
+// from?/to? (ISO timestamps), page/pageSize/all, sort=emittedAt&dir. Paged mode
+// only — the response is always the {rows,total,page,pageSize} envelope.
+router.get(
+  '/logs/unified',
+  requireAuth,
+  requirePermission('logs:read'),
+  async (req, res: Response) => {
+    try {
+      const q = req.query as Record<string, string | undefined>;
+
+      // Paged mode only — the webapp always sends page/pageSize or all=true.
+      const pg = parsePagination(q, { defaultPageSize: 50, maxPageSize: 200 });
+      if ('error' in pg) {
+        res.status(400).json({ error: pg.error });
+        return;
+      }
+
+      // Time is the only meaningful sort axis (same rule as /logs above).
+      let orderDir: 'asc' | 'desc' = 'desc';
+      if (q.sort !== undefined && q.sort !== 'emittedAt') {
+        res.status(400).json({ error: `"sort" must be "emittedAt"` });
+        return;
+      }
+      if (q.dir === 'asc') orderDir = 'asc';
+
+      const levels = (q.level ?? '')
+        .split(',')
+        .map((s) => s.trim())
+        .filter(Boolean);
+      for (const l of levels) {
+        if (!LOG_LEVELS.includes(l)) {
+          res.status(400).json({ error: `"level" must be a comma list of: ${LOG_LEVELS.join(', ')}` });
+          return;
+        }
+      }
+
+      const source = q.source?.trim();
+      if (source && !['plugin', 'device'].includes(source)) {
+        res.status(400).json({ error: `"source" must be "plugin" or "device"` });
+        return;
+      }
+
+      // Time window — ISO text for plugin_logs (text column, lexicographic =
+      // chronological), epoch ms for security_events.
+      const fromIso = q.from?.trim() || null;
+      const toIso = q.to?.trim() || null;
+      if (fromIso && Number.isNaN(Date.parse(fromIso))) {
+        res.status(400).json({ error: `"from" must be an ISO timestamp` });
+        return;
+      }
+      if (toIso && Number.isNaN(Date.parse(toIso))) {
+        res.status(400).json({ error: `"to" must be an ISO timestamp` });
+        return;
+      }
+
+      // Device-level access control — same rules as both source routes.
+      const allowed = await allowedDeviceIds(req);
+      if (allowed !== null && q.deviceId && !allowed.has(q.deviceId)) {
+        res.status(200).json({ rows: [], total: 0, ...envelopePage(pg, 0) });
+        return;
+      }
+
+      // Device log lines keep their own gate — without security:read the caller
+      // only ever sees plugin logs (source=device answers empty for them).
+      const canSecurity = Array.isArray(req.user?.permissions) && req.user.permissions.includes('security:read');
+      const wantPlugin = !source || source === 'plugin';
+      const wantDevice = (!source || source === 'device') && canSecurity;
+
+      if ((allowed !== null && allowed.size === 0) || (!wantPlugin && !wantDevice)) {
+        res.status(200).json({ rows: [], total: 0, ...envelopePage(pg, 0) });
+        return;
+      }
+
+      // --- Build the two UNION ALL sides (parameterized, per wanted side) -----
+      const params: unknown[] = [];
+      const ph = (v: unknown): string => {
+        params.push(v);
+        return `$${params.length}`;
+      };
+      const inList = (ids: string[]): string => `(${ids.map((id) => ph(id)).join(', ')})`;
+
+      const search = q.search?.trim() ?? '';
+      const pat = search ? `%${search.replace(/[%_]/g, '')}%` : null;
+
+      const pluginClauses: string[] = [];
+      if (wantPlugin) {
+        if (fromIso) pluginClauses.push(`"emittedAt" >= ${ph(fromIso)}`);
+        if (toIso) pluginClauses.push(`"emittedAt" < ${ph(toIso)}`);
+        if (levels.length === 1) pluginClauses.push(`level = ${ph(levels[0])}`);
+        else if (levels.length > 1) pluginClauses.push(`level IN ${inList(levels)}`);
+        if (q.pluginId) pluginClauses.push(`"pluginId" = ${ph(q.pluginId)}`);
+        if (q.deviceId) pluginClauses.push(`"deviceId" = ${ph(q.deviceId)}`);
+        if (pat) pluginClauses.push(`("message" ILIKE ${ph(pat)} OR "context" ILIKE ${ph(pat)})`);
+        if (allowed !== null) pluginClauses.push(`"deviceId" IN ${inList([...allowed])}`);
+      }
+
+      const deviceClauses: string[] = [];
+      if (wantDevice) {
+        if (fromIso) deviceClauses.push(`"tsMs" >= ${ph(Date.parse(fromIso))}`);
+        if (toIso) deviceClauses.push(`"tsMs" < ${ph(Date.parse(toIso))}`);
+        if (levels.length === 1) deviceClauses.push(`level = ${ph(levels[0])}`);
+        else if (levels.length > 1) deviceClauses.push(`level IN ${inList(levels)}`);
+        if (q.pluginId) deviceClauses.push(`"pluginId" = ${ph(q.pluginId)}`);
+        if (q.deviceId) deviceClauses.push(`"deviceId" = ${ph(q.deviceId)}`);
+        if (pat) {
+          deviceClauses.push(
+            `("message" ILIKE ${ph(pat)} OR "hostname" ILIKE ${ph(pat)} OR "appname" ILIKE ${ph(pat)} OR "facility" ILIKE ${ph(pat)} OR "srcIp" ILIKE ${ph(pat)} OR "dstIp" ILIKE ${ph(pat)})`
+          );
+        }
+        if (allowed !== null) deviceClauses.push(`"deviceId" IN ${inList([...allowed])}`);
+      }
+
+      // Both sides normalize to the SAME ISO-8601 text format for sort_key, so a
+      // single lexicographic ORDER BY is chronological across sources: plugin_logs
+      // stores JS toISOString() verbatim; security_events tsMs (bigint ms) is
+      // formatted into the identical shape (no parsing of untrusted text).
+      const sides: string[] = [];
+      if (wantPlugin) {
+        sides.push(
+          `SELECT 'plugin'::text AS source, id, level, message, context, "pluginId", "deviceId", NULL::text AS appname, NULL::text AS hostname, "emittedAt" AS sort_key FROM plugin_logs${pluginClauses.length ? ` WHERE ${pluginClauses.join(' AND ')}` : ''}`
+        );
+      }
+      if (wantDevice) {
+        sides.push(
+          `SELECT 'device'::text AS source, id, level, message, NULL::text AS context, "pluginId", "deviceId", appname, hostname, to_char(to_timestamp("tsMs" / 1000.0) AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS sort_key FROM security_events${deviceClauses.length ? ` WHERE ${deviceClauses.join(' AND ')}` : ''}`
+        );
+      }
+
+      const union = sides.join(' UNION ALL ');
+      // lo.limit/lo.offset are integers from parsePagination — safe to inline.
+      const lo = limitOffset(pg); // null in all-mode (unbounded)
+      const [rowsRes, countRes] = await Promise.all([
+        pool.query(
+          `SELECT * FROM (${union}) u ORDER BY sort_key ${orderDir.toUpperCase()}${lo ? ` LIMIT ${lo.limit} OFFSET ${lo.offset}` : ''}`,
+          params
+        ),
+        pool.query(`SELECT count(*)::int AS n FROM (${union}) u`, params),
+      ]);
+
+      const raw = rowsRes.rows as Array<{
+        source: string;
+        id: string;
+        level: string;
+        message: string;
+        context: string | null;
+        pluginId: string;
+        deviceId: string | null;
+        appname: string | null;
+        hostname: string | null;
+        sort_key: string;
+      }>;
+      const total = Number(countRes.rows[0]?.n ?? 0);
+
+      // Batch-load display names (same pattern as /logs above).
+      const deviceIds = [...new Set(raw.map((r) => r.deviceId).filter((d): d is string => !!d))];
+      const pluginIds = [...new Set(raw.map((r) => r.pluginId))];
+      const [devicesQ, pluginsQ] = await Promise.all([
+        deviceIds.length > 0 ? db.query.devices.findMany({ where: inArray(schema.devices.id, deviceIds) }) : [],
+        pluginIds.length > 0 ? db.query.plugins.findMany({ where: inArray(schema.plugins.id, pluginIds) }) : [],
+      ]);
+      const deviceNameById = new Map(devicesQ.map((d) => [d.id, d.name] as const));
+      const pluginNameById = new Map(pluginsQ.map((p2) => [p2.id, p2.name] as const));
+
+      res.status(200).json({
+        rows: raw.map((r) => ({
+          id: `${r.source}:${r.id}`, // prefixed — unique across both tables
+          source: r.source as 'plugin' | 'device',
+          tsMs: Date.parse(r.sort_key),
+          level: r.level,
+          message: r.message,
+          context: r.context ? safeParseJson(r.context) : null,
+          pluginId: r.pluginId ?? null,
+          pluginName: pluginNameById.get(r.pluginId) ?? null,
+          deviceId: r.deviceId ?? null,
+          deviceName: r.deviceId ? (deviceNameById.get(r.deviceId) ?? null) : null,
+          appname: r.appname ?? null,
+          hostname: r.hostname ?? null,
+        })),
+        total,
+        ...envelopePage(pg, total),
+      });
     } catch (err) {
       const e = err as { status?: number; message?: string };
       res.status(e.status ?? 500).json({ error: e.message ?? 'Internal server error' });

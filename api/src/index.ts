@@ -30,6 +30,7 @@ import updatesRouter from './routes/updates';
 import securityChecksRouter from './routes/securityChecks';
 import cveRouter from './routes/cve';
 import securityEventsRouter from './routes/securityEvents';
+import logRulesRouter from './routes/logRules';
 import threatIntelRouter from './routes/threatIntel';
 // DNS query events (/dns-queries) — read view of the per-query log pushed via
 // POST /plugin/dns-queries (OPNsense unbound qstats); feeds the Security page.
@@ -58,6 +59,7 @@ import { startHostStateRetentionWorker } from './workers/hostStateRetention';
 import { startPluginDiscovery } from './plugins/discovery';
 import { startPlanExecutorWorker } from './workers/planExecutor';
 import { startPlanSchedulerWorker } from './workers/planScheduler';
+import { startLogRulesWorker } from './workers/logRules';
 import { startLogRetentionWorker } from './workers/logRetention';
 import { startFileRepoRetentionWorker } from './workers/fileRepoRetention';
 import { startPluginMetricsWorker } from './workers/pluginMetrics';
@@ -351,6 +353,7 @@ async function main(): Promise<void> {
   // Syslog security events (/security-events) — read view of the append-only log
   // filled by the syslog-collector plugin via POST /plugin/security-events.
   api.use(securityEventsRouter);
+  api.use(logRulesRouter);
   // Threat intelligence (/threat-intel) — IOC feed sources + status; matching
   // runs in workers/threatIntel.ts and raises 'ioc-hit' findings.
   api.use(threatIntelRouter);
@@ -469,6 +472,10 @@ async function main(): Promise<void> {
     void runAsLeader(LEADER_KEYS.flowSecurity, 'flowSecurity', () => startFlowSecurityWorker()).then((stop) => workerStops.push(stop));
     // Threat-intel feed fetch + IOC matching (Security page; cadence from threatIntelFetchIntervalMinutes).
     void runAsLeader(LEADER_KEYS.threatIntel, 'threatIntel', () => startThreatIntelWorker()).then((stop) => workerStops.push(stop));
+
+    // Log rules — Sigma detection over ingested device log lines (Security page;
+    // watermark scan of security_events, findings into the shared pipeline).
+    void runAsLeader(LEADER_KEYS.logRules, 'logRules', () => startLogRulesWorker()).then((stop) => workerStops.push(stop));
 
     // GeoIP database refresh (leader-gated; cadence from geoipFetchIntervalHours).
     void runAsLeader(LEADER_KEYS.geoip, 'geoip', () => startGeoIpWorker()).then((stop) => workerStops.push(stop));

@@ -1700,6 +1700,27 @@ export async function initDb(): Promise<void> {
   await pool.query(`
     CREATE INDEX IF NOT EXISTS idx_plugin_logs_emitted_at
       ON plugin_logs ("emittedAt")`);
+  // Cleanup for pre-rename DBs: when the column was still named `timestamp`,
+  // bootstrap created idx_plugin_logs_{device,plugin,_}timestamp. RENAME COLUMN
+  // kept those indexes alive — silently re-pointed at "emittedAt" — so existing
+  // databases carry three EXACT duplicates of the indexes above (≈43 MB wasted
+  // on a small install + double write amplification on every log insert).
+  // Fresh installs never had them; DROP IF EXISTS is a no-op there.
+  await pool.query(`
+    DO $$ BEGIN
+      DROP INDEX IF EXISTS idx_plugin_logs_device_timestamp;
+      DROP INDEX IF EXISTS idx_plugin_logs_plugin_timestamp;
+      DROP INDEX IF EXISTS idx_plugin_logs_timestamp;
+    END $$`);
+  // Trigram GIN index so the Logs page's ILIKE '%term%' search can use an
+  // index instead of a sequential scan once the retention window holds
+  // millions of rows (btree cannot serve leading-wildcard LIKE). pg_trgm ships
+  // with stock Postgres images. Write cost per insert is modest and bounded by
+  // retention, which caps table size.
+  await pool.query(`CREATE EXTENSION IF NOT EXISTS pg_trgm`);
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS idx_plugin_logs_message_trgm
+      ON plugin_logs USING gin (message gin_trgm_ops)`);
 
   // Firewall event-log rows (Firewall Events page) — append-only log pushed by
   // plugins via POST /plugin/firewall-events. Dedupe key = vendorEventId
@@ -1768,6 +1789,11 @@ export async function initDb(): Promise<void> {
   await pool.query(`
     CREATE INDEX IF NOT EXISTS idx_security_events_ts_ms
       ON security_events ("tsMs")`);
+  // Same trigram treatment as plugin_logs.message — device log lines are the
+  // bulk of search volume on the unified Logs page.
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS idx_security_events_message_trgm
+      ON security_events USING gin (message gin_trgm_ops)`);
 
   // Per-host firewall state-table snapshots (Hosts/Networks "States" columns) —
   // append-only, pushed by plugins via POST /plugin/host-states. One row per
@@ -2038,6 +2064,42 @@ await pool.query(`ALTER TABLE flow_micro ADD COLUMN IF NOT EXISTS "agentCount" I
   await pool.query(`
     CREATE INDEX IF NOT EXISTS idx_flow_security_findings_kind_src
       ON flow_security_findings (kind, "srcIp", "lastSeenAt")`);
+  // Log-rule findings (workers/logRules.ts) are not always IP-centric — a rule
+  // can fire on a line with no source address at all. Make srcIp nullable and
+  // add an explicit dedupe key: when present it is the upsert identity of an
+  // ongoing condition instead of (kind, srcIp, dstIp). Both changes are
+  // additive — existing kinds keep their IP-keyed behavior untouched.
+  await pool.query(`ALTER TABLE flow_security_findings ALTER COLUMN "srcIp" DROP NOT NULL`);
+  await pool.query(`ALTER TABLE flow_security_findings ADD COLUMN IF NOT EXISTS "dedupeKey" TEXT`);
+  await pool.query(`
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_flow_security_findings_dedupe_open
+      ON flow_security_findings ("dedupeKey") WHERE status = 'open' AND "dedupeKey" IS NOT NULL`);
+
+  // Log rules — Sigma-format detection over ingested device log lines
+  // (security_events). Built-ins are seeded at boot by workers/logRules.ts;
+  // user rules are managed via /v1/log-rules. sigmaYaml is the single source
+  // of truth and re-parsed on every cache load.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS log_rules (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL UNIQUE,
+      source TEXT NOT NULL DEFAULT 'user',
+      "sigmaYaml" TEXT NOT NULL,
+      enabled BOOLEAN NOT NULL DEFAULT true,
+      "severityOverride" TEXT,
+      "lastError" TEXT,
+      "createdAt" TEXT NOT NULL,
+      "updatedAt" TEXT NOT NULL
+    )`);
+  // Repair for DBs bootstrapped before the column was quoted (unquoted
+  // camelCase gets lowercased by Postgres → sigmayaml).
+  await pool.query(`
+    DO $$ BEGIN
+      IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'log_rules' AND column_name = 'sigmayaml') THEN
+        ALTER TABLE log_rules RENAME COLUMN sigmayaml TO "sigmaYaml";
+      END IF;
+    END $$`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_log_rules_enabled ON log_rules (enabled)`);
 
   // ── Threat intelligence (workers/threatIntel.ts) ───────────────────────────
   // User-managed IOC feed sources + the fetched indicators. `ioc` is INET so a

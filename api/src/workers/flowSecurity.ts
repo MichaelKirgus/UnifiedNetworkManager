@@ -50,11 +50,12 @@ const AUTO_RESOLVE_AFTER_MS = 86_400_000; // 24 h
 /** Detector 3 (egress baseline) is throttled — the rolling window moves slowly. */
 const EGRESS_CHECK_INTERVAL_MS = 30 * 60_000;
 
-// 'ioc-hit' rows are written by workers/threatIntel.ts (threat-intel matching)
-// and 'dns-ioc-hit' rows by its DNS pass (queried domains vs domain-list feeds)
+// 'ioc-hit' rows are written by workers/threatIntel.ts (threat-intel matching),
+// 'dns-ioc-hit' rows by its DNS pass (queried domains vs domain-list feeds) and
+// 'log-rule' rows by workers/logRules.ts (Sigma rules over ingested log lines)
 // — they share this table, the auto-resolve sweep and the securityFinding
 // automation trigger with the three flow detectors.
-export const FLOW_SECURITY_KINDS = ['new-destination', 'port-scan', 'egress-baseline', 'ioc-hit', 'dns-ioc-hit'] as const;
+export const FLOW_SECURITY_KINDS = ['new-destination', 'port-scan', 'egress-baseline', 'ioc-hit', 'dns-ioc-hit', 'log-rule'] as const;
 export type FlowSecurityKind = (typeof FLOW_SECURITY_KINDS)[number];
 
 const SEVERITY_RANK: Record<'info' | 'warning' | 'critical', number> = { info: 0, warning: 1, critical: 2 };
@@ -193,24 +194,56 @@ async function ensureSeenSet(): Promise<boolean> {
   }
 }
 
-/** Shared finding shape — also used by workers/threatIntel.ts ('ioc-hit'). */
+/** Shared finding shape — also used by workers/threatIntel.ts ('ioc-hit') and
+ * workers/logRules.ts ('log-rule'). */
 export interface FindingInput {
   kind: FlowSecurityKind;
-  srcIp: string;
+  /** Null for findings that are not IP-centric (e.g. a log-rule hit on a line without a source address). */
+  srcIp: string | null;
   dstIp: string | null;
   severity: 'info' | 'warning' | 'critical';
   detail: string;
   context: Record<string, unknown>;
   deviceId: string | null;
+  /** Stable identity of the ongoing condition. When present it is the upsert key INSTEAD of (kind, srcIp, dstIp) — used by log-rule findings. */
+  dedupeKey?: string | null;
 }
 
 /**
- * Creates or refreshes a finding row for (kind, srcIp, dstIp). Returns true
- * when the row was NEW (first detection of this condition) — callers raise the
- * notification only in that case so a persisting condition never re-spams.
+ * Creates or refreshes a finding row for (kind, srcIp, dstIp) — or for the
+ * explicit `dedupeKey` when one is given. Returns true when the row was NEW
+ * (first detection of this condition) — callers raise the notification only in
+ * that case so a persisting condition never re-spams.
  */
 export async function upsertFinding(f: FindingInput): Promise<boolean> {
   const nowIso = new Date().toISOString();
+  // Explicit dedupe key (log-rule findings): identity is the key itself, IP
+  // columns are plain attributes and may be NULL.
+  if (f.dedupeKey) {
+    const existingK = await pool.query(
+      `SELECT id, severity FROM flow_security_findings WHERE "dedupeKey" = $1 AND status = 'open'`,
+      [f.dedupeKey]
+    );
+    if (existingK.rows.length > 0) {
+      const row = existingK.rows[0];
+      const currentRank = SEVERITY_RANK[(row.severity as 'info' | 'warning' | 'critical')] ?? 1;
+      const newSeverity = SEVERITY_RANK[f.severity] > currentRank ? f.severity : row.severity;
+      await pool.query(
+        `UPDATE flow_security_findings
+         SET "lastSeenAt" = $1, occurrences = occurrences + 1, severity = $2, detail = $3, context = $4, status = 'open', "resolvedAt" = NULL
+         WHERE id = $5`,
+        [nowIso, newSeverity, f.detail.slice(0, 2_048), JSON.stringify(f.context), row.id]
+      );
+      return false;
+    }
+    await pool.query(
+      `INSERT INTO flow_security_findings (id, kind, severity, "srcIp", "dstIp", detail, context, "deviceId", "firstSeenAt", "lastSeenAt", occurrences, status, "dedupeKey")
+       VALUES ($1, $2, $3, $4::inet, $5::inet, $6, $7, $8, $9, $9, 1, 'open', $10)`,
+      [uuidv4(), f.kind, f.severity, f.srcIp, f.dstIp, f.detail.slice(0, 2_048), JSON.stringify(f.context), f.deviceId, nowIso, f.dedupeKey]
+    );
+    return true;
+  }
+
   const existing = await pool.query(
     `SELECT id, severity FROM flow_security_findings
      WHERE kind = $1 AND "srcIp" = $2::inet AND ("dstIp" IS NOT DISTINCT FROM $3::inet) AND status = 'open'`,

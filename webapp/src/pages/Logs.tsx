@@ -5,18 +5,18 @@ import { DataTable, DataTableColumn } from '../components/DataTable';
 import { DeviceChip } from '../components/DeviceChip';
 import { TimeRangeFilter, resolveTimeRangeIso, type TimeRangeValue } from '../components/TimeRangeFilter';
 import { ALL_PAGES, useServerTable } from '../components/useServerTable';
-import { api, LogEntry } from '../api/client';
+import { api, UnifiedLogEntry } from '../api/client';
 import { useTimeFormat } from '../utils/time';
 
 /** Small colored pill for the log level. */
-const LEVEL_STYLES: Record<LogEntry['level'], string> = {
+const LEVEL_STYLES: Record<UnifiedLogEntry['level'], string> = {
   debug: 'bg-muted text-muted-foreground',
   info: 'bg-info text-info-fg',
   warn: 'bg-warning text-warning-fg',
   error: 'bg-danger text-danger-fg',
 };
 
-function LevelBadge({ level }: { level: LogEntry['level'] }) {
+function LevelBadge({ level }: { level: UnifiedLogEntry['level'] }) {
   return (
     <span className={`inline-flex rounded px-1.5 py-0.5 text-xs font-medium uppercase ${LEVEL_STYLES[level] ?? 'bg-muted text-secondary'}`}>
       {level}
@@ -25,13 +25,15 @@ function LevelBadge({ level }: { level: LogEntry['level'] }) {
 }
 
 /**
- * Global plugin log view. Rows are pushed by plugins via the API's internal
- * POST /plugin/logs endpoint (see docs/PLUGIN-DEVELOPMENT.md §8 Logging) and
- * kept for LOG_RETENTION_DAYS (default 7). Gated by `logs:read` — logs can
- * carry critical details, so the nav item is hidden without the permission.
+ * Unified log view — ONE time-ordered table over BOTH log sources (GET
+ * /logs/unified): plugin operational logs (POST /plugin/logs, kept for
+ * LOG_RETENTION_DAYS) and device log lines (security_events — syslog ingestion
+ * + rotation-aware file tailing). Gated by `logs:read`; device rows are only
+ * served to callers that also hold `security:read`.
  */
 export default function Logs() {
   const { formatDateTime } = useTimeFormat();
+  const [source, setSource] = useState('');
   const [level, setLevel] = useState('');
   const [pluginId, setPluginId] = useState('');
   const [deviceId, setDeviceId] = useState('');
@@ -44,16 +46,17 @@ export default function Logs() {
   const devicesQuery = useQuery({ queryKey: ['devices'], queryFn: api.devices });
 
   // Page-owned filters; any change resets the table to page 1 (hook behavior).
-  const extra = useMemo(() => ({ level, pluginId, deviceId, range }), [level, pluginId, deviceId, range]);
+  const extra = useMemo(() => ({ source, level, pluginId, deviceId, range }), [source, level, pluginId, deviceId, range]);
 
   // Server-side pagination — rows are fetched per page by the API. The `from`
   // bound is computed at fetch time so "last hour" keeps sliding on refetch.
-  const table = useServerTable<{ level: string; pluginId: string; deviceId: string; range: TimeRangeValue }, LogEntry>({
+  const table = useServerTable<{ source: string; level: string; pluginId: string; deviceId: string; range: TimeRangeValue }, UnifiedLogEntry>({
     fetcher: async (p) => {
       // Relative presets slide with the current time; custom ranges are absolute.
       const { from, to } = resolveTimeRangeIso(p.range);
-      const res = await api.logs({
-        level: (p.level || undefined) as LogEntry['level'] | undefined,
+      const res = await api.unifiedLogs({
+        source: (p.source || undefined) as 'plugin' | 'device' | undefined,
+        level: p.level || undefined,
         pluginId: p.pluginId || undefined,
         deviceId: p.deviceId || undefined,
         search: p.q,
@@ -93,13 +96,13 @@ export default function Logs() {
     });
   }
 
-  const columns: DataTableColumn<LogEntry>[] = [
+  const columns: DataTableColumn<UnifiedLogEntry>[] = [
     {
       header: 'Time',
-      key: 'emittedAt',
+      key: 'tsMs',
       width: 180,
-      sortAccessor: (row) => new Date(row.emittedAt).getTime(),
-      render: (row) => <span className="font-mono text-xs">{formatDateTime(row.emittedAt)}</span>,
+      sortAccessor: (row) => row.tsMs,
+      render: (row) => <span className="font-mono text-xs">{formatDateTime(new Date(row.tsMs).toISOString())}</span>,
     },
     {
       header: 'Level',
@@ -109,13 +112,25 @@ export default function Logs() {
       render: (row) => <LevelBadge level={row.level} />,
     },
     {
+      header: 'Source',
+      key: 'source',
+      width: 110,
+      sortable: false,
+      exportValue: (row) => row.source,
+      render: (row) => (
+        <span className="text-xs font-medium uppercase tracking-wide text-secondary">
+          {row.source === 'plugin' ? 'Plugin log' : 'Device log'}
+        </span>
+      ),
+    },
+    {
       header: 'Plugin',
       key: 'pluginName',
       width: 200,
       sortable: false,
       exportValue: (row) => row.pluginName ?? row.pluginId,
       render: (row) => (
-        <span className="text-sm text-secondary" title={row.pluginId}>
+        <span className="text-sm text-secondary" title={row.pluginId ?? undefined}>
           {row.pluginName ?? '—'}
         </span>
       ),
@@ -131,6 +146,21 @@ export default function Logs() {
           <DeviceChip deviceName={row.deviceName} managementAddress={null} pluginName={null} siteName={null} interfaces={[]} />
         ) : (
           <span className="text-xs text-faint">plugin-level</span>
+        ),
+    },
+    {
+      header: 'Appname',
+      key: 'appname',
+      width: 180,
+      sortable: false,
+      exportValue: (row) => row.appname ?? '',
+      render: (row) =>
+        row.source === 'device' ? (
+          <span className="font-mono text-xs" title={row.hostname ?? undefined}>
+            {row.appname ?? row.hostname ?? '—'}
+          </span>
+        ) : (
+          <span className="text-xs text-faint">—</span>
         ),
     },
     {
@@ -166,7 +196,15 @@ export default function Logs() {
     <Layout title="Logs">
 
       {/* Filter bar */}
-      <div className="mb-4 grid grid-cols-1 gap-3 rounded-md border border-border bg-card p-3 shadow-sm sm:grid-cols-5">
+      <div className="mb-4 grid grid-cols-1 gap-3 rounded-md border border-border bg-card p-3 shadow-sm sm:grid-cols-3 lg:grid-cols-6">
+        <div>
+          <label className="mb-1 block text-xs font-medium text-secondary">Source</label>
+          <select className="w-full rounded-md border border-border px-2.5 py-1.5 text-sm" value={source} onChange={(e) => setSource(e.target.value)}>
+            <option value="">All sources</option>
+            <option value="plugin">Plugin logs</option>
+            <option value="device">Device logs</option>
+          </select>
+        </div>
         <div>
           <label className="mb-1 block text-xs font-medium text-secondary">Level</label>
           <select className="w-full rounded-md border border-border px-2.5 py-1.5 text-sm" value={level} onChange={(e) => setLevel(e.target.value)}>
@@ -235,7 +273,7 @@ export default function Logs() {
           onSortChange: table.setSort,
         }}
         autoRefresh={{ intervalMs: 30_000, queries: [table] }}
-        emptyMessage="No log entries in this range yet — plugins ship failures and state changes here (poll errors, config/plan results)."
+        emptyMessage="No log entries in this range yet — plugin operational logs and device log lines (syslog, tailed files) both land here."
       />
     </Layout>
   );

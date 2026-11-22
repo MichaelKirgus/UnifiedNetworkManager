@@ -5724,6 +5724,153 @@ paths:
                 properties:
                   error: { type: string }
 
+  /log-rules:
+    get:
+      tags: [Security]
+      summary: List log rules (Sigma detection over ingested device logs)
+      description: >-
+        All log rules — built-ins seeded at boot plus user-imported rules —
+        with worker status and per-rule open-finding stats. The worker scans
+        security_events (syslog + tailed files) with a watermark; hits raise
+        'log-rule' findings into the shared findings pipeline (notifications +
+        securityFinding automation trigger). Gated on `security:read`.
+      responses:
+        '200':
+          description: Log rules + worker status
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LogRulesResponse'
+        '401':
+          description: Authentication required
+        '403':
+          description: Missing security:read permission
+    post:
+      tags: [Security]
+      summary: Create a user log rule from one Sigma document
+      description: >-
+        Validates the single-line Sigma subset (fields message/appname/facility/
+        hostname/srcIp/dstIp; matchers =, contains, startswith, endswith, re;
+        condition and/or/not + parentheses; optional unm.threshold). Unsupported
+        constructs are rejected with structured issues. Gated on `system:write`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [yaml]
+              properties:
+                yaml: { type: string, description: One Sigma rule document (YAML) }
+                name: { type: string, description: Optional display-name override (defaults to the rule title) }
+      responses:
+        '201':
+          description: Rule created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LogRule'
+        '400':
+          description: Parse/validation error (body carries `issues[]` with per-construct details)
+        '401':
+          description: Authentication required
+        '409':
+          description: A rule with this name already exists
+
+  /log-rules/{id}:
+    patch:
+      tags: [Security]
+      summary: Update a log rule (enable/disable, severity override; YAML replace for user rules)
+      description: >-
+        Built-in rules may only be disabled or given a severityOverride — their
+        YAML is managed by UNM and refreshed at boot. Gated on `system:write`.
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                enabled: { type: boolean }
+                severityOverride:
+                  oneOf:
+                    - type: string
+                      enum: [info, warning, critical]
+                    - type: 'null'
+                  description: Per-rule severity override; null clears it (defaults to the rule's own level mapping)
+                yaml: { type: string, description: Replace the Sigma document (user rules only) }
+      responses:
+        '200':
+          description: Updated rule
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LogRule'
+        '400':
+          description: Invalid field, YAML parse error, or built-in YAML change attempt
+        '401':
+          description: Authentication required
+        '404':
+          description: Rule not found
+    delete:
+      tags: [Security]
+      summary: Delete a user log rule (built-ins are protected)
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Rule deleted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  deleted: { type: boolean }
+        '400':
+          description: Built-in rules cannot be deleted — disable them instead
+        '401':
+          description: Authentication required
+        '404':
+          description: Rule not found
+
+  /log-rules/import:
+    post:
+      tags: [Security]
+      summary: Import multiple Sigma rules (multi-document YAML)
+      description: >-
+        Accepts one or more Sigma documents separated by `---`. Per-rule results
+        are returned — created, duplicate (name already exists) or error with the
+        parse message; a bad document never aborts the batch. Gated on
+        `system:write`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [yaml]
+              properties:
+                yaml: { type: string, description: Multi-document Sigma YAML (documents separated by ---) }
+      responses:
+        '201':
+          description: Import results
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LogRuleImportResult'
+        '400':
+          description: Empty body
+        '401':
+          description: Authentication required
+
   /geoip/status:
     get:
       tags: [Flows]
@@ -8096,6 +8243,96 @@ paths:
                   - $ref: '#/components/schemas/LogPagedResponse'
         '400':
           description: Invalid level filter value, invalid sort/dir or invalid pagination values
+        '401':
+          description: Authentication required
+        '403':
+          description: Missing logs:read permission
+
+  /logs/unified:
+    get:
+      tags: [Logs]
+      summary: Unified log view — plugin logs + device log lines in one time-ordered table
+      description: >-
+        ONE time-ordered table over BOTH log sources for the Logs page: plugin
+        operational logs (plugin_logs) and ingested device log lines
+        (security_events — syslog forwarding + rotation-aware file tailing).
+        Requires permission `logs:read`; security_events rows are included ONLY
+        when the caller also holds `security:read` (without it, source=device
+        answers empty). Always returns a `{ rows, total, page, pageSize }`
+        envelope. Rows are kept per their own retention settings
+        (logRetentionDays / securityEventRetentionDays) and then swept away.
+      parameters:
+        - in: query
+          name: source
+          required: false
+          schema: { type: string, enum: [plugin, device] }
+          description: Restrict to one source (default = both)
+        - in: query
+          name: level
+          required: false
+          schema: { type: string }
+          description: "Filter by level (comma list allowed, e.g. 'warn,error')"
+        - in: query
+          name: pluginId
+          required: false
+          schema: { type: string }
+          description: Filter to one plugin instance
+        - in: query
+          name: deviceId
+          required: false
+          schema: { type: string }
+          description: Filter to one device (scoped callers get an empty result for devices outside their scope)
+        - in: query
+          name: search
+          required: false
+          schema: { type: string }
+          description: "Case-insensitive substring match — plugin rows: message + context; device rows: message, hostname, appname, facility, srcIp, dstIp"
+        - in: query
+          name: from
+          required: false
+          schema: { type: string, format: date-time }
+          description: Inclusive lower bound (ISO-8601)
+        - in: query
+          name: to
+          required: false
+          schema: { type: string, format: date-time }
+          description: Exclusive upper bound (ISO-8601)
+        # NOTE: no `default:` on these — the validator injects schema defaults into
+        # MISSING params; the code applies its own defaults.
+        - in: query
+          name: sort
+          required: false
+          schema: { type: string, enum: [emittedAt] }
+          description: Sort field (only `emittedAt` is supported) — only meaningful with dir=asc; default order is newest first
+        - in: query
+          name: dir
+          required: false
+          schema: { type: string, enum: [asc, desc] }
+          description: Sort direction (default desc = newest first)
+        - in: query
+          name: page
+          required: false
+          schema: { type: integer, minimum: 1 }
+          description: Page number (1-based, default 1)
+        - in: query
+          name: pageSize
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 200 }
+          description: Rows per page (default 50, clamped to 200 max)
+        - in: query
+          name: all
+          required: false
+          schema: { type: boolean }
+          description: "true = return ALL matching rows in one unpaginated response — for exports and small filtered sets; wins over page/pageSize"
+      responses:
+        '200':
+          description: Unified log entries, time-ordered across both sources (newest first unless dir=asc).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UnifiedLogsResponse'
+        '400':
+          description: Invalid source/level filter value, invalid sort/dir or invalid pagination values
         '401':
           description: Authentication required
         '403':
@@ -11059,6 +11296,49 @@ components:
         page: { type: integer, description: "Current 1-based page; equals 1 in all-mode" }
         pageSize: { type: integer, description: "Rows per page; equals total in all-mode" }
 
+    UnifiedLogEntry:
+      type: object
+      description: >-
+        One row of the unified Logs view (GET /logs/unified) — a plugin
+        operational log entry or an ingested device log line, normalized to a
+        common shape. `id` is prefixed with its source ("plugin:<uuid>" /
+        "device:<uuid>") so it is unique across both tables. Device-only fields
+        (appname/hostname) are null on plugin rows; context is null on device
+        rows.
+      required: [id, source, tsMs, level, message]
+      properties:
+        id: { type: string, description: "Source-prefixed row id — unique across both tables" }
+        source:
+          type: string
+          enum: [plugin, device]
+          description: "plugin = plugin_logs (operational), device = security_events (syslog / tailed files)"
+        tsMs: { type: integer, format: int64, description: "Epoch milliseconds of the log line" }
+        level:
+          type: string
+          enum: [debug, info, warn, error]
+        message: { type: string }
+        context: { type: object, additionalProperties: true, nullable: true, description: "Structured details (plugin rows only); null otherwise" }
+        pluginId: { type: [string, 'null'] }
+        pluginName: { type: [string, 'null'] }
+        deviceId: { type: [string, 'null'], description: "Device the line relates to; null for plugin-level entries or unresolvable syslog hosts" }
+        deviceName: { type: [string, 'null'] }
+        appname: { type: [string, 'null'], description: "Syslog APP-NAME / tailed-file label (device rows only)" }
+        hostname: { type: [string, 'null'], description: "Originating syslog host (device rows only)" }
+
+    UnifiedLogsResponse:
+      type: object
+      description: Paged envelope for GET /logs/unified — always an envelope (no legacy array mode).
+      required: [rows, total, page, pageSize]
+      properties:
+        rows:
+          type: array
+          items:
+            $ref: '#/components/schemas/UnifiedLogEntry'
+          description: "The requested slice, time-ordered across both sources (newest first unless dir=asc)"
+        total: { type: integer, description: "Total matching rows over the filters/window" }
+        page: { type: integer, description: "Current 1-based page; equals 1 in all-mode" }
+        pageSize: { type: integer, description: "Rows per page; equals total in all-mode" }
+
     NotificationPagedResponse:
       type: object
       description: Paged-mode envelope for GET /notifications — returned when page/pageSize query params are present (the `all` param is a visibility switch here, not pagination); legacy callers get a plain array.
@@ -11418,16 +11698,73 @@ components:
           type: array
           items: { $ref: '#/components/schemas/ThreatIntelHit' }
 
+    LogRule:
+      type: object
+      description: One Sigma log rule (built-in or user-imported) + its open-finding stats.
+      required: [id, name, source, sigmaYaml, enabled]
+      properties:
+        id: { type: string }
+        name: { type: string, description: Unique display name (defaults to the Sigma title) }
+        source: { type: string, enum: [builtin, user], description: builtin = seeded/refreshed by UNM at boot; user = imported via API }
+        sigmaYaml: { type: string, description: The raw Sigma YAML document — single source of truth } 
+        enabled: { type: boolean }
+        severityOverride:
+          oneOf:
+            - type: string
+              enum: [info, warning, critical]
+            - type: 'null'
+          description: Per-rule severity override; null = the rule's own level mapping (low→info, medium→warning, high/critical→critical)
+        lastError: { type: [string, 'null'], description: Parse error surfaced by the worker when this rule cannot be compiled }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+        lastHitAt: { type: [string, 'null'], format: date-time, description: Last observation of an OPEN finding for this rule; null = never fired or resolved }
+        occurrences: { type: integer, description: Total occurrences across open findings for this rule }
+
+    LogRulesResponse:
+      type: object
+      required: [enabled, worker, rules]
+      properties:
+        enabled: { type: boolean, description: 'Master switch (logRulesEnabled setting)' }
+        worker:
+          type: object
+          properties:
+            lastRunAt: { type: [string, 'null'], format: date-time }
+            lastError: { type: [string, 'null'] }
+            watermarkMs: { type: integer, format: int64, description: security_events tsMs watermark (epoch ms) — rows above this are unscanned; does not advance while disabled }
+            rulesEnabled: { type: [integer, 'null'], description: Compiled enabled rules in the worker cache (null before first beat) }
+            hitsLast24h: { type: integer, description: log-rule findings first seen in the last 24 h }
+        rules:
+          type: array
+          items: { $ref: '#/components/schemas/LogRule' }
+
+    LogRuleImportResult:
+      type: object
+      required: [imported, total, results]
+      properties:
+        imported: { type: integer, description: Rules created by this import }
+        total: { type: integer, description: Documents in the submitted YAML }
+        results:
+          type: array
+          items:
+            type: object
+            required: [status]
+            properties:
+              name: { type: [string, 'null'], description: Rule title (null when the document failed to parse) }
+              status: { type: string, enum: [created, duplicate, error] }
+              error: { type: [string, 'null'], description: Parse/validation message for status=error }
+
     FlowSecurityFinding:
       type: object
       properties:
         id: { type: string }
-        kind: { type: string, enum: [new-destination, port-scan, egress-baseline, ioc-hit, dns-ioc-hit] }
+        kind: { type: string, enum: [new-destination, port-scan, egress-baseline, ioc-hit, dns-ioc-hit, log-rule] }
         severity: { type: string, enum: [info, warning, critical] }
-        srcIp: { type: string }
+        srcIp:
+          type: [string, 'null']
+          description: Null for findings that are not IP-centric (e.g. log-rule hits on lines without a source address)
         dstIp:
           type: [string, 'null']
-          description: Null for port-scan findings (the condition aggregates over many destinations)
+          description: Null for port-scan findings (the condition aggregates over many destinations) and most log-rule hits
         detail: { type: string }
         context:
           type: [object, 'null']

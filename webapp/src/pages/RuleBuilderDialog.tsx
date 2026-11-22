@@ -537,6 +537,7 @@ const FINDING_KIND_LABEL: Record<FlowSecurityFindingKind, string> = {
   'egress-baseline': 'Egress baseline breach',
   'ioc-hit': 'Threat-intel IOC hit',
   'dns-ioc-hit': 'Threat-intel DNS domain hit',
+  'log-rule': 'Log rule match',
 };
 
 function SecurityFindingTriggerEditor({ block, onChange }: { block: Extract<AutomationTriggerBlock, { type: 'securityFinding' }>; onChange: (b: AutomationTriggerBlock) => void }) {
