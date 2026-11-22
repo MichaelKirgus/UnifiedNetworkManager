@@ -1,4 +1,5 @@
 import { AxiosInstance } from 'axios';
+import { createHash } from 'node:crypto';
 import { get, post, OpnsenseApiResult } from './http';
 
 /**
@@ -157,11 +158,24 @@ export function restartUnbound(client: AxiosInstance): Promise<OpnsenseApiResult
 // rows (limit hardcoded to 1000 in the controller when no client/time filter is
 // given), newest first. NOTE: `client` carries the reverse-resolved HOSTNAME instead
 // of the IP whenever the appliance could resolve it — consumers must handle both.
+//
+// GOTCHA (verified live on OPNsense 26.10, 2026-11-22): the row's `uuid` field is NOT
+// a per-query identifier — it is the DNSBL rule id of the blocklist match that
+// produced the query (`log.py`: `uuid = match.get('id') if match else ''`). Every
+// unblocked query (i.e. virtually all traffic) carries uuid=null, so dedupe keys
+// must be synthesized from the row content instead (see vendorEventId below).
 
 /** One per-query row from the appliance's unbound qstats database. */
 export interface UnboundQueryRow {
-  /** The appliance's per-query uuid — stable dedupe key at UNM ingest. */
-  uuid: string;
+  /** The DNSBL rule id that blocked this query — null for every unblocked query. NOT unique per query. */
+  uuid: string | null;
+  /**
+   * Deterministic dedupe key for UNM ingest (sha1 of the row's stable fields).
+   * Stable across re-sent batches, so on-conflict-ignore at the API stays
+   * idempotent; identical (time, client, domain, type) tuples within one second
+   * collapse to a single stored row — acceptable for a security log.
+   */
+  vendorEventId: string;
   /** Unix epoch SECONDS (UTC). */
   time: number;
   /** Client IP, or a hostname when the appliance reverse-resolved it. */
@@ -182,9 +196,21 @@ export interface UnboundQueryRow {
 }
 
 /**
+ * Deterministic dedupe key for one qstats row. The appliance's `uuid` field is the
+ * DNSBL rule id (null for unblocked queries) and can never serve as a per-query
+ * identity, so we hash the stable row fields instead: identical re-sends of the
+ * same row always yield the same key (idempotent ingest), while distinct queries
+ * differ in at least one field.
+ */
+export function dnsVendorEventId(uuid: string | null, timeSec: number, client: string, domain: string, type: string | null): string {
+  return createHash('sha1').update([uuid ?? '', String(timeSec), client, domain, type ?? ''].join('|')).digest('hex');
+}
+
+/**
  * Normalizes the search_queries response body into usable rows. Tolerates both
  * a bare array (the controller's shape) and a {rows: [...]} wrapper, and skips
- * anything missing its uuid/time/client/domain — feed noise never throws.
+ * anything missing its time/client/domain — feed noise never throws. A missing
+ * uuid is NORMAL (it only carries a DNSBL rule id for blocked queries).
  */
 export function parseUnboundQueryRows(data: unknown): UnboundQueryRow[] {
   const arr: unknown[] = Array.isArray(data) ? data : (data && typeof data === 'object' && Array.isArray((data as { rows?: unknown }).rows) ? ((data as { rows: unknown[] }).rows) : []);
@@ -192,19 +218,21 @@ export function parseUnboundQueryRows(data: unknown): UnboundQueryRow[] {
   for (const r of arr) {
     if (!r || typeof r !== 'object') continue;
     const row = r as Record<string, unknown>;
-    const uuid = typeof row['uuid'] === 'string' ? row['uuid'].trim() : '';
+    const uuid = typeof row['uuid'] === 'string' && row['uuid'].trim() !== '' ? row['uuid'].trim() : null;
     const time = Number(row['time']);
     const clientIp = typeof row['client'] === 'string' ? row['client'].trim() : '';
     const domain = typeof row['domain'] === 'string' ? row['domain'].trim() : '';
-    if (!uuid || !Number.isFinite(time) || time <= 0 || !clientIp || !domain) continue; // unusable row — skip
+    if (!Number.isFinite(time) || time <= 0 || !clientIp || !domain) continue; // unusable row — skip
+    const type = typeof row['type'] === 'string' && row['type'].trim() !== '' ? row['type'].trim() : null;
     out.push({
       uuid,
+      vendorEventId: dnsVendorEventId(uuid, Math.trunc(time), clientIp, domain, type),
       time: Math.trunc(time),
       client: clientIp,
       domain,
       action: typeof row['action'] === 'string' ? row['action'] : 'Pass',
       family: typeof row['family'] === 'string' ? row['family'] : null,
-      type: typeof row['type'] === 'string' ? row['type'] : null,
+      type,
       source: typeof row['source'] === 'string' ? row['source'] : null,
       blocklist: typeof row['blocklist'] === 'string' && row['blocklist'].trim() !== '' ? row['blocklist'] : null,
       rcode: typeof row['rcode'] === 'string' ? row['rcode'] : null,

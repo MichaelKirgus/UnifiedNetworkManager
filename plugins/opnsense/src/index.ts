@@ -1931,9 +1931,10 @@ async function collectAndPushFirewallEvents(
 // as firewall events). Incremental reads use a TIME cursor: search_queries has no
 // digest param and returns only the newest 1000 rows, so we store the max epoch
 // seconds seen in the shared state store and push rows strictly newer than it.
-// Dedupe by vendorEventId (the appliance's per-query uuid) at ingest makes any
-// re-send harmless; a missing cursor takes a ≤1000-row baseline of the newest
-// queries (same first-run semantics as firewall events).
+// Dedupe by vendorEventId (a deterministic hash of the row's stable fields — the
+// appliance's `uuid` field is a DNSBL rule id, null for unblocked queries) at
+// ingest makes any re-send harmless; a missing cursor takes a ≤1000-row baseline
+// of the newest queries (same first-run semantics as firewall events).
 
 const DNS_STATE_NAMESPACE = 'dns-queries';
 
@@ -2007,11 +2008,13 @@ async function collectAndPushDnsQueries(
   const fresh = cursorSec === null ? rows : rows.filter((r) => r.time > cursorSec);
   if (fresh.length === 0) return;
 
-  // Compact wire shape: u=uuid, t=epoch seconds, c=client (IP or hostname —
-  // verbatim), d=domain, q=qtype, a=action, s=source, r=rcode, b=blocklist,
-  // x=dnssec status, m=resolveTimeMs, l=ttl.
+  // Compact wire shape: u=vendorEventId (deterministic dedupe key — the
+  // appliance's `uuid` field is only a DNSBL rule id and null for unblocked
+  // queries), t=epoch seconds, c=client (IP or hostname — verbatim), d=domain,
+  // q=qtype, a=action, s=source, r=rcode, b=blocklist, x=dnssec status,
+  // m=resolveTimeMs, l=ttl.
   const events = fresh.map((r) => ({
-    u: r.uuid, t: r.time, c: r.client, d: r.domain, q: r.type ?? null, a: r.action,
+    u: r.vendorEventId, t: r.time, c: r.client, d: r.domain, q: r.type ?? null, a: r.action,
     s: r.source ?? null, r: r.rcode ?? null, b: r.blocklist ?? null, x: r.dnssecStatus ?? null,
     m: r.resolveTimeMs ?? null, l: r.ttl ?? null,
   }));
