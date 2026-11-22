@@ -313,3 +313,117 @@ export async function getDkimDetails(client: AxiosInstance, domain: string): Pro
   const selector = typeof raw['dkim_selector'] === 'string' && raw['dkim_selector'] ? (raw['dkim_selector'] as string) : undefined;
   return { present: true, ...(length ? { length } : {}), ...(selector ? { selector } : {}) };
 }
+
+// --- Security logs & stats -----------------------------------------------------
+// The mailcow JSON API exposes three more security-relevant surfaces than the
+// fail2ban/DKIM pair above (verified live against a 2026-11b instance):
+//   - GET /api/v1/get/logs/netfilter — the netfilter jail log: brute-force
+//     pre-ban warnings, failed mail auth attempts and non-SMTP port scans.
+//     Append-only ring buffer (newest ~1000 entries), epoch-seconds `time`.
+//   - GET /api/v1/get/logs/rspamd-stats — rspamd version/uptime + cumulative
+//     scan counters incl. per-action tallies (reject, soft reject, greylist…).
+//   - GET /api/v1/get/logs/sasl — recent mail login activity: service, username
+//     and source IP (`real_rip`) per event (newest ~1000). No success/failure
+//     flag — failures are captured in the netfilter log instead.
+
+/** One raw entry from GET /api/v1/get/logs/netfilter. */
+export interface MailcowNetfilterLogEntry {
+  /** Unix epoch SECONDS (UTC) when the event was logged. */
+  time: number;
+  /** syslog-style priority as reported by mailcow ('warn' | 'info'). */
+  priority: string;
+  /** Human-readable log line (the only per-event detail the API carries). */
+  message: string;
+}
+
+/**
+ * GET /api/v1/get/logs/netfilter — newest ~1000 netfilter jail log entries.
+ * Returns [] when the instance has no logged events yet. Entries without a
+ * usable timestamp or message are dropped (they cannot be deduped/ordered).
+ */
+export async function getNetfilterLogs(client: AxiosInstance): Promise<MailcowNetfilterLogEntry[]> {
+  const rows = await getRows(client, '/api/v1/get/logs/netfilter');
+  return rows
+    .map((r) => {
+      const time = typeof r['time'] === 'number' ? r['time'] : Number(r['time']);
+      const message = typeof r['message'] === 'string' ? r['message'] : '';
+      if (!Number.isFinite(time) || time <= 0 || message.trim() === '') return null;
+      const priority = typeof r['priority'] === 'string' && r['priority'].trim() !== '' ? (r['priority'] as string).trim().toLowerCase() : 'info';
+      return { time, priority, message } as MailcowNetfilterLogEntry;
+    })
+    .filter((e): e is MailcowNetfilterLogEntry => e !== null);
+}
+
+/** Normalized rspamd stats from GET /api/v1/get/logs/rspamd-stats. */
+export interface MailcowRspamdStats {
+  /** Rspamd version string (e.g. "4.2.3"). Absent when the endpoint is empty. */
+  version?: string;
+  /** Seconds since rspamd started. */
+  uptimeSec?: number;
+  /** Total messages scanned since start. */
+  scanned?: number;
+  /** Messages learned into the bayes database. */
+  learned?: number;
+  /** Cumulative per-action tallies (reject, soft reject, greylist, …). */
+  actions: Record<string, number>;
+}
+
+/**
+ * GET /api/v1/get/logs/rspamd-stats — rspamd version + cumulative counters.
+ * Returns `{ actions: {} }` when the endpoint answers empty (instances without
+ * the stats endpoint) so callers can treat it as "not verifiable".
+ */
+export async function getRspamdStats(client: AxiosInstance): Promise<MailcowRspamdStats> {
+  const raw = await getObject(client, '/api/v1/get/logs/rspamd-stats');
+  const num = (v: unknown): number | undefined => {
+    if (typeof v === 'number' && Number.isFinite(v)) return v;
+    if (typeof v === 'string' && v.trim() !== '' && Number.isFinite(Number(v))) return Number(v);
+    return undefined;
+  };
+  const actionsRaw = raw['actions'];
+  const actions: Record<string, number> = {};
+  if (actionsRaw && typeof actionsRaw === 'object' && !Array.isArray(actionsRaw)) {
+    for (const [k, v] of Object.entries(actionsRaw as Record<string, unknown>)) {
+      const n = num(v);
+      if (n !== undefined) actions[k] = n;
+    }
+  }
+  return {
+    ...(typeof raw['version'] === 'string' && (raw['version'] as string).trim() !== '' ? { version: (raw['version'] as string).trim() } : {}),
+    ...(num(raw['uptime']) !== undefined ? { uptimeSec: num(raw['uptime']) } : {}),
+    ...(num(raw['scanned']) !== undefined ? { scanned: num(raw['scanned']) } : {}),
+    ...(num(raw['learned']) !== undefined ? { learned: num(raw['learned']) } : {}),
+    actions,
+  };
+}
+
+/** One raw entry from GET /api/v1/get/logs/sasl (recent mail login activity). */
+export interface MailcowSaslLogin {
+  /** Service the login targeted ('imap', 'smtp', …). */
+  service: string;
+  /** Account that authenticated. */
+  username: string;
+  /** Source IP of the connection (`real_rip`). */
+  ip: string;
+  /** Whether an app password was used (0/1 in mailcow's rows). */
+  appPassword: boolean;
+}
+
+/**
+ * GET /api/v1/get/logs/sasl — newest ~1000 mail login events. Returns [] when
+ * the instance has no logged logins yet. Rows without a usable source IP or
+ * username are dropped (they cannot be attributed to an address/account).
+ */
+export async function getSaslLogins(client: AxiosInstance): Promise<MailcowSaslLogin[]> {
+  const rows = await getRows(client, '/api/v1/get/logs/sasl');
+  return rows
+    .map((r) => {
+      const ip = typeof r['real_rip'] === 'string' ? (r['real_rip'] as string).trim() : '';
+      const username = typeof r['username'] === 'string' ? (r['username'] as string).trim() : '';
+      if (ip === '' || username === '') return null;
+      const service = typeof r['service'] === 'string' && (r['service'] as string).trim() !== '' ? (r['service'] as string).trim().toLowerCase() : 'unknown';
+      const appPassword = r['app_password'] === 1 || r['app_password'] === '1' || r['app_password'] === true;
+      return { service, username, ip, appPassword } as MailcowSaslLogin;
+    })
+    .filter((e): e is MailcowSaslLogin => e !== null);
+}

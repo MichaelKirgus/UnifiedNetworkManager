@@ -16,6 +16,7 @@
 
 import path from 'path';
 import { Request, Response } from 'express';
+import axios from 'axios';
 import type { AxiosInstance } from 'axios';
 import {
   Health,
@@ -35,6 +36,12 @@ import { MailcowActionContext } from './actions';
 import { registry as actionRegistry } from './actions';
 import { collectSecurityChecks } from './security';
 import { buildPlan, PlanningError } from './plan';
+import { PLUGIN_UUID, stateStore } from './stateStore';
+import {
+  newestNetfilterTimeSec,
+  selectFreshNetfilterEntries,
+  toFirewallEventRows,
+} from './netfilter';
 import {
   MailcowApiError,
   MailcowCredentials,
@@ -44,19 +51,22 @@ import {
   getAliases,
   getDomains,
   getMailboxes,
+  getNetfilterLogs,
   getStatusVersion,
   isAuthError,
 } from './client/mailcowClient';
 
 // --- Identity -----------------------------------------------------------------
 const identity = resolvePluginIdentity({
-  uuid: '00000000-0000-4000-8000-00000000000f', // mailcow plugin — stable primary key in the API
+  uuid: PLUGIN_UUID, // mailcow plugin — stable primary key in the API (see ./stateStore)
   name: 'Mailcow Plugin',
   description:
-    'mailcow-dockerized management — domains, mailboxes and aliases via the REST API, with DKIM/fail2ban security checks.',
-  version: '0.2.0',
+    'mailcow-dockerized management — domains, mailboxes and aliases via the REST API, with fail2ban/DKIM/rspamd security checks and netfilter jail-log events.',
+  version: '0.3.0',
   vendors: ['mailcow'],
-  // securityChecks: fail2ban (rate limiting) + per-domain DKIM over the REST API.
+  // securityChecks: fail2ban (rate limiting), per-domain DKIM, rspamd spam-filter
+  // state and SASL login activity over the REST API; netfilter jail log rows are
+  // pushed to the shared firewall-events table.
   capabilities: ['monitoring', 'inventory', 'configuration', 'planning', 'securityChecks'],
 });
 
@@ -110,7 +120,15 @@ const PLUGIN_OPTIONS: PluginOptionDescriptor[] = [
     type: 'boolean' as const,
     default: true,
     description:
-      'Run per-instance security checks (fail2ban brute-force protection state and per-domain DKIM key presence/strength). Findings appear in the cross-device Security page.',
+      'Run per-instance security checks (fail2ban brute-force protection state, per-domain DKIM key presence/strength, rspamd spam-filter state and SASL login activity). Findings appear in the cross-device Security page.',
+  },
+  {
+    key: 'netfilterLogEnabled',
+    label: 'Netfilter block log',
+    type: 'boolean' as const,
+    default: true,
+    description:
+      "Push mailcow's netfilter jail log (brute-force pre-ban warnings, failed logins and port scans) to the Firewall Events page.",
   },
 ];
 
@@ -410,9 +428,9 @@ async function handleMonitoring(req: Request, res: Response, body: Record<string
         if (!isAuthError(aliasesRes.reason)) health = 'warning';
       }
 
-      // Security checks (fail2ban + per-domain DKIM). Throttled internally to a
-      // ~15-min cadence; best-effort — a failure omits the key entirely (absent
-      // = no wipe, per the ingestion contract).
+      // Security checks (fail2ban + DKIM + rspamd + SASL login activity).
+      // Throttled internally to a ~15-min cadence; best-effort — a failure omits
+      // the key entirely (absent = no wipe, per the ingestion contract).
       if (settings.securityChecksEnabled !== false) {
         try {
           const domainNames = domainsRes.status === 'fulfilled'
@@ -422,6 +440,14 @@ async function handleMonitoring(req: Request, res: Response, body: Record<string
         } catch {
           /* best-effort — a failed check must never sink the poll */
         }
+      }
+
+      // Netfilter jail log → Firewall Events page. Fire-and-forget: a slow or
+      // dead endpoint must never sink the poll. Runs on inventory polls only —
+      // the log is a ~190 KB payload that grows slowly, so metrics-only beats
+      // (every ~30 s) would hammer the appliance for nothing.
+      if (settings.netfilterLogEnabled !== false && deviceId) {
+        void collectAndPushNetfilterEvents(host, String(deviceId), client).catch(() => { /* best-effort */ });
       }
     }
   } catch (err) {
@@ -455,6 +481,85 @@ async function handleMonitoring(req: Request, res: Response, body: Record<string
     metrics,
     metricDescriptors: METRIC_DESCRIPTORS,
   });
+}
+
+// --- Netfilter jail log → firewall-events push pipeline (fire-and-forget) -------
+// mailcow's netfilter jail log is an append-only ring buffer (~newest 1000
+// entries); we PUSH newly classified rows to the API's internal
+// /plugin/firewall-events endpoint (same pattern as OPNsense's firewall log).
+// Incremental reads use a TIME cursor: the endpoint has no digest param, so we
+// store the max epoch seconds seen in the shared state store and push entries
+// strictly newer than it. Dedupe by vendorEventId (a deterministic sha1 of
+// time|message) at ingest makes any re-send harmless; a missing cursor takes a
+// ≤1000-entry baseline on first run.
+
+const NETFILTER_STATE_NAMESPACE = 'netfilter-logs';
+
+const eventApi = axios.create({
+  baseURL: (process.env.UNM_API_URL ?? 'http://localhost:3000/v1').replace(/\/+$/, ''),
+  timeout: 5_000,
+  headers: process.env.PLUGIN_API_KEY ? { 'x-plugin-api-key': process.env.PLUGIN_API_KEY } : undefined,
+});
+
+/** Pushes one batch with a single retry; resolves true when the API accepted it. */
+async function pushNetfilterBatch(deviceId: string, events: Array<Record<string, unknown>>): Promise<boolean> {
+  const body = { pluginId: identity.effectiveUuid, deviceId, events };
+  try {
+    await eventApi.post('/plugin/firewall-events', body);
+    return true;
+  } catch {
+    await new Promise((r) => setTimeout(r, 500));
+    try {
+      await eventApi.post('/plugin/firewall-events', body);
+      return true;
+    } catch (err) {
+      logger.warn(`Dropped netfilter-event batch of ${events.length} rows for device ${deviceId}`, { context: { error: String((err as Error)?.message ?? err) } });
+      return false; // cursor NOT advanced — the same entries are re-fetched next beat
+    }
+  }
+}
+
+/**
+ * Collects new mailcow netfilter jail-log entries for one host and pushes them
+ * to the API. Runs fire-and-forget from /monitoring (never blocks or fails the
+ * poll). The time cursor lives in the shared state store keyed by management
+ * address, so it survives container restarts.
+ */
+async function collectAndPushNetfilterEvents(host: string, deviceId: string, client: AxiosInstance): Promise<void> {
+  let cursorSec: number | null = null;
+  try {
+    const stored = await stateStore.get(NETFILTER_STATE_NAMESPACE, host);
+    if (stored && typeof stored === 'object' && Number.isFinite(Number((stored as Record<string, unknown>)['timeSec']))) {
+      cursorSec = Number((stored as Record<string, unknown>)['timeSec']);
+    }
+  } catch { /* best-effort — no cursor means a fresh baseline */ }
+
+  let entries;
+  try {
+    entries = await getNetfilterLogs(client);
+  } catch {
+    return; // best-effort — a dead endpoint must never break the poll
+  }
+
+  const fresh = selectFreshNetfilterEntries(entries, cursorSec);
+  if (fresh.length === 0) return;
+
+  const events = toFirewallEventRows(fresh);
+  if (events.length > 0) {
+    const ok = await pushNetfilterBatch(deviceId, events);
+    if (!ok) return; // cursor NOT advanced — the same entries are re-fetched next beat
+  }
+
+  // Advance the cursor over ALL fresh entries (parsed or not) so non-event lines
+  // (chain setup, allowlist changes) are never re-fetched. The API dedupes by
+  // (deviceId, pluginId, vendorEventId), so even a lost-ack race can't create
+  // duplicate rows.
+  const newestSec = newestNetfilterTimeSec(fresh);
+  if (newestSec !== null) {
+    try {
+      await stateStore.put([{ namespace: NETFILTER_STATE_NAMESPACE, key: host, value: { timeSec: newestSec }, deviceId }]);
+    } catch { /* best-effort — worst case the next beat re-sends and dedupe absorbs it */ }
+  }
 }
 
 // ---------------------------------------------------------------------------

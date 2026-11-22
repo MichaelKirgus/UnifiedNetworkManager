@@ -22,6 +22,8 @@ const KIND_STYLES: Record<string, string> = {
   'wifi-encryption': 'bg-accent-purple text-accent-purple-fg',
   'vpn-crypto': 'bg-accent-cyan text-accent-cyan-fg',
   'email-auth': 'bg-accent-sky text-accent-sky-fg',
+  'spam-filtering': 'bg-accent-violet text-accent-violet-fg',
+  'auth-activity': 'bg-accent-indigo text-accent-indigo-fg',
   other: 'bg-muted text-secondary',
 };
 
@@ -35,6 +37,8 @@ const KIND_LABELS: Record<string, string> = {
   'wifi-encryption': 'wifi encryption',
   'vpn-crypto': 'vpn crypto',
   'email-auth': 'email auth',
+  'spam-filtering': 'spam filtering',
+  'auth-activity': 'login activity',
   other: 'other',
 };
 
