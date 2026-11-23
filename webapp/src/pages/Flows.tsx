@@ -68,8 +68,11 @@ const FINDING_KIND_LABEL: Record<FlowSecurityFindingKind, string> = {
   'new-destination': 'New destination',
   'port-scan': 'Port scan',
   'egress-baseline': 'Egress spike',
+  beacon: 'Beaconing',
   'ioc-hit': 'Threat intel hit',
   'dns-ioc-hit': 'DNS domain hit',
+  dga: 'DGA domain',
+  'dns-tunnel': 'DNS tunnel',
   'log-rule': 'Log rule hit',
 };
 

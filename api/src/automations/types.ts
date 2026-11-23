@@ -192,8 +192,8 @@ export interface ContainerLogTrigger {
   pattern: string;
 }
 
-/** Finding kinds produced by the flow security worker (flow_security_findings.kind). Mirrors FLOW_SECURITY_KINDS in workers/flowSecurity.ts. 'ioc-hit' + 'dns-ioc-hit' rows are written by the threat-intel worker. */
-export const FLOW_SECURITY_FINDING_KINDS = ['new-destination', 'port-scan', 'egress-baseline', 'ioc-hit', 'dns-ioc-hit'] as const;
+/** Finding kinds produced into flow_security_findings.kind. Mirrors FLOW_SECURITY_KINDS in workers/flowSecurity.ts — 'ioc-hit' + 'dns-ioc-hit' rows are written by the threat-intel worker, 'dga' + 'dns-tunnel' by the DNS security heuristics worker and 'log-rule' by the Sigma log-rule worker. */
+export const FLOW_SECURITY_FINDING_KINDS = ['new-destination', 'port-scan', 'egress-baseline', 'beacon', 'ioc-hit', 'dns-ioc-hit', 'dga', 'dns-tunnel', 'log-rule'] as const;
 export type FlowSecurityFindingKind = (typeof FLOW_SECURITY_FINDING_KINDS)[number];
 
 /**

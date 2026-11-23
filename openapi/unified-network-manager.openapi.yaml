@@ -5558,8 +5558,10 @@ paths:
         - in: query
           name: kind
           required: false
-          schema: { type: string, enum: [new-destination, port-scan, egress-baseline, ioc-hit, dns-ioc-hit] }
-          description: Filter to one detector ('ioc-hit' + 'dns-ioc-hit' rows are written by the threat-intel worker)
+          schema: { type: string, enum: [new-destination, port-scan, egress-baseline, beacon, ioc-hit, dns-ioc-hit, dga, dns-tunnel, log-rule] }
+          description: >-
+            Filter to one detector. 'ioc-hit' + 'dns-ioc-hit' rows are written by the threat-intel worker,
+            'dga' + 'dns-tunnel' by the DNS security heuristics worker and 'log-rule' by the Sigma log-rule worker.
         - in: query
           name: status
           required: false
@@ -5583,6 +5585,17 @@ paths:
                       lastError: { type: [string, 'null'] }
                       cursorBucketMs: { type: integer, format: int64 }
                       seenDstCount: { type: integer }
+                      beaconTrackedPairs: { type: integer, description: (src → internet dst) pairs currently tracked by the beacon detector's rolling window }
+                  dnsHeuristics:
+                    type: object
+                    description: DNS heuristic detectors (DGA + tunneling over dns_query_events; workers/dnsSecurity.ts)
+                    properties:
+                      enabled: { type: boolean }
+                      lastRunAt: { type: [string, 'null'], format: date-time }
+                      lastError: { type: [string, 'null'] }
+                      watermarkMs: { type: integer, format: int64, description: Rows with tsMs at/before this epoch-ms value are never scanned (no history replay) }
+                      dgaDomainCacheSize: { type: integer }
+                      tunnelTrackedPairs: { type: integer }
         '401':
           description: Authentication required
 
@@ -12041,14 +12054,16 @@ components:
       type: object
       properties:
         id: { type: string }
-        kind: { type: string, enum: [new-destination, port-scan, egress-baseline, ioc-hit, dns-ioc-hit, log-rule] }
+        kind: { type: string, enum: [new-destination, port-scan, egress-baseline, beacon, ioc-hit, dns-ioc-hit, dga, dns-tunnel, log-rule] }
         severity: { type: string, enum: [info, warning, critical] }
         srcIp:
           type: [string, 'null']
           description: Null for findings that are not IP-centric (e.g. log-rule hits on lines without a source address)
         dstIp:
           type: [string, 'null']
-          description: Null for port-scan findings (the condition aggregates over many destinations) and most log-rule hits
+          description: >-
+            Null for port-scan, DGA and DNS-tunneling findings (the condition is not destination-centric) and most
+            log-rule hits
         detail: { type: string }
         context:
           type: [object, 'null']
@@ -16359,7 +16374,10 @@ components:
       required: [id, type]
       description: >-
         Fires when NEW flow security findings appear (workers/flowSecurity.ts —
-        new-destination, port-scan or egress-baseline). A per-trigger watermark
+        new-destination, port-scan, egress-baseline and beaconing; plus
+        'ioc-hit'/'dns-ioc-hit' from the threat-intel worker, 'dga'/'dns-tunnel'
+        from the DNS heuristics worker and 'log-rule' from the Sigma log-rule
+        worker — all share flow_security_findings). A per-trigger watermark
         seeds on first run without firing; each scan fires at most once with the
         newest in-scope finding. Template tokens: {{finding.kind}},
         {{finding.srcIp}}, {{finding.dstIp}}, {{finding.severity}},
@@ -16371,7 +16389,7 @@ components:
         kinds:
           type: array
           minItems: 1
-          items: { type: string, enum: [new-destination, port-scan, egress-baseline] }
+          items: { type: string, enum: [new-destination, port-scan, egress-baseline, beacon, ioc-hit, dns-ioc-hit, dga, dns-tunnel, log-rule] }
           description: "Only these finding kinds (absent = all)"
 
     AutomationActionBlock:

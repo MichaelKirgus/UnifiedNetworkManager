@@ -660,6 +660,58 @@ export const SETTING_DESCRIPTORS: SettingDescriptor[] = [
       'The current egress window must be at least this multiple of the pair\'s historical per-hour median (and above the candidate floor) to raise a finding. A pair with no history is not flagged here — first-time destinations are covered by the new-destination detector.',
   },
   {
+    key: 'flowSecurityBeaconMinBuckets',
+    label: 'Beaconing threshold (active buckets)',
+    type: 'integer',
+    category: 'Flows',
+    unit: 'buckets/24h',
+    min: 4,
+    max: 100,
+    default: 6,
+    envVar: 'UNM_FLOW_SECURITY_BEACON_MIN_BUCKETS',
+    help:
+      'A (source → internet destination) pair active in at least this many distinct 5-minute buckets inside the beaconing window becomes a candidate. Combined with the jitter gate, this is what separates periodic C2 check-ins from bursty normal traffic.',
+  },
+  {
+    key: 'flowSecurityBeaconMaxJitterPercent',
+    label: 'Beaconing max jitter',
+    type: 'integer',
+    category: 'Flows',
+    unit: '%',
+    min: 0,
+    max: 100,
+    default: 25,
+    envVar: 'UNM_FLOW_SECURITY_BEACON_MAX_JITTER_PERCENT',
+    help:
+      'Maximum allowed jitter (coefficient of variation × 100) of the inter-bucket intervals for a pair to count as beaconing. 0 = perfectly periodic only; raise it if real C2 with timing noise is missed, lower it if bursty transfers false-positive.',
+  },
+  {
+    key: 'flowSecurityBeaconWindowHours',
+    label: 'Beaconing window',
+    type: 'integer',
+    category: 'Flows',
+    unit: 'hours',
+    min: 1,
+    max: 72,
+    default: 24,
+    envVar: 'UNM_FLOW_SECURITY_BEACON_WINDOW_HOURS',
+    help:
+      'Rolling window over which the beacon detector counts a pair\'s active 5-minute buckets. Longer windows catch slow beacons (hourly check-ins) but need proportionally more history.',
+  },
+  {
+    key: 'flowSecurityBeaconMaxAvgBytesPerBucket',
+    label: 'Beaconing max avg bytes per bucket',
+    type: 'integer',
+    category: 'Flows',
+    unit: 'bytes',
+    min: 65_536,
+    max: 1_099_511_627_776,
+    default: 4_194_304,
+    envVar: 'UNM_FLOW_SECURITY_BEACON_MAX_AVG_BYTES_PER_BUCKET',
+    help:
+      'Pairs whose average estimated bytes per active bucket exceed this are NOT flagged as beacons — a sustained heavy transfer is an exfiltration candidate (sustained-egress detector\'s domain), not a check-in. Beacons are small keep-alives.',
+  },
+  {
     key: 'flowSecurityFindingsRetentionDays',
     label: 'Flow security findings retention',
     type: 'integer',
@@ -688,6 +740,98 @@ export const SETTING_DESCRIPTORS: SettingDescriptor[] = [
     envVar: 'UNM_THREAT_INTEL_ENABLED',
     help:
       'Master switch for the threat-intel worker. When on, configured IOC feed sources are fetched through the web-fetch plugin and every flow destination plus firewall-event IP is checked against the active indicators; hits raise "threat intel hit" findings (notifications + securityFinding automation trigger). Turning this off stops fetching and matching but keeps existing data visible.',
+  },
+
+  // DNS security heuristics (workers/dnsSecurity.ts) — deterministic DGA and
+  // tunneling detectors over dns_query_events. Findings land in the shared
+  // flow_security_findings pipeline (kinds 'dga' / 'dns-tunnel').
+  {
+    key: 'dnsSecurityEnabled',
+    label: 'DNS security heuristics',
+    type: 'boolean',
+    category: 'Security',
+    default: true,
+    envVar: 'UNM_DNS_SECURITY_ENABLED',
+    help:
+      'Master switch for the DNS heuristic detectors (DGA-like domains and DNS tunneling) over ingested resolver query logs. Findings appear in the Flows page "Security" section alongside the flow-based findings; turning this off stops new detections but keeps existing findings visible.',
+  },
+  {
+    key: 'dnsSecurityDgaMinLabelLen',
+    label: 'DGA minimum label length',
+    type: 'integer',
+    category: 'Security',
+    unit: 'chars',
+    min: 8,
+    max: 63,
+    default: 12,
+    envVar: 'UNM_DNS_SECURITY_DGA_MIN_LABEL_LEN',
+    help:
+      'A domain is scored as DGA-like only when its longest non-TLD label has at least this many characters. Short labels are almost always human-readable.',
+  },
+  {
+    key: 'dnsSecurityDgaMinEntropyX10',
+    label: 'DGA minimum label entropy (×10)',
+    type: 'integer',
+    category: 'Security',
+    unit: 'bits/char ×10',
+    min: 25,
+    max: 60,
+    default: 36,
+    envVar: 'UNM_DNS_SECURITY_DGA_MIN_ENTROPY_X10',
+    help:
+      'Minimum Shannon entropy (bits per character, ×10) of the longest non-TLD label. Random strings sit near 4.7 for lowercase; typical English words stay below ~3.5. Stored ×10 because settings are integers.',
+  },
+  {
+    key: 'dnsSecurityDgaMaxVowelRatioPercent',
+    label: 'DGA max vowel ratio',
+    type: 'integer',
+    category: 'Security',
+    unit: '%',
+    min: 0,
+    max: 60,
+    default: 25,
+    envVar: 'UNM_DNS_SECURITY_DGA_MAX_VOWEL_RATIO_PERCENT',
+    help:
+      'Maximum vowel share (a/e/i/o/u, in percent) of the longest non-TLD label. DGA strings are consonant-heavy; English averages ~36–40%. All three DGA gates (length + entropy + vowel ratio) must hold.',
+  },
+  {
+    key: 'dnsSecurityTunnelWindowHours',
+    label: 'DNS tunneling window',
+    type: 'integer',
+    category: 'Security',
+    unit: 'hours',
+    min: 1,
+    max: 24,
+    default: 1,
+    envVar: 'UNM_DNS_SECURITY_TUNNEL_WINDOW_HOURS',
+    help:
+      'Rolling window over which per-client query counts and subdomain label lengths are aggregated for the tunneling detector.',
+  },
+  {
+    key: 'dnsSecurityTunnelMinQueries',
+    label: 'DNS tunneling min queries',
+    type: 'integer',
+    category: 'Security',
+    unit: 'queries/window',
+    min: 5,
+    max: 10_000,
+    default: 30,
+    envVar: 'UNM_DNS_SECURITY_TUNNEL_MIN_QUERIES',
+    help:
+      'A client must issue at least this many subdomain-bearing queries to the same base domain inside the tunneling window before it becomes a candidate.',
+  },
+  {
+    key: 'dnsSecurityTunnelMinAvgLabelLen',
+    label: 'DNS tunneling min avg label length',
+    type: 'integer',
+    category: 'Security',
+    unit: 'chars',
+    min: 8,
+    max: 63,
+    default: 24,
+    envVar: 'UNM_DNS_SECURITY_TUNNEL_MIN_AVG_LABEL_LEN',
+    help:
+      'The average subdomain label length (labels left of the base domain) must reach this many characters. Tunneling tools encode data into very long labels; normal clients rarely exceed ~15.',
   },
   {
     key: 'threatIntelFetchIntervalMinutes',

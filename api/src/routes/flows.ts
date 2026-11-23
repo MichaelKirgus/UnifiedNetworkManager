@@ -5,6 +5,7 @@ import { pluginAxios } from '../utils/pluginHttp';
 import { resolveOne } from '../utils/reverseDns';
 import { lookupGeoIp } from '../utils/geoIp';
 import { getFlowIngestStats } from '../workers/flows';
+import { getDnsSecurityStats } from '../workers/dnsSecurity';
 import { getFlowSecurityStats, resetFlowSecurityBaseline, FLOW_SECURITY_KINDS } from '../workers/flowSecurity';
 import { getEffectiveValues, getEffectiveSettingValue, invalidateSystemSettingsCache } from '../systemSettings';
 import { getRepoFile, openRepoFile } from '../fileRepo';
@@ -963,12 +964,14 @@ router.get('/flow-collectors', requireAuth, requirePermission('flows:read'), asy
 });
 
 /**
- * GET /v1/flows/security — security findings from the flow tiers.
+ * GET /v1/flows/security — security findings from the flow tiers + DNS logs.
  *
- * Rows written by workers/flowSecurity.ts (new-destination, port-scan and
- * egress-baseline detectors): one row per distinct condition while active,
- * auto-resolved 24 h after last observation. `status` filters open vs resolved
- * rows; `kind` narrows to one detector.
+ * Rows written by workers/flowSecurity.ts (new-destination, port-scan,
+ * egress-baseline and beaconing detectors), workers/threatIntel.ts
+ * ('ioc-hit'/'dns-ioc-hit'), workers/dnsSecurity.ts ('dga'/'dns-tunnel') and
+ * workers/logRules.ts ('log-rule'): one row per distinct condition while
+ * active, auto-resolved 24 h after last observation. `status` filters open vs
+ * resolved rows; `kind` narrows to one detector.
  */
 router.get('/flows/security', requireAuth, requirePermission('flows:read'), async (req: Request, res: Response) => {
   const q = req.query as Record<string, unknown>;
@@ -1020,6 +1023,12 @@ router.get('/flows/security', requireAuth, requirePermission('flows:read'), asyn
       worker: {
         enabled: (await getEffectiveSettingValue('flowSecurityEnabled')) === true,
         ...getFlowSecurityStats(),
+      },
+      // DNS heuristic detectors (workers/dnsSecurity.ts) — same findings table,
+      // separate watermark-based scan of dns_query_events.
+      dnsHeuristics: {
+        enabled: (await getEffectiveSettingValue('dnsSecurityEnabled')) === true,
+        ...getDnsSecurityStats(),
       },
     });
   } catch (error) {

@@ -47,7 +47,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { pool } from '../db';
 import { getEffectiveValues } from '../systemSettings';
 import { emitNotification } from '../notifications';
-import { addRepoFile, deleteRepoFile } from '../fileRepo';
+import { addRepoFile, deleteRepoFile, sanitizeTags } from '../fileRepo';
 import { resolveWebFetchProvider, fetchViaWebFetch } from '../webFetchBroker';
 import { LEADER_KEYS } from './leader';
 import { initWorker, trackBeat } from './stats';
@@ -427,6 +427,9 @@ async function fetchSource(source: SourceRow): Promise<void> {
       data: bytes,
       name: threatIntelFileName(source.name, source.format),
       category: 'threat-intel',
+      // Flat feature tags — group/filter these snapshots in the Files page
+      // without any folder structure (portable across repo backends).
+      tags: ['threat-intel', ...sanitizeTags([source.name])],
       uploadedBy: 'plugin',
     });
     if (source.repoFileId && source.repoFileId !== entry.id) {
@@ -726,8 +729,9 @@ async function notifyDnsIocHit(f: FindingInput): Promise<void> {
 /** Resolves hostname clients to IPs via the hosts table (one batched lookup,
  * newest lastSeenAt wins per name). The appliance's REST API substitutes a
  * reverse-resolved hostname for the client IP, so findings — which need an INET
- * source address — require this hop. */
-async function resolveClientHostnames(names: string[]): Promise<Map<string, string>> {
+ * source address — require this hop. Exported: workers/dnsSecurity.ts reuses it
+ * for its DGA / tunneling findings. */
+export async function resolveClientHostnames(names: string[]): Promise<Map<string, string>> {
   if (names.length === 0) return new Map();
   try {
     const res = await pool.query<{ h: string; ip: string; seen: string }>(

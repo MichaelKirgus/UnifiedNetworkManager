@@ -71,6 +71,7 @@ import { startGeoIpWorker } from './workers/geoip';
 import { startMapBasemapWorker } from './workers/mapBasemap';
 import { startCveWorker } from './cve/worker';
 import { startFlowsWorker } from './workers/flows';
+import { startDnsSecurityWorker } from './workers/dnsSecurity';
 import { startFlowSecurityWorker } from './workers/flowSecurity';
 import { startReverseDnsWorker } from './workers/reverseDns';
 import { startThreatIntelWorker } from './workers/threatIntel';
@@ -472,11 +473,14 @@ async function main(): Promise<void> {
     // Flow data: drains the POST /plugin/flows queue into flow_micro and runs
     // the 5m/hourly rollups + partition maintenance (sFlow/NetFlow feature).
     void runAsLeader(LEADER_KEYS.flows, 'flows', () => startFlowsWorker()).then((stop) => workerStops.push(stop));
-    // Flow security insights — new-destination / port-scan / egress-baseline
-    // detectors over the enriched flow tiers (findings + notifications).
+    // Flow security insights — new-destination / port-scan / egress-baseline /
+    // beaconing detectors over the enriched flow tiers (findings + notifications).
     void runAsLeader(LEADER_KEYS.flowSecurity, 'flowSecurity', () => startFlowSecurityWorker()).then((stop) => workerStops.push(stop));
     // Threat-intel feed fetch + IOC matching (Security page; cadence from threatIntelFetchIntervalMinutes).
     void runAsLeader(LEADER_KEYS.threatIntel, 'threatIntel', () => startThreatIntelWorker()).then((stop) => workerStops.push(stop));
+    // DNS security heuristics — DGA-like domains + tunneling over dns_query_events
+    // (findings into the shared flow_security_findings pipeline).
+    void runAsLeader(LEADER_KEYS.dnsSecurity, 'dnsSecurity', () => startDnsSecurityWorker()).then((stop) => workerStops.push(stop));
 
     // Log rules — Sigma detection over ingested device log lines (Security page;
     // watermark scan of security_events, findings into the shared pipeline).

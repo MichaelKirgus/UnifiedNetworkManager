@@ -18,6 +18,12 @@
  *      exceeds its historical per-hour median (lookback `flowSecurityEgressBaselineDays`
  *      over the hourly tier) by at least `flowSecurityEgressBaselineMultiple`,
  *      with an absolute candidate floor of `flowSecurityEgressMinBytes`.
+ *   4. beacon          — a (source → internet destination) pair active in ≥
+ *      `flowSecurityBeaconMinBuckets` five-minute buckets inside a rolling window
+ *      (`flowSecurityBeaconWindowHours`) with near-constant spacing (inter-bucket
+ *      jitter ≤ `flowSecurityBeaconMaxJitterPercent`, coefficient of variation).
+ *      The classic C2 check-in signature; heavy sustained transfers are excluded
+ *      via `flowSecurityBeaconMaxAvgBytesPerBucket` (that's detector 3's domain).
  *
  * Findings land in flow_security_findings (one row per distinct condition,
  * upserted while it persists). A finding raises ONE notification when first
@@ -51,11 +57,12 @@ const AUTO_RESOLVE_AFTER_MS = 86_400_000; // 24 h
 const EGRESS_CHECK_INTERVAL_MS = 30 * 60_000;
 
 // 'ioc-hit' rows are written by workers/threatIntel.ts (threat-intel matching),
-// 'dns-ioc-hit' rows by its DNS pass (queried domains vs domain-list feeds) and
-// 'log-rule' rows by workers/logRules.ts (Sigma rules over ingested log lines)
-// — they share this table, the auto-resolve sweep and the securityFinding
-// automation trigger with the three flow detectors.
-export const FLOW_SECURITY_KINDS = ['new-destination', 'port-scan', 'egress-baseline', 'ioc-hit', 'dns-ioc-hit', 'log-rule'] as const;
+// 'dns-ioc-hit' rows by its DNS pass (queried domains vs domain-list feeds),
+// 'dga' + 'dns-tunnel' rows by workers/dnsSecurity.ts (DNS heuristics over
+// dns_query_events) and 'log-rule' rows by workers/logRules.ts (Sigma rules
+// over ingested log lines) — they share this table, the auto-resolve sweep and
+// the securityFinding automation trigger with the flow detectors.
+export const FLOW_SECURITY_KINDS = ['new-destination', 'port-scan', 'egress-baseline', 'beacon', 'ioc-hit', 'dns-ioc-hit', 'dga', 'dns-tunnel', 'log-rule'] as const;
 export type FlowSecurityKind = (typeof FLOW_SECURITY_KINDS)[number];
 
 const SEVERITY_RANK: Record<'info' | 'warning' | 'critical', number> = { info: 0, warning: 1, critical: 2 };
@@ -67,6 +74,12 @@ let cursorBucketMs = Math.floor(Date.now() / BUCKET_MS) * BUCKET_MS;
 /** Every dst IP stored in either agg tier at load time + everything processed since. */
 let seenDstIps: Set<string> | null = null;
 let lastEgressCheckMs = 0;
+/** Active-bucket history per (src → internet dst) pair for the beacon detector.
+ * Key `${srcIp}|${dstIp}` — IP strings never contain '|'. Values are sorted,
+ * deduplicated bucket START times inside the rolling window. */
+const beaconHistory = new Map<string, number[]>();
+/** Safety cap on tracked pairs — a runaway fleet must not grow the map unbounded. */
+const BEACON_MAX_TRACKED_PAIRS = 200_000;
 /** Overlap guard — a slow beat must not pile up unbounded concurrent scans. */
 let busy = false;
 let lastRunAt: string | null = null;
@@ -78,12 +91,14 @@ export function getFlowSecurityStats(): {
   lastError: string | null;
   cursorBucketMs: number;
   seenDstCount: number;
+  beaconTrackedPairs: number;
 } {
   return {
     lastRunAt,
     lastError,
     cursorBucketMs,
     seenDstCount: seenDstIps?.size ?? 0,
+    beaconTrackedPairs: beaconHistory.size,
   };
 }
 
@@ -154,6 +169,52 @@ export function egressVerdict(
   const ratio = median > 0 ? Math.round((avgHourly / median) * 10) / 10 : null;
   const severity: 'warning' | 'critical' = ratio !== null && ratio >= 10 ? 'critical' : 'warning';
   return { severity, ratio, baselineMedianBytes: median };
+}
+
+/** Verdict for one candidate pair in detectBeacons. */
+export interface BeaconVerdict {
+  severity: 'warning' | 'critical';
+  /** Mean inter-bucket interval expressed in minutes (bucket units × 5). */
+  periodMinutes: number;
+  /** Number of active 5-minute buckets inside the rolling window. */
+  bucketCount: number;
+  /** Span from first to last active bucket, in hours (one decimal). */
+  spanHours: number;
+  /** Coefficient of variation of the inter-bucket intervals (0–1, three decimals). */
+  jitterCv: number;
+}
+
+/**
+ * Pure decision core of detectBeacons — extracted for unit testing.
+ * `bucketStartsMs` are the START times (ms) of every 5-minute bucket in which
+ * the pair was active, sorted ascending and deduplicated. Returns null when NO
+ * finding is warranted: fewer than `minBuckets` active buckets, or the
+ * inter-bucket intervals jitter by more than `maxJitterPercent` (coefficient
+ * of variation × 100). Perfectly periodic activity over at least twice the
+ * minimum bucket count escalates to critical — exact regularity is very strong
+ * C2 evidence. Note: because buckets are 5-minute slots, a beacon with any
+ * sub-5-minute period shows up in EVERY bucket (interval = 1 unit); longer
+ * periods show up every k-th bucket.
+ */
+export function beaconVerdict(
+  bucketStartsMs: number[],
+  minBuckets: number,
+  maxJitterPercent: number
+): BeaconVerdict | null {
+  if (bucketStartsMs.length < minBuckets) return null;
+  const units: number[] = [];
+  for (let i = 1; i < bucketStartsMs.length; i++) units.push((bucketStartsMs[i] - bucketStartsMs[i - 1]) / BUCKET_MS);
+  const mean = units.reduce((a, b) => a + b, 0) / units.length;
+  if (mean <= 0) return null;
+  // Population std dev — the samples are small and we want a conservative
+  // (slightly higher) jitter estimate, so no Bessel correction.
+  const variance = units.reduce((a, b) => a + (b - mean) ** 2, 0) / units.length;
+  const cv = Math.sqrt(variance) / mean;
+  if (cv * 100 > maxJitterPercent) return null;
+  const periodMinutes = Math.round(mean * (BUCKET_MS / 60_000));
+  const spanHours = Math.round(((bucketStartsMs[bucketStartsMs.length - 1] - bucketStartsMs[0]) / 3_600_000) * 10) / 10;
+  const severity: 'warning' | 'critical' = cv === 0 && bucketStartsMs.length >= minBuckets * 2 ? 'critical' : 'warning';
+  return { severity, periodMinutes, bucketCount: bucketStartsMs.length, spanHours, jitterCv: Math.round(cv * 1_000) / 1_000 };
 }
 
 async function lookupDeviceName(deviceId: string): Promise<string | null> {
@@ -286,6 +347,9 @@ async function notifyFinding(f: FindingInput): Promise<void> {
         break;
       case 'egress-baseline':
         title = `Unusual egress volume from ${srcLabel} to ${f.dstIp}`;
+        break;
+      case 'beacon':
+        title = `Possible beaconing from ${srcLabel} to ${f.dstIp}`;
         break;
     }
     await emitNotification({
@@ -474,6 +538,108 @@ async function detectEgressBaseline(windowEndMs: number): Promise<void> {
   }
 }
 
+// ── Detector 4: beaconing (periodic C2-style check-ins) ─────────────────────
+
+/**
+ * Tracks which 5-minute buckets each (src → internet dst) pair was active in
+ * and flags near-constant spacing — the classic command-and-control check-in
+ * signature. Pure periodicity math lives in beaconVerdict (unit-tested); this
+ * function only maintains the rolling per-pair history and attributes findings.
+ * Heavy sustained transfers are deliberately excluded (avg bytes per active
+ * bucket above `flowSecurityBeaconMaxAvgBytesPerBucket`) — those are
+ * exfiltration candidates, detector 3's domain.
+ */
+async function detectBeacons(fromMs: number, toMs: number): Promise<void> {
+  const values = await getEffectiveValues();
+  const minBuckets = Number(values.flowSecurityBeaconMinBuckets) || 6;
+  const maxJitterPercent = Number.isFinite(Number(values.flowSecurityBeaconMaxJitterPercent)) ? Number(values.flowSecurityBeaconMaxJitterPercent) : 25;
+  const windowHours = Number(values.flowSecurityBeaconWindowHours) || 24;
+  const maxAvgBytes = Number(values.flowSecurityBeaconMaxAvgBytesPerBucket) || 4_194_304; // 4 MiB
+
+  // Prune history older than the rolling window (and cap the map size).
+  const windowStartMs = toMs - windowHours * 3_600_000;
+  for (const [key, arr] of beaconHistory) {
+    while (arr.length > 0 && arr[0] < windowStartMs) arr.shift();
+    if (arr.length === 0) beaconHistory.delete(key);
+  }
+  if (beaconHistory.size > BEACON_MAX_TRACKED_PAIRS) {
+    // eslint-disable-next-line no-console
+    console.warn(`[flow-security] beacon history exceeded ${BEACON_MAX_TRACKED_PAIRS} pairs — resetting`);
+    beaconHistory.clear();
+  }
+
+  // Every (bucket, src → internet dst) triple in the processed range.
+  const res = await pool.query(
+    `SELECT bucket, "srcIp", "dstIp", MAX("srcHostname") AS hostname, MAX("srcDeviceId") AS device_id
+     FROM flow_agg_5m
+     WHERE bucket >= $1 AND bucket < $2
+       AND "dstClass" = 'internet' AND "srcClass" IN ('internal', 'unknown')
+     GROUP BY 1, 2, 3 ORDER BY 1`,
+    [new Date(fromMs).toISOString(), new Date(toMs).toISOString()]
+  );
+
+  const touched = new Map<string, { srcIp: string; dstIp: string; hostname: string | null; deviceId: string | null }>();
+  for (const r of res.rows) {
+    const bucketMs = new Date(String(r.bucket)).getTime();
+    if (!Number.isFinite(bucketMs)) continue;
+    const srcIp = String(r.srcIp);
+    const dstIp = String(r.dstIp);
+    const key = `${srcIp}|${dstIp}`;
+    let arr = beaconHistory.get(key);
+    if (!arr) { arr = []; beaconHistory.set(key, arr); }
+    // One row per (bucket, pair) thanks to GROUP BY — the last-element check
+    // keeps the array sorted + unique even on a retried beat.
+    if (arr[arr.length - 1] !== bucketMs) arr.push(bucketMs);
+    touched.set(key, {
+      srcIp,
+      dstIp,
+      hostname: r.hostname ? String(r.hostname) : null,
+      deviceId: r.device_id ? String(r.device_id) : null,
+    });
+  }
+  if (touched.size === 0) return;
+
+  // Average per-bucket bytes for the touched pairs over the WHOLE window — a
+  // sustained heavy transfer is not a beacon. One hash-joined scan, same
+  // pattern as detectEgressBaseline's baseline query.
+  const keys = [...touched.keys()];
+  const avgRes = await pool.query(
+    `SELECT f."srcIp", f."dstIp", AVG(f."estBytes") AS avg_bytes
+     FROM flow_agg_5m f
+     JOIN (SELECT * FROM unnest($1::inet[], $2::inet[]) AS u(src, dst)) u
+       ON f."srcIp" = u.src AND f."dstIp" = u.dst
+     WHERE f.bucket >= $3 AND f.bucket < $4
+     GROUP BY f."srcIp", f."dstIp"`,
+    [keys.map((k) => k.split('|')[0]), keys.map((k) => k.split('|')[1]), new Date(windowStartMs).toISOString(), new Date(toMs).toISOString()]
+  );
+  const avgByPair = new Map<string, number>();
+  for (const a of avgRes.rows) avgByPair.set(`${a.srcIp}|${a.dstIp}`, Number(a.avg_bytes ?? 0));
+
+  for (const [key, meta] of touched) {
+    const arr = beaconHistory.get(key);
+    if (!arr || arr.length === 0) continue;
+    // The verdict math is pure — unit-tested in flowSecurity.test.ts.
+    const verdict = beaconVerdict(arr, minBuckets, maxJitterPercent);
+    if (!verdict) continue;
+    const avgBytes = avgByPair.get(key);
+    if (avgBytes !== undefined && avgBytes > maxAvgBytes) continue; // sustained heavy transfer — not a beacon
+
+    const detail = `${meta.hostname ?? meta.srcIp} contacted ${meta.dstIp} in ${verdict.bucketCount} of the last ${windowHours} h with near-constant spacing` +
+      ` (≈ every ${verdict.periodMinutes} min, jitter ${(verdict.jitterCv * 100).toFixed(0)}%) — possible beaconing / C2 check-in.`;
+    const input: FindingInput = {
+      kind: 'beacon',
+      srcIp: meta.srcIp,
+      dstIp: meta.dstIp,
+      severity: verdict.severity,
+      detail,
+      context: { periodMinutes: verdict.periodMinutes, bucketCount: verdict.bucketCount, spanHours: verdict.spanHours, jitterCv: verdict.jitterCv, avgBytesPerBucket: Math.round(avgBytes ?? 0), srcHostname: meta.hostname },
+      deviceId: meta.deviceId,
+    };
+    const isNew = await upsertFinding(input);
+    if (isNew) await notifyFinding(input);
+  }
+}
+
 // ── Maintenance sweeps ───────────────────────────────────────────────────────
 
 /** Auto-resolves stale findings and prunes rows past retention. Runs every beat. */
@@ -515,6 +681,7 @@ async function beat(): Promise<void> {
 
     await detectNewDestinations(fromIso, toIso);
     await detectPortScans(fromIso, toIso);
+    await detectBeacons(fromMs, toMs);
     if (nowMs - lastEgressCheckMs >= EGRESS_CHECK_INTERVAL_MS) {
       await detectEgressBaseline(toMs);
       lastEgressCheckMs = nowMs;

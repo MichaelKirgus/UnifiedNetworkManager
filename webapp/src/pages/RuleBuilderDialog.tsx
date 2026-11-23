@@ -535,8 +535,11 @@ const FINDING_KIND_LABEL: Record<FlowSecurityFindingKind, string> = {
   'new-destination': 'New internet destination',
   'port-scan': 'Port scan',
   'egress-baseline': 'Egress baseline breach',
+  beacon: 'Beaconing (C2 check-in)',
   'ioc-hit': 'Threat-intel IOC hit',
   'dns-ioc-hit': 'Threat-intel DNS domain hit',
+  dga: 'DGA-like DNS domain',
+  'dns-tunnel': 'DNS tunneling',
   'log-rule': 'Log rule match',
 };
 

@@ -1691,6 +1691,16 @@ export interface FlowsSecurityResponse {
     lastError: string | null;
     cursorBucketMs: number;
     seenDstCount: number;
+    beaconTrackedPairs: number;
+  };
+  /** DNS heuristic detectors (DGA + tunneling over dns_query_events) — same findings table, separate watermark scan. */
+  dnsHeuristics?: {
+    enabled: boolean;
+    lastRunAt: string | null;
+    lastError: string | null;
+    watermarkMs: number;
+    dgaDomainCacheSize: number;
+    tunnelTrackedPairs: number;
   };
 }
 
@@ -3947,8 +3957,8 @@ export interface AutomationUpdateTrigger {
   defer?: { schedule: AutomationScheduleSpec; maxWaitHours?: number };
 }
 
-/** Finding kinds produced by the flow security worker (flow_security_findings.kind). 'ioc-hit' + 'dns-ioc-hit' rows are written by the threat-intel worker. */
-export const FLOW_SECURITY_FINDING_KINDS = ['new-destination', 'port-scan', 'egress-baseline', 'ioc-hit', 'dns-ioc-hit', 'log-rule'] as const;
+/** Finding kinds produced into flow_security_findings.kind. 'ioc-hit' + 'dns-ioc-hit' rows are written by the threat-intel worker, 'dga' + 'dns-tunnel' by the DNS security heuristics worker and 'log-rule' by the Sigma log-rule worker. */
+export const FLOW_SECURITY_FINDING_KINDS = ['new-destination', 'port-scan', 'egress-baseline', 'beacon', 'ioc-hit', 'dns-ioc-hit', 'dga', 'dns-tunnel', 'log-rule'] as const;
 export type FlowSecurityFindingKind = (typeof FLOW_SECURITY_FINDING_KINDS)[number];
 
 // ── Threat intelligence (GET /threat-intel) ────────────────────────────────

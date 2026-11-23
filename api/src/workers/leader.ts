@@ -60,6 +60,8 @@ export const LEADER_KEYS = {
   dnsQueryRetention: 9026,
   fileRepoRetention: 9027,
   logRules: 9028,
+  logRuleFeeds: 9029,
+  dnsSecurity: 9030,
 } as const;
 
 /**
