@@ -29,8 +29,8 @@ describe('updateRowsForRepoFiles', () => {
   });
 
   it('keeps only rows whose applyInput.repoFileId is in the wanted set', () => {
-    const a = row({ deviceId: 'd1', kind: 'firmware', name: 'os', applyActionId: 'lx.firmware.update', applyInput: { repoFileId: 'f-6500' } });
-    const b = row({ deviceId: 'd2', kind: 'firmware', name: 'os', applyActionId: 'lx.firmware.update', applyInput: { repoFileId: 'f-7500' } });
+    const a = row({ deviceId: 'd1', kind: 'firmware', name: 'os', applyActionId: 'firmware.update', applyInput: { repoFileId: 'f-6500' } });
+    const b = row({ deviceId: 'd2', kind: 'firmware', name: 'os', applyActionId: 'firmware.update', applyInput: { repoFileId: 'f-7500' } });
     const c = row({ deviceId: 'd3', kind: 'os-package', name: 'curl', applyActionId: 'packages.update', applyInput: {} });
 
     expect(updateRowsForRepoFiles([a, b, c], ['f-6500']).map((r) => r.deviceId)).toEqual(['d1']);

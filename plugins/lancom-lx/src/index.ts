@@ -466,7 +466,7 @@ app.post('/monitoring', async (req, res) => {
       let fwRow = catalogFirmwareRow(sys.swVersion, KNOWN_LX_LINES, { releaseNotesUrl: notesUrl });
       // One-click upgrade path — a .upx in UNM's central file repository that
       // matches this device's hardware model AND is newer than the live version
-      // gets an actionable row (plan → lx.firmware.update). Best-effort: a repo
+      // gets an actionable row (plan → firmware.update). Best-effort: a repo
       // failure must never sink the poll, so fall back to the catalog-only row.
       try {
         const target = findRepoFirmwareTarget(sys.swVersion, selectedModel, await listFirmwareFiles());
@@ -479,7 +479,7 @@ app.post('/monitoring', async (req, res) => {
             rebootRequired: true,
             sizeBytes: target.sizeBytes ?? null,
             releaseNotesUrl: (() => { const line = extractMajorMinor(target.version); return line ? notesUrl(line) : null; })(),
-            applyActionId: 'lx.firmware.update',
+            applyActionId: 'firmware.update',
             applyInput: { repoFileId: target.fileId },
           };
         }
@@ -913,7 +913,7 @@ app.post('/config', async (req, res) => {
       deviceId: typeof deviceId === 'string' ? deviceId : undefined,
       // The UNM display name — labels artifacts the plugin creates (config backups).
       deviceName: typeof body.deviceName === 'string' && body.deviceName !== '' ? body.deviceName : null,
-      // Selected hardware model (e.g. "LC-LX-6500") — lx.firmware.update verifies
+      // Selected hardware model (e.g. "LC-LX-6500") — firmware.update verifies
       // the image's model against it before flashing anything.
       selectedModel: typeof body.model === 'string' && body.model !== '' ? body.model : null,
       web,

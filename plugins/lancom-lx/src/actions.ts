@@ -1785,7 +1785,10 @@ function sleep(ms: number): Promise<void> { return new Promise((r) => setTimeout
  *  - retryOnDispatchFailure=false — a failed flash is NEVER re-dispatched.
  */
 const firmwareUpdate: ActionDescriptor<LxActionContext> = {
-  id: 'lx.firmware.update',
+  // Domain-based, vendor-prefix-free — the convention of every other action in
+  // this plugin (and e.g. OPNsense's own `firmware.update`); ids are scoped per
+  // plugin by the catalog, so no `lx.` prefix is needed.
+  id: 'firmware.update',
   label: 'Update firmware from file repository',
   description:
     "DANGEROUS — flashes a new LCOS-LX firmware image onto the AP (vendor web-UI flow): fetches the .upx by `repoFileId` from UNM's central file repository, verifies its SHA-256, stages it on the AP (/cgi-bin/cgi-upload), triggers lxupdate.firmwareUpgrade and waits for the reboot. The device is unreachable while flashing (~1–4 min). Preflight: the file name must be LC-LX-<model>-<version>.upx; a model mismatch with this device's selected hardware model is refused, and downgrades are refused unless allowDowngrade=true.",

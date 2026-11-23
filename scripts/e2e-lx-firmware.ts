@@ -3,7 +3,7 @@
  *
  * SAFE MODE (default) — touches AP_Wohnzimmer only with READS + a REJECTED preflight:
  *   1. device exists, has a selected hardware model, is assigned to the LX plugin
- *   2. the deployed plugin catalog contains lx.firmware.update (dangerous, no re-dispatch)
+ *   2. the deployed plugin catalog contains firmware.update (dangerous, no re-dispatch)
  *   3. a dummy .upx uploaded to the file repo (category firmware) shows up as an
  *      actionable updates row after a forced device refresh (repo → /monitoring wiring)
  *   4. NEGATIVE model guard: a plan flashing a WRONG-MODEL image fails in preflight
@@ -139,8 +139,8 @@ async function main(): Promise<void> {
   // --- 2. Catalog -----------------------------------------------------------------
   const catalog = await authed('GET', `/plugins/${LX_PLUGIN_UUID}/actions`).then((r) => r.json());
   const actions: Array<Record<string, any>> = (catalog?.actions ?? []) as Array<Record<string, any>>;
-  const fwAction = actions.find((a) => a.id === 'lx.firmware.update');
-  check('catalog contains lx.firmware.update', Boolean(fwAction), actions.map((a) => a.id).slice(0, 40));
+  const fwAction = actions.find((a) => a.id === 'firmware.update');
+  check('catalog contains firmware.update', Boolean(fwAction), actions.map((a) => a.id).slice(0, 40));
   if (fwAction) {
     check('action is riskLevel dangerous', fwAction.riskLevel === 'dangerous', fwAction.riskLevel);
     check('action has retryOnDispatchFailure=false', fwAction.retryOnDispatchFailure === false, fwAction.retryOnDispatchFailure);
@@ -196,9 +196,9 @@ async function main(): Promise<void> {
       let m: any;
       try { m = JSON.parse(r.rows[0].metrics); } catch { continue; }
       const updates = Array.isArray(m?.updates) ? m.updates : [];
-      row = updates.find((u: any) => u.kind === 'firmware' && u.applyActionId === 'lx.firmware.update') ?? null;
+      row = updates.find((u: any) => u.kind === 'firmware' && u.applyActionId === 'firmware.update') ?? null;
     }
-    check('updates row is actionable (repo file matched)', Boolean(row), row ?? '(no lx.firmware.update row within 120s)');
+    check('updates row is actionable (repo file matched)', Boolean(row), row ?? '(no firmware.update row within 120s)');
     if (row) {
       check('row points at the dummy repo file', row.applyInput?.repoFileId === dummyId, row.applyInput);
       check('row shows target version from file name', row.latestVersion === DUMMY_VERSION, row.latestVersion);
@@ -209,7 +209,7 @@ async function main(): Promise<void> {
       const updRes = await authed('GET', '/updates');
       const updBody: any = await updRes.json();
       const updRows: Array<any> = updBody?.rows ?? [];
-      const updRow = updRows.find((u) => u.deviceId === device.id && u.applyActionId === 'lx.firmware.update' && u.applyInput?.repoFileId === dummyId);
+      const updRow = updRows.find((u) => u.deviceId === device.id && u.applyActionId === 'firmware.update' && u.applyInput?.repoFileId === dummyId);
       check('GET /updates exposes the actionable row for the repo file', Boolean(updRow), updRow ?? `no matching row among ${updRows.length} rows`);
     }
 
@@ -224,7 +224,7 @@ async function main(): Promise<void> {
 
       const planRes = await authed('POST', '/plans', {
         pluginId: LX_PLUGIN_UUID,
-        intentActionId: 'lx.firmware.update',
+        intentActionId: 'firmware.update',
         inputs: { repoFileId: wrongId },
         devices: [{ deviceId: device.id }],
       });
@@ -244,7 +244,7 @@ async function main(): Promise<void> {
       }
       check('plan finished FAILED (model guard tripped)', planState?.status === 'failed', planState?.status);
       const steps: Array<any> = planState?.steps ?? [];
-      const fwStep = steps.find((s) => s.actionId === 'lx.firmware.update');
+      const fwStep = steps.find((s) => s.actionId === 'firmware.update');
       const backupStep = steps.find((s) => s.actionId === 'config.backup.download');
       check('auto-prepended config backup step ran first', Boolean(backupStep), steps.map((s) => `${s.actionId}:${s.status}`));
       // planSteps.result stores {success, result: <ActionResult>} — the error lives one level deeper.
@@ -270,7 +270,7 @@ async function main(): Promise<void> {
       } else {
         const planRes = await authed('POST', '/plans', {
           pluginId: LX_PLUGIN_UUID,
-          intentActionId: 'lx.firmware.update',
+          intentActionId: 'firmware.update',
           inputs: { repoFileId: liveRepoId },
           devices: [{ deviceId: device.id }],
         });
@@ -287,7 +287,7 @@ async function main(): Promise<void> {
             if (['succeeded', 'failed', 'cancelled'].includes(planState?.status)) break;
           }
           const steps: Array<any> = planState?.steps ?? [];
-          const fwStep = steps.find((s) => s.actionId === 'lx.firmware.update');
+          const fwStep = steps.find((s) => s.actionId === 'firmware.update');
           // planSteps.result stores {success, result: <ActionResult>} — one level deeper.
           const fwResult = (fwStep?.result?.result ?? fwStep?.result ?? {}) as Record<string, unknown>;
           check('live flash succeeded + verified', planState?.status === 'succeeded' && fwResult.verified === true, { status: planState?.status, details: fwResult.details ?? null });

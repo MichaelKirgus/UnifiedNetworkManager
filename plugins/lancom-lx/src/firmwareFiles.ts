@@ -5,7 +5,7 @@
  * (e.g. LC-LX-6500-7.20.0192-RU1.upx). An admin uploads one to the Files page
  * (category `firmware`) and the Updates page offers a one-click upgrade when a
  * file matches this device's hardware model AND is newer than the live version —
- * applied through the plan workflow by action `lx.firmware.update`.
+ * applied through the plan workflow by action `firmware.update`.
  *
  * The matching logic here is pure (unit-testable); only listFirmwareFiles()
  * touches the network, with a short TTL cache so per-device polls don't hammer
