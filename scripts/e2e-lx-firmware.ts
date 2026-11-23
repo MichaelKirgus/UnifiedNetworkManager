@@ -40,8 +40,13 @@ const LX_PLUGIN_UUID = '00000000-0000-4000-8000-000000000004';
 const LIVE = process.env.LX_FW_E2E_LIVE === '1';
 const REAL_FILE = process.env.LX_FW_FILE ?? '';
 const REAL_REPO_ID = process.env.LX_FW_REPO_FILE_ID ?? '';
-/** Target version baked into the dummy file names (must be NEWER than live for the row to appear). */
-const DUMMY_VERSION = '7.20.0192-RU1';
+/**
+ * Version baked into the dummy file names. Must be STRICTLY newer than whatever
+ * firmware the device is running (findRepoFirmwareTarget only offers strictly
+ * newer builds) — so use a far-future version instead of a real one, which would
+ * stop producing an Updates row once a live flash has brought the device up to it.
+ */
+const DUMMY_VERSION = '9.99.9999';
 
 // pg + otplib live in api/node_modules — resolve through the API package.
 const apiRequire = createRequire(path.resolve(process.cwd(), 'api', 'package.json'));

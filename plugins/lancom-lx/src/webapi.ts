@@ -168,11 +168,14 @@ function postMultipart(
   transport: 'auto' | 'http' | 'https',
   timeoutMs: number,
   ports?: { httpsPort?: number; httpPort?: number }
-): Promise<{ status: number; text: string }> {
+): Promise<{ status: number; text: string; via: 'http' | 'https' }> {
   return new Promise((resolve, reject) => {
     let start: URL;
     try {
-      start = resolveBaseUrl(address, transport, ports);
+      // NOTE: the path MUST be joined onto the base — posting to the bare web
+      // root makes the AP answer with its SPA shell (HTTP 200 + HTML) instead
+      // of the CGI JSON, without ever reading the body.
+      start = new URL(path, resolveBaseUrl(address, transport, ports));
     } catch (err) {
       return reject(new Error(`Invalid management address "${address}": ${(err as Error).message}`));
     }
@@ -211,8 +214,8 @@ function postMultipart(
         (res) => {
           const chunks: Buffer[] = [];
           res.on('data', (c: Buffer) => chunks.push(c));
-          res.on('end', () => done(() => resolve({ status: res.statusCode ?? 0, text: Buffer.concat(chunks).toString('utf8') })));
-          res.on('error', () => done(() => resolve({ status: res.statusCode ?? 0, text: Buffer.concat(chunks).toString('utf8') })));
+          res.on('end', () => done(() => resolve({ status: res.statusCode ?? 0, text: Buffer.concat(chunks).toString('utf8'), via: scheme })));
+          res.on('error', () => done(() => resolve({ status: res.statusCode ?? 0, text: Buffer.concat(chunks).toString('utf8'), via: scheme })));
         }
       );
       req.on('error', (err) => {
@@ -449,35 +452,55 @@ export class LcosWebClient {
    * installed yet; call firmwareUpgrade() with the returned stagedPath to flash
    * + reboot. `timeoutMs` must be generous: 40–70 MB images take a while even
    * over LAN.
+   *
+   * RETRY: staging is idempotent (fixed path in RAM, nothing installed), so any
+   * failure — e.g. the session expiring mid-upload on slow links — is retried
+   * ONCE with a fresh session before surfacing the error.
    */
   async uploadFirmware(data: Buffer, fileName: string, timeoutMs?: number): Promise<{ stagedPath: string; sha256sum?: string | null; size?: number | null }> {
-    const sid = await this.sid();
-    const res = await postMultipart(
-      this.address, '/cgi-bin/cgi-upload',
-      [['sessionid', sid], ['filetype', 'firmware']],
-      { name: 'filedata', filename: fileName, data },
-      this.transport, timeoutMs ?? this.opts.timeoutMs, this.ports
-    );
-    if (res.status !== 200) throw new Error(`Web-UI returned HTTP ${res.status} for /cgi-bin/cgi-upload`);
-    let body: any;
-    try {
-      body = JSON.parse(res.text);
-    } catch {
-      // Keep the raw head — an HTML error page or a truncated body is the whole story.
-      throw new Error(`Firmware upload returned a non-JSON response (HTTP ${res.status}): ${res.text.slice(0, 200).replace(/\s+/g, ' ')}`);
-    }
-    // The CGI answers HTTP 200 even for protocol errors (e.g. "File data without
-    // session", code 14) — the error object is in the JSON body.
-    if (body.error) throw new Error(`Firmware upload rejected: ${body.error.message ?? 'unknown error'} (code ${body.error.code ?? '?'})`);
-    const staged = body?.result?.[1];
-    if (!staged || typeof staged.filename !== 'string') {
-      throw new Error(`Firmware upload returned no staged file: ${res.text.slice(0, 200)}`);
-    }
-    return {
-      stagedPath: staged.filename,
-      sha256sum: typeof staged.sha256sum === 'string' ? staged.sha256sum : null,
-      size: typeof staged.size === 'number' ? staged.size : null,
+    const attempt = async (): Promise<{ stagedPath: string; sha256sum?: string | null; size?: number | null }> => {
+      const sid = await this.sid();
+      const res = await postMultipart(
+        this.address, '/cgi-bin/cgi-upload',
+        [['sessionid', sid], ['filetype', 'firmware']],
+        { name: 'filedata', filename: fileName, data },
+        this.transport, timeoutMs ?? this.opts.timeoutMs, this.ports
+      );
+      if (res.status !== 200) throw new Error(`Web-UI returned HTTP ${res.status} for /cgi-bin/cgi-upload (via ${res.via})`);
+      let body: any;
+      try {
+        body = JSON.parse(res.text);
+      } catch {
+        // Keep the raw head — an HTML error page or a truncated body is the whole story.
+        throw new Error(`Firmware upload returned a non-JSON response (HTTP ${res.status}, via ${res.via}): ${res.text.slice(0, 200).replace(/\s+/g, ' ')}`);
+      }
+      // The CGI answers HTTP 200 even for protocol errors (e.g. "File data without
+      // session", code 14) — the error object is in the JSON body.
+      if (body.error) throw new Error(`Firmware upload rejected: ${body.error.message ?? 'unknown error'} (code ${body.error.code ?? '?'})`);
+      const staged = body?.result?.[1];
+      if (!staged || typeof staged.filename !== 'string') {
+        throw new Error(`Firmware upload returned no staged file: ${res.text.slice(0, 200)}`);
+      }
+      return {
+        stagedPath: staged.filename,
+        sha256sum: typeof staged.sha256sum === 'string' ? staged.sha256sum : null,
+        size: typeof staged.size === 'number' ? staged.size : null,
+      };
     };
+
+    try {
+      return await attempt();
+    } catch (firstErr) {
+      // One retry with a fresh session — staging has no side effects beyond the
+      // RAM-staged file, so re-sending is always safe.
+      await this.destroy().catch(() => undefined);
+      try {
+        return await attempt();
+      } catch (secondErr) {
+        const msg = (e: unknown) => (e instanceof Error ? e.message : String(e));
+        throw new Error(`Firmware upload failed twice — first: ${msg(firstErr)}; retry with fresh session: ${msg(secondErr)}`);
+      }
+    }
   }
 
   /**
