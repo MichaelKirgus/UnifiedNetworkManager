@@ -22,7 +22,7 @@
 
 import { createHash } from 'node:crypto';
 
-import { ActionResult, ActionDescriptor, compareVersions, configBackupFileName, createFileRepoClient, createRegistry, FileRepoClient } from '@unm/plugin-sdk';
+import { ActionResult, ActionDescriptor, compareVersions, configBackupFileName, createFileRepoClient, createRegistry, FileRepoClient, webFetchViaApi } from '@unm/plugin-sdk';
 import { isWriteOk, LcosWebClient, parseLcosConfigText, REDACTED, redactConfig, tableCell, type ParsedLcosConfig } from './webapi';
 import { ianaToLxTimezoneEnum } from './lcosOids';
 import { deviceModelDigits, findRepoFirmwareTarget, liveVersionCore, parseLxFwFileName } from './firmwareFiles';
@@ -1762,6 +1762,10 @@ const FW_UPLOAD_TIMEOUT_MS = (() => { const v = Number(process.env.LX_FW_UPLOAD_
 const FW_REBOOT_WAIT_MS = (() => { const v = Number(process.env.LX_FW_REBOOT_WAIT_MS); return Number.isFinite(v) && v > 0 ? Math.min(v, 1_800_000) : 480_000; })();
 /** Poll interval while waiting for the reboot. */
 const FW_REBOOT_POLL_MS = (() => { const v = Number(process.env.LX_FW_REBOOT_POLL_MS); return Number.isFinite(v) && v > 2_000 ? Math.min(v, 60_000) : 10_000; })();
+/** Download budget for a .upx pulled through the web-fetch broker (70 MB over slow egress). */
+const FW_DOWNLOAD_TIMEOUT_MS = (() => { const v = Number(process.env.LX_FW_DOWNLOAD_TIMEOUT_MS); return Number.isFinite(v) && v > 0 ? Math.min(v, 1_800_000) : 600_000; })();
+/** Hard ceiling for a firmware image — LX .upx files are 40–70 MB today. */
+const FW_MAX_IMAGE_BYTES = 256 * 1024 * 1024;
 
 /** OID of the running firmware version (ubus form — see lcosOids.ts HW block). */
 const FW_VERSION_OID = '13.1.47.9';
@@ -1769,19 +1773,29 @@ const FW_VERSION_OID = '13.1.47.9';
 function sleep(ms: number): Promise<void> { return new Promise((r) => setTimeout(r, ms)); }
 
 /**
- * Flashes a firmware image from UNM's central file repository — the same flow
- * as the vendor web-UI "Firmware Update" dialog (reverse-engineered + verified
- * live on an LC-LX-6500): multipart upload to /cgi-bin/cgi-upload stages the
- * .upx in AP RAM, then ubus lxupdate.firmwareUpgrade validates and REBOOTS.
+ * Flashes a firmware image onto an AP — the same flow as the vendor web-UI
+ * "Firmware Update" dialog (reverse-engineered + verified live on an LC-LX-6500):
+ * multipart upload to /cgi-bin/cgi-upload stages the .upx in AP RAM, then ubus
+ * lxupdate.firmwareUpgrade validates and REBOOTS.
+ *
+ * Image source — exactly one of:
+ *  - `repoFileId`: a .upx already in UNM's central file repository (manual upload);
+ *  - `url` (+ optional `fileName`): an absolute https:// URL, downloaded through
+ *    UNM's web-fetch broker and stored into the repo afterwards — fleet cache:
+ *    every other device of the same model reuses the stored copy (content-hash
+ *    dedupe) instead of downloading again. This is how the Updates page flashes
+ *    images offered by LANCOM's public release feed.
  *
  * Safety rails:
  *  - file name must follow LC-LX-<model>-<version>.upx; a model mismatch with
  *    this device's selected hardware model is refused (wrong-model images are
  *    the classic bricking path);
  *  - downgrades are refused unless allowDowngrade=true;
- *  - SHA-256 of the downloaded file must match the repo metadata, and the AP's
- *    echoed sha256sum after staging must match the local hash (transfer
- *    integrity end-to-end);
+ *  - ALL preflights run BEFORE any download — an already-current target never
+ *    costs a single byte of egress;
+ *  - SHA-256 of the downloaded file must match the repo metadata (when known),
+ *    and the AP's echoed sha256sum after staging must match the local hash
+ *    (transfer integrity end-to-end);
  *  - retryOnDispatchFailure=false — a failed flash is NEVER re-dispatched.
  */
 const firmwareUpdate: ActionDescriptor<LxActionContext> = {
@@ -1789,32 +1803,49 @@ const firmwareUpdate: ActionDescriptor<LxActionContext> = {
   // this plugin (and e.g. OPNsense's own `firmware.update`); ids are scoped per
   // plugin by the catalog, so no `lx.` prefix is needed.
   id: 'firmware.update',
-  label: 'Update firmware from file repository',
+  label: 'Update firmware',
   description:
-    "DANGEROUS — flashes a new LCOS-LX firmware image onto the AP (vendor web-UI flow): fetches the .upx by `repoFileId` from UNM's central file repository, verifies its SHA-256, stages it on the AP (/cgi-bin/cgi-upload), triggers lxupdate.firmwareUpgrade and waits for the reboot. The device is unreachable while flashing (~1–4 min). Preflight: the file name must be LC-LX-<model>-<version>.upx; a model mismatch with this device's selected hardware model is refused, and downgrades are refused unless allowDowngrade=true.",
+    "DANGEROUS — flashes a new LCOS-LX firmware image onto the AP (vendor web-UI flow): fetches the .upx from UNM's central file repository (`repoFileId`) or downloads it through the web-fetch broker (`url`), verifies its SHA-256, stages it on the AP (/cgi-bin/cgi-upload), triggers lxupdate.firmwareUpgrade and waits for the reboot. The device is unreachable while flashing (~1–4 min). Preflight: the file name must be LC-LX-<model>-<version>.upx; a model mismatch with this device's selected hardware model is refused, and downgrades are refused unless allowDowngrade=true.",
   module: 'Firmware',
   riskLevel: 'dangerous' as const,
   deviceCount: 1 as const,
-  timeoutMs: 900_000, // upload + validation + flash + reboot wait must fit the plan-step budget
+  timeoutMs: 900_000, // download + upload + validation + flash + reboot wait must fit the plan-step budget
   retryOnDispatchFailure: false, // a failed flash must never be blindly re-dispatched (double-flash risk)
   inputSchema: {
-    repoFileId: { type: 'string', required: true, minLength: 1, description: "UNM file-repo id of the .upx image (Files page → category firmware; pre-filled by the Updates page)" },
+    repoFileId: { type: 'string', required: false, minLength: 1, description: "UNM file-repo id of the .upx image (Files page → category firmware; pre-filled by the Updates page for uploaded images). Provide exactly one of repoFileId/url." },
+    url: { type: 'string', required: false, minLength: 8, description: "Absolute https:// URL of a .upx to download through UNM's web-fetch broker and flash (pre-filled by the Updates page for LANCOM release-feed entries). Provide exactly one of repoFileId/url." },
+    fileName: { type: 'string', required: false, maxLength: 200, description: "Original file name when flashing from `url` (defaults to the URL's last path segment) — must follow LC-LX-<model>-<version>.upx" },
     allowDowngrade: { type: 'boolean', required: false, default: false, description: 'Allow installing an older version than currently running (default false)' },
   },
   execute: async (ctx: LxActionContext, input): Promise<ActionResult> => {
-    const repoFileId = typeof input.repoFileId === 'string' && input.repoFileId.trim() ? input.repoFileId.trim() : null;
-    if (!repoFileId) return { success: false, error: "Missing required input `repoFileId` (the UNM file-repo id of the .upx image)." };
     const allowDowngrade = input.allowDowngrade === true;
-
-    // --- Preflight 1: repo metadata + name convention -------------------------
-    let meta: { id: string; name: string; sizeBytes?: number | null; sha256?: string | null } | null = null;
-    try {
-      meta = await fileRepo().getMeta(repoFileId);
-    } catch (e) {
-      return { success: false, error: `Could not query the file repository: ${e instanceof Error ? e.message : String(e)}` };
+    const repoFileId = typeof input.repoFileId === 'string' && input.repoFileId.trim() ? input.repoFileId.trim() : null;
+    const imageUrl = typeof input.url === 'string' && /^https?:\/\//i.test(input.url.trim()) ? input.url.trim() : null;
+    if (repoFileId && imageUrl) {
+      return { success: false, error: 'Provide exactly one of `repoFileId` or `url`, not both.' };
     }
-    if (!meta) return { success: false, error: `Unknown file-repo id ${repoFileId} — upload the .upx to the Files page (category firmware) first.` };
+    if (!repoFileId && !imageUrl) {
+      return { success: false, error: "Missing required input — provide either `repoFileId` (UNM file-repo id of the .upx) or `url` (absolute https:// URL of the .upx)." };
+    }
 
+    // --- Resolve source metadata BEFORE any download ---------------------------
+    let meta: { id: string | null; name: string; sha256?: string | null };
+    if (repoFileId) {
+      let m: { id: string; name: string; sha256?: string | null } | null = null;
+      try {
+        m = await fileRepo().getMeta(repoFileId);
+      } catch (e) {
+        return { success: false, error: `Could not query the file repository: ${e instanceof Error ? e.message : String(e)}` };
+      }
+      if (!m) return { success: false, error: `Unknown file-repo id ${repoFileId} — upload the .upx to the Files page (category firmware) first.` };
+      meta = m;
+    } else {
+      // URL source — the name comes from the input or the URL's last path segment.
+      const fileName = (typeof input.fileName === 'string' && input.fileName.trim() !== '' ? input.fileName : imageUrl!.split('/').pop() ?? '').trim();
+      meta = { id: null, name: fileName, sha256: null };
+    }
+
+    // --- Preflight 1: name convention ------------------------------------------
     const parsed = parseLxFwFileName(meta.name);
     if (!parsed) {
       return { success: false, error: `Firmware file "${meta.name}" does not follow the LC-LX naming convention — rename it to LC-LX-<model>-<version>.upx (e.g. LC-LX-6500-7.20.0192-RU1.upx).` };
@@ -1853,13 +1884,51 @@ const firmwareUpdate: ActionDescriptor<LxActionContext> = {
       return { success: false, error: `File targets ${parsed.version} but the device runs ${currentRaw} — that is a DOWNGRADE. Pass allowDowngrade=true to force it anyway.` };
     }
 
-    // --- Fetch + local integrity check -----------------------------------------
+    // --- Resolve the image bytes -------------------------------------------------
     let data: Buffer;
-    try {
-      data = await fileRepo().get(repoFileId);
-    } catch (e) {
-      return { success: false, error: `Could not download ${meta.name} from the file repository: ${e instanceof Error ? e.message : String(e)}` };
+    if (meta.id) {
+      try {
+        data = await fileRepo().get(meta.id);
+      } catch (e) {
+        return { success: false, error: `Could not download ${meta.name} from the file repository: ${e instanceof Error ? e.message : String(e)}` };
+      }
+    } else {
+      // URL source — dedupe against the repo first: an identical image may already
+      // be stored (fleet cache — one broker download per version, not per device).
+      let hit: { id: string; name: string; sha256?: string | null } | null = null;
+      try {
+        const files = await fileRepo().list('firmware');
+        hit = files.find((f) => f.name === meta.name) ?? null;
+      } catch { /* repo unavailable — fall through to a direct download */ }
+      if (hit) {
+        meta.id = hit.id;
+        meta.sha256 = hit.sha256 ?? null;
+        try {
+          data = await fileRepo().get(hit.id);
+        } catch (e) {
+          return { success: false, error: `Could not download ${meta.name} from the file repository: ${e instanceof Error ? e.message : String(e)}` };
+        }
+      } else {
+        let dl: Awaited<ReturnType<typeof webFetchViaApi>>;
+        try {
+          dl = await webFetchViaApi({ url: imageUrl!, timeoutMs: FW_DOWNLOAD_TIMEOUT_MS, maxBytes: FW_MAX_IMAGE_BYTES });
+        } catch (e) {
+          return { success: false, error: `Firmware download failed: ${e instanceof Error ? e.message : String(e)}`, details: { hint: 'Check that a web-fetch plugin is online and the URL is reachable from it.' } };
+        }
+        if (dl.status !== 200) return { success: false, error: `Download of ${imageUrl} returned HTTP ${dl.status}` };
+        data = dl.bytes;
+        if (data.length === 0) return { success: false, error: 'The downloaded firmware image is empty' };
+        // Store into the repo for fleet reuse + audit trail — best-effort: a repo
+        // failure must not block an explicit URL flash.
+        try {
+          const entry = await fileRepo().upload(data, { name: meta.name, category: 'firmware' }, FW_DOWNLOAD_TIMEOUT_MS);
+          meta.id = entry.id;
+          meta.sha256 = entry.sha256 ?? null;
+        } catch { /* repo unavailable — continue with the downloaded bytes */ }
+      }
     }
+
+    // --- Local integrity check -----------------------------------------------------
     const localSha256 = createHash('sha256').update(data).digest('hex');
     if (typeof meta.sha256 === 'string' && meta.sha256.length > 0 && meta.sha256.toLowerCase() !== localSha256) {
       return { success: false, error: `SHA-256 mismatch between repo metadata (${meta.sha256}) and the downloaded file (${localSha256}) — refusing to flash a corrupted image.` };
@@ -1894,7 +1963,7 @@ const firmwareUpdate: ActionDescriptor<LxActionContext> = {
         // reboots right after validation) — treat as started and verify post-reboot.
       }
 
-      void fileRepo().recordUse(repoFileId, { deviceId: ctx.deviceId ?? undefined, note: `firmware update to ${parsed.version} on ${ctx.host}` }).catch(() => undefined);
+      if (meta.id) void fileRepo().recordUse(meta.id, { deviceId: ctx.deviceId ?? undefined, note: `firmware update to ${parsed.version} on ${ctx.host}` }).catch(() => undefined);
 
       // --- Wait for the reboot -------------------------------------------------------
       const deadline = Date.now() + FW_REBOOT_WAIT_MS;

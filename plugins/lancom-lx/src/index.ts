@@ -30,6 +30,7 @@ import {
   buildWebUiUrl,
   warnOnce,
   catalogFirmwareRow,
+  compareVersions,
   CertificateRow,
   type QuickAction,
   type AutomationTemplate,
@@ -42,7 +43,8 @@ import { buildDescriptors, DISCOVER_METRICS } from './metrics';
 import { DEVICE_MODELS } from './deviceModels';
 import { LcosWebClient, parseLcosConfigText } from './webapi';
 import { registry as actionRegistry, type LxActionContext } from './actions';
-import { findRepoFirmwareTarget, listFirmwareFiles } from './firmwareFiles';
+import { deviceModelDigits, findRepoFirmwareTarget, listFirmwareFiles, liveVersionCore } from './firmwareFiles';
+import { fetchLxFwFeed } from './lancomFeed';
 import { buildPlan, PlanningError } from './plan';
 import { buildLxState } from './state';
 
@@ -83,7 +85,11 @@ const identity = resolvePluginIdentity({
   // → UNM central file repo, read-only on the device) and config.restore
   // (dangerous SetConfig overwrite from a repo id or base64). Every mutating
   // plan now gets a best-effort backup step prepended per dirty device.
-  version: '0.6.0',
+  // 0.7.0 — Online update feed: the Updates row also checks LANCOM's public
+  // release server (ftp.lancom.de, one .upx = newest release per model) via the
+  // web-fetch broker; firmware.update accepts a `url` source (broker download →
+  // repo cache → flash). Optional via the onlineUpdateFeed setting (default on).
+  version: '0.7.0',
   vendors: ['lancom'],
   // monitoring + inventory over the LCOS-LX MIB, plus an interactive SSH console
   // ('sshConsole') — LX access points expose a CLI shell over SSH (port 22).
@@ -159,6 +165,14 @@ const PLUGIN_OPTIONS: PluginOptionDescriptor[] = [
     default: true,
     description:
       'Run per-AP security checks (WiFi cipher strength — WEP/open SSIDs — and PSK brute-force attempts from the WLAN failure counters). Findings appear in the cross-device Security page.',
+  },
+  {
+    key: 'onlineUpdateFeed',
+    label: 'Online update feed',
+    type: 'boolean' as const,
+    default: true,
+    description:
+      "Check LANCOM's public release server (ftp.lancom.de) for the newest firmware per model and offer it on the Updates page — flashing downloads the image through UNM's web-fetch broker. Disable in air-gapped setups or when only manually uploaded images should be offered.",
   },
   {
     key: 'httpsPort',
@@ -464,26 +478,45 @@ app.post('/monitoring', async (req, res) => {
       // Release notes: LANCOM's FTP release-notes folder for the target line
       // (RN_LCOS-LX-<line>-*.pdf).
       let fwRow = catalogFirmwareRow(sys.swVersion, KNOWN_LX_LINES, { releaseNotesUrl: notesUrl });
-      // One-click upgrade path — a .upx in UNM's central file repository that
-      // matches this device's hardware model AND is newer than the live version
-      // gets an actionable row (plan → firmware.update). Best-effort: a repo
-      // failure must never sink the poll, so fall back to the catalog-only row.
+      // One-click upgrade path — actionable candidates are a .upx in UNM's
+      // central file repository and/or the newest image LANCOM publishes for
+      // this model (public release feed). The strictly-newer one wins; every
+      // candidate lookup is best-effort — a failure must never sink the poll,
+      // so fall back to whatever stands (repo row, catalog-only row).
+      const candidates: Array<{ version: string; sizeBytes?: number | null; applyInput: Record<string, unknown> }> = [];
       try {
         const target = findRepoFirmwareTarget(sys.swVersion, selectedModel, await listFirmwareFiles());
-        if (target) {
-          fwRow = {
-            name: 'os', kind: 'firmware',
-            currentVersion: sys.swVersion,
-            latestVersion: target.version,
-            available: true, // manually built row — the match already proved it is newer
-            rebootRequired: true,
-            sizeBytes: target.sizeBytes ?? null,
-            releaseNotesUrl: (() => { const line = extractMajorMinor(target.version); return line ? notesUrl(line) : null; })(),
-            applyActionId: 'firmware.update',
-            applyInput: { repoFileId: target.fileId },
-          };
-        }
-      } catch { /* file repo unreachable — catalog row (if any) stands */ }
+        if (target) candidates.push({ version: target.version, sizeBytes: target.sizeBytes ?? null, applyInput: { repoFileId: target.fileId } });
+      } catch { /* file repo unreachable — feed/catalog rows stand */ }
+      // Online release feed — optional via the `onlineUpdateFeed` setting
+      // (default on); needs a selected hardware model + web-fetch egress.
+      if (settings.onlineUpdateFeed !== false && selectedModel) {
+        try {
+          const digits = deviceModelDigits(selectedModel);
+          if (digits) {
+            const entry = await fetchLxFwFeed(digits);
+            // Strictly newer than the live build? (findRepoFirmwareTarget does
+            // this for repo files; the feed entry needs its own check.)
+            if (entry && compareVersions(liveVersionCore(sys.swVersion), entry.version) < 0) {
+              candidates.push({ version: entry.version, sizeBytes: entry.sizeBytes ?? null, applyInput: { url: entry.url, fileName: entry.fileName } });
+            }
+          }
+        } catch { /* feed unreachable this cycle — repo/catalog rows stand */ }
+      }
+      if (candidates.length > 0) {
+        const best = candidates.reduce((a, b) => (compareVersions(a.version, b.version) >= 0 ? a : b));
+        fwRow = {
+          name: 'os', kind: 'firmware',
+          currentVersion: sys.swVersion,
+          latestVersion: best.version,
+          available: true, // manually built row — the match already proved it is newer
+          rebootRequired: true,
+          sizeBytes: best.sizeBytes ?? null,
+          releaseNotesUrl: (() => { const line = extractMajorMinor(best.version); return line ? notesUrl(line) : null; })(),
+          applyActionId: 'firmware.update',
+          applyInput: best.applyInput,
+        };
+      }
       if (fwRow) metrics['updates'] = [fwRow];
     }
     metrics['system.serialNumber'] = sys.serialNumber || null;
