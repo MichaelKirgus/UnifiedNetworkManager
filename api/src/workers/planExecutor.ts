@@ -463,6 +463,9 @@ async function processPlan(planId: string): Promise<void> {
             // The UNM display name — plugins use it to label artifacts they create
             // (e.g. config backups stored in the central file repo).
             deviceName: device.name,
+            // Selected hardware model — lets plugins verify hardware-specific
+            // preconditions (e.g. LX firmware image ↔ model match before flashing).
+            model: device.model ?? undefined,
             managementAddress: device.managementAddress,
             credentials,
             actionId: step.actionId,

@@ -20,9 +20,12 @@
  *    a best-effort `config.backup.download` rollback point prepended (plan.ts).
  */
 
-import { ActionResult, ActionDescriptor, configBackupFileName, createFileRepoClient, createRegistry, FileRepoClient } from '@unm/plugin-sdk';
+import { createHash } from 'node:crypto';
+
+import { ActionResult, ActionDescriptor, compareVersions, configBackupFileName, createFileRepoClient, createRegistry, FileRepoClient } from '@unm/plugin-sdk';
 import { isWriteOk, LcosWebClient, parseLcosConfigText, REDACTED, redactConfig, tableCell, type ParsedLcosConfig } from './webapi';
 import { ianaToLxTimezoneEnum } from './lcosOids';
+import { deviceModelDigits, findRepoFirmwareTarget, liveVersionCore, parseLxFwFileName } from './firmwareFiles';
 
 // --- Context ------------------------------------------------------------------
 
@@ -33,6 +36,8 @@ export interface LxActionContext {
   deviceId?: string;
   /** UNM device display name (sent by the API on /config) — labels artifacts like config backups. */
   deviceName?: string | null;
+  /** Selected hardware model of this device (e.g. "LC-LX-6500") — sent by the API on /config; used to verify firmware-file/model match before flashing. */
+  selectedModel?: string | null;
   /** Decrypted `web` credential slot (username/password for the ubus login). */
   web: { username: string; password: string };
   timeoutMs: number;
@@ -1749,6 +1754,189 @@ const systemClockSync: ActionDescriptor<LxActionContext> = {
   },
 };
 
+// --- Firmware update ---------------------------------------------------------------
+
+/** Upload budget for .upx images (40–70 MB) — env override for slow links/tests. */
+const FW_UPLOAD_TIMEOUT_MS = (() => { const v = Number(process.env.LX_FW_UPLOAD_TIMEOUT_MS); return Number.isFinite(v) && v > 0 ? Math.min(v, 900_000) : 300_000; })();
+/** How long to wait for the AP to come back after it reboots into the new firmware. */
+const FW_REBOOT_WAIT_MS = (() => { const v = Number(process.env.LX_FW_REBOOT_WAIT_MS); return Number.isFinite(v) && v > 0 ? Math.min(v, 1_800_000) : 480_000; })();
+/** Poll interval while waiting for the reboot. */
+const FW_REBOOT_POLL_MS = (() => { const v = Number(process.env.LX_FW_REBOOT_POLL_MS); return Number.isFinite(v) && v > 2_000 ? Math.min(v, 60_000) : 10_000; })();
+
+/** OID of the running firmware version (ubus form — see lcosOids.ts HW block). */
+const FW_VERSION_OID = '13.1.47.9';
+
+function sleep(ms: number): Promise<void> { return new Promise((r) => setTimeout(r, ms)); }
+
+/**
+ * Flashes a firmware image from UNM's central file repository — the same flow
+ * as the vendor web-UI "Firmware Update" dialog (reverse-engineered + verified
+ * live on an LC-LX-6500): multipart upload to /cgi-bin/cgi-upload stages the
+ * .upx in AP RAM, then ubus lxupdate.firmwareUpgrade validates and REBOOTS.
+ *
+ * Safety rails:
+ *  - file name must follow LC-LX-<model>-<version>.upx; a model mismatch with
+ *    this device's selected hardware model is refused (wrong-model images are
+ *    the classic bricking path);
+ *  - downgrades are refused unless allowDowngrade=true;
+ *  - SHA-256 of the downloaded file must match the repo metadata, and the AP's
+ *    echoed sha256sum after staging must match the local hash (transfer
+ *    integrity end-to-end);
+ *  - retryOnDispatchFailure=false — a failed flash is NEVER re-dispatched.
+ */
+const firmwareUpdate: ActionDescriptor<LxActionContext> = {
+  id: 'lx.firmware.update',
+  label: 'Update firmware from file repository',
+  description:
+    "DANGEROUS — flashes a new LCOS-LX firmware image onto the AP (vendor web-UI flow): fetches the .upx by `repoFileId` from UNM's central file repository, verifies its SHA-256, stages it on the AP (/cgi-bin/cgi-upload), triggers lxupdate.firmwareUpgrade and waits for the reboot. The device is unreachable while flashing (~1–4 min). Preflight: the file name must be LC-LX-<model>-<version>.upx; a model mismatch with this device's selected hardware model is refused, and downgrades are refused unless allowDowngrade=true.",
+  module: 'Firmware',
+  riskLevel: 'dangerous' as const,
+  deviceCount: 1 as const,
+  timeoutMs: 900_000, // upload + validation + flash + reboot wait must fit the plan-step budget
+  retryOnDispatchFailure: false, // a failed flash must never be blindly re-dispatched (double-flash risk)
+  inputSchema: {
+    repoFileId: { type: 'string', required: true, minLength: 1, description: "UNM file-repo id of the .upx image (Files page → category firmware; pre-filled by the Updates page)" },
+    allowDowngrade: { type: 'boolean', required: false, default: false, description: 'Allow installing an older version than currently running (default false)' },
+  },
+  execute: async (ctx: LxActionContext, input): Promise<ActionResult> => {
+    const repoFileId = typeof input.repoFileId === 'string' && input.repoFileId.trim() ? input.repoFileId.trim() : null;
+    if (!repoFileId) return { success: false, error: "Missing required input `repoFileId` (the UNM file-repo id of the .upx image)." };
+    const allowDowngrade = input.allowDowngrade === true;
+
+    // --- Preflight 1: repo metadata + name convention -------------------------
+    let meta: { id: string; name: string; sizeBytes?: number | null; sha256?: string | null } | null = null;
+    try {
+      meta = await fileRepo().getMeta(repoFileId);
+    } catch (e) {
+      return { success: false, error: `Could not query the file repository: ${e instanceof Error ? e.message : String(e)}` };
+    }
+    if (!meta) return { success: false, error: `Unknown file-repo id ${repoFileId} — upload the .upx to the Files page (category firmware) first.` };
+
+    const parsed = parseLxFwFileName(meta.name);
+    if (!parsed) {
+      return { success: false, error: `Firmware file "${meta.name}" does not follow the LC-LX naming convention — rename it to LC-LX-<model>-<version>.upx (e.g. LC-LX-6500-7.20.0192-RU1.upx).` };
+    }
+
+    // --- Preflight 2: model match ---------------------------------------------
+    const wantModel = deviceModelDigits(ctx.selectedModel);
+    if (!wantModel) {
+      return { success: false, error: `This device has no hardware model selected — set it on the Devices page (e.g. LC-LX-6500) so a firmware image can be verified against it before flashing.` };
+    }
+    if (parsed.modelDigits !== wantModel) {
+      return { success: false, error: `Firmware file "${meta.name}" is for model ${parsed.modelDigits}, but this device is a ${ctx.selectedModel} — refusing to flash an image for the wrong hardware.` };
+    }
+
+    // --- Preflight 3: live version (also proves reachability + credentials) ----
+    const c = client(ctx);
+    let currentRaw: string | null = null;
+    try {
+      currentRaw = await c.getScalar(FW_VERSION_OID);
+    } catch (e) {
+      return { success: false, error: `Could not read the running firmware version from ${ctx.host}: ${e instanceof Error ? e.message : String(e)} — aborting before any upload.` };
+    } finally {
+      await c.destroy().catch(() => undefined);
+    }
+    const current = liveVersionCore(currentRaw);
+    if (!current) return { success: false, error: `The device reported an empty firmware version (${JSON.stringify(currentRaw)}) — aborting before any upload.` };
+
+    let cmp: -1 | 0 | 1;
+    try {
+      cmp = compareVersions(current, parsed.version);
+    } catch (e) {
+      return { success: false, error: `Could not compare versions ${current} vs ${parsed.version}: ${e instanceof Error ? e.message : String(e)}` };
+    }
+    if (cmp === 0) return { success: true, applied: false, verified: true, details: { fileName: meta.name, version: parsed.version, note: `Already running ${currentRaw} — nothing to do.` } };
+    if (cmp > 0 && !allowDowngrade) {
+      return { success: false, error: `File targets ${parsed.version} but the device runs ${currentRaw} — that is a DOWNGRADE. Pass allowDowngrade=true to force it anyway.` };
+    }
+
+    // --- Fetch + local integrity check -----------------------------------------
+    let data: Buffer;
+    try {
+      data = await fileRepo().get(repoFileId);
+    } catch (e) {
+      return { success: false, error: `Could not download ${meta.name} from the file repository: ${e instanceof Error ? e.message : String(e)}` };
+    }
+    const localSha256 = createHash('sha256').update(data).digest('hex');
+    if (typeof meta.sha256 === 'string' && meta.sha256.length > 0 && meta.sha256.toLowerCase() !== localSha256) {
+      return { success: false, error: `SHA-256 mismatch between repo metadata (${meta.sha256}) and the downloaded file (${localSha256}) — refusing to flash a corrupted image.` };
+    }
+
+    // --- Stage on the AP ---------------------------------------------------------
+    const c2 = client(ctx);
+    try {
+      let staged: { stagedPath: string; sha256sum?: string | null; size?: number | null };
+      try {
+        staged = await c2.uploadFirmware(data, meta.name, FW_UPLOAD_TIMEOUT_MS);
+      } catch (e) {
+        return { success: false, error: `Staging the firmware image on ${ctx.host} failed: ${e instanceof Error ? e.message : String(e)} — nothing was flashed.` };
+      }
+
+      // End-to-end integrity: the AP echoes the sha256sum of what it received.
+      if (staged.sha256sum && staged.sha256sum.toLowerCase() !== localSha256) {
+        return { success: false, error: `The AP's echoed SHA-256 (${staged.sha256sum}) does not match the uploaded file (${localSha256}) — transfer corrupted; nothing was flashed.` };
+      }
+
+      // --- Trigger install + reboot ------------------------------------------------
+      let upgradeStarted = true;
+      try {
+        await c2.firmwareUpgrade(staged.stagedPath, FW_UPLOAD_TIMEOUT_MS);
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        // A protocol rejection means the device REFUSED the upgrade and stays online.
+        if (/^firmwareUpgrade rejected/i.test(msg)) {
+          return { success: false, error: `The AP refused to install ${meta.name}: ${msg} — the device is still running ${currentRaw}.` };
+        }
+        // Timeout / connection drop mid-call = ambiguous but expected (the device
+        // reboots right after validation) — treat as started and verify post-reboot.
+      }
+
+      void fileRepo().recordUse(repoFileId, { deviceId: ctx.deviceId ?? undefined, note: `firmware update to ${parsed.version} on ${ctx.host}` }).catch(() => undefined);
+
+      // --- Wait for the reboot -------------------------------------------------------
+      const deadline = Date.now() + FW_REBOOT_WAIT_MS;
+      let afterRaw: string | null = null;
+      while (Date.now() < deadline) {
+        await sleep(FW_REBOOT_POLL_MS);
+        try {
+          const probe = client(ctx);
+          try {
+            afterRaw = await probe.getScalar(FW_VERSION_OID);
+          } finally {
+            await probe.destroy().catch(() => undefined);
+          }
+          if (afterRaw) break; // device is back and answering ubus
+        } catch { /* still down — keep polling */ }
+      }
+
+      if (!afterRaw) {
+        return {
+          success: true, applied: true, verified: false,
+          details: { fileName: meta.name, from: currentRaw, expectedVersion: parsed.version, note: `The upgrade was triggered and the image staged+accepted (SHA-256 verified), but ${ctx.host} had not come back within ${Math.round(FW_REBOOT_WAIT_MS / 1000)}s. Check it manually — if it is up, verify the firmware version.` },
+        };
+      }
+
+      // --- Verify the new version ------------------------------------------------------
+      const after = liveVersionCore(afterRaw);
+      let cmpAfter: -1 | 0 | 1;
+      try {
+        cmpAfter = compareVersions(after, parsed.version);
+      } catch (e) {
+        return { success: true, applied: true, verified: false, details: { fileName: meta.name, from: currentRaw, to: afterRaw, note: `Device is back but its version string (${afterRaw}) could not be compared with the target ${parsed.version}: ${e instanceof Error ? e.message : String(e)}` } };
+      }
+      if (cmpAfter < 0) {
+        return { success: false, error: `${ctx.host} came back reporting ${afterRaw}, but the target was ${parsed.version} — the update may have failed on the device side. Investigate before retrying.` };
+      }
+      return {
+        success: true, applied: true, verified: true,
+        details: { fileName: meta.name, from: currentRaw, to: afterRaw, expectedVersion: parsed.version, sha256: localSha256 },
+      };
+    } finally {
+      await c2.destroy().catch(() => undefined);
+    }
+  },
+};
+
 // --- Registry -----------------------------------------------------------------------------
 
 export const registry = createRegistry<LxActionContext>([
@@ -1790,4 +1978,5 @@ export const registry = createRegistry<LxActionContext>([
   configPersist,
   configBackupDownload,
   configRestore,
+  firmwareUpdate,
 ]);

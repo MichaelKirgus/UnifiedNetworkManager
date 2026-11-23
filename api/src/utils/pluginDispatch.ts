@@ -61,7 +61,9 @@ export async function dispatchPluginAction(
 
     const response = await pluginAxios(plugin.endpoint).post(
       '/config',
-      { deviceId: device.id, managementAddress: device.managementAddress, credentials, actionId, input },
+      // deviceName/model let plugins label artifacts and verify hardware-specific
+      // preconditions (e.g. LX firmware image ↔ selected model match before flashing).
+      { deviceId: device.id, managementAddress: device.managementAddress, credentials, actionId, input, deviceName: device.name, model: device.model ?? undefined },
       { timeout: effectiveTimeout, headers }
     );
     const body = (response.data ?? {}) as { success?: boolean; result?: Record<string, unknown> };

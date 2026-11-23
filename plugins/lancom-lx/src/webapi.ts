@@ -141,6 +141,98 @@ function postJson(
   });
 }
 
+/** Resolves the base URL for a management address (shared by postJson/postMultipart). */
+function resolveBaseUrl(
+  address: string,
+  transport: 'auto' | 'http' | 'https',
+  ports?: { httpsPort?: number; httpPort?: number }
+): URL {
+  const base = address.includes('://')
+    ? address
+    : transport === 'http'
+      ? `http://${address}${ports?.httpPort && ports.httpPort !== 80 ? `:${ports.httpPort}` : ''}`
+      : `https://${address}${ports?.httpsPort && ports.httpsPort !== 443 ? `:${ports.httpsPort}` : ''}`;
+  return new URL(base);
+}
+
+/**
+ * Performs one raw multipart/form-data POST (firmware upload to /cgi-bin/cgi-upload).
+ * Same transport semantics as postJson: fresh connection per call, self-signed TLS
+ * accepted, `auto` prefers HTTPS and falls back to HTTP once when TLS fails.
+ */
+function postMultipart(
+  address: string,
+  path: string,
+  fields: Array<[string, string]>,
+  fileField: { name: string; filename: string; data: Buffer },
+  transport: 'auto' | 'http' | 'https',
+  timeoutMs: number,
+  ports?: { httpsPort?: number; httpPort?: number }
+): Promise<{ status: number; text: string }> {
+  return new Promise((resolve, reject) => {
+    let start: URL;
+    try {
+      start = resolveBaseUrl(address, transport, ports);
+    } catch (err) {
+      return reject(new Error(`Invalid management address "${address}": ${(err as Error).message}`));
+    }
+
+    const boundary = `----lcoslx${Date.now().toString(16)}${Math.random().toString(16).slice(2, 8)}`;
+    const parts: Buffer[] = [];
+    for (const [name, value] of fields) {
+      parts.push(Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="${name}"\r\n\r\n${value}\r\n`));
+    }
+    parts.push(Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="${fileField.name}"; filename="${fileField.filename.replace(/"/g, '')}"\r\nContent-Type: application/octet-stream\r\n\r\n`));
+    parts.push(fileField.data, Buffer.from('\r\n'));
+    parts.push(Buffer.from(`--${boundary}--\r\n`));
+    const payload = Buffer.concat(parts);
+
+    const preferHttps = transport !== 'http';
+    let settled = false;
+    const done = (fn: () => void) => { if (!settled) { settled = true; fn(); } };
+
+    const attempt = (url: URL, onFallback: boolean) => {
+      const scheme = url.protocol === 'http:' ? 'http' : 'https';
+      const lib = scheme === 'https' ? https : http;
+      const req = lib.request(
+        {
+          hostname: url.hostname,
+          port: url.port || (scheme === 'https' ? 443 : 80),
+          path: url.pathname + url.search,
+          method: 'POST',
+          headers: {
+            'Content-Type': `multipart/form-data; boundary=${boundary}`,
+            Accept: 'application/json',
+            'Content-Length': payload.length,
+            Connection: 'close',
+          },
+          rejectUnauthorized: false,
+        },
+        (res) => {
+          const chunks: Buffer[] = [];
+          res.on('data', (c: Buffer) => chunks.push(c));
+          res.on('end', () => done(() => resolve({ status: res.statusCode ?? 0, text: Buffer.concat(chunks).toString('utf8') })));
+          res.on('error', () => done(() => resolve({ status: res.statusCode ?? 0, text: Buffer.concat(chunks).toString('utf8') })));
+        }
+      );
+      req.on('error', (err) => {
+        if (!onFallback && preferHttps) {
+          const httpUrl = new URL(url);
+          httpUrl.protocol = 'http:';
+          if (ports?.httpPort && ports.httpPort !== 80) httpUrl.port = String(ports.httpPort);
+          attempt(httpUrl, true);
+        } else {
+          done(() => reject(new Error(`Web-UI request failed: ${err.message}`)));
+        }
+      });
+      req.setTimeout(timeoutMs, () => req.destroy(new Error(`Web-UI request timed out after ${timeoutMs}ms`)));
+      req.end(payload);
+    };
+
+    attempt(start, false);
+  });
+}
+
 // --- Client ---------------------------------------------------------------------------
 
 /**
@@ -345,6 +437,76 @@ export class LcosWebClient {
     const data = body?.result?.[1]?.data;
     if (typeof data !== 'string' || data.length === 0) throw new Error(`lancomfile.read returned no data for ${path}`);
     return data;
+  }
+
+  /**
+   * Stages a firmware image on the AP — multipart POST to /cgi-bin/cgi-upload,
+   * exactly what the vendor SPA's "Firmware Update" dialog does (reverse-
+   * engineered from the v7.14/7.20 bundle + verified live): fields are
+   * `sessionid` = the ubus session token, `filetype` = "firmware", `filedata`
+   * = the .upx file. The AP stores it in RAM at a fixed path (/tmp/cgi-
+   * firmware.upload) and echoes back {size, sha256sum, filename} — NOTHING is
+   * installed yet; call firmwareUpgrade() with the returned stagedPath to flash
+   * + reboot. `timeoutMs` must be generous: 40–70 MB images take a while even
+   * over LAN.
+   */
+  async uploadFirmware(data: Buffer, fileName: string, timeoutMs?: number): Promise<{ stagedPath: string; sha256sum?: string | null; size?: number | null }> {
+    const sid = await this.sid();
+    const res = await postMultipart(
+      this.address, '/cgi-bin/cgi-upload',
+      [['sessionid', sid], ['filetype', 'firmware']],
+      { name: 'filedata', filename: fileName, data },
+      this.transport, timeoutMs ?? this.opts.timeoutMs, this.ports
+    );
+    if (res.status !== 200) throw new Error(`Web-UI returned HTTP ${res.status} for /cgi-bin/cgi-upload`);
+    let body: any;
+    try {
+      body = JSON.parse(res.text);
+    } catch {
+      // Keep the raw head — an HTML error page or a truncated body is the whole story.
+      throw new Error(`Firmware upload returned a non-JSON response (HTTP ${res.status}): ${res.text.slice(0, 200).replace(/\s+/g, ' ')}`);
+    }
+    // The CGI answers HTTP 200 even for protocol errors (e.g. "File data without
+    // session", code 14) — the error object is in the JSON body.
+    if (body.error) throw new Error(`Firmware upload rejected: ${body.error.message ?? 'unknown error'} (code ${body.error.code ?? '?'})`);
+    const staged = body?.result?.[1];
+    if (!staged || typeof staged.filename !== 'string') {
+      throw new Error(`Firmware upload returned no staged file: ${res.text.slice(0, 200)}`);
+    }
+    return {
+      stagedPath: staged.filename,
+      sha256sum: typeof staged.sha256sum === 'string' ? staged.sha256sum : null,
+      size: typeof staged.size === 'number' ? staged.size : null,
+    };
+  }
+
+  /**
+   * Triggers the actual firmware install — ubus `lxupdate.firmwareUpgrade` with
+   * the path returned by uploadFirmware(). The AP validates the image and then
+   * REBOOTS; the call may take a while (synchronous validation) or drop the
+   * connection mid-flight. A protocol error in the response means the upgrade
+   * was NOT started (the device stays online); a timeout/transport failure is
+   * ambiguous — the caller must verify via post-reboot version check.
+   */
+  async firmwareUpgrade(stagedPath: string, timeoutMs?: number): Promise<void> {
+    const sid = await this.sid();
+    // The upgrade call gets its own generous budget (image validation can take
+    // minutes) — independent of the per-request default.
+    const res = await postJson(this.address, '/ubus', { jsonrpc: '2.0', id: 1, method: 'call', params: [sid, 'lxupdate', 'firmwareUpgrade', { path: stagedPath }] }, this.transport, timeoutMs ?? Math.max(this.opts.timeoutMs, 300_000), this.ports);
+    if (res.status !== 200) throw new Error(`Web-UI returned HTTP ${res.status} for firmwareUpgrade`);
+    let body: any;
+    try {
+      body = JSON.parse(res.text);
+    } catch {
+      // Non-JSON after a long call — the device likely rebooted mid-response.
+      return;
+    }
+    if (body.error) throw new Error(`firmwareUpgrade rejected: ${body.error.message ?? 'unknown error'} (code ${body.error.code ?? '?'})`);
+    const inner = body?.result?.[1];
+    // Surface an explicit failure tag when the device reports one (the SPA's
+    // containsErrors() path — e.g. image validation failed, AP stays online).
+    const errtag = Number(inner?.ErrorTag ?? inner?.errortag ?? 0);
+    if (!Number.isFinite(errtag) || errtag !== 0) throw new Error(`firmwareUpgrade reported error tag ${errtag}`);
   }
 }
 

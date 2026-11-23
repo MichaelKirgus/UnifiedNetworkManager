@@ -8,6 +8,7 @@ import {
   createPluginServer,
   createTerminalPool,
   errorDescriptor,
+  extractMajorMinor,
   hostFromAddress,
   INVENTORY_INTERVAL_MS,
   makeConsoleUpgrade,
@@ -41,6 +42,7 @@ import { buildDescriptors, DISCOVER_METRICS } from './metrics';
 import { DEVICE_MODELS } from './deviceModels';
 import { LcosWebClient, parseLcosConfigText } from './webapi';
 import { registry as actionRegistry, type LxActionContext } from './actions';
+import { findRepoFirmwareTarget, listFirmwareFiles } from './firmwareFiles';
 import { buildPlan, PlanningError } from './plan';
 import { buildLxState } from './state';
 
@@ -458,11 +460,30 @@ app.post('/monitoring', async (req, res) => {
     // 30.07.2026") vs the newest known LCOS-LX line — major.minor comparison,
     // so build suffixes + dates never matter. Available-without-apply.
     if (sys.swVersion) {
+      const notesUrl = (line: string): string => `https://ftp.lancom.de/Documentation/Release-Notes/LCOS%20LX/${String(line).replace(/\./g, '')}/`;
       // Release notes: LANCOM's FTP release-notes folder for the target line
       // (RN_LCOS-LX-<line>-*.pdf).
-      const fwRow = catalogFirmwareRow(sys.swVersion, KNOWN_LX_LINES, {
-        releaseNotesUrl: (target) => `https://ftp.lancom.de/Documentation/Release-Notes/LCOS%20LX/${String(target).replace(/\./g, '')}/`,
-      });
+      let fwRow = catalogFirmwareRow(sys.swVersion, KNOWN_LX_LINES, { releaseNotesUrl: notesUrl });
+      // One-click upgrade path — a .upx in UNM's central file repository that
+      // matches this device's hardware model AND is newer than the live version
+      // gets an actionable row (plan → lx.firmware.update). Best-effort: a repo
+      // failure must never sink the poll, so fall back to the catalog-only row.
+      try {
+        const target = findRepoFirmwareTarget(sys.swVersion, selectedModel, await listFirmwareFiles());
+        if (target) {
+          fwRow = {
+            name: 'os', kind: 'firmware',
+            currentVersion: sys.swVersion,
+            latestVersion: target.version,
+            available: true, // manually built row — the match already proved it is newer
+            rebootRequired: true,
+            sizeBytes: target.sizeBytes ?? null,
+            releaseNotesUrl: (() => { const line = extractMajorMinor(target.version); return line ? notesUrl(line) : null; })(),
+            applyActionId: 'lx.firmware.update',
+            applyInput: { repoFileId: target.fileId },
+          };
+        }
+      } catch { /* file repo unreachable — catalog row (if any) stands */ }
       if (fwRow) metrics['updates'] = [fwRow];
     }
     metrics['system.serialNumber'] = sys.serialNumber || null;
@@ -892,6 +913,9 @@ app.post('/config', async (req, res) => {
       deviceId: typeof deviceId === 'string' ? deviceId : undefined,
       // The UNM display name — labels artifacts the plugin creates (config backups).
       deviceName: typeof body.deviceName === 'string' && body.deviceName !== '' ? body.deviceName : null,
+      // Selected hardware model (e.g. "LC-LX-6500") — lx.firmware.update verifies
+      // the image's model against it before flashing anything.
+      selectedModel: typeof body.model === 'string' && body.model !== '' ? body.model : null,
       web,
       timeoutMs: clampInt(settings.timeoutMs, 1_000, 30_000, 5_000),
     };
