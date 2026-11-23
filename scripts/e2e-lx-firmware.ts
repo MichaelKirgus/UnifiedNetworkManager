@@ -203,6 +203,14 @@ async function main(): Promise<void> {
       check('row points at the dummy repo file', row.applyInput?.repoFileId === dummyId, row.applyInput);
       check('row shows target version from file name', row.latestVersion === DUMMY_VERSION, row.latestVersion);
       check('row carries sizeBytes', typeof row.sizeBytes === 'number' && row.sizeBytes > 0, row.sizeBytes);
+
+      // The Updates page's data source must expose the SAME actionable row — it is
+      // what the Files-page "Flash devices…" deep link (?file=<id>) filters on.
+      const updRes = await authed('GET', '/updates');
+      const updBody: any = await updRes.json();
+      const updRows: Array<any> = updBody?.rows ?? [];
+      const updRow = updRows.find((u) => u.deviceId === device.id && u.applyActionId === 'lx.firmware.update' && u.applyInput?.repoFileId === dummyId);
+      check('GET /updates exposes the actionable row for the repo file', Boolean(updRow), updRow ?? `no matching row among ${updRows.length} rows`);
     }
 
     // --- 4. Negative model guard through the real plan path -------------------------

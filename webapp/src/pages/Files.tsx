@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import clsx from 'clsx';
-import { Database, Download, FileUp, FolderOpen, History, Loader2, Pencil, Plus, Tag, Timer, Trash2, X } from 'lucide-react';
+import { Database, Download, FileUp, FolderOpen, History, Loader2, Pencil, Plus, Rocket, Tag, Timer, Trash2, X } from 'lucide-react';
+import { useNavigate } from 'react-router-dom';
 import { DialogShell } from '../components/DialogShell';
 import { Layout } from '../components/Layout';
 import { DataTable, DataTableColumn } from '../components/DataTable';
@@ -357,7 +358,17 @@ function UsesDialog({ entry, onClose }: { entry: RepoFileEntry; onClose: () => v
 export default function Files() {
   const { formatDateTime } = useTimeFormat();
   const queryClient = useQueryClient();
+  const navigate = useNavigate();
   const canWrite = can('files:write');
+
+  /** Deep link into the Updates page filtered to this/these repo file(s) —
+   * "Flash devices…" for firmware images (rows appear once each matching
+   * device's next telemetry beat reports it). One `file=` param per id. */
+  function flashDevices(fileIds: string[]) {
+    const q = new URLSearchParams();
+    for (const id of fileIds) q.append('file', id);
+    navigate(`/updates?${q.toString()}`);
+  }
 
   const [category, setCategory] = useState<string>(''); // '' = all
   const [tag, setTag] = useState<string>(''); // '' = all (flat feature-tag filter)
@@ -593,6 +604,10 @@ export default function Files() {
             className="rounded-md p-1.5 text-secondary hover:bg-muted hover:text-foreground"><Download size={14} /></button>
           <button type="button" aria-label={`Usage history of ${row.name}`} title="Usage history" onClick={() => setUsesEntry(row)}
             className="rounded-md p-1.5 text-secondary hover:bg-muted hover:text-foreground"><History size={14} /></button>
+          {row.category === 'firmware' && (
+            <button type="button" aria-label={`Flash devices with ${row.name}`} title="Flash devices… — pick which device(s) get this image (opens the Updates page filtered to it)" onClick={() => flashDevices([row.id])}
+              className="rounded-md p-1.5 text-secondary hover:bg-muted hover:text-foreground"><Rocket size={14} /></button>
+          )}
           {canWrite && (
             <>
               <button type="button" aria-label={`Rename or recategorize ${row.name}`} title="Edit name & category (metadata only — stored bytes untouched)" onClick={() => setEditEntry(row)}
@@ -782,6 +797,13 @@ export default function Files() {
                 { label: 'Add tags', onClick: (rows) => setBulkTags({ rows, mode: 'add' }) },
                 { label: 'Remove tags', onClick: (rows) => setBulkTags({ rows, mode: 'remove' }) },
                 { label: 'Set category', onClick: (rows) => setBulkCategoryRows(rows) },
+                {
+                  // Enabled only when EVERY selected row is a firmware image — the
+                  // Updates page filter shows update rows pointing at these files.
+                  label: 'Flash devices…',
+                  enabled: (sel) => sel.length > 0 && sel.every((r) => r.category === 'firmware'),
+                  onClick: (sel) => flashDevices(sel.map((r) => r.id)),
+                },
                 {
                   label: 'Delete selected',
                   confirm: (count) => `Delete ${count} file${count === 1 ? '' : 's'} from the repository? This removes their stored content. Usage history is kept.`,

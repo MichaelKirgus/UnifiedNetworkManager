@@ -93,8 +93,11 @@ export function findRepoFirmwareTarget(
 
 // --- Repo listing with a short TTL cache ---------------------------------------------
 
-/** How long the firmware-file list stays fresh between polls (5 min). */
-const REPO_LIST_TTL_MS = 5 * 60_000;
+/** How long the firmware-file list stays fresh between polls. Kept short (1 min)
+ * so an image uploaded via the Files page shows up as an update row on the very
+ * next poll beat — the listing is one cheap internal GET per plugin instance,
+ * shared across all of its devices. */
+const REPO_LIST_TTL_MS = 60_000;
 
 let repoListCache: { at: number; files: FileRepoEntry[] } | null = null;
 

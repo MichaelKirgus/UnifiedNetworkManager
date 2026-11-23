@@ -1,7 +1,7 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { ArrowUpCircle, CheckCircle2, ExternalLink, Layers, Loader2, Lock, RefreshCw, Rocket, ShieldCheck, Unlock, Zap, Workflow } from 'lucide-react';
+import { ArrowUpCircle, CheckCircle2, ExternalLink, Layers, Loader2, Lock, RefreshCw, Rocket, ShieldCheck, Unlock, X, Zap, Workflow } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import { DialogShell } from '../components/DialogShell';
 import { Layout } from '../components/Layout';
 import { DataTable, DataTableColumn, type ExpandChildContext } from '../components/DataTable';
@@ -10,6 +10,7 @@ import { ReauthDialog } from '../components/ReauthDialog';
 import { runAction, useExecutionMode, type ExecutionMode } from '../executionMode';
 import { api, ApiError, UpdateRow, FixesSummary } from '../api/client';
 import { can } from '../auth/permissions';
+import { updateRowsForRepoFiles } from '../utils/updateRows';
 
 // ---------------------------------------------------------------------------
 // Kind badge + helpers (same visual language as the other inventory pages)
@@ -379,8 +380,27 @@ export default function Updates() {
     refetchInterval: 30_000,
   });
 
-  const rows: UpdateRow[] = updatesQuery.data?.rows ?? [];
+  // Deep link from the Files page ("Flash devices…" on a firmware file):
+  // ?file=<repoFileId> (repeatable) restricts the view to update rows whose
+  // apply input points at one of those files.
+  const [searchParams, setSearchParams] = useSearchParams();
+  const fileFilterIds = useMemo(() => searchParams.getAll('file').filter((v) => v !== ''), [searchParams]);
+
+  const allRows: UpdateRow[] = updatesQuery.data?.rows ?? [];
+  const rows = useMemo(() => updateRowsForRepoFiles(allRows, fileFilterIds), [allRows, fileFilterIds]);
   const stack = updatesQuery.data?.stack;
+
+  // File names for the filter chip (only fetched while a file filter is active).
+  const fileNamesQuery = useQuery({
+    queryKey: ['repoFiles', 'firmware'],
+    queryFn: () => api.repoFiles('firmware'),
+    enabled: fileFilterIds.length > 0,
+    staleTime: 60_000,
+  });
+  const fileNameOf = (id: string): string => {
+    const f = fileNamesQuery.data?.files.find((x) => x.id === id);
+    return f ? f.name : `${id.slice(0, 8)}…`;
+  };
 
   // Action catalogs of the plugins reporting updates — used to offer actions a
   // plugin actually advertises (e.g. generic-ssh's `packages.dist-upgrade`).
@@ -710,7 +730,9 @@ export default function Updates() {
   const [checking, setChecking] = useState(false);
   async function checkNow() {
     // 'unm-stack' is the synthetic UNM-itself row — it has no device to poll.
-    const deviceIds = Array.from(new Set(rows.map((r) => r.deviceId))).filter((id) => id !== 'unm-stack');
+    // allRows (not the file-filtered rows): with a filter active we don't know
+    // which devices will match until they report, so refresh every reporter.
+    const deviceIds = Array.from(new Set(allRows.map((r) => r.deviceId))).filter((id) => id !== 'unm-stack');
     if (deviceIds.length === 0) return;
     setChecking(true);
     try {
@@ -958,7 +980,7 @@ export default function Updates() {
     <Layout
       title="Updates"
       actions={
-        rows.length > 0 ? (
+        allRows.length > 0 ? (
           <button
             type="button"
             onClick={() => void checkNow()}
@@ -1011,6 +1033,26 @@ export default function Updates() {
           <div className={`flex items-center justify-between rounded border px-3 py-2 text-sm ${notice.kind === 'error' ? 'border-danger/40 bg-danger/10 text-danger-fg' : 'border-success/40 bg-success/10 text-success-fg'}`}>
             <span>{notice.text}</span>
             <button type="button" onClick={() => setNotice(null)} className="text-xs underline">dismiss</button>
+          </div>
+        )}
+
+        {/* File filter chip — deep link from the Files page ("Flash devices…"). */}
+        {fileFilterIds.length > 0 && (
+          <div className="flex flex-wrap items-center gap-2 rounded-md border border-accent-indigo/40 bg-accent-indigo/10 px-3 py-2 text-sm">
+            <Rocket size={14} className="text-secondary" />
+            <span className="font-medium text-secondary">Flash target:</span>
+            {fileFilterIds.map((id) => (
+              <span key={id} className="rounded bg-card px-2 py-0.5 font-mono text-xs">{fileNameOf(id)}</span>
+            ))}
+            <button
+              type="button"
+              aria-label="Clear file filter — show all updates"
+              title="Show all updates"
+              onClick={() => setSearchParams({}, { replace: true })}
+              className="ml-auto rounded p-1 text-secondary hover:bg-muted"
+            >
+              <X size={14} />
+            </button>
           </div>
         )}
 
@@ -1072,7 +1114,9 @@ export default function Updates() {
           rowKey={(n) => n.key}
           storageKey="updates"
           searchPlaceholder="Search devices or updates…"
-          emptyMessage="No available updates — all devices are up to date."
+          emptyMessage={fileFilterIds.length > 0
+            ? 'No device has reported an update for this file yet. Rows appear after each matching device\'s next telemetry poll (within a minute); "Check now" forces a fresh poll once any device reports.'
+            : 'No available updates — all devices are up to date.'}
           selectable={canApply && !readOnly}
           bulkActions={[
             {
