@@ -497,6 +497,7 @@ export default function Flows() {
   const collectors = collectorsQuery.data?.collectors ?? [];
   const ingest = collectorsQuery.data?.ingest;
   const securityWorker = securityQuery.data?.worker;
+  const securityDns = securityQuery.data?.dnsHeuristics;
 
   const findingColumns: DataTableColumn<FlowSecurityFinding>[] = [
     {
@@ -798,9 +799,18 @@ export default function Flows() {
             {securityWorker && (
               <p className="mt-1 text-xs text-faint">
                 {securityWorker.enabled
-                  ? `Worker active · last run ${formatDateTime(securityWorker.lastRunAt)} · ${formatNumber(securityWorker.seenDstCount)} known destinations`
-                  : 'Worker disabled — enable “Flow security insights” in Settings → Flows.'}
+                  ? `Flow worker active · last run ${formatDateTime(securityWorker.lastRunAt)} · ${formatNumber(securityWorker.seenDstCount)} known destinations`
+                  : 'Flow worker disabled — enable “Flow security insights” in Settings → Flows.'}
                 {securityWorker.lastError && <span className="text-danger-fg"> · last error: {securityWorker.lastError}</span>}
+              </p>
+            )}
+            {securityDns && (
+              <p className="mt-1 text-xs text-faint">
+                {securityDns.enabled
+                  ? `DNS heuristics active · last run ${formatDateTime(securityDns.lastRunAt)} · ${formatNumber(securityDns.dgaDomainCacheSize)} domains scored · ${formatNumber(securityDns.tunnelTrackedPairs)} tunnel pairs tracked`
+                    + (securityDns.dgaConfirmedClients > 0 ? ` · ${formatNumber(securityDns.dgaConfirmedClients)} client(s) confirmed DGA` : '')
+                  : 'DNS heuristics disabled — enable “DNS security heuristics” in Settings → Security.'}
+                {securityDns.lastError && <span className="text-danger-fg"> · last error: {securityDns.lastError}</span>}
               </p>
             )}
             <DataTable

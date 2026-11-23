@@ -9,9 +9,10 @@
  *      waits ~40–45 min of real time for the seeded buckets to become
  *      processable — run it in the background.
  *   B. DNS heuristics — insert dns_query_events rows for DGA-like domains
- *      (positive + human-word negative) and tunneling traffic (long subdomain
- *      labels, high volume; plus a short-label negative). Assert 'dga' and
- *      'dns-tunnel' findings land with the right attribution.
+ *      (ten distinct names per client to cross the volume gate, plus human-word,
+ *      low-volume and whitelisted-zone negatives) and tunneling traffic (long
+ *      subdomain labels, high volume; plus a short-label negative). Assert 'dga'
+ *      and 'dns-tunnel' findings land with the right attribution.
  *   C. cleanup (set KEEP=1 to leave the test data in place).
  *
  * Test identities live in reserved ranges so they cannot collide with real
@@ -48,14 +49,27 @@ const DST_HEAVY = `203.0.113.${randOctet()}`; // negative: periodic but 50 MiB/b
 // in-boot dedupe caches (dgaReported / tunnelState) that survive across E2E
 // runs, so a fixed name would be silently skipped on re-runs.
 const CLIENT_DGA = '10.99.1.4';
-const DGA_DOMAIN_POS = `${randConsonantLabel(14)}.test`; // 14 distinct consonants: H = log2(14) ≈ 3.81 ≥ 3.6, zero vowels
+// Volume gate (default 10 distinct DGA-like domains per client): seed exactly the
+// threshold count — crossing it confirms the client and reports EVERY tracked
+// domain, so all ten must land as findings.
+const DGA_DOMAINS_POS: string[] = (() => {
+  const out = new Set<string>();
+  while (out.size < 10) out.add(`${randConsonantLabel(14)}.test`); // H = log2(14) ≈ 3.81 ≥ 3.6, zero vowels
+  return [...out];
+})();
+const DGA_DOMAIN_POS = DGA_DOMAINS_POS[0];
 const DGA_DOMAIN_NEG = 'stackoverflow.example'; // len 13 but H ≈ 3.55 < 3.6 (and vowel ratio 31%)
+// Volume-gate negative: ONE DGA-like domain (< threshold) → no finding…
+const CLIENT_SUPPRESSED = '10.99.1.7';
+const SUPPRESSED_DOMAIN = `${randConsonantLabel(14)}.test`;
+// …and whitelist negative: a DGA-like label on a whitelisted zone (cloudfront.net is in the default list) → never scored.
+const WHITELISTED_DOMAIN = `${randConsonantLabel(14)}.cloudfront.net`;
 const CLIENT_TUNNEL = '10.99.1.5';
 const TUNNEL_BASE_POS = `tun${randLabel(10)}.test`; // 35 queries, 30-char subdomain labels
 const CLIENT_TUNNEL_NEG = '10.99.1.6';
 const TUNNEL_BASE_NEG = 'tunnelneg-e2e.test'; // 35 queries but 1-char labels
 
-const ALL_TEST_IPS = [SRC_BEACON, SRC_JITTER, SRC_HEAVY, CLIENT_DGA, CLIENT_TUNNEL, CLIENT_TUNNEL_NEG];
+const ALL_TEST_IPS = [SRC_BEACON, SRC_JITTER, SRC_HEAVY, CLIENT_DGA, CLIENT_SUPPRESSED, CLIENT_TUNNEL, CLIENT_TUNNEL_NEG];
 const ALL_TEST_DSTS = [DST_BEACON, DST_JITTER, DST_HEAVY];
 
 // ── Plumbing ─────────────────────────────────────────────────────────────────
@@ -126,7 +140,7 @@ async function purgeTestRows(): Promise<void> {
     `DELETE FROM notifications WHERE "dedupeKey" LIKE 'flow-security:%' AND ("dedupeKey" LIKE '%10.99.1.%')`
   );
   // Single array parameter (double-wrapped): pg serializes the inner array as one text[] value.
-  await pool.query(`DELETE FROM dns_query_events WHERE client = ANY($1)`, [[CLIENT_DGA, CLIENT_TUNNEL, CLIENT_TUNNEL_NEG]]);
+  await pool.query(`DELETE FROM dns_query_events WHERE client = ANY($1)`, [[CLIENT_DGA, CLIENT_SUPPRESSED, CLIENT_TUNNEL, CLIENT_TUNNEL_NEG]]);
   await pool.query(`DELETE FROM flow_agg_5m WHERE "srcIp" = ANY($1::inet[])`, [ALL_TEST_IPS]);
 }
 
@@ -239,9 +253,11 @@ async function phaseB(): Promise<void> {
       [crypto.randomUUID(), pluginId, deviceId, t0 + (i += 1) * 10, client, domain, crypto.randomUUID()]
     );
 
-  await insertDns(CLIENT_DGA, DGA_DOMAIN_POS);
+  for (const d of DGA_DOMAINS_POS) await insertDns(CLIENT_DGA, d); // crosses the volume gate → all ten reported
   await insertDns(CLIENT_DGA, DGA_DOMAIN_POS); // second query — must NOT create a second finding
   await insertDns(CLIENT_DGA, DGA_DOMAIN_NEG);
+  await insertDns(CLIENT_SUPPRESSED, SUPPRESSED_DOMAIN); // below the volume gate → no finding
+  await insertDns(CLIENT_SUPPRESSED, WHITELISTED_DOMAIN); // whitelisted zone → never scored
   for (let q = 0; q < 35; q++) await insertDns(CLIENT_TUNNEL, `${randLabel(30)}.${TUNNEL_BASE_POS}`);
   for (let q = 0; q < 35; q++) await insertDns(CLIENT_TUNNEL_NEG, `a.${TUNNEL_BASE_NEG}`);
 
@@ -249,6 +265,9 @@ async function phaseB(): Promise<void> {
 
   let dgaPos: FindingRow | undefined;
   let dgaNeg = false;
+  let lowVolLeaked = false;
+  let whitelistLeaked = false;
+  let posFoundCount = 0;
   let tunnelPos: FindingRow | undefined;
   let tunnelNeg = false;
   const deadline = Date.now() + 3 * 60_000; // two beats at worst (60 s cadence)
@@ -260,12 +279,16 @@ async function phaseB(): Promise<void> {
     if (dga.status === 200) {
       dgaPos = dga.data.findings.find((f) => f.context?.domain === DGA_DOMAIN_POS);
       dgaNeg = dga.data.findings.some((f) => f.context?.domain === DGA_DOMAIN_NEG);
+      lowVolLeaked = dga.data.findings.some((f) => f.context?.domain === SUPPRESSED_DOMAIN);
+      whitelistLeaked = dga.data.findings.some((f) => f.context?.domain === WHITELISTED_DOMAIN);
+      posFoundCount = dga.data.findings.filter((f) => DGA_DOMAINS_POS.includes(String(f.context?.domain ?? ''))).length;
     }
     if (tun.status === 200) {
       tunnelPos = tun.data.findings.find((f) => f.context?.baseDomain === TUNNEL_BASE_POS);
       tunnelNeg = tun.data.findings.some((f) => f.context?.baseDomain === TUNNEL_BASE_NEG);
     }
-    if (dgaPos && !dgaNeg && tunnelPos && !tunnelNeg) break; // all four assertions decidable
+    // dgaPos existing proves ≥1 beat processed the rows — absence of the negatives is decidable then.
+    if (dgaPos && !dgaNeg && !lowVolLeaked && !whitelistLeaked && tunnelPos && !tunnelNeg) break;
     await sleep(10_000);
   }
 
@@ -275,10 +298,14 @@ async function phaseB(): Promise<void> {
     check('DGA context carries label features', Number(dgaPos.context?.labelLen) >= 12 && Number(dgaPos.context?.entropy) > 3.5,
       `context=${JSON.stringify(dgaPos.context ?? {})}`);
   }
-  check('human-word domain NOT flagged as DGA', !dgaNeg);
   const dgaAll = await api<SecurityResponse>('GET', '/flows/security?kind=dga');
   const posCount = dgaAll.status === 200 ? dgaAll.data.findings.filter((f) => f.context?.domain === DGA_DOMAIN_POS).length : -1;
   check('repeated queries to the same DGA domain do not duplicate findings', posCount === 1, `count=${posCount}`);
+  const allPosFound = dgaAll.status === 200 ? dgaAll.data.findings.filter((f) => DGA_DOMAINS_POS.includes(String(f.context?.domain ?? ''))).length : -1;
+  check('volume gate crossed → ALL tracked domains of the client reported', allPosFound === DGA_DOMAINS_POS.length, `count=${allPosFound}/${DGA_DOMAINS_POS.length}`);
+  check('human-word domain NOT flagged as DGA', !dgaNeg);
+  check('single DGA-like domain below the volume gate NOT flagged', !lowVolLeaked);
+  check('DGA-like label on a whitelisted zone (cloudfront.net) NOT flagged', !whitelistLeaked);
 
   check('tunneling traffic raised a finding', !!tunnelPos, tunnelPos ? `src=${tunnelPos.srcIp}` : 'none found');
   if (tunnelPos) {

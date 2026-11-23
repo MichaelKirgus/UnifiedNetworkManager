@@ -1700,6 +1700,10 @@ export interface FlowsSecurityResponse {
     lastError: string | null;
     watermarkMs: number;
     dgaDomainCacheSize: number;
+    /** Clients with DGA-like domains tracked in the volume-gate window. */
+    dgaTrackedClients: number;
+    /** Clients that crossed the distinct-domain threshold (reporting every new domain for this boot). */
+    dgaConfirmedClients: number;
     tunnelTrackedPairs: number;
   };
 }

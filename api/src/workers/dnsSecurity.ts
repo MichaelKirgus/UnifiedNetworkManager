@@ -10,9 +10,21 @@
  *   dga        — a client queried a domain whose longest non-TLD label looks
  *                algorithmically generated (label length ≥ dnsSecurityDgaMinLabelLen
  *                AND Shannon entropy ≥ dnsSecurityDgaMinEntropyX10/10 AND vowel
- *                ratio ≤ dnsSecurityDgaMaxVowelRatioPercent). Each domain is
- *                scored once per process boot; each (client, domain) tuple
- *                raises at most one finding per boot.
+ *                ratio ≤ dnsSecurityDgaMaxVowelRatioPercent) — gated by TWO
+ *                noise filters learned from live operation:
+ *                  · base-domain whitelist (dnsSecurityDgaBaseDomainWhitelist):
+ *                    cloud/CDN services legitimately use random-looking subdomain
+ *                    tokens (OneDrive, CloudFront dist ids, AWS ELB names, Alexa)
+ *                    and are never scored;
+ *                  · volume gate: a client must query ≥ dnsSecurityDgaMinDistinctDomainsPerClient
+ *                    DISTINCT DGA-like domains inside the rolling window
+ *                    (dnsSecurityDgaVolumeWindowHours) before any of them is
+ *                    reported — real DGA campaigns generate dozens to hundreds of
+ *                    names per host, legit services produce a handful. Confirmed
+ *                    clients stay confirmed for the rest of the boot and report
+ *                    every new DGA-like domain immediately.
+ *                Each domain is scored once per process boot; each (client, domain)
+ *                tuple raises at most one finding per boot.
  *   dns-tunnel — one client issued ≥ `dnsSecurityTunnelMinQueries` queries to
  *                the same base domain inside a rolling window (`dnsSecurityTunnelWindowHours`)
  *                whose subdomain labels average ≥ `dnsSecurityTunnelMinAvgLabelLen`
@@ -45,6 +57,8 @@ const SCAN_LIMIT = 20_000;
 const FUTURE_GUARD_MS = 300_000;
 /** Safety cap on tracked tunnel pairs — a runaway fleet must not grow the map unbounded. */
 const TUNNEL_MAX_TRACKED_PAIRS = 100_000;
+/** Safety cap on clients with DGA-like domains in the volume-gate window. */
+const DGA_MAX_TRACKED_CLIENTS = 100_000;
 
 // ── State ────────────────────────────────────────────────────────────────────
 
@@ -55,6 +69,10 @@ let lastError: string | null = null;
 const dgaVerdicts = new Map<string, boolean>();
 /** (client|domain) tuples already reported as DGA — avoids re-upserting on every query. */
 const dgaReported = new Set<string>();
+/** Volume gate: distinct DGA-like domains per client inside the rolling window (domain → first-seen ts). */
+const dgaClientDomains = new Map<string, Map<string, number>>();
+/** Clients that crossed the distinct-domain threshold — report every new domain for this boot. */
+const dgaConfirmedClients = new Set<string>();
 /** Rolling tunnel state per `${client}|${baseDomain}` — subdomain-bearing rows only. */
 interface TunnelState { ts: number[]; labelLenSum: number }
 const tunnelState = new Map<string, TunnelState>();
@@ -65,6 +83,8 @@ export function getDnsSecurityStats(): {
   lastError: string | null;
   watermarkMs: number;
   dgaDomainCacheSize: number;
+  dgaTrackedClients: number;
+  dgaConfirmedClients: number;
   tunnelTrackedPairs: number;
 } {
   return {
@@ -72,6 +92,8 @@ export function getDnsSecurityStats(): {
     lastError,
     watermarkMs,
     dgaDomainCacheSize: dgaVerdicts.size,
+    dgaTrackedClients: dgaClientDomains.size,
+    dgaConfirmedClients: dgaConfirmedClients.size,
     tunnelTrackedPairs: tunnelState.size,
   };
 }
@@ -124,6 +146,30 @@ export function isDgaLike(
   return f.len >= opts.minLabelLen && f.entropy >= opts.minEntropy && f.vowelRatio <= opts.maxVowelRatio;
 }
 
+/** Parse a comma/whitespace-separated base-domain whitelist into a lowercase set (empty entries dropped). */
+export function parseBaseDomainWhitelist(raw: string): Set<string> {
+  const out = new Set<string>();
+  for (const part of raw.split(/[\s,]+/)) {
+    const d = part.trim().toLowerCase();
+    if (d) out.add(d);
+  }
+  return out;
+}
+
+/**
+ * True when the domain equals a whitelist entry or sits UNDER one (case-insensitive
+ * suffix match) — never scored as DGA. Suffix semantics so an entry like
+ * 'cloudapp.azure.com' covers every OneDrive-for-Business endpoint
+ * ('…westus.cloudapp.azure.com') even though its last-two-labels base is 'azure.com'.
+ */
+export function isDgaBaseDomainWhitelisted(domain: string, whitelist: Set<string>): boolean {
+  const d = domain.toLowerCase();
+  for (const entry of whitelist) {
+    if (d === entry || d.endsWith(`.${entry}`)) return true;
+  }
+  return false;
+}
+
 /** Naive registered domain = last two labels (co.uk-style TLDs are approximated). */
 export function baseDomainOf(domain: string): string | null {
   const labels = domain.split('.');
@@ -159,6 +205,25 @@ export function tunnelVerdict(
   const avg = state.labelLenSum / state.ts.length;
   if (avg < minAvgLabelLen) return null;
   return { queries: state.ts.length, avgLabelLen: Math.round(avg * 10) / 10 };
+}
+
+/** Decision for one newly seen DGA-like domain under the per-client volume gate. */
+export interface DgaVolumeDecision {
+  /** The client just crossed the distinct-domain threshold — report ALL its tracked domains now. */
+  confirmClient: boolean;
+  /** This new domain should be reported right away (client already confirmed). */
+  reportNewDomain: boolean;
+}
+
+/** Pure decision core of the DGA volume gate — extracted for unit testing. */
+export function dgaVolumeDecision(
+  trackedDistinctCount: number,
+  alreadyConfirmed: boolean,
+  minDistinctDomains: number
+): DgaVolumeDecision {
+  if (alreadyConfirmed) return { confirmClient: false, reportNewDomain: true };
+  const crossed = trackedDistinctCount >= minDistinctDomains;
+  return { confirmClient: crossed, reportNewDomain: crossed };
 }
 
 // ── Notification ─────────────────────────────────────────────────────────────
@@ -202,6 +267,9 @@ async function beat(): Promise<void> {
     const dgaMinLabelLen = Number(values.dnsSecurityDgaMinLabelLen) || 12;
     const dgaMinEntropy = (Number(values.dnsSecurityDgaMinEntropyX10) || 36) / 10;
     const dgaMaxVowelRatio = (Number.isFinite(Number(values.dnsSecurityDgaMaxVowelRatioPercent)) ? Number(values.dnsSecurityDgaMaxVowelRatioPercent) : 25) / 100;
+    const dgaMinDistinctDomains = Math.max(1, Number(values.dnsSecurityDgaMinDistinctDomainsPerClient) || 10);
+    const dgaVolumeWindowHours = Number(values.dnsSecurityDgaVolumeWindowHours) || 24;
+    const dgaWhitelist = parseBaseDomainWhitelist(String(values.dnsSecurityDgaBaseDomainWhitelist ?? ''));
     const tunnelWindowHours = Number(values.dnsSecurityTunnelWindowHours) || 1;
     const tunnelMinQueries = Number(values.dnsSecurityTunnelMinQueries) || 30;
     const tunnelMinAvgLabelLen = Number(values.dnsSecurityTunnelMinAvgLabelLen) || 24;
@@ -216,18 +284,50 @@ async function beat(): Promise<void> {
       rows.push({ client: String(r.client), domain: String(r.domain), deviceId: r.deviceId ? String(r.deviceId) : '', ts });
     }
 
-    // ── DGA pass — score each new domain once per boot; report each (client, domain) tuple once.
-    const dgaCandidates = new Map<string, Row>(); // key `${client}|${domain}` → first row
+    // ── DGA pass — score each new domain once per boot (whitelisted base domains are never scored).
+    const dgaNew = new Map<string, Row>(); // key `${client}|${domain}` → first row this beat
     for (const row of rows) {
       let verdict = dgaVerdicts.get(row.domain);
       if (verdict === undefined) {
         const f = dgaCandidateLabel(row.domain);
-        verdict = f !== null && isDgaLike(f, { minLabelLen: dgaMinLabelLen, minEntropy: dgaMinEntropy, maxVowelRatio: dgaMaxVowelRatio });
+        verdict = f !== null && !isDgaBaseDomainWhitelisted(row.domain, dgaWhitelist)
+          && isDgaLike(f, { minLabelLen: dgaMinLabelLen, minEntropy: dgaMinEntropy, maxVowelRatio: dgaMaxVowelRatio });
         dgaVerdicts.set(row.domain, verdict);
       }
       if (verdict) {
         const key = `${row.client}|${row.domain}`;
-        if (!dgaReported.has(key)) dgaCandidates.set(key, row);
+        if (!dgaReported.has(key)) dgaNew.set(key, row);
+      }
+    }
+
+    // Volume gate — real DGA campaigns generate dozens of distinct names per host,
+    // legit services with random-looking tokens a handful. Track distinct DGA-like
+    // domains per client in a rolling window; report only once the count crosses
+    // the threshold (confirmed clients stay confirmed for this boot).
+    const dgaWindowStartMs = nowMs - dgaVolumeWindowHours * 3_600_000;
+    for (const [clientKey, domains] of dgaClientDomains) {
+      for (const [domain, firstSeenTs] of domains) if (firstSeenTs < dgaWindowStartMs) domains.delete(domain);
+      if (domains.size === 0) dgaClientDomains.delete(clientKey);
+    }
+    if (dgaClientDomains.size > DGA_MAX_TRACKED_CLIENTS) {
+      // eslint-disable-next-line no-console
+      console.warn(`[dns-security] DGA client state exceeded ${DGA_MAX_TRACKED_CLIENTS} clients — resetting`);
+      dgaClientDomains.clear();
+    }
+    const dgaToReport = new Map<string, Row>(); // key `${client}|${domain}` → row to report this beat
+    for (const [key, row] of dgaNew) {
+      let domains = dgaClientDomains.get(row.client);
+      if (!domains) { domains = new Map(); dgaClientDomains.set(row.client, domains); }
+      if (!domains.has(row.domain)) domains.set(row.domain, row.ts); // first-seen ts for window pruning
+      const decision = dgaVolumeDecision(domains.size, dgaConfirmedClients.has(row.client), dgaMinDistinctDomains);
+      if (decision.confirmClient) {
+        dgaConfirmedClients.add(row.client);
+        for (const [domain] of domains) {
+          const k = `${row.client}|${domain}`;
+          if (!dgaReported.has(k)) dgaToReport.set(k, { client: row.client, domain, deviceId: row.deviceId, ts: domains.get(domain)! });
+        }
+      } else if (decision.reportNewDomain) {
+        dgaToReport.set(key, row);
       }
     }
 
@@ -262,12 +362,12 @@ async function beat(): Promise<void> {
 
     // Resolve hostname clients to IPs for finding attribution (one batched lookup).
     const namesToResolve = new Set<string>();
-    for (const row of dgaCandidates.values()) if (net.isIP(row.client) === 0) namesToResolve.add(row.client.toLowerCase());
+    for (const row of dgaToReport.values()) if (net.isIP(row.client) === 0) namesToResolve.add(row.client.toLowerCase());
     for (const row of touchedTunnels.values()) if (net.isIP(row.client) === 0) namesToResolve.add(row.client.toLowerCase());
     const resolved = await resolveClientHostnames([...namesToResolve]);
 
-    // DGA findings — one per (client, domain) tuple.
-    for (const [key, row] of dgaCandidates) {
+    // DGA findings — one per (client, domain) tuple that cleared the volume gate.
+    for (const [key, row] of dgaToReport) {
       const clientIp = net.isIP(row.client) !== 0 ? row.client : resolved.get(row.client.toLowerCase());
       if (!clientIp) continue; // no address to attribute — stays visible in the DNS view
       dgaReported.add(key);

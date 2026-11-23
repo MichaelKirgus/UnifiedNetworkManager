@@ -1,6 +1,7 @@
 /**
  * Unit tests for workers/dnsSecurity.ts — the pure DNS heuristic helpers:
  * Shannon entropy, DGA label feature extraction + the three-gate decision,
+ * the DGA base-domain whitelist + per-client volume gate, and
  * base-domain / subdomain-label decomposition and the tunnel verdict.
  */
 
@@ -11,7 +12,10 @@ jest.mock('uuid', () => ({ v4: () => '00000000-0000-4000-8000-000000000000' }));
 import {
   baseDomainOf,
   dgaCandidateLabel,
+  dgaVolumeDecision,
+  isDgaBaseDomainWhitelisted,
   isDgaLike,
+  parseBaseDomainWhitelist,
   shannonEntropy,
   tunnelLabelLen,
   tunnelVerdict,
@@ -127,5 +131,67 @@ describe('tunnelVerdict', () => {
     // 10 queries, sum 245 → avg 24.5 ≥ 24 (fires at threshold)
     const ts10 = Array.from({ length: 10 }, (_, i) => i * 60_000);
     expect(tunnelVerdict({ ts: ts10, labelLenSum: 245 }, 10, 24)).toEqual({ queries: 10, avgLabelLen: 24.5 });
+  });
+});
+
+describe('parseBaseDomainWhitelist', () => {
+  it('parses a comma-separated list and normalises case + whitespace', () => {
+    const set = parseBaseDomainWhitelist('CloudApp.Azure.com, cloudfront.net');
+    expect(set).toEqual(new Set(['cloudapp.azure.com', 'cloudfront.net']));
+  });
+
+  it('accepts mixed separators (commas, spaces, newlines) and drops empty entries', () => {
+    const set = parseBaseDomainWhitelist('a.com\n b.org ,\t c.io ,,');
+    expect(set).toEqual(new Set(['a.com', 'b.org', 'c.io']));
+  });
+
+  it('returns an empty set for empty / separator-only input', () => {
+    expect(parseBaseDomainWhitelist('').size).toBe(0);
+    expect(parseBaseDomainWhitelist(' , \n ').size).toBe(0);
+  });
+});
+
+describe('isDgaBaseDomainWhitelisted', () => {
+  const wl = parseBaseDomainWhitelist('cloudapp.azure.com, cloudfront.net');
+
+  it('matches domains sitting UNDER an entry (suffix semantics)', () => {
+    // OneDrive for Business: last-two-labels base is azure.com — the suffix match still covers it.
+    expect(isDgaBaseDomainWhitelisted('onedsc12345.westus.cloudapp.azure.com', wl)).toBe(true);
+    expect(isDgaBaseDomainWhitelisted('d2ly6zhewrzsqf.cloudfront.net', wl)).toBe(true);
+  });
+
+  it('matches the entry itself (case-insensitively)', () => {
+    expect(isDgaBaseDomainWhitelisted('CLOUDFRONT.NET', wl)).toBe(true);
+  });
+
+  it('does NOT match sibling or lookalike zones', () => {
+    expect(isDgaBaseDomainWhitelisted('evil.cloudapp.azure.com.evil.example.net', wl)).toBe(false); // suffix must be a full label boundary
+    expect(isDgaBaseDomainWhitelisted('xcloudfront.net', wl)).toBe(false);
+    expect(isDgaBaseDomainWhitelisted('onedsc12345.westus.onedrive.com', wl)).toBe(false);
+  });
+
+  it('never matches with an empty whitelist', () => {
+    expect(isDgaBaseDomainWhitelisted('anything.example.com', new Set())).toBe(false);
+  });
+});
+
+describe('dgaVolumeDecision', () => {
+  it('reports nothing while the client is below the distinct-domain threshold', () => {
+    // 3 distinct DGA-like domains < 10 — e.g. OneDrive endpoints from one host
+    expect(dgaVolumeDecision(3, false, 10)).toEqual({ confirmClient: false, reportNewDomain: false });
+  });
+
+  it('confirms the client exactly at the threshold and reports everything tracked', () => {
+    // 10th distinct domain crosses min=10 → confirm + report all (incl. this one)
+    expect(dgaVolumeDecision(10, false, 10)).toEqual({ confirmClient: true, reportNewDomain: true });
+  });
+
+  it('reports new domains immediately once the client is confirmed', () => {
+    // already confirmed → every further DGA-like domain fires without re-accumulating
+    expect(dgaVolumeDecision(1, true, 10)).toEqual({ confirmClient: false, reportNewDomain: true });
+  });
+
+  it('min=1 restores the legacy behaviour (report on first sight)', () => {
+    expect(dgaVolumeDecision(1, false, 1)).toEqual({ confirmClient: true, reportNewDomain: true });
   });
 });

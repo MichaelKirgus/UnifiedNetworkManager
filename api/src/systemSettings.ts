@@ -795,6 +795,43 @@ export const SETTING_DESCRIPTORS: SettingDescriptor[] = [
       'Maximum vowel share (a/e/i/o/u, in percent) of the longest non-TLD label. DGA strings are consonant-heavy; English averages ~36–40%. All three DGA gates (length + entropy + vowel ratio) must hold.',
   },
   {
+    key: 'dnsSecurityDgaMinDistinctDomainsPerClient',
+    label: 'DGA min distinct domains per client',
+    type: 'integer',
+    category: 'Security',
+    unit: 'domains/window',
+    min: 1,
+    max: 10_000,
+    default: 10,
+    envVar: 'UNM_DNS_SECURITY_DGA_MIN_DISTINCT_DOMAINS_PER_CLIENT',
+    help:
+      'Volume gate for DGA findings: a client must query at least this many DISTINCT DGA-like domains inside the volume window before any of them are reported. Real DGA campaigns generate dozens to hundreds of names per host; legitimate services with random-looking subdomain tokens (OneDrive, CloudFront, k8s ELBs) typically produce only a handful. Set 1 to report every DGA-like domain immediately.',
+  },
+  {
+    key: 'dnsSecurityDgaVolumeWindowHours',
+    label: 'DGA volume window',
+    type: 'integer',
+    category: 'Security',
+    unit: 'hours',
+    min: 1,
+    max: 168,
+    default: 24,
+    envVar: 'UNM_DNS_SECURITY_DGA_VOLUME_WINDOW_HOURS',
+    help:
+      'Rolling window over which distinct DGA-like domains per client are counted for the volume gate.',
+  },
+  {
+    key: 'dnsSecurityDgaBaseDomainWhitelist',
+    label: 'DGA base-domain whitelist',
+    type: 'string',
+    category: 'Security',
+    default: 'cloudapp.azure.com, cloudfront.net, amazonaws.com, a2z.com, myhomescreen.tv, pubmnet.com',
+    maxLength: 1024,
+    envVar: 'UNM_DNS_SECURITY_DGA_BASE_DOMAIN_WHITELIST',
+    help:
+      'Comma-separated domains that are NEVER scored as DGA — a query matches when its domain equals an entry or sits under it (e.g. "cloudapp.azure.com" covers every OneDrive-for-Business endpoint). Use for cloud/CDN services that legitimately use random-looking subdomain tokens (CloudFront distribution ids, AWS ELB names, Alexa device services). Extend the list when a new service false-positives; leave empty to disable.',
+  },
+  {
     key: 'dnsSecurityTunnelWindowHours',
     label: 'DNS tunneling window',
     type: 'integer',

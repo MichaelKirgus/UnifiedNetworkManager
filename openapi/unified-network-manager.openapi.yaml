@@ -5595,6 +5595,8 @@ paths:
                       lastError: { type: [string, 'null'] }
                       watermarkMs: { type: integer, format: int64, description: Rows with tsMs at/before this epoch-ms value are never scanned (no history replay) }
                       dgaDomainCacheSize: { type: integer }
+                      dgaTrackedClients: { type: integer, description: Clients with DGA-like domains tracked in the volume-gate window }
+                      dgaConfirmedClients: { type: integer, description: Clients that crossed the distinct-domain threshold (reporting every new domain for this boot) }
                       tunnelTrackedPairs: { type: integer }
         '401':
           description: Authentication required
