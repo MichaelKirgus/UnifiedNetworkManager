@@ -31,6 +31,7 @@ import securityChecksRouter from './routes/securityChecks';
 import cveRouter from './routes/cve';
 import securityEventsRouter from './routes/securityEvents';
 import logRulesRouter from './routes/logRules';
+import logRuleFeedsRouter from './routes/logRuleFeeds';
 import threatIntelRouter from './routes/threatIntel';
 // DNS query events (/dns-queries) — read view of the per-query log pushed via
 // POST /plugin/dns-queries (OPNsense unbound qstats); feeds the Security page.
@@ -60,6 +61,7 @@ import { startPluginDiscovery } from './plugins/discovery';
 import { startPlanExecutorWorker } from './workers/planExecutor';
 import { startPlanSchedulerWorker } from './workers/planScheduler';
 import { startLogRulesWorker } from './workers/logRules';
+import { startLogRuleFeedsWorker } from './workers/logRuleFeeds';
 import { startLogRetentionWorker } from './workers/logRetention';
 import { startFileRepoRetentionWorker } from './workers/fileRepoRetention';
 import { startPluginMetricsWorker } from './workers/pluginMetrics';
@@ -354,6 +356,9 @@ async function main(): Promise<void> {
   // filled by the syslog-collector plugin via POST /plugin/security-events.
   api.use(securityEventsRouter);
   api.use(logRulesRouter);
+  // Sigma rule feeds (/log-rule-feeds) — URL/GitHub sources of log rules, synced
+  // by the leader worker (workers/logRuleFeeds.ts) + on demand.
+  api.use(logRuleFeedsRouter);
   // Threat intelligence (/threat-intel) — IOC feed sources + status; matching
   // runs in workers/threatIntel.ts and raises 'ioc-hit' findings.
   api.use(threatIntelRouter);
@@ -476,6 +481,10 @@ async function main(): Promise<void> {
     // Log rules — Sigma detection over ingested device log lines (Security page;
     // watermark scan of security_events, findings into the shared pipeline).
     void runAsLeader(LEADER_KEYS.logRules, 'logRules', () => startLogRulesWorker()).then((stop) => workerStops.push(stop));
+
+    // Log-rule feeds — scheduled sync of URL/GitHub Sigma rule sources (Phase 2;
+    // per-feed intervalMinutes, manual sync runs in-process via the routes).
+    void runAsLeader(LEADER_KEYS.logRuleFeeds, 'logRuleFeeds', () => startLogRuleFeedsWorker()).then((stop) => workerStops.push(stop));
 
     // GeoIP database refresh (leader-gated; cadence from geoipFetchIntervalHours).
     void runAsLeader(LEADER_KEYS.geoip, 'geoip', () => startGeoIpWorker()).then((stop) => workerStops.push(stop));

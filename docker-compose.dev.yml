@@ -224,6 +224,10 @@ services:
       # ever run), so chown it to the dropped app user like the CA files above —
       # otherwise writeRadiusConfig() gets EACCES on first render.
       - UNM_CHOWN_PATHS=/data/backups /data/file-repo /data/tls /data/ca/admin-jwk.pem /data/ca/ca.json /data/radius
+    # host.docker.internal — lets E2E fixture servers running on HOST ports be
+    # reached from inside this container (e.g. mock feed URLs for log-rule feeds).
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       # Stored UNM backups (Backups page) — local-destination archives live here.
       # Named volume by default; set UNM_BACKUP_VOLUME to a host path or another

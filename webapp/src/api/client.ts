@@ -4010,18 +4010,59 @@ export interface ThreatIntelResponse {
 export interface LogRule {
   id: string;
   name: string;
-  /** 'builtin' = YAML managed by UNM (disable/override only); 'user' = created or imported via the UI. */
-  source: 'builtin' | 'user';
+  /** 'builtin' = YAML managed by UNM (disable/override only); 'user' = created or imported via the UI; 'feed' = synced from a URL feed. */
+  source: 'builtin' | 'user' | 'feed';
   sigmaYaml: string;
   enabled: boolean;
   severityOverride: 'info' | 'warning' | 'critical' | null;
   /** Parse/compile error from the last worker beat (null = healthy). */
   lastError: string | null;
+  /** Owning feed id (source='feed') — null for builtin/user rules. */
+  feedId: string | null;
   createdAt: string;
   updatedAt: string;
   /** Open-finding stats for this rule (lastHitAt null = never fired / already resolved). */
   lastHitAt: string | null;
   occurrences: number;
+}
+
+/** A Sigma rule feed — a URL source of log rules synced by the leader worker. */
+export interface LogRuleFeed {
+  id: string;
+  name: string;
+  /** 'yaml-url' = one https URL serving a (multi-doc) YAML file; 'github-repo' = owner/repo (+ optional pathPrefix). */
+  kind: 'yaml-url' | 'github-repo';
+  url: string;
+  pathPrefix: string | null;
+  enabled: boolean;
+  /** Sync cadence in minutes (0 = manual only). */
+  intervalMinutes: number;
+  lastSyncAt: string | null;
+  lastSuccessAt: string | null;
+  lastError: string | null;
+  ruleCount: number;
+  /** Central file-repo id of the raw snapshot from the last successful sync. */
+  repoFileId: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface LogRuleFeedsResponse {
+  feeds: LogRuleFeed[];
+}
+
+/** Outcome of one feed sync cycle (POST /log-rule-feeds/:id/sync). */
+export interface FeedSyncResult {
+  syncedAt: string;
+  totalDocs: number;
+  created: number;
+  updated: number;
+  unchanged: number;
+  /** Rules owned by the feed that were missing from the sync → disabled. */
+  disabled: number;
+  skipped: Array<{ name: string | null; error: string }>;
+  conflicts: Array<{ name: string; owner: 'builtin' | 'user' | 'feed'; ownerId?: string }>;
+  repoFileId: string | null;
 }
 
 export interface LogRulesResponse {
@@ -5111,6 +5152,17 @@ export const api = {
     apiFetch<{ deleted: boolean }>(`/log-rules/${encodeURIComponent(id)}`, { method: 'DELETE' }),
   importLogRules: (yaml: string) =>
     apiFetch<{ imported: number; total: number; results: LogRuleImportResult[] }>('/log-rules/import', { method: 'POST', body: JSON.stringify({ yaml }) }),
+
+  // Sigma rule feeds (Phase 2) — URL sources of log rules.
+  logRuleFeeds: () => apiFetch<LogRuleFeedsResponse>('/log-rule-feeds'),
+  createLogRuleFeed: (body: { name: string; kind: 'yaml-url' | 'github-repo'; url: string; pathPrefix?: string | null; intervalMinutes?: number }) =>
+    apiFetch<LogRuleFeed>('/log-rule-feeds', { method: 'POST', body: JSON.stringify(body) }),
+  updateLogRuleFeed: (id: string, body: Partial<{ name: string; kind: 'yaml-url' | 'github-repo'; url: string; pathPrefix: string | null; intervalMinutes: number; enabled: boolean }>) =>
+    apiFetch<LogRuleFeed>(`/log-rule-feeds/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify(body) }),
+  deleteLogRuleFeed: (id: string) =>
+    apiFetch<{ deleted: boolean; convertedRules: number }>(`/log-rule-feeds/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+  syncLogRuleFeed: (id: string) =>
+    apiFetch<FeedSyncResult & { feed: LogRuleFeed }>(`/log-rule-feeds/${encodeURIComponent(id)}/sync`, { method: 'POST', body: '{}' }),
   /** DNS query events from appliance resolvers (unbound qstats) + window aggregates. */
   dnsQueries: (params?: { sinceHours?: number; deviceId?: string; action?: 'pass' | 'block' | 'drop'; q?: string; limit?: number }) => {
     const qs = new URLSearchParams();

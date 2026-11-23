@@ -1,5 +1,5 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { Bug, Download, Eye, FileSearch, Globe, Loader2, Pencil, RefreshCw, Radar, ShieldCheck, ShieldAlert, ShieldX, Info, Trash2 } from 'lucide-react';
+import { Bug, Download, Eye, FileSearch, Globe, Loader2, Pencil, RefreshCw, Radar, Rss, ShieldCheck, ShieldAlert, ShieldX, Info, Trash2 } from 'lucide-react';
 import { Link } from 'react-router-dom';
 import { useMemo, useState } from 'react';
 import clsx from 'clsx';
@@ -9,7 +9,7 @@ import { DataTable, DataTableColumn } from '../components/DataTable';
 import { ALL_PAGES, useServerTable } from '../components/useServerTable';
 import { DeviceChip } from '../components/DeviceChip';
 import { PageTabs } from '../components/PageTabs';
-import { api, ApiError, SecurityCheckRow, CvePackageRow, CveVulnerabilityRow, ThreatIntelSource, LogRule, LogRuleImportResult, DnsQueryEvent } from '../api/client';
+import { api, ApiError, SecurityCheckRow, CvePackageRow, CveVulnerabilityRow, ThreatIntelSource, LogRule, LogRuleFeed, FeedSyncResult, LogRuleImportResult, DnsQueryEvent } from '../api/client';
 
 /** Check-kind pill — the vocabulary is shared across all plugins (SDK contract). */
 const KIND_STYLES: Record<string, string> = {
@@ -1154,6 +1154,8 @@ function LogRulesSection() {
   const [creating, setCreating] = useState(false);
   const [importing, setImporting] = useState(false);
   const [viewingId, setViewingId] = useState<string | null>(null);
+  const [view, setView] = useState<'rules' | 'feeds'>('rules');
+  const [editingFeed, setEditingFeed] = useState<{ mode: 'create' } | { mode: 'edit'; feed: LogRuleFeed } | null>(null);
 
   async function toggleRule(r: LogRule) {
     try {
@@ -1190,6 +1192,11 @@ function LogRulesSection() {
           {row.source === 'builtin' && (
             <span className="rounded bg-muted px-1 py-0.5 text-[10px] font-medium uppercase tracking-wide text-faint" title="Seeded by UNM — the YAML is managed; disable the rule or override its severity instead">
               builtin
+            </span>
+          )}
+          {row.source === 'feed' && (
+            <span className="rounded bg-accent-sky px-1 py-0.5 text-[10px] font-medium uppercase tracking-wide text-accent-sky-fg" title="Synced from a URL feed — the YAML follows the feed on each sync; manage it in the Feeds view">
+              feed
             </span>
           )}
         </span>
@@ -1267,16 +1274,32 @@ function LogRulesSection() {
 
   return (
     <div>
-      {/* New rule / import — right-aligned */}
-      <div className="mb-3 flex justify-end gap-2">
-        <button type="button" onClick={() => setImporting(true)} title="Paste one or more Sigma documents separated by ---" className="inline-flex items-center gap-2 rounded-md border border-border px-3 py-1.5 text-sm font-medium text-secondary hover:bg-muted">
-          Import YAML
-        </button>
-        <button type="button" onClick={() => setCreating(true)} className="inline-flex items-center gap-2 rounded-md bg-primary px-3 py-1.5 text-sm font-medium text-primary-fg hover:opacity-90">
-          New rule
-        </button>
+      {/* Rules/Feeds sub-view — left; context actions right */}
+      <div className="mb-3 flex items-center justify-between gap-2">
+        <div className="flex rounded-md border border-border p-0.5 text-sm font-medium">
+          <button type="button" onClick={() => setView('rules')} className={clsx('rounded px-3 py-1', view === 'rules' ? 'bg-muted text-foreground' : 'text-secondary hover:text-foreground')}>Rules</button>
+          <button type="button" onClick={() => setView('feeds')} className={clsx('rounded px-3 py-1', view === 'feeds' ? 'bg-muted text-foreground' : 'text-secondary hover:text-foreground')}>Feeds</button>
+        </div>
+        {view === 'rules' ? (
+          <div className="flex gap-2">
+            <button type="button" onClick={() => setImporting(true)} title="Paste one or more Sigma documents separated by ---" className="inline-flex items-center gap-2 rounded-md border border-border px-3 py-1.5 text-sm font-medium text-secondary hover:bg-muted">
+              Import YAML
+            </button>
+            <button type="button" onClick={() => setCreating(true)} className="inline-flex items-center gap-2 rounded-md bg-primary px-3 py-1.5 text-sm font-medium text-primary-fg hover:opacity-90">
+              New rule
+            </button>
+          </div>
+        ) : (
+          <button type="button" onClick={() => setEditingFeed({ mode: 'create' })} className="inline-flex items-center gap-2 rounded-md bg-primary px-3 py-1.5 text-sm font-medium text-primary-fg hover:opacity-90">
+            <Rss className="h-4 w-4" /> New feed
+          </button>
+        )}
       </div>
 
+      {view === 'feeds' ? (
+        <LogRuleFeedsSection onEditFeed={(feed) => setEditingFeed({ mode: 'edit', feed })} />
+      ) : (
+        <>
       {lrQuery.isLoading && <p className="text-sm text-muted-foreground">Loading log rules…</p>}
       {lrQuery.isError && (
         <p className="text-sm text-danger-fg">Failed to load log rules: {(lrQuery.error as Error).message}</p>
@@ -1315,11 +1338,284 @@ function LogRulesSection() {
           emptyMessage={'No log rules yet — create one below or import Sigma YAML. Built-in rules are seeded automatically at boot.'}
         />
       )}
+        </>
+      )}
 
       {creating && <LogRuleCreateDialog onClose={() => setCreating(false)} />}
       {importing && <LogRuleImportDialog onClose={() => setImporting(false)} />}
       {viewing && <LogRuleYamlDialog rule={viewing} onClose={() => setViewingId(null)} />}
+      {editingFeed && (
+        <FeedDialog feed={editingFeed.mode === 'edit' ? editingFeed.feed : null} onClose={() => setEditingFeed(null)} />
+      )}
     </div>
+  );
+}
+
+/** Log rule feeds — named YAML-URL / GitHub-repo sources the leader worker syncs on an interval. */
+function LogRuleFeedsSection({ onEditFeed }: { onEditFeed: (feed: LogRuleFeed) => void }) {
+  const queryClient = useQueryClient();
+  const feedsQuery = useQuery({
+    queryKey: ['logRuleFeeds'],
+    queryFn: () => api.logRuleFeeds(),
+    refetchInterval: 30_000,
+  });
+
+  const [syncingId, setSyncingId] = useState<string | null>(null);
+  const [lastSync, setLastSync] = useState<{ name: string; result: FeedSyncResult } | null>(null);
+  const [syncError, setSyncError] = useState<string | null>(null);
+
+  async function toggleFeed(f: LogRuleFeed) {
+    try {
+      await api.updateLogRuleFeed(f.id, { enabled: !f.enabled });
+      void queryClient.invalidateQueries({ queryKey: ['logRuleFeeds'] });
+    } catch (err) {
+      console.warn('Failed to toggle log rule feed:', (err as Error).message);
+    }
+  }
+
+  async function deleteFeed(f: LogRuleFeed) {
+    if (!window.confirm(`Delete the "${f.name}" feed? Its ${f.ruleCount} rule(s) become ordinary user rules.`)) return;
+    try {
+      await api.deleteLogRuleFeed(f.id);
+      void queryClient.invalidateQueries({ queryKey: ['logRuleFeeds'] });
+      void queryClient.invalidateQueries({ queryKey: ['logRules'] });
+    } catch (err) {
+      console.warn('Failed to delete log rule feed:', (err as Error).message);
+    }
+  }
+
+  async function syncNow(f: LogRuleFeed) {
+    setSyncingId(f.id);
+    setLastSync(null);
+    setSyncError(null);
+    try {
+      const result = await api.syncLogRuleFeed(f.id);
+      setLastSync({ name: f.name, result });
+      void queryClient.invalidateQueries({ queryKey: ['logRuleFeeds'] });
+      void queryClient.invalidateQueries({ queryKey: ['logRules'] });
+    } catch (err) {
+      setSyncError((err as Error).message);
+    } finally {
+      setSyncingId(null);
+    }
+  }
+
+  const feeds = feedsQuery.data?.feeds ?? [];
+
+  const columns: DataTableColumn<LogRuleFeed>[] = [
+    {
+      header: 'Name',
+      key: 'name',
+      width: 200,
+      render: (row) => <span className="text-sm font-medium">{row.name}</span>,
+    },
+    {
+      header: 'Kind',
+      key: 'kind',
+      width: 160,
+      render: (row) => (
+        <span className="flex items-center gap-1.5">
+          <span className={clsx('rounded px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide', row.kind === 'github-repo' ? 'bg-accent-sky text-accent-sky-fg' : 'bg-muted text-secondary')}>
+            {row.kind}
+          </span>
+          {row.pathPrefix && <span className="truncate font-mono text-[11px] text-faint" title={row.pathPrefix}>{row.pathPrefix}/</span>}
+        </span>
+      ),
+    },
+    {
+      header: 'Source',
+      key: 'url',
+      width: 260,
+      render: (row) => <span className="block truncate font-mono text-[11px] text-secondary" title={row.url}>{row.url}</span>,
+    },
+    {
+      header: 'Interval',
+      key: 'intervalMinutes',
+      width: 90,
+      sortAccessor: (row) => row.intervalMinutes,
+      render: (row) => <span className="text-xs text-secondary">{row.intervalMinutes > 0 ? `${row.intervalMinutes} min` : 'manual'}</span>,
+    },
+    {
+      header: 'Rules',
+      key: 'ruleCount',
+      width: 70,
+      sortAccessor: (row) => row.ruleCount,
+      render: (row) => <span className="text-xs text-secondary">{row.ruleCount}</span>,
+    },
+    {
+      header: 'Last sync',
+      key: 'lastSyncAt',
+      width: 160,
+      sortAccessor: (row) => Date.parse(row.lastSyncAt ?? '') || 0,
+      render: (row) =>
+        row.lastError ? (
+          <span className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-xs font-medium bg-danger/20 text-danger-fg" title={String(row.lastError)}>
+            {String(row.lastError).slice(0, 60)}{String(row.lastError).length > 60 ? '…' : ''}
+          </span>
+        ) : row.lastSyncAt ? (
+          <span className="text-xs text-secondary" title={new Date(row.lastSyncAt).toLocaleString()}>{timeAgo(row.lastSyncAt)}</span>
+        ) : (
+          <span className="text-xs text-faint">never</span>
+        ),
+    },
+    {
+      header: 'Status',
+      key: 'enabled',
+      width: 90,
+      render: (row) =>
+        row.enabled ? (
+          <span className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-xs font-medium bg-success/20 text-success-fg">active</span>
+        ) : (
+          <span className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-xs font-medium bg-muted text-secondary">disabled</span>
+        ),
+    },
+    {
+      header: '',
+      key: 'actions',
+      width: 180,
+      render: (row) => (
+        <div className="flex items-center justify-end gap-1">
+          <button type="button" onClick={() => void syncNow(row)} disabled={syncingId === row.id} title={`Sync "${row.name}" now`} className="rounded p-1 text-secondary hover:bg-muted disabled:opacity-40">
+            {syncingId === row.id ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
+          </button>
+          <button type="button" onClick={() => onEditFeed(row)} title={`Edit "${row.name}"`} className="rounded p-1 text-secondary hover:bg-muted">
+            <Pencil className="h-3.5 w-3.5" />
+          </button>
+          <button type="button" onClick={() => void toggleFeed(row)} title={row.enabled ? 'Disable this feed' : 'Enable this feed'} className="rounded px-2 py-1 text-xs font-medium text-secondary hover:bg-muted">
+            {row.enabled ? 'Disable' : 'Enable'}
+          </button>
+          <button type="button" onClick={() => void deleteFeed(row)} title={`Delete "${row.name}"`} className="rounded p-1 text-secondary hover:bg-danger/20 hover:text-danger-fg">
+            <Trash2 className="h-3.5 w-3.5" />
+          </button>
+        </div>
+      ),
+    },
+  ];
+
+  return (
+    <div>
+      {feedsQuery.isLoading && <p className="text-sm text-muted-foreground">Loading feeds…</p>}
+      {feedsQuery.isError && (
+        <p className="text-sm text-danger-fg">Failed to load log rule feeds: {(feedsQuery.error as Error).message}</p>
+      )}
+      {!feedsQuery.isLoading && (
+        <DataTable
+          columns={columns}
+          rows={feeds}
+          rowKey={(row) => row.id}
+          storageKey="log-rule-feeds"
+          autoRefresh={{ intervalMs: 30_000, queries: [feedsQuery] }}
+          searchPlaceholder="Search feeds…"
+          emptyMessage={'No log rule feeds yet — add one to sync Sigma rules from a YAML URL or GitHub repository.'}
+        />
+      )}
+
+      {syncError && (
+        <div className="mt-3 rounded-md border border-danger-border bg-danger px-3 py-2 text-xs text-danger-fg">Sync failed: {syncError}</div>
+      )}
+      {lastSync && (
+        <div className="mt-3 rounded-md border border-border bg-muted/30 px-3 py-2 text-xs text-secondary">
+          <span className="font-medium">{lastSync.name}</span>: {lastSync.result.created} created · {lastSync.result.updated} updated · {lastSync.result.unchanged} unchanged · {lastSync.result.disabled} disabled
+          {lastSync.result.skipped.length > 0 && <> · {lastSync.result.skipped.length} skipped</>}
+          {lastSync.result.conflicts.length > 0 && <> · {lastSync.result.conflicts.length} conflicts</>}
+          {lastSync.result.skipped.length > 0 && (
+            <ul className="mt-1 list-disc pl-4 text-faint">
+              {lastSync.result.skipped.slice(0, 5).map((s) => (
+                <li key={s.name ?? s.error}>{s.name ? `${s.name}: ` : ''}{s.error}</li>
+              ))}
+            </ul>
+          )}
+          {lastSync.result.conflicts.length > 0 && (
+            <ul className="mt-1 list-disc pl-4 text-faint">
+              {lastSync.result.conflicts.slice(0, 5).map((c) => (
+                <li key={c.name}>{c.name} — already owned by a {c.owner} rule</li>
+              ))}
+            </ul>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** Create/edit dialog for one log rule feed (YAML URL or GitHub repository). */
+function FeedDialog({ feed, onClose }: { feed: LogRuleFeed | null; onClose: () => void }) {
+  const queryClient = useQueryClient();
+  const [name, setName] = useState(feed?.name ?? '');
+  const [kind, setKind] = useState<'yaml-url' | 'github-repo'>(feed?.kind ?? 'yaml-url');
+  const [url, setUrl] = useState(feed?.url ?? '');
+  const [pathPrefix, setPathPrefix] = useState(feed?.pathPrefix ?? '');
+  const [intervalMinutes, setIntervalMinutes] = useState(feed ? String(feed.intervalMinutes) : '60');
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function save() {
+    if (saving || !name.trim() || !url.trim()) return;
+    setSaving(true);
+    setError(null);
+    try {
+      const body = {
+        name: name.trim(),
+        kind,
+        url: url.trim(),
+        pathPrefix: kind === 'github-repo' ? (pathPrefix.trim() || null) : null,
+        intervalMinutes: Math.max(0, Math.min(1440, Number(intervalMinutes) || 0)),
+      };
+      if (feed) await api.updateLogRuleFeed(feed.id, body);
+      else await api.createLogRuleFeed(body);
+      void queryClient.invalidateQueries({ queryKey: ['logRuleFeeds'] });
+      onClose();
+    } catch (err) {
+      setError((err as ApiError).message);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  const fieldCls = 'w-full rounded-md border border-border bg-background px-3 py-2 text-sm focus:border-focus-ring focus:outline-none';
+  return (
+    <DialogShell title={feed ? `Edit feed — ${feed.name}` : 'New log rule feed'} subtitle="Sync Sigma rules from a YAML URL or GitHub repository. The raw snapshot of each sync is stored in the file repo (tagged log-rules)." onClose={onClose} maxWidth="max-w-xl">
+      <div className="space-y-3">
+        {error && (
+          <div className="rounded-md border border-danger-border bg-danger px-3 py-2 text-xs text-danger-fg">{error}</div>
+        )}
+        <label className="block text-sm font-medium text-secondary">
+          Name
+          <input value={name} onChange={(e) => setName(e.target.value)} maxLength={200} placeholder="sigma-base" className={`${fieldCls} mt-1`} />
+        </label>
+        <div className="grid grid-cols-2 gap-3">
+          <label className="block text-sm font-medium text-secondary">
+            Kind
+            <select value={kind} onChange={(e) => setKind(e.target.value as 'yaml-url' | 'github-repo')} className={`${fieldCls} mt-1`}>
+              <option value="yaml-url">YAML URL</option>
+              <option value="github-repo">GitHub repository</option>
+            </select>
+          </label>
+          <label className="block text-sm font-medium text-secondary">
+            Interval (minutes) <span className="font-normal text-faint">(0 = manual only)</span>
+            <input type="number" min={0} max={1440} value={intervalMinutes} onChange={(e) => setIntervalMinutes(e.target.value)} className={`${fieldCls} mt-1`} />
+          </label>
+        </div>
+        <label className="block text-sm font-medium text-secondary">
+          {kind === 'yaml-url' ? 'URL (https, serves a YAML file)' : 'Repository (owner/repo or GitHub URL)'}
+          <input value={url} onChange={(e) => setUrl(e.target.value)} placeholder={kind === 'yaml-url' ? 'https://example.com/rules.yml' : 'sigmahq/sigma-rulestest'} className={`${fieldCls} mt-1`} />
+        </label>
+        {kind === 'github-repo' && (
+          <label className="block text-sm font-medium text-secondary">
+            Path prefix <span className="font-normal text-faint">(optional — subfolder of the repo)</span>
+            <input value={pathPrefix} onChange={(e) => setPathPrefix(e.target.value)} placeholder="rules/linux" className={`${fieldCls} mt-1`} />
+          </label>
+        )}
+        <div className="flex justify-end gap-2">
+          <button type="button" onClick={onClose} className="rounded-md border border-border px-3 py-1.5 text-sm font-medium text-secondary hover:bg-muted">Cancel</button>
+          <button type="button" onClick={() => void save()} disabled={saving || !name.trim() || !url.trim()}
+            className="inline-flex items-center gap-2 rounded-md bg-primary px-3 py-1.5 text-sm font-medium text-primary-fg hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50">
+            {saving && <Loader2 className="h-4 w-4 animate-spin" />}
+            {feed ? 'Save feed' : 'Add feed'}
+          </button>
+        </div>
+      </div>
+    </DialogShell>
   );
 }
 

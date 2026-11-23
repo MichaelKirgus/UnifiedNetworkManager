@@ -2100,6 +2100,34 @@ await pool.query(`ALTER TABLE flow_micro ADD COLUMN IF NOT EXISTS "agentCount" I
       END IF;
     END $$`);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_log_rules_enabled ON log_rules (enabled)`);
+  // Phase 2 — URL feeds: which feed manages a rule (NULL = builtin/user-owned).
+  // Deleting a feed converts its rules to source='user' first, so no FK needed.
+  await pool.query(`ALTER TABLE log_rules ADD COLUMN IF NOT EXISTS "feedId" TEXT`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_log_rules_feed ON log_rules ("feedId") WHERE "feedId" IS NOT NULL`);
+  // Sigma rule feeds (logRules/feeds.ts): named sources the leader worker syncs
+  // on an interval. kind 'yaml-url' = one https URL serving a (multi-doc) YAML
+  // file; 'github-repo' = owner/repo (+ optional pathPrefix) crawled via the
+  // GitHub trees API. Synced rules are upserted by name with source='feed';
+  // rules missing from a sync are disabled, never deleted.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS log_rule_feeds (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL UNIQUE,
+      kind TEXT NOT NULL DEFAULT 'yaml-url',
+      url TEXT NOT NULL,
+      "pathPrefix" TEXT,
+      enabled BOOLEAN NOT NULL DEFAULT true,
+      "intervalMinutes" INTEGER NOT NULL DEFAULT 60,
+      "lastSyncAt" TEXT,
+      "lastSuccessAt" TEXT,
+      "lastError" TEXT,
+      "ruleCount" INTEGER NOT NULL DEFAULT 0,
+      "createdAt" TEXT NOT NULL,
+      "updatedAt" TEXT NOT NULL
+    )`);
+  // Raw snapshot pointer (central file repo, category 'log-rule-feeds') — one
+  // current snapshot per feed; superseded files are pruned after the new lands.
+  await pool.query(`ALTER TABLE log_rule_feeds ADD COLUMN IF NOT EXISTS "repoFileId" TEXT`);
   // Flat feature tags for repo files (fileRepo.ts) — pure metadata used to group/
   // filter files by the feature that produced them ('log-rules', 'threat-intel', …).
   // Deliberately NEVER encoded into storagePath or blob keys: file-repo backends

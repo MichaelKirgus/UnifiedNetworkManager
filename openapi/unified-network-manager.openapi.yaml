@@ -5943,6 +5943,164 @@ paths:
         '401':
           description: Authentication required
 
+  /log-rule-feeds:
+    get:
+      tags: [Security]
+      summary: List Sigma rule feeds
+      description: >-
+        Named feed sources that sync Sigma log rules on an interval — a single
+        YAML URL (`kind: yaml-url`) or a GitHub repository (`kind: github-repo`,
+        optional pathPrefix). The leader worker fetches due feeds through the
+        web-fetch plugin and upserts rules by name (source `feed`); rules that
+        disappear from a feed are disabled, never deleted. Each successful sync
+        stores its raw snapshot in the central file repo (category
+        `log-rule-feeds`, tagged `log-rules`). Gated on `security:read`.
+      responses:
+        '200':
+          description: All feeds
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LogRuleFeedsResponse'
+        '401':
+          description: Authentication required (requires security:read)
+    post:
+      tags: [Security]
+      summary: Create a Sigma rule feed
+      description: >-
+        Gated on `system:write`. 409 when the name is already taken. For
+        `github-repo`, `url` may be an owner/repo reference or any GitHub URL;
+        a /tree/... folder URL derives `pathPrefix` automatically unless one is
+        given explicitly.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, kind, url]
+              properties:
+                name: { type: string, minLength: 1, maxLength: 200 }
+                kind: { type: string, enum: [yaml-url, github-repo] }
+                url: { type: string, description: 'https URL (yaml-url) or owner/repo / GitHub URL (github-repo)' }
+                pathPrefix: { type: [string, 'null'], description: Subfolder of the repository (github-repo only) }
+                intervalMinutes: { type: integer, minimum: 0, maximum: 1440, default: 60, description: Sync cadence; 0 = manual only }
+      responses:
+        '201':
+          description: The created feed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LogRuleFeed'
+        '400':
+          description: Invalid input (bad URL / kind mismatch)
+        '401':
+          description: Authentication required (requires system:write)
+        '409':
+          description: Feed name already exists
+
+  /log-rule-feeds/{id}:
+    patch:
+      tags: [Security]
+      summary: Update a Sigma rule feed (partial)
+      description: >-
+        Gated on `system:write`. Partial update — only provided fields change;
+        cross-field validation runs against the merged row. 409 when the new
+        name collides with another feed.
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: { type: string, minLength: 1, maxLength: 200 }
+                kind: { type: string, enum: [yaml-url, github-repo] }
+                url: { type: string }
+                pathPrefix: { type: [string, 'null'] }
+                enabled: { type: boolean }
+                intervalMinutes: { type: integer, minimum: 0, maximum: 1440 }
+      responses:
+        '200':
+          description: The updated feed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LogRuleFeed'
+        '400':
+          description: Invalid input
+        '401':
+          description: Authentication required (requires system:write)
+        '404':
+          description: Feed not found
+        '409':
+          description: Name collision with another feed
+    delete:
+      tags: [Security]
+      summary: Delete a Sigma rule feed
+      description: >-
+        Gated on `system:write`. The feed's rules are NOT deleted — they become
+        ordinary user rules (source flips to `user`, feedId cleared) so nothing
+        is lost.
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Deletion result
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  deleted: { type: boolean }
+                  convertedRules: { type: integer, description: Feed rules converted to user rules }
+        '401':
+          description: Authentication required (requires system:write)
+        '404':
+          description: Feed not found
+
+  /log-rule-feeds/{id}/sync:
+    post:
+      tags: [Security]
+      summary: Sync one feed now
+      description: >-
+        Gated on `system:write`. Runs the fetch/import cycle immediately (same
+        code path as the leader worker): upserts rules by name, disables rules
+        missing from the feed, stores the raw snapshot in the file repo and
+        updates bookkeeping. 409 when a sync for this feed is already running.
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Sync outcome + refreshed feed row
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/FeedSyncResult'
+                  - type: object
+                    properties:
+                      feed: { $ref: '#/components/schemas/LogRuleFeed' }
+        '401':
+          description: Authentication required (requires system:write)
+        '404':
+          description: Feed not found
+        '409':
+          description: A sync for this feed is already in progress
+        '502':
+          description: Fetch failed (no web-fetch plugin online, upstream error, …) — recorded on the feed row
+
   /geoip/status:
     get:
       tags: [Flows]
@@ -11777,9 +11935,10 @@ components:
       properties:
         id: { type: string }
         name: { type: string, description: Unique display name (defaults to the Sigma title) }
-        source: { type: string, enum: [builtin, user], description: builtin = seeded/refreshed by UNM at boot; user = imported via API }
+        source: { type: string, enum: [builtin, user, feed], description: builtin = seeded/refreshed by UNM at boot; user = imported via API; feed = synced from a log-rule feed (see /log-rule-feeds) }
         sigmaYaml: { type: string, description: The raw Sigma YAML document — single source of truth } 
         enabled: { type: boolean }
+        feedId: { type: [string, 'null'], description: Id of the log-rule feed managing this rule (source `feed`); null for builtin/user rules. Deleting a feed converts its rules to source `user`. }
         severityOverride:
           oneOf:
             - type: string
@@ -11791,6 +11950,59 @@ components:
         updatedAt: { type: string, format: date-time }
         lastHitAt: { type: [string, 'null'], format: date-time, description: Last observation of an OPEN finding for this rule; null = never fired or resolved }
         occurrences: { type: integer, description: Total occurrences across open findings for this rule }
+
+    LogRuleFeed:
+      type: object
+      required: [id, name, kind, url, enabled, intervalMinutes, createdAt, updatedAt]
+      properties:
+        id: { type: string }
+        name: { type: string, description: Unique feed display name (1-200 chars) }
+        kind: { type: string, enum: [yaml-url, github-repo], description: yaml-url = one https URL serving a (multi-doc) YAML file; github-repo = owner/repo (+ optional pathPrefix) crawled via the GitHub trees API }
+        url: { type: string, description: The feed source — https URL or owner/repo / GitHub URL }
+        pathPrefix: { type: [string, 'null'], description: Subfolder of the repository (github-repo only; null = repo root) }
+        enabled: { type: boolean, description: Disabled feeds are skipped by the worker but keep their rules }
+        intervalMinutes: { type: integer, minimum: 0, maximum: 1440, description: "Sync cadence in minutes (0 = manual only — sync via POST /log-rule-feeds/{id}/sync)" }
+        lastSyncAt: { type: [string, 'null'], format: date-time, description: Last sync attempt (success or failure) }
+        lastSuccessAt: { type: [string, 'null'], format: date-time, description: Last successful sync }
+        lastError: { type: [string, 'null'], description: Error message of the most recent failed sync; cleared on success }
+        ruleCount: { type: integer, description: Number of log rules currently owned by this feed }
+        repoFileId: { type: [string, 'null'], description: Central file-repo id of the raw snapshot from the last successful sync (category `log-rule-feeds`, tagged `log-rules`) }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+
+    LogRuleFeedsResponse:
+      type: object
+      required: [feeds]
+      properties:
+        feeds:
+          type: array
+          items: { $ref: '#/components/schemas/LogRuleFeed' }
+
+    FeedSyncResult:
+      type: object
+      required: [syncedAt, totalDocs, created, updated, unchanged, disabled, skipped, conflicts]
+      properties:
+        syncedAt: { type: string, format: date-time }
+        totalDocs: { type: integer, description: Sigma documents found in the feed content }
+        created: { type: integer, description: New rules inserted (source `feed`) }
+        updated: { type: integer, description: Feed-owned rules whose YAML changed (enabled/severityOverride preserved) }
+        unchanged: { type: integer, description: Feed-owned rules already up to date }
+        disabled: { type: integer, description: Feed-owned rules missing from the sync → disabled (never deleted) }
+        skipped:
+          type: array
+          items:
+            type: object
+            properties:
+              name: { type: [string, 'null'] }
+              error: { type: string, description: Parse/validation message for this document }
+        conflicts:
+          type: array
+          items:
+            type: object
+            properties:
+              name: { type: string, description: Rule name already owned by something else — the feed did NOT take over }
+              owner: { type: string, enum: [builtin, user, feed], description: Who owns the conflicting rule (another feed when `feed`) }
+        repoFileId: { type: [string, 'null'], description: File-repo id of the raw snapshot stored for this sync }
 
     LogRulesResponse:
       type: object

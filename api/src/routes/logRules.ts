@@ -24,6 +24,8 @@ interface RuleRow {
   id: string;
   name: string;
   source: string;
+  /** Phase 2 — the feed managing this rule (source='feed'); null for builtin/user. */
+  feedId: string | null;
   sigmaYaml: string;
   enabled: boolean;
   severityOverride: string | null;
@@ -36,7 +38,8 @@ function ruleToJson(r: RuleRow, hit?: { lastHitAt: string; occurrences: number }
   return {
     id: String(r.id),
     name: String(r.name),
-    source: (['builtin', 'user'] as readonly string[]).includes(String(r.source)) ? r.source : 'user',
+    source: (['builtin', 'user', 'feed'] as readonly string[]).includes(String(r.source)) ? r.source : 'user',
+    feedId: r.feedId ? String(r.feedId) : null,
     sigmaYaml: String(r.sigmaYaml),
     enabled: Boolean(r.enabled),
     severityOverride: r.severityOverride && (SEVERITIES as readonly string[]).includes(String(r.severityOverride)) ? String(r.severityOverride) : null,
@@ -77,7 +80,7 @@ async function loadRuleHits(): Promise<Map<string, { lastHitAt: string; occurren
 router.get('/log-rules', requireAuth, requirePermission('security:read'), async (_req: Request, res: Response) => {
   try {
     const [rulesRes, hits] = await Promise.all([
-      pool.query<RuleRow>(`SELECT id, name, source, "sigmaYaml", enabled, "severityOverride", "lastError", "createdAt", "updatedAt" FROM log_rules ORDER BY source DESC, name`),
+      pool.query<RuleRow>(`SELECT id, name, source, "feedId", "sigmaYaml", enabled, "severityOverride", "lastError", "createdAt", "updatedAt" FROM log_rules ORDER BY source DESC, name`),
       loadRuleHits(),
     ]);
     const hitRes = await pool.query(

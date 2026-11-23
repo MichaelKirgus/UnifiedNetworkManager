@@ -235,3 +235,82 @@ per-rule hit history view, `plugin_logs` as a second source (message+context).
 - **camelCase columns** are quoted identifiers — pg rows keep case (`r.tsMs`).
 - `upsertFinding` must stay backward-compatible: existing kinds keep the IP-key
   path; only `log-rule` uses dedupeKey.
+
+## 13. Feeds — URL/GitHub sources of rules (Phase 2, shipped)
+
+The first Phase 2 item from §11: community rule packs as named feeds. Design
+decisions (confirmed with the operator): feed sources = **YAML URL + GitHub
+repo path**; sync = **manual + per-feed `intervalMinutes`** (0 = manual only);
+prune = **disable, keep** (never delete); local edits — **the feed's YAML wins**
+on each sync while the user's `enabled`/`severityOverride` choices are preserved.
+
+### 13.1 Architecture (`api/src/logRules/feeds.ts`, worker key 9029)
+
+- **Table** `log_rule_feeds`: name (unique), kind (`yaml-url` |
+  `github-repo`), url, pathPrefix (github-repo subfolder), enabled,
+  intervalMinutes, lastSyncAt/lastSuccessAt/lastError, ruleCount, repoFileId.
+- **Fetching goes through the web-fetch plugin** (`webFetchBroker.ts`) — the API
+  never opens outbound egress itself; no provider online → sync fails with a
+  clear error recorded on the feed row. `GITHUB_TOKEN` (env) is passed as an
+  auth header for GitHub fetches only.
+- **Leader worker** (`workers/logRuleFeeds.ts`, LEADER_KEYS.logRuleFeeds=9029):
+  60 s beat, JS due-check per feed (`now - lastSyncAt >= intervalMinutes`),
+  `isFeedSyncing()` guard so manual + scheduled syncs never overlap.
+- **Upsert by name** (name = Sigma `title`): new → INSERT with
+  `source='feed'` + `feedId`; owned-by-this-feed → refresh `"sigmaYaml"` when it
+  changed, preserving enabled/severityOverride; name already owned by a builtin/
+  user rule/**another feed** → reported in `conflicts[]`, NOT taken over.
+- **Prune**: rules of THIS feed missing from the sync are disabled (never
+  deleted). Deleting a feed converts its rules to `source='user'` +
+  `feedId=NULL` — nothing is lost.
+- **Raw snapshot → central file repo** per successful sync (category
+  `log-rule-feeds`, flat tags `['log-rules', <feed-slug>]`): the exact content
+  behind each sync stays auditable/downloadable in the Files page; one current
+  snapshot per feed, superseded files pruned after the new one lands; repo
+  failure never breaks the cycle (try/catch, threat-intel pattern).
+
+### 13.2 Routes (`api/src/routes/logRuleFeeds.ts`, all in OpenAPI)
+
+| route | perm | purpose |
+|---|---|---|
+| `GET /v1/log-rule-feeds` | security:read | `{ feeds[] }` with sync state + repoFileId |
+| `POST /v1/log-rule-feeds` | system:write | create; 409 dup name; github-repo accepts owner/repo or any GitHub URL (tree/blob URLs derive pathPrefix) |
+| `PATCH /v1/log-rule-feeds/:id` | system:write | partial update, cross-field validation on the merged row |
+| `DELETE /v1/log-rule-feeds/:id` | system:write | `{ deleted, convertedRules }` — rules become user-owned first |
+| `POST /v1/log-rule-feeds/:id/sync` | system:write | run a cycle now; 409 while one is in flight; 502 on fetch failure (recorded) |
+
+OpenAPI schemas: `LogRuleFeed`, `LogRuleFeedsResponse`, `FeedSyncResult`;
+`LogRule.source` gained `'feed'` + new nullable `feedId`. Webapp client types +
+methods mirror (client.ts).
+
+### 13.3 Webapp
+
+Security page Log-rules section gets a **Rules / Feeds** sub-view toggle: the
+Feeds view lists feeds (kind pill, source URL, interval, rule count, last sync
+with error state) with per-row sync-now / edit / enable-disable / delete and an
+inline last-sync result panel (created/updated/unchanged/disabled/skipped/
+conflicts). The Rules table shows a `feed` badge on feed-owned rules. Create/edit
+dialog: name, kind select, URL (or owner/repo), optional path prefix, interval
+(0 = manual only).
+
+### 13.4 E2E (`scripts/e2e-log-rule-feeds.ts`)
+
+Live run against dev: a host HTTP fixture serves deterministic multi-doc Sigma
+YAML (reachable from the api container via `host.docker.internal` — see
+extra_hosts in docker-compose.dev.yml; **bind the fixture to all interfaces, not
+127.0.0.1**). Asserts: create → sync #1 created=3 + snapshot stored with tags;
+tag filter/PATCH/distinct endpoints; sync #2 updated/unchanged/disabled/conflict
+semantics (user-owned colliding title NOT taken over); delete feed converts all
+rules to user-owned; cleanup. `tsx scripts/e2e-log-rule-feeds.ts` from repo root.
+
+### 13.5 Gotchas learned in Phase 2
+
+- **TrueNAS compose read-back lags ~4 min after `containers.update`** — verify a
+  prod cutover via `/v1/info` buildTag FIRST, never re-dispatch on stale YAML.
+- `validateFeedInput`: an OMITTED `pathPrefix` on create is null, not an error
+  (only a wrong type errors) — E2E caught the original bug.
+- GET /log-rules must SELECT + expose `"feedId"` and allow `'feed'` in the
+  source whitelist (Phase 1 code coerced everything to builtin|user).
+- Flat file-repo **tags** (`repo_files.tags TEXT[]`, GIN index) are pure metadata
+  — never part of storagePath/blob keys, so they stay portable across
+  filesystem/S3/cloud backends; see the Files page tag filter + `x-file-tags`.
