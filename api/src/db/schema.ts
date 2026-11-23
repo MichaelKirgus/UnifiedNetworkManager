@@ -2856,6 +2856,11 @@ export const repoFiles = pgTable(
     // NULL = NO policy → the file is kept FOREVER (the retention worker only ever
     // touches rows that carry a policy id — see workers/fileRepoRetention.ts).
     retentionPolicyId: text('retentionPolicyId'),
+    // Flat feature tags (e.g. 'log-rules', 'threat-intel') — pure metadata for
+    // grouping/filtering in the Files page and by plugins. NEVER part of
+    // storagePath or blob keys, so it stays portable across filesystem/S3/cloud
+    // file-repo backends (no folder structure).
+    tags: text('tags').array().notNull().default([]),
   },
   (table) => {
     return {
@@ -2863,6 +2868,7 @@ export const repoFiles = pgTable(
       idxRepoFilesCategory: index('idx_repo_files_category').on(table.category),
       idxRepoFilesProvider: index('idx_repo_files_provider').on(table.providerId),
       idxRepoFilesRetentionPolicy: index('idx_repo_files_retention_policy').on(table.retentionPolicyId),
+      idxRepoFilesTags: index('idx_repo_files_tags').using('gin', table.tags),
     };
   }
 );

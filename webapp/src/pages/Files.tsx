@@ -360,21 +360,32 @@ export default function Files() {
   const canWrite = can('files:write');
 
   const [category, setCategory] = useState<string>(''); // '' = all
+  const [tag, setTag] = useState<string>(''); // '' = all (flat feature-tag filter)
   const [uploadCategory, setUploadCategory] = useState<string>('iso');
+  const [uploadTags, setUploadTags] = useState(''); // comma-separated, optional
   const [uploadProvider, setUploadProvider] = useState<string>(''); // '' = API default
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [usesEntry, setUsesEntry] = useState<RepoFileEntry | null>(null);
   const [retentionEntry, setRetentionEntry] = useState<RepoFileEntry | null>(null);
+  const [tagsEntry, setTagsEntry] = useState<RepoFileEntry | null>(null);
   const [policiesOpen, setPoliciesOpen] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const filesQuery = useQuery({
-    queryKey: ['repoFiles', category],
-    queryFn: () => api.repoFiles(category || undefined),
+    queryKey: ['repoFiles', category, tag],
+    queryFn: () => api.repoFiles(category || undefined, tag || undefined),
   });
   const files = filesQuery.data?.files ?? [];
+
+  // Distinct tags across the whole repo — feeds the tag filter chips. Invalidated
+  // alongside file mutations so new feature tags appear without a reload.
+  const tagsQuery = useQuery({
+    queryKey: ['repoFileTags'],
+    queryFn: () => api.listRepoTags(),
+  });
+  const allTags = tagsQuery.data?.tags ?? [];
 
   // Registered file-repo backends + the effective default (system setting /
   // env). Refreshed periodically so online state stays current.
@@ -408,10 +419,16 @@ export default function Files() {
     return providers.find((p) => p.id === f.providerId)?.name ?? 'unknown repo';
   };
 
-  const invalidate = () => queryClient.invalidateQueries({ queryKey: ['repoFiles'] });
+  const invalidate = () => {
+    queryClient.invalidateQueries({ queryKey: ['repoFiles'] });
+    queryClient.invalidateQueries({ queryKey: ['repoFileTags'] });
+  };
 
   const uploadMutation = useMutation({
-    mutationFn: (file: File) => api.uploadRepoFile(file, uploadCategory || undefined, uploadProvider || undefined),
+    mutationFn: (file: File) => {
+      const tags = uploadTags.split(',').map((t) => t.trim()).filter(Boolean);
+      return api.uploadRepoFile(file, uploadCategory || undefined, uploadProvider || undefined, tags.length > 0 ? tags : undefined);
+    },
     onSuccess: ({ file, deduplicated }) => {
       setBusy(false);
       setError(null);
@@ -475,6 +492,26 @@ export default function Files() {
       render: (row) => (
         <span className="rounded border border-border bg-background px-1.5 py-0.5 text-[11px] text-secondary">{row.category}</span>
       ),
+    },
+    {
+      header: 'Tags',
+      key: 'tags',
+      width: 200,
+      sortAccessor: (row) => (row.tags ?? []).join(' '),
+      render: (row) => {
+        const tags = row.tags ?? [];
+        if (tags.length === 0) return <span className="text-[11px] text-faint">—</span>;
+        return (
+          <span className="flex items-center gap-1" title={tags.join(', ')}>
+            {tags.slice(0, 3).map((t) => (
+              <button key={t} type="button" onClick={() => setTag(t)}
+                className="rounded bg-accent-sky px-1.5 py-0.5 text-[11px] font-medium text-accent-sky-fg hover:opacity-80"
+                title={`Filter by tag "${t}"`}>{t}</button>
+            ))}
+            {tags.length > 3 && <span className="text-[11px] text-faint">+{tags.length - 3}</span>}
+          </span>
+        );
+      },
     },
     {
       header: 'Retention',
@@ -541,6 +578,8 @@ export default function Files() {
             className="rounded-md p-1.5 text-secondary hover:bg-muted hover:text-foreground"><History size={14} /></button>
           {canWrite && (
             <>
+              <button type="button" aria-label={`Tags for ${row.name}`} title="Edit tags (flat feature metadata — never part of the storage path)" onClick={() => setTagsEntry(row)}
+                className="rounded-md p-1.5 text-secondary hover:bg-muted hover:text-foreground"><Pencil size={13} /></button>
               <button type="button" aria-label={`Retention policy for ${row.name}`} title="Set retention policy (no policy = kept forever)" onClick={() => setRetentionEntry(row)}
                 className="rounded-md p-1.5 text-secondary hover:bg-muted hover:text-foreground"><Timer size={13} /></button>
               <button type="button" aria-label={`Delete ${row.name}`} title="Delete" onClick={() => remove(row)} disabled={deleteMutation.isPending}
@@ -577,6 +616,13 @@ export default function Files() {
               >
                 {CATEGORIES.map((c) => <option key={c} value={c}>{c}</option>)}
               </select>
+              <input
+                value={uploadTags}
+                onChange={(e) => setUploadTags(e.target.value)}
+                placeholder="tags (comma-separated, optional)"
+                title="Flat feature tags for the uploaded file — group files by the feature that produced them"
+                className="w-52 rounded-md border border-border bg-background px-2 py-1.5 text-xs text-secondary focus:border-focus-ring focus:ring-1 focus:ring-focus-ring"
+              />
               {/* Target repository — only shown when multiple file-repo backends
                   exist. Preselected to the effective default (system setting),
                   so users normally don't need to change it per upload. */}
@@ -610,31 +656,61 @@ export default function Files() {
             Retention policies
           </button>
 
-          {/* Category filter chips */}
-          <div className="ml-auto flex items-center gap-1">
-            <button
-              type="button"
-              onClick={() => setCategory('')}
-              className={clsx(
-                'rounded-full border px-2.5 py-0.5 text-xs',
-                category === '' ? 'border-focus-ring bg-accent-indigo/40 text-secondary' : 'border-border text-faint hover:text-secondary'
-              )}
-            >
-              all
-            </button>
-            {CATEGORIES.map((c) => (
+          {/* Filter chips — category row + flat feature-tag row */}
+          <div className="ml-auto flex flex-col items-end gap-1">
+            <div className="flex items-center gap-1">
               <button
-                key={c}
                 type="button"
-                onClick={() => setCategory(c)}
+                onClick={() => setCategory('')}
                 className={clsx(
                   'rounded-full border px-2.5 py-0.5 text-xs',
-                  category === c ? 'border-focus-ring bg-accent-indigo/40 text-secondary' : 'border-border text-faint hover:text-secondary'
+                  category === '' ? 'border-focus-ring bg-accent-indigo/40 text-secondary' : 'border-border text-faint hover:text-secondary'
                 )}
               >
-                {c}
+                all
               </button>
-            ))}
+              {CATEGORIES.map((c) => (
+                <button
+                  key={c}
+                  type="button"
+                  onClick={() => setCategory(c)}
+                  className={clsx(
+                    'rounded-full border px-2.5 py-0.5 text-xs',
+                    category === c ? 'border-focus-ring bg-accent-indigo/40 text-secondary' : 'border-border text-faint hover:text-secondary'
+                  )}
+                >
+                  {c}
+                </button>
+              ))}
+            </div>
+            {allTags.length > 0 && (
+              <div className="flex max-w-lg flex-wrap items-center justify-end gap-1">
+                <span className="text-[10px] uppercase tracking-wide text-faint">tags:</span>
+                <button
+                  type="button"
+                  onClick={() => setTag('')}
+                  className={clsx(
+                    'rounded-full border px-2.5 py-0.5 text-xs',
+                    tag === '' ? 'border-focus-ring bg-accent-sky text-accent-sky-fg' : 'border-border text-faint hover:text-secondary'
+                  )}
+                >
+                  all
+                </button>
+                {allTags.map((t) => (
+                  <button
+                    key={t}
+                    type="button"
+                    onClick={() => setTag(t)}
+                    className={clsx(
+                      'rounded-full border px-2.5 py-0.5 text-xs',
+                      tag === t ? 'border-focus-ring bg-accent-sky text-accent-sky-fg' : 'border-border text-faint hover:text-secondary'
+                    )}
+                  >
+                    {t}
+                  </button>
+                ))}
+              </div>
+            )}
           </div>
         </div>
 
@@ -682,15 +758,69 @@ export default function Files() {
               storageKey="files"
               fillHeight
               searchPlaceholder="Search files…"
-              emptyMessage={`The repository is empty${category ? ` for category "${category}"` : ''}.${canWrite ? ' Upload an ISO, firmware image or config backup — it becomes available to every device and plugin through the API.' : ''}`}
+              emptyMessage={`The repository is empty${category ? ` for category "${category}"` : ''}${tag ? ` with tag "${tag}"` : ''}.${canWrite ? ' Upload an ISO, firmware image or config backup — it becomes available to every device and plugin through the API.' : ''}`}
             />
           </div>
         )}
 
         {usesEntry && <UsesDialog entry={usesEntry} onClose={() => setUsesEntry(null)} />}
         {retentionEntry && canWrite && <FileRetentionDialog entry={retentionEntry} onClose={() => setRetentionEntry(null)} />}
+        {tagsEntry && canWrite && <TagsDialog entry={tagsEntry} onClose={() => setTagsEntry(null)} />}
         {policiesOpen && <RetentionPoliciesDialog onClose={() => setPoliciesOpen(false)} />}
       </div>
     </Layout>
+  );
+}
+
+/** Edit the flat feature tags of one repo file (comma-separated input). Tags are
+ * pure metadata for grouping/filtering — never part of the storage path, so they
+ * stay portable across filesystem/S3/cloud file-repo backends. */
+function TagsDialog({ entry, onClose }: { entry: RepoFileEntry; onClose: () => void }) {
+  const queryClient = useQueryClient();
+  const [tagsText, setTagsText] = useState((entry.tags ?? []).join(', '));
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function save() {
+    if (saving) return;
+    setSaving(true);
+    setError(null);
+    try {
+      await api.setRepoFileTags(entry.id, tagsText.split(',').map((t) => t.trim()).filter(Boolean));
+      queryClient.invalidateQueries({ queryKey: ['repoFiles'] });
+      queryClient.invalidateQueries({ queryKey: ['repoFileTags'] });
+      onClose();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <DialogShell title={`Tags — ${entry.name}`} subtitle="Flat feature tags group files by the feature that produced them (e.g. log-rules, threat-intel). Comma-separated; leave empty to clear." onClose={onClose} maxWidth="max-w-md">
+      <div className="space-y-3">
+        {error && (
+          <div className="rounded-md border border-danger-border bg-danger px-3 py-2 text-xs text-danger-fg">{error}</div>
+        )}
+        <label className={labelCls}>
+          Tags
+          <input
+            value={tagsText}
+            onChange={(e) => setTagsText(e.target.value)}
+            placeholder="log-rules, my-feature"
+            className={`${fieldCls} mt-1`}
+          />
+        </label>
+        <div className="flex justify-end gap-2">
+          <button type="button" onClick={onClose} className="rounded-md border border-border px-3 py-1.5 text-xs font-medium text-secondary hover:bg-muted">Cancel</button>
+          <button type="button" onClick={() => void save()} disabled={saving}
+            className="inline-flex items-center gap-2 rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-fg hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50">
+            {saving && <Loader2 size={12} className="animate-spin" />}
+            Save tags
+          </button>
+        </div>
+      </div>
+    </DialogShell>
   );
 }

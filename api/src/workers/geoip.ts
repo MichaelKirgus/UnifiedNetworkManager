@@ -186,7 +186,7 @@ export async function geoipCycle(): Promise<void> {
     // Store in the central file repository (category 'geoip'). Identical
     // content dedupes to the existing row — a no-op refresh costs nothing.
     const name = fileNameFor(resolved.url, result.extractedFrom);
-    const { entry } = await addRepoFile({ data: bytes, name, category: 'geoip', uploadedBy: 'plugin' });
+    const { entry } = await addRepoFile({ data: bytes, name, category: 'geoip', tags: ['geoip'], uploadedBy: 'plugin' });
 
     await setActiveFileId(entry.id);
     // This process's lookup engine must see the new pointer immediately — drop

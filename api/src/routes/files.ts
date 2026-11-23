@@ -7,10 +7,12 @@ import {
   deleteRepoFile,
   getRepoFile,
   listRepoFiles,
+  listRepoFileTags,
   listRepoFileUses,
   openRepoFile,
   recordRepoFileUse,
   sanitizeCategory,
+  setRepoFileTags,
 } from '../fileRepo';
 import { defaultFileRepoProviderId, listFileRepoProviders } from '../fileRepoBroker';
 import {
@@ -32,8 +34,11 @@ import {
  *   - filesRouter (PUBLIC, mounted after the OpenAPI validator): JWT + page
  *     permissions. The webapp's Files page lists/uploads/downloads/deletes repo
  *     files here. Uploads are RAW octet-stream bodies with `x-file-name` /
- *     `x-file-category` headers — no multipart parser needed and multi-GB ISOs
- *     stream straight through (express.json only touches application/json).
+ *     `x-file-category` / `x-file-tags` headers — no multipart parser needed and
+ *     multi-GB ISOs stream straight through (express.json only touches
+ *     application/json). Tags are FLAT metadata for grouping/filtering by the
+ *     feature that produced a file — never part of the storage path, so they
+ *     stay portable across filesystem/S3/cloud file-repo backends.
  *   - internalFileRepoRouter (INTERNAL, mounted BEFORE the OpenAPI validator):
  *     gated by the shared x-plugin-api-key. Plugins do repo CRUD here (SDK
  *     createFileRepoClient) — they NEVER touch the volume or the database.
@@ -56,6 +61,14 @@ function readCategoryHeader(req: Request): string | undefined {
   const cat = Array.isArray(raw) ? (raw[0] ?? '') : (raw ?? '');
   const c = String(cat).trim();
   return c.length > 0 ? c.slice(0, 40) : undefined;
+}
+
+/** Optional comma-separated flat tag list from an upload request (`x-file-tags`). */
+function readTagsHeader(req: Request): string[] | undefined {
+  const raw = req.headers['x-file-tags'];
+  const s = Array.isArray(raw) ? String(raw[0] ?? '') : String(raw ?? '');
+  const parts = s.split(',').map((p) => p.trim()).filter(Boolean);
+  return parts.length > 0 ? parts.slice(0, 20) : undefined;
 }
 
 /** Optional explicit file-repo provider id (multi-segment repos). Omitted = default. */
@@ -82,11 +95,12 @@ function sendRetentionError(res: Response, err: unknown): void {
 
 export const filesRouter = Router();
 
-// GET /files — list repo files, newest first. Optional ?category= filter.
+// GET /files — list repo files, newest first. Optional ?category= and/or ?tag= filter.
 filesRouter.get('/files', requireAuth, requirePermission('files:read'), async (req: Request, res: Response) => {
   try {
     const category = typeof req.query.category === 'string' && req.query.category !== '' ? req.query.category : undefined;
-    const files = await listRepoFiles(category);
+    const tag = typeof req.query.tag === 'string' && req.query.tag !== '' ? req.query.tag : undefined;
+    const files = await listRepoFiles(category, tag);
     res.status(200).json({ files });
   } catch (err) {
     if (err instanceof FileRepoError) return void res.status(err.status).json({ error: err.message });
@@ -101,6 +115,19 @@ filesRouter.get('/files/providers', requireAuth, requirePermission('files:read')
   try {
     const [providers, defaultProviderId] = await Promise.all([listFileRepoProviders(), defaultFileRepoProviderId()]);
     res.status(200).json({ providers, defaultProviderId });
+  } catch (err) {
+    if (err instanceof FileRepoError) return void res.status(err.status).json({ error: err.message });
+    throw err;
+  }
+});
+
+// GET /files/tags — distinct tags across all repo files (filter chips for the
+// Files page). MUST be registered before /files/:id so 'tags' is not captured
+// as a file id. Read-only, files:read only.
+filesRouter.get('/files/tags', requireAuth, requirePermission('files:read'), async (_req: Request, res: Response) => {
+  try {
+    const tags = await listRepoFileTags();
+    res.status(200).json({ tags });
   } catch (err) {
     if (err instanceof FileRepoError) return void res.status(err.status).json({ error: err.message });
     throw err;
@@ -132,6 +159,7 @@ filesRouter.post('/files', requireAuth, requirePermission('files:write'), async 
       data: req as unknown as Readable,
       name,
       category: readCategoryHeader(req),
+      tags: readTagsHeader(req),
       uploadedBy,
       providerId: readProviderHeader(req),
     });
@@ -224,6 +252,20 @@ filesRouter.patch('/files/:id/retention', requireAuth, requirePermission('files:
   }
 });
 
+// PATCH /files/:id/tags — replace the flat tag list of one file
+// (body { tags: string[] } — sanitized server-side; [] clears all).
+filesRouter.patch('/files/:id/tags', requireAuth, requirePermission('files:write'), async (req: Request, res: Response) => {
+  try {
+    const body = (req.body ?? {}) as { tags?: unknown };
+    const tags = Array.isArray(body.tags) ? body.tags.map((t) => String(t)) : [];
+    const file = await setRepoFileTags(String(req.params.id ?? ''), tags);
+    res.status(200).json({ file });
+  } catch (err) {
+    if (err instanceof FileRepoError) return void res.status(err.status).json({ error: err.message });
+    throw err;
+  }
+});
+
 // GET /files/:id — download a repo file (raw bytes, Content-Disposition
 // attachment). Records a usage row for the audit trail.
 filesRouter.get('/files/:id', requireAuth, requirePermission('files:read'), async (req: Request, res: Response) => {
@@ -292,11 +334,12 @@ const pluginAuth = (req: Request, res: Response, next: () => void): void => {
   next();
 };
 
-// GET /plugin/files — list repo files for a plugin (optional ?category=).
+// GET /plugin/files — list repo files for a plugin (optional ?category= and/or ?tag=).
 internalFileRepoRouter.get('/plugin/files', pluginAuth, async (req: Request, res: Response) => {
   try {
     const category = typeof req.query.category === 'string' && req.query.category !== '' ? req.query.category : undefined;
-    const files = await listRepoFiles(category);
+    const tag = typeof req.query.tag === 'string' && req.query.tag !== '' ? req.query.tag : undefined;
+    const files = await listRepoFiles(category, tag);
     res.status(200).json({ files });
   } catch (err) {
     if (err instanceof FileRepoError) return void res.status(err.status).json({ error: err.message });
@@ -328,6 +371,7 @@ internalFileRepoRouter.post('/plugin/files', pluginAuth, async (req: Request, re
       data: req as unknown as Readable,
       name,
       category,
+      tags: readTagsHeader(req),
       uploadedBy: null, // plugin upload — no user context on this hop
       retentionPolicyId,
     });

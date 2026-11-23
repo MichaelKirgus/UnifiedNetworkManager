@@ -37,6 +37,8 @@ export interface FileRepoEntry {
   name: string;
   /** Open category set, e.g. 'iso' | 'firmware' | 'config-backup' | 'script' | 'other'. */
   category: string;
+  /** Flat feature tags (e.g. 'log-rules', 'threat-intel') — metadata for grouping/filtering only; never part of the storage path, so they stay portable across filesystem/S3/cloud backends. */
+  tags: string[];
   sizeBytes: number;
   /** SHA-256 hex of the stored content (integrity + dedupe signal). */
   sha256: string;
@@ -56,8 +58,8 @@ export interface FileRepoClientOptions {
 
 /** The shared repo client — one per plugin process is fine. */
 export interface FileRepoClient {
-  /** Lists repo files, optionally filtered by category (newest first). */
-  list(category?: string): Promise<FileRepoEntry[]>;
+  /** Lists repo files, optionally filtered by category and/or tag (newest first). */
+  list(category?: string, tag?: string): Promise<FileRepoEntry[]>;
   /** Metadata for one file (name/category/size/sha256) — null when unknown. */
   getMeta(fileId: string): Promise<FileRepoEntry | null>;
   /** Fetches a file's raw bytes (for "use" flows that push onto a device). */
@@ -75,10 +77,10 @@ export interface FileRepoClient {
    * stream mid-transfer. The caller's plan-step budget bounds the operation.
    */
   getStream(fileId: string, timeoutMs?: number): Promise<Readable>;
-  /** Adds a file to the repo. `name` is required; category defaults to 'other'. */
+  /** Adds a file to the repo. `name` is required; category defaults to 'other'; tags are flat feature metadata (optional). */
   upload(
     data: Buffer | Uint8Array,
-    meta: { name: string; category?: string },
+    meta: { name: string; category?: string; tags?: string[] },
     timeoutMs?: number
   ): Promise<FileRepoEntry>;
   /** Removes a file from the repo (content + metadata). */
@@ -99,8 +101,11 @@ export function createFileRepoClient(opts: FileRepoClientOptions = {}): FileRepo
   });
 
   return {
-    async list(category?: string) {
-      const qs = category ? `?category=${encodeURIComponent(category)}` : '';
+    async list(category?: string, tag?: string) {
+      const params = new URLSearchParams();
+      if (category) params.set('category', category);
+      if (tag) params.set('tag', tag);
+      const qs = params.toString() ? `?${params.toString()}` : '';
       const res = await http.get<{ files: FileRepoEntry[] }>(`/plugin/files${qs}`);
       return Array.isArray(res.data.files) ? (res.data.files as FileRepoEntry[]) : [];
     },
@@ -148,6 +153,7 @@ export function createFileRepoClient(opts: FileRepoClientOptions = {}): FileRepo
             'Content-Type': 'application/octet-stream',
             'x-file-name': meta.name,
             ...(meta.category ? { 'x-file-category': meta.category } : {}),
+            ...(meta.tags && meta.tags.length > 0 ? { 'x-file-tags': meta.tags.join(',') } : {}),
           },
           ...(timeoutMs ? { timeout: timeoutMs } : {}),
         }

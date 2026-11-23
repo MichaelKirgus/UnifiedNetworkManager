@@ -2100,6 +2100,13 @@ await pool.query(`ALTER TABLE flow_micro ADD COLUMN IF NOT EXISTS "agentCount" I
       END IF;
     END $$`);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_log_rules_enabled ON log_rules (enabled)`);
+  // Flat feature tags for repo files (fileRepo.ts) — pure metadata used to group/
+  // filter files by the feature that produced them ('log-rules', 'threat-intel', …).
+  // Deliberately NEVER encoded into storagePath or blob keys: file-repo backends
+  // may be filesystem, S3 buckets or cloud stores where folder structure is not
+  // portable — tags stay flat and live only in this column.
+  await pool.query(`ALTER TABLE repo_files ADD COLUMN IF NOT EXISTS "tags" TEXT[] NOT NULL DEFAULT '{}'`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_repo_files_tags ON repo_files USING GIN ("tags")`);
 
   // ── Threat intelligence (workers/threatIntel.ts) ───────────────────────────
   // User-managed IOC feed sources + the fetched indicators. `ioc` is INET so a

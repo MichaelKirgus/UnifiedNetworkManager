@@ -2663,6 +2663,8 @@ export interface RepoFileEntry {
   name: string;
   /** Open category set (iso | firmware | config-backup | script | other). */
   category: string;
+  /** Flat feature tags (e.g. 'log-rules', 'threat-intel') — metadata for grouping/filtering only, never part of the storage path. */
+  tags: string[];
   sizeBytes: number;
   sha256: string;
   uploadedBy: string | null;
@@ -4809,11 +4811,18 @@ export const api = {
     return apiFetch<VmsOverview>(`/vms${suffix}`);
   },
   // --- Central file repository (device-independent store) ---------------------
-  /** Lists repo files, newest first. Optional category filter. */
-  repoFiles: (category?: string) => {
-    const suffix = category ? `?category=${encodeURIComponent(category)}` : '';
+  /** Lists repo files, newest first. Optional category and/or tag filter. */
+  repoFiles: (category?: string, tag?: string) => {
+    const params = new URLSearchParams();
+    if (category) params.set('category', category);
+    if (tag) params.set('tag', tag);
+    const suffix = params.toString() ? `?${params.toString()}` : '';
     return apiFetch<{ files: RepoFileEntry[] }>(`/files${suffix}`);
   },
+  /** Distinct tags across all repo files (filter chips). */
+  listRepoTags: () => apiFetch<{ tags: string[] }>('/files/tags'),
+  /** Replaces the flat tag list of one file ([] clears all). */
+  setRepoFileTags: (id: string, tags: string[]) => apiFetch<{ file: RepoFileEntry }>(`/files/${encodeURIComponent(id)}/tags`, { method: 'PATCH', body: JSON.stringify({ tags }) }),
   /** Lists the registered file-repo storage backends + online state, plus the
    * effective default (what new uploads go to when no repo is picked). */
   repoFileProviders: () => apiFetch<{ providers: RepoFileProvider[]; defaultProviderId: string | null }>('/files/providers'),
@@ -4821,7 +4830,7 @@ export const api = {
    * multi-GB ISOs stream through without base64/buffering. Identical content is
    * deduplicated (existing entry returned, deduplicated: true). `providerId`
    * optionally targets a specific file-repo backend (multi-segment repos). */
-  uploadRepoFile: async (file: File, category?: string, providerId?: string): Promise<{ file: RepoFileEntry; deduplicated: boolean }> => {
+  uploadRepoFile: async (file: File, category?: string, providerId?: string, tags?: string[]): Promise<{ file: RepoFileEntry; deduplicated: boolean }> => {
     const token = getToken();
     const res = await fetch(`${BASE}/files`, {
       method: 'POST',
@@ -4830,6 +4839,7 @@ export const api = {
         'x-file-name': file.name,
         ...(category ? { 'x-file-category': category } : {}),
         ...(providerId ? { 'x-file-provider': providerId } : {}),
+        ...(tags && tags.length > 0 ? { 'x-file-tags': tags.join(',') } : {}),
         ...(token ? { Authorization: `Bearer ${token}` } : {}),
       },
       body: file,

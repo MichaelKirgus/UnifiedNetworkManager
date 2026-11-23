@@ -213,7 +213,7 @@ async function customUrlCycle(customUrl: string): Promise<void> {
   }
 
   const name = `map-basemap-custom-${new Date().toISOString().slice(0, 10)}.geojson`;
-  const { entry } = await addRepoFile({ data: bytes, name, category: 'map', uploadedBy: 'plugin' });
+  const { entry } = await addRepoFile({ data: bytes, name, category: 'map', tags: ['map'], uploadedBy: 'plugin' });
   await setActiveFileId(entry.id);
   await writeStatusKey('mapBasemapLastSuccessAt', new Date().toISOString());
   await writeStatusKey('mapBasemapLastError', '');
@@ -299,7 +299,7 @@ async function osmCycle(current: Map<string, unknown>): Promise<void> {
 
   const fc = { type: 'FeatureCollection' as const, features: [...current.values()] };
   const name = `map-basemap-osm-${new Date().toISOString().slice(0, 10)}.geojson`;
-  const { entry } = await addRepoFile({ data: Buffer.from(JSON.stringify(fc), 'utf8'), name, category: 'map', uploadedBy: 'plugin' });
+  const { entry } = await addRepoFile({ data: Buffer.from(JSON.stringify(fc), 'utf8'), name, category: 'map', tags: ['map'], uploadedBy: 'plugin' });
   await setActiveFileId(entry.id);
   await writeStatusKey('mapBasemapProgress', done ? '' : `${current.size}/${COUNTRIES.length}`);
   if (done) {

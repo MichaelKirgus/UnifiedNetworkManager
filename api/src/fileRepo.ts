@@ -4,8 +4,8 @@ import fs from 'fs';
 import fsp from 'fs/promises';
 import path from 'path';
 import { Readable } from 'stream';
-import { desc, eq, inArray } from 'drizzle-orm';
-import { db } from './db';
+import { and, arrayContains, desc, eq, inArray, SQL } from 'drizzle-orm';
+import { db, pool } from './db';
 import * as schema from './db/schema';
 import { deleteBlobViaProvider, openBlobFromProvider, resolveFileRepoProvider, storeBlobViaProvider } from './fileRepoBroker';
 
@@ -42,6 +42,8 @@ export interface RepoFileEntry {
   id: string;
   name: string;
   category: string;
+  /** Flat feature tags (e.g. 'log-rules', 'threat-intel') — metadata for grouping/filtering only, NEVER part of the storage path or blob key (portable across filesystem/S3/cloud backends). */
+  tags: string[];
   sizeBytes: number;
   sha256: string;
   uploadedBy: string | null;
@@ -90,6 +92,7 @@ function toEntry(row: typeof schema.repoFiles.$inferSelect): RepoFileEntry {
     id: row.id,
     name: row.name,
     category: row.category,
+    tags: row.tags ?? [],
     sizeBytes: Number(row.sizeBytes ?? 0),
     sha256: row.sha256,
     uploadedBy: row.uploadedBy,
@@ -122,10 +125,14 @@ async function resolveUploaders(entries: RepoFileEntry[]): Promise<Map<string, s
   return usernamesByIds(entries.map((e) => e.uploadedBy));
 }
 
-/** Lists repo files (newest first), optionally filtered by category. */
-export async function listRepoFiles(category?: string): Promise<RepoFileEntry[]> {
+/** Lists repo files (newest first), optionally filtered by category and/or tag. */
+export async function listRepoFiles(category?: string, tag?: string): Promise<RepoFileEntry[]> {
+  const conds: SQL[] = [];
+  if (category) conds.push(eq(schema.repoFiles.category, category));
+  const cleanTag = sanitizeTags([tag ?? ''])[0];
+  if (cleanTag) conds.push(arrayContains(schema.repoFiles.tags, [cleanTag]));
   const rows = await db.query.repoFiles.findMany({
-    where: category ? (t) => eq(t.category, category) : undefined,
+    where: conds.length > 0 ? (t) => and(...conds) : undefined,
     orderBy: [desc(schema.repoFiles.createdAt)],
   });
   const entries = rows.map(toEntry);
@@ -185,9 +192,12 @@ export async function addRepoFile(args: {
   providerId?: string | null;
   /** Retention policy to assign at insert time (null/omitted = no policy → kept forever). */
   retentionPolicyId?: string | null;
+  /** Flat feature tags (sanitized on store) — metadata for grouping/filtering, never part of the storage path. */
+  tags?: string[];
 }): Promise<{ entry: RepoFileEntry; deduplicated: boolean }> {
   const category = sanitizeCategory(args.category);
   const base = sanitizeFileName(args.name);
+  const tags = sanitizeTags(args.tags);
 
   // Resolve where the bytes live. An explicit provider is honored even if it's a
   // different instance (multi-segment repos); otherwise the default, else local.
@@ -259,9 +269,16 @@ export async function addRepoFile(args: {
   }
 
   // Dedupe — identical content already stored (in ANY repo). The bytes are
-  // idempotent either way; we just return the existing row.
+  // idempotent either way; we just return the existing row. Tags are descriptive
+  // metadata though — a re-upload may carry NEW tags for the same content, so
+  // union them into the existing row (idempotent enrichment, never lossy).
   const existing = await findRepoFileBySha256(sha256);
   if (existing) {
+    const mergedTags = [...new Set([...(existing.tags ?? []), ...tags])];
+    if (mergedTags.length !== (existing.tags ?? []).length) {
+      await db.update(schema.repoFiles).set({ tags: mergedTags }).where(eq(schema.repoFiles.id, existing.id));
+      return { entry: { ...existing, tags: mergedTags }, deduplicated: true };
+    }
     return { entry: existing, deduplicated: true };
   }
 
@@ -271,6 +288,7 @@ export async function addRepoFile(args: {
     id,
     name: (args.name ?? '').trim() || base,
     category,
+    tags,
     sizeBytes,
     sha256,
     storagePath,
@@ -379,4 +397,36 @@ export async function listRepoFileUses(fileId: string): Promise<RepoFileUse[]> {
 export function sanitizeCategory(category?: string): string {
   const c = (category ?? '').trim().toLowerCase().replace(/[^a-z0-9\-_]+/g, '-').replace(/^-+|-+$/g, '');
   return c.length > 0 && c.length <= 40 ? c : 'other';
+}
+
+/** Normalizes a tag list for storage — lowercase slugs (same rules as categories), deduped, capped at 10 tags × 64 chars. */
+export function sanitizeTags(tags?: Iterable<string> | null): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const raw of tags ?? []) {
+    if (typeof raw !== 'string') continue;
+    const t = raw.trim().toLowerCase().replace(/[^a-z0-9\-_]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 64);
+    if (!t || seen.has(t)) continue;
+    seen.add(t);
+    out.push(t);
+    if (out.length >= 10) break;
+  }
+  return out;
+}
+
+/** Replaces the tag list of one repo file (sanitized). Returns the updated entry. */
+export async function setRepoFileTags(id: string, tags?: Iterable<string> | null): Promise<RepoFileEntry> {
+  const row = await db.query.repoFiles.findFirst({ where: (t) => eq(t.id, id) });
+  if (!row) throw new FileRepoError(404, 'File not found');
+  const clean = sanitizeTags(tags);
+  await db.update(schema.repoFiles).set({ tags: clean }).where(eq(schema.repoFiles.id, id));
+  return { ...toEntry(row), tags: clean };
+}
+
+/** Distinct tags across all repo files (feeds the Files page filter chips). */
+export async function listRepoFileTags(): Promise<string[]> {
+  const res = await pool.query<{ t: string[] | null }>(
+    `SELECT array_agg(DISTINCT tag) AS t FROM (SELECT unnest("tags") AS tag FROM repo_files WHERE cardinality("tags") > 0) s`
+  );
+  return res.rows[0]?.t ?? [];
 }

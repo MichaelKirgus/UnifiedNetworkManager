@@ -3783,11 +3783,17 @@ paths:
         The device-independent file repo (ISOs, firmware images, config backups,
         scripts). Files live on a volume only the API mounts; metadata + usage
         audit trail in Postgres. Requires permission `files:read`. Optional
-        `category` query filter (e.g. `iso`, `firmware`). Newest first.
+        `category` query filter (e.g. `iso`, `firmware`) and/or flat feature-tag
+        filter (`tag`, e.g. `log-rules`, `threat-intel`). Newest first.
       parameters:
         - in: query
           name: category
           required: false
+          schema: { type: string }
+        - in: query
+          name: tag
+          required: false
+          description: Flat feature-tag filter (metadata only — never part of the storage path).
           schema: { type: string }
       responses:
         '200':
@@ -3816,12 +3822,18 @@ paths:
         suffix, so nothing is ever silently overwritten. Multi-GB ISOs stream
         through without buffering. An optional `x-file-provider` header targets
         a specific file-repo backend (see GET /files/providers); omitted = the
-        effective default repository.
+        effective default repository. An optional comma-separated `x-file-tags`
+        header sets flat feature tags on the stored entry.
       parameters:
         - name: x-file-provider
           in: header
           required: false
           description: File-repo plugin id to store the bytes in (multi-segment repos). Omitted = default.
+          schema: { type: string }
+        - name: x-file-tags
+          in: header
+          required: false
+          description: Comma-separated flat feature tags (e.g. `log-rules,my-feature`) — metadata for grouping/filtering only.
           schema: { type: string }
       requestBody:
         required: true
@@ -4088,6 +4100,66 @@ paths:
           description: Authentication required (requires files:write)
         '404':
           description: File or policy not found
+
+  /files/tags:
+    get:
+      tags: [Files]
+      summary: Distinct tags across all repo files
+      description: >-
+        Requires permission `files:read`. Returns every distinct flat feature tag
+        currently in use — feeds the Files page filter chips.
+      responses:
+        '200':
+          description: Distinct tags
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  tags:
+                    type: array
+                    items: { type: string }
+        '401':
+          description: Authentication required (requires files:read)
+
+  /files/{id}/tags:
+    patch:
+      tags: [Files]
+      summary: Replace the flat tag list of one file
+      description: >-
+        Requires permission `files:write`. Replaces the entry's tags with the
+        given (sanitized) list; an empty array clears all. Tags are pure metadata
+        for grouping/filtering — never part of the storage path, so they stay
+        portable across filesystem/S3/cloud file-repo backends.
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                tags:
+                  type: array
+                  items: { type: string }
+      responses:
+        '200':
+          description: The updated file entry
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  file:
+                    $ref: '#/components/schemas/RepoFileEntry'
+        '401':
+          description: Authentication required (requires files:write)
+        '404':
+          description: File not found
 
   /files/{id}:
     get:
@@ -14374,6 +14446,13 @@ components:
         id: { type: string }
         name: { type: string, description: "Original file name as uploaded" }
         category: { type: string, description: "Open set — iso | firmware | config-backup | script | other" }
+        tags:
+          type: array
+          items: { type: string }
+          description: >-
+            Flat feature tags (e.g. `log-rules`, `threat-intel`) — metadata for
+            grouping/filtering only, NEVER part of the storage path or blob key,
+            so they stay portable across filesystem/S3/cloud file-repo backends.
         sizeBytes: { type: integer }
         sha256: { type: string, description: "SHA-256 hex of the stored content (integrity + dedupe)" }
         uploadedBy: { type: string, nullable: true, description: "User id that uploaded it; 'plugin' for plugin uploads; null when unknown" }
