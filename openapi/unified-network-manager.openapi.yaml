@@ -4161,6 +4161,53 @@ paths:
         '404':
           description: File not found
 
+  /files/bulk:
+    post:
+      tags: [Files]
+      summary: Bulk operations on selected repo files
+      description: >-
+        Requires permission `files:write`. Applies one operation to up to 200
+        files at once (the Files page selection bar). Rows that vanished in the
+        meantime are skipped, so a stale selection never fails the batch.
+        Returns `{ affected }` — how many files were actually changed or
+        deleted. `tags` is required for add-tags/remove-tags; `category` for
+        set-category (sanitized to a lowercase slug server-side).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [ids, op]
+              properties:
+                ids:
+                  type: array
+                  items: { type: string }
+                  description: "Repo file ids (deduped server-side, max 200)"
+                op:
+                  type: string
+                  enum: [add-tags, remove-tags, set-category, delete]
+                tags:
+                  type: array
+                  items: { type: string }
+                  description: "Tags for add-tags / remove-tags (sanitized server-side)"
+                category:
+                  type: string
+                  description: "Target category for set-category"
+      responses:
+        '200':
+          description: How many files were affected
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  affected: { type: integer }
+        '400':
+          description: Missing/unknown op, no ids, or missing tags/category for the given op
+        '401':
+          description: Authentication required (requires files:write)
+
   /files/{id}:
     get:
       tags: [Files]
@@ -4187,6 +4234,47 @@ paths:
           description: Authentication required (requires files:read)
         '404':
           description: File not found or content missing from the repo volume
+    patch:
+      tags: [Files]
+      summary: Rename and/or recategorize a repo file (metadata only)
+      description: >-
+        Requires permission `files:write`. Updates the file's display name
+        and/or category WITHOUT touching the stored bytes — provider blobs are
+        content-addressed by sha256 and local files resolve via their storage
+        path, so both backends stay consistent. At least one of `name` /
+        `category` must be given; `category` is sanitized to a lowercase slug
+        server-side (invalid input becomes 'other'). 404 when the file is
+        unknown, 400 on an empty or overlong name (>256 chars).
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: { type: string, description: "New display name (1-256 chars)" }
+                category: { type: string, description: "New category slug" }
+      responses:
+        '200':
+          description: The updated file entry
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  file:
+                    $ref: '#/components/schemas/RepoFileEntry'
+        '400':
+          description: Empty or overlong name, or neither field given
+        '401':
+          description: Authentication required (requires files:write)
+        '404':
+          description: File not found
     delete:
       tags: [Files]
       summary: Delete a repo file (content + metadata)

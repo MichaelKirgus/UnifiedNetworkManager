@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import clsx from 'clsx';
-import { Database, Download, FileUp, FolderOpen, History, Loader2, Pencil, Plus, Timer, Trash2, X } from 'lucide-react';
+import { Database, Download, FileUp, FolderOpen, History, Loader2, Pencil, Plus, Tag, Timer, Trash2, X } from 'lucide-react';
 import { DialogShell } from '../components/DialogShell';
 import { Layout } from '../components/Layout';
 import { DataTable, DataTableColumn } from '../components/DataTable';
@@ -370,6 +370,9 @@ export default function Files() {
   const [usesEntry, setUsesEntry] = useState<RepoFileEntry | null>(null);
   const [retentionEntry, setRetentionEntry] = useState<RepoFileEntry | null>(null);
   const [tagsEntry, setTagsEntry] = useState<RepoFileEntry | null>(null);
+  const [editEntry, setEditEntry] = useState<RepoFileEntry | null>(null); // rename / recategorize (metadata only)
+  const [bulkTags, setBulkTags] = useState<{ rows: RepoFileEntry[]; mode: 'add' | 'remove' } | null>(null);
+  const [bulkCategoryRows, setBulkCategoryRows] = useState<RepoFileEntry[] | null>(null);
   const [policiesOpen, setPoliciesOpen] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -446,6 +449,20 @@ export default function Files() {
     mutationFn: (id: string) => api.deleteRepoFile(id),
     onSuccess: () => {
       setNotice('File deleted.');
+      invalidate();
+    },
+    onError: (err) => setError(err instanceof Error ? err.message : String(err)),
+  });
+
+  // One shared mutation for every bulk operation from the selection bar — the
+  // dialogs only collect input; success closes them and surfaces a count notice.
+  const bulkMutation = useMutation({
+    mutationFn: (args: { ids: string[]; op: 'add-tags' | 'remove-tags' | 'set-category' | 'delete'; tags?: string[]; category?: string }) => api.bulkRepoFiles(args),
+    onSuccess: ({ affected }, vars) => {
+      const verb = vars.op === 'delete' ? 'deleted' : vars.op === 'set-category' ? 'recategorized' : 'updated';
+      setNotice(`${affected} file${affected === 1 ? '' : 's'} ${verb}.`);
+      setBulkTags(null);
+      setBulkCategoryRows(null);
       invalidate();
     },
     onError: (err) => setError(err instanceof Error ? err.message : String(err)),
@@ -569,7 +586,7 @@ export default function Files() {
       sortable: false,
       filterable: false,
       excludeFromExport: true,
-      width: 130,
+      width: 190,
       render: (row) => (
         <div className="flex items-center justify-end gap-0.5">
           <button type="button" aria-label={`Download ${row.name}`} title="Download" onClick={() => void download(row)}
@@ -578,8 +595,10 @@ export default function Files() {
             className="rounded-md p-1.5 text-secondary hover:bg-muted hover:text-foreground"><History size={14} /></button>
           {canWrite && (
             <>
-              <button type="button" aria-label={`Tags for ${row.name}`} title="Edit tags (flat feature metadata — never part of the storage path)" onClick={() => setTagsEntry(row)}
+              <button type="button" aria-label={`Rename or recategorize ${row.name}`} title="Edit name & category (metadata only — stored bytes untouched)" onClick={() => setEditEntry(row)}
                 className="rounded-md p-1.5 text-secondary hover:bg-muted hover:text-foreground"><Pencil size={13} /></button>
+              <button type="button" aria-label={`Tags for ${row.name}`} title="Edit tags (flat feature metadata — never part of the storage path)" onClick={() => setTagsEntry(row)}
+                className="rounded-md p-1.5 text-secondary hover:bg-muted hover:text-foreground"><Tag size={13} /></button>
               <button type="button" aria-label={`Retention policy for ${row.name}`} title="Set retention policy (no policy = kept forever)" onClick={() => setRetentionEntry(row)}
                 className="rounded-md p-1.5 text-secondary hover:bg-muted hover:text-foreground"><Timer size={13} /></button>
               <button type="button" aria-label={`Delete ${row.name}`} title="Delete" onClick={() => remove(row)} disabled={deleteMutation.isPending}
@@ -758,6 +777,17 @@ export default function Files() {
               storageKey="files"
               fillHeight
               searchPlaceholder="Search files…"
+              selectable={canWrite}
+              bulkActions={canWrite ? [
+                { label: 'Add tags', onClick: (rows) => setBulkTags({ rows, mode: 'add' }) },
+                { label: 'Remove tags', onClick: (rows) => setBulkTags({ rows, mode: 'remove' }) },
+                { label: 'Set category', onClick: (rows) => setBulkCategoryRows(rows) },
+                {
+                  label: 'Delete selected',
+                  confirm: (count) => `Delete ${count} file${count === 1 ? '' : 's'} from the repository? This removes their stored content. Usage history is kept.`,
+                  onClick: (rows) => bulkMutation.mutate({ ids: rows.map((r) => r.id), op: 'delete' }),
+                },
+              ] : undefined}
               emptyMessage={`The repository is empty${category ? ` for category "${category}"` : ''}${tag ? ` with tag "${tag}"` : ''}.${canWrite ? ' Upload an ISO, firmware image or config backup — it becomes available to every device and plugin through the API.' : ''}`}
             />
           </div>
@@ -766,6 +796,24 @@ export default function Files() {
         {usesEntry && <UsesDialog entry={usesEntry} onClose={() => setUsesEntry(null)} />}
         {retentionEntry && canWrite && <FileRetentionDialog entry={retentionEntry} onClose={() => setRetentionEntry(null)} />}
         {tagsEntry && canWrite && <TagsDialog entry={tagsEntry} onClose={() => setTagsEntry(null)} />}
+        {editEntry && canWrite && <EditFileDialog entry={editEntry} onClose={() => setEditEntry(null)} />}
+        {bulkTags && canWrite && (
+          <BulkTagsDialog
+            mode={bulkTags.mode}
+            count={bulkTags.rows.length}
+            busy={bulkMutation.isPending}
+            onApply={(tags) => bulkMutation.mutate({ ids: bulkTags.rows.map((r) => r.id), op: bulkTags.mode === 'add' ? 'add-tags' : 'remove-tags', tags })}
+            onClose={() => setBulkTags(null)}
+          />
+        )}
+        {bulkCategoryRows && canWrite && (
+          <BulkCategoryDialog
+            rows={bulkCategoryRows}
+            busy={bulkMutation.isPending}
+            onApply={(category) => bulkMutation.mutate({ ids: bulkCategoryRows.map((r) => r.id), op: 'set-category', category })}
+            onClose={() => setBulkCategoryRows(null)}
+          />
+        )}
         {policiesOpen && <RetentionPoliciesDialog onClose={() => setPoliciesOpen(false)} />}
       </div>
     </Layout>
@@ -818,6 +866,167 @@ function TagsDialog({ entry, onClose }: { entry: RepoFileEntry; onClose: () => v
             className="inline-flex items-center gap-2 rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-fg hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50">
             {saving && <Loader2 size={12} className="animate-spin" />}
             Save tags
+          </button>
+        </div>
+      </div>
+    </DialogShell>
+  );
+}
+
+/** Rename and/or recategorize one repo file. METADATA ONLY — the stored bytes
+ * are never touched (provider blobs are content-addressed by sha256, local
+ * files resolve via their storage path), so this is safe on every backend. */
+function EditFileDialog({ entry, onClose }: { entry: RepoFileEntry; onClose: () => void }) {
+  const queryClient = useQueryClient();
+  const [name, setName] = useState(entry.name);
+  const [category, setCategory] = useState(entry.category);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  // Categories are an open slug set — offer the known ones plus whatever this
+  // file currently has (so a plugin-set category is not lost on save).
+  const categories = (CATEGORIES as readonly string[]).includes(entry.category)
+    ? [...CATEGORIES]
+    : [entry.category, ...CATEGORIES];
+
+  async function save() {
+    if (saving) return;
+    setSaving(true);
+    setError(null);
+    try {
+      await api.updateRepoFile(entry.id, { name: name.trim(), category });
+      queryClient.invalidateQueries({ queryKey: ['repoFiles'] });
+      onClose();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <DialogShell title={`Edit file — ${entry.name}`} subtitle="Rename and/or recategorize. Metadata only — the stored bytes are never touched." onClose={onClose} maxWidth="max-w-md">
+      <div className="space-y-3">
+        {error && (
+          <div className="rounded-md border border-danger-border bg-danger px-3 py-2 text-xs text-danger-fg">{error}</div>
+        )}
+        <label className={labelCls}>
+          Name
+          <input
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            placeholder="file.iso"
+            maxLength={256}
+            className={`${fieldCls} mt-1`}
+          />
+        </label>
+        <label className={labelCls}>
+          Category
+          <select value={category} onChange={(e) => setCategory(e.target.value)} className={`${fieldCls} mt-1`}>
+            {categories.map((c) => <option key={c} value={c}>{c}</option>)}
+          </select>
+        </label>
+        <div className="flex justify-end gap-2">
+          <button type="button" onClick={onClose} className="rounded-md border border-border px-3 py-1.5 text-xs font-medium text-secondary hover:bg-muted">Cancel</button>
+          <button type="button" onClick={() => void save()} disabled={saving || name.trim().length === 0}
+            className="inline-flex items-center gap-2 rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-fg hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50">
+            {saving && <Loader2 size={12} className="animate-spin" />}
+            Save changes
+          </button>
+        </div>
+      </div>
+    </DialogShell>
+  );
+}
+
+/** Add or remove flat feature tags on a SET of selected repo files at once.
+ * The parent's bulk mutation performs the call — success closes this dialog,
+ * errors surface in the page banner (the dialog stays open for a retry). */
+function BulkTagsDialog({ mode, count, busy, onApply, onClose }: {
+  mode: 'add' | 'remove';
+  count: number;
+  busy: boolean;
+  onApply: (tags: string[]) => void;
+  onClose: () => void;
+}) {
+  const [tagsText, setTagsText] = useState('');
+  const [error, setError] = useState<string | null>(null);
+
+  function apply() {
+    if (busy) return;
+    const tags = tagsText.split(',').map((t) => t.trim()).filter(Boolean);
+    if (tags.length === 0) {
+      setError('Enter at least one tag.');
+      return;
+    }
+    onApply(tags);
+  }
+
+  return (
+    <DialogShell
+      title={`${mode === 'add' ? 'Add tags to' : 'Remove tags from'} ${count} file${count === 1 ? '' : 's'}`}
+      subtitle="Comma-separated flat feature tags. Existing tags are kept; the repo cap of 10 tags per file applies."
+      onClose={onClose}
+      maxWidth="max-w-md"
+    >
+      <div className="space-y-3">
+        {error && (
+          <div className="rounded-md border border-danger-border bg-danger px-3 py-2 text-xs text-danger-fg">{error}</div>
+        )}
+        <label className={labelCls}>
+          Tags
+          <input
+            value={tagsText}
+            onChange={(e) => setTagsText(e.target.value)}
+            placeholder="log-rules, my-feature"
+            className={`${fieldCls} mt-1`}
+          />
+        </label>
+        <div className="flex justify-end gap-2">
+          <button type="button" onClick={onClose} className="rounded-md border border-border px-3 py-1.5 text-xs font-medium text-secondary hover:bg-muted">Cancel</button>
+          <button type="button" onClick={apply} disabled={busy}
+            className="inline-flex items-center gap-2 rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-fg hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50">
+            {busy && <Loader2 size={12} className="animate-spin" />}
+            {mode === 'add' ? 'Add tags' : 'Remove tags'}
+          </button>
+        </div>
+      </div>
+    </DialogShell>
+  );
+}
+
+/** Move a SET of selected repo files into one category at once (metadata only). */
+function BulkCategoryDialog({ rows, busy, onApply, onClose }: {
+  rows: RepoFileEntry[];
+  busy: boolean;
+  onApply: (category: string) => void;
+  onClose: () => void;
+}) {
+  // Offer the known categories plus whatever the selection currently spans.
+  const current = [...new Set(rows.map((r) => r.category))];
+  const categories = [...new Set([...current, ...CATEGORIES])];
+  const [category, setCategory] = useState(current.length === 1 ? current[0] : CATEGORIES[0]);
+
+  return (
+    <DialogShell
+      title={`Set category for ${rows.length} file${rows.length === 1 ? '' : 's'}`}
+      subtitle="Moves the selected files into one category. Metadata only — stored bytes are untouched."
+      onClose={onClose}
+      maxWidth="max-w-md"
+    >
+      <div className="space-y-3">
+        <label className={labelCls}>
+          Category
+          <select value={category} onChange={(e) => setCategory(e.target.value)} className={`${fieldCls} mt-1`}>
+            {categories.map((c) => <option key={c} value={c}>{c}</option>)}
+          </select>
+        </label>
+        <div className="flex justify-end gap-2">
+          <button type="button" onClick={onClose} className="rounded-md border border-border px-3 py-1.5 text-xs font-medium text-secondary hover:bg-muted">Cancel</button>
+          <button type="button" onClick={() => onApply(category)} disabled={busy}
+            className="inline-flex items-center gap-2 rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-fg hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50">
+            {busy && <Loader2 size={12} className="animate-spin" />}
+            Set category
           </button>
         </div>
       </div>

@@ -37,6 +37,15 @@ export class FileRepoError extends Error {
   }
 }
 
+/** Hard cap for a (re)named file — same limit the upload route enforces. */
+export const MAX_FILE_NAME_LEN = 256;
+
+/** Max files per bulk operation (webapp selection bar). */
+const BULK_MAX_IDS = 200;
+
+/** The bulk operations supported by `bulkRepoFiles`. */
+export type RepoFileBulkOp = 'add-tags' | 'remove-tags' | 'set-category' | 'delete';
+
 /** One repo file (the row shape the webapp + plugin client consume). */
 export interface RepoFileEntry {
   id: string;
@@ -421,6 +430,112 @@ export async function setRepoFileTags(id: string, tags?: Iterable<string> | null
   const clean = sanitizeTags(tags);
   await db.update(schema.repoFiles).set({ tags: clean }).where(eq(schema.repoFiles.id, id));
   return { ...toEntry(row), tags: clean };
+}
+
+/**
+ * Renames and/or recategorizes one repo file — METADATA ONLY. The stored bytes
+ * are never touched: provider blobs are content-addressed by sha256 (the blob
+ * key is independent of name/category) and legacy local files resolve through
+ * the row's storagePath, so both backends stay consistent after a rename or
+ * recategorization. 404 when unknown; 400 on an empty/overlong name.
+ */
+export async function updateRepoFileMeta(
+  id: string,
+  meta: { name?: string; category?: string }
+): Promise<RepoFileEntry> {
+  const row = await db.query.repoFiles.findFirst({ where: (t) => eq(t.id, id) });
+  if (!row) throw new FileRepoError(404, 'File not found');
+
+  const patch: Partial<typeof schema.repoFiles.$inferInsert> = {};
+  if (meta.name !== undefined) {
+    const name = meta.name.trim();
+    if (!name) throw new FileRepoError(400, 'Name must not be empty');
+    if (name.length > MAX_FILE_NAME_LEN) throw new FileRepoError(400, `Name must be at most ${MAX_FILE_NAME_LEN} characters`);
+    patch.name = name;
+  }
+  if (meta.category !== undefined) {
+    patch.category = sanitizeCategory(meta.category);
+  }
+  if (Object.keys(patch).length === 0) throw new FileRepoError(400, 'Provide name and/or category');
+
+  await db.update(schema.repoFiles).set(patch).where(eq(schema.repoFiles.id, id));
+  const updated = await db.query.repoFiles.findFirst({ where: (t) => eq(t.id, id) });
+  if (!updated) throw new FileRepoError(404, 'File not found');
+  return toEntry(updated);
+}
+
+/**
+ * Bulk operations on repo files (the Files page selection bar). `ids` are
+ * deduped and capped at BULK_MAX_IDS; rows that vanished in the meantime are
+ * tolerated (skipped), so a stale selection never fails the whole batch.
+ * Returns how many files were actually changed/deleted.
+ */
+export async function bulkRepoFiles(
+  ids: string[],
+  op: RepoFileBulkOp,
+  opts: { tags?: string[]; category?: string } = {}
+): Promise<{ affected: number }> {
+  const cleanIds = [...new Set((ids ?? []).map((i) => String(i).trim()).filter(Boolean))];
+  if (cleanIds.length === 0) throw new FileRepoError(400, 'No file ids given');
+  if (cleanIds.length > BULK_MAX_IDS) throw new FileRepoError(400, `At most ${BULK_MAX_IDS} files per bulk operation`);
+
+  switch (op) {
+    case 'add-tags': {
+      const add = sanitizeTags(opts.tags);
+      if (add.length === 0) throw new FileRepoError(400, 'No valid tags given');
+      // Merged lists always CONTAIN the existing ones (existing tags are already
+      // sanitized slugs), so an unchanged length means nothing to write.
+      const rows = await db.query.repoFiles.findMany({ where: (t) => inArray(t.id, cleanIds) });
+      let affected = 0;
+      for (const row of rows) {
+        const merged = sanitizeTags([...(row.tags ?? []), ...add]);
+        if (merged.length !== (row.tags ?? []).length) {
+          await db.update(schema.repoFiles).set({ tags: merged }).where(eq(schema.repoFiles.id, row.id));
+          affected++;
+        }
+      }
+      return { affected };
+    }
+    case 'remove-tags': {
+      const remove = new Set(sanitizeTags(opts.tags));
+      if (remove.size === 0) throw new FileRepoError(400, 'No valid tags given');
+      const rows = await db.query.repoFiles.findMany({ where: (t) => inArray(t.id, cleanIds) });
+      let affected = 0;
+      for (const row of rows) {
+        const kept = (row.tags ?? []).filter((t) => !remove.has(t));
+        if (kept.length !== (row.tags ?? []).length) {
+          await db.update(schema.repoFiles).set({ tags: kept }).where(eq(schema.repoFiles.id, row.id));
+          affected++;
+        }
+      }
+      return { affected };
+    }
+    case 'set-category': {
+      if (!opts.category || !String(opts.category).trim()) throw new FileRepoError(400, 'No category given');
+      const category = sanitizeCategory(String(opts.category));
+      // One read + one write — only rows whose category actually changes count.
+      const rows = await db.query.repoFiles.findMany({ where: (t) => inArray(t.id, cleanIds) });
+      const changed = rows.filter((r) => r.category !== category).map((r) => r.id);
+      if (changed.length > 0) {
+        await db.update(schema.repoFiles).set({ category }).where(inArray(schema.repoFiles.id, changed));
+      }
+      return { affected: changed.length };
+    }
+    case 'delete': {
+      let affected = 0;
+      for (const id of cleanIds) {
+        try {
+          await deleteRepoFile(id);
+          affected++;
+        } catch (err) {
+          if (!(err instanceof FileRepoError && err.status === 404)) throw err; // vanished — skip
+        }
+      }
+      return { affected };
+    }
+    default:
+      throw new FileRepoError(400, `Unknown bulk op: ${String(op)}`);
+  }
 }
 
 /** Distinct tags across all repo files (feeds the Files page filter chips). */

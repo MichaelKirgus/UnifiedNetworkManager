@@ -3,7 +3,10 @@ import { Readable } from 'stream';
 import { requireAuth, requirePermission } from '../auth/middleware';
 import {
   FileRepoError,
+  MAX_FILE_NAME_LEN,
+  RepoFileBulkOp,
   addRepoFile,
+  bulkRepoFiles,
   deleteRepoFile,
   getRepoFile,
   listRepoFiles,
@@ -13,6 +16,7 @@ import {
   recordRepoFileUse,
   sanitizeCategory,
   setRepoFileTags,
+  updateRepoFileMeta,
 } from '../fileRepo';
 import { defaultFileRepoProviderId, listFileRepoProviders } from '../fileRepoBroker';
 import {
@@ -48,7 +52,8 @@ import {
  * them through /plugin/files/:id/content.
  */
 
-const MAX_NAME_LEN = 256;
+/** The bulk ops accepted by POST /files/bulk (validated before hitting the service). */
+const BULK_OPS: readonly RepoFileBulkOp[] = ['add-tags', 'remove-tags', 'set-category', 'delete'];
 
 function readNameHeader(req: Request): string {
   const raw = req.headers['x-file-name'];
@@ -147,8 +152,8 @@ filesRouter.post('/files', requireAuth, requirePermission('files:write'), async 
     res.status(400).json({ error: 'Missing x-file-name header (the original file name)' });
     return;
   }
-  if (name.length > MAX_NAME_LEN) {
-    res.status(400).json({ error: `File name must be at most ${MAX_NAME_LEN} characters` });
+  if (name.length > MAX_FILE_NAME_LEN) {
+    res.status(400).json({ error: `File name must be at most ${MAX_FILE_NAME_LEN} characters` });
     return;
   }
   try {
@@ -259,6 +264,46 @@ filesRouter.patch('/files/:id/tags', requireAuth, requirePermission('files:write
     const body = (req.body ?? {}) as { tags?: unknown };
     const tags = Array.isArray(body.tags) ? body.tags.map((t) => String(t)) : [];
     const file = await setRepoFileTags(String(req.params.id ?? ''), tags);
+    res.status(200).json({ file });
+  } catch (err) {
+    if (err instanceof FileRepoError) return void res.status(err.status).json({ error: err.message });
+    throw err;
+  }
+});
+
+// POST /files/bulk — bulk operations on selected files (Files page selection
+// bar). Body: { ids: string[], op, tags?: string[], category?: string } with
+// op one of 'add-tags' | 'remove-tags' | 'set-category' | 'delete'. Returns
+// { affected } — how many files were actually changed/deleted.
+filesRouter.post('/files/bulk', requireAuth, requirePermission('files:write'), async (req: Request, res: Response) => {
+  try {
+    const body = (req.body ?? {}) as { ids?: unknown; op?: unknown; tags?: unknown; category?: unknown };
+    const ids = Array.isArray(body.ids) ? body.ids.map((i) => String(i)) : [];
+    const op = typeof body.op === 'string' ? body.op : '';
+    if (!BULK_OPS.includes(op as RepoFileBulkOp)) {
+      res.status(400).json({ error: `op must be one of: ${BULK_OPS.join(', ')}` });
+      return;
+    }
+    const tags = Array.isArray(body.tags) ? body.tags.map((t) => String(t)) : undefined;
+    const category = typeof body.category === 'string' ? body.category : undefined;
+    const result = await bulkRepoFiles(ids, op as RepoFileBulkOp, { tags, category });
+    res.status(200).json(result);
+  } catch (err) {
+    if (err instanceof FileRepoError) return void res.status(err.status).json({ error: err.message });
+    throw err;
+  }
+});
+
+// PATCH /files/:id — rename and/or recategorize one file. METADATA ONLY — the
+// stored bytes are never touched (provider blobs are content-addressed by
+// sha256, local files resolve via storagePath). Body { name?, category? }.
+filesRouter.patch('/files/:id', requireAuth, requirePermission('files:write'), async (req: Request, res: Response) => {
+  try {
+    const body = (req.body ?? {}) as { name?: unknown; category?: unknown };
+    const file = await updateRepoFileMeta(String(req.params.id ?? ''), {
+      name: typeof body.name === 'string' ? body.name : undefined,
+      category: typeof body.category === 'string' ? body.category : undefined,
+    });
     res.status(200).json({ file });
   } catch (err) {
     if (err instanceof FileRepoError) return void res.status(err.status).json({ error: err.message });

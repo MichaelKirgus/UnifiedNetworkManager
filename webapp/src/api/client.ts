@@ -4878,6 +4878,12 @@ export const api = {
   listRepoTags: () => apiFetch<{ tags: string[] }>('/files/tags'),
   /** Replaces the flat tag list of one file ([] clears all). */
   setRepoFileTags: (id: string, tags: string[]) => apiFetch<{ file: RepoFileEntry }>(`/files/${encodeURIComponent(id)}/tags`, { method: 'PATCH', body: JSON.stringify({ tags }) }),
+  /** Renames and/or recategorizes one repo file — METADATA ONLY, the stored
+   * bytes are never touched (provider blobs are content-addressed by sha256). */
+  updateRepoFile: (id: string, meta: { name?: string; category?: string }) => apiFetch<{ file: RepoFileEntry }>(`/files/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify(meta) }),
+  /** Bulk operations on selected repo files (add/remove tags, set category,
+   * delete). Returns how many files were actually changed/deleted. */
+  bulkRepoFiles: (body: { ids: string[]; op: 'add-tags' | 'remove-tags' | 'set-category' | 'delete'; tags?: string[]; category?: string }) => apiFetch<{ affected: number }>('/files/bulk', { method: 'POST', body: JSON.stringify(body) }),
   /** Lists the registered file-repo storage backends + online state, plus the
    * effective default (what new uploads go to when no repo is picked). */
   repoFileProviders: () => apiFetch<{ providers: RepoFileProvider[]; defaultProviderId: string | null }>('/files/providers'),
