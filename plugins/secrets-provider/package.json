@@ -12,11 +12,11 @@
   },
   "dependencies": {
     "@unm/plugin-sdk": "file:../../packages/plugin-sdk",
-    "axios": "^1.20.0",
+    "axios": "^1.21.1",
     "bonjour-service": "^1.2.1",
     "cors": "^2.8.5",
     "express": "^5.2.1",
-    "node-forge": "^1.4.1",
+    "node-forge": "^1.4.3",
     "uuid": "^14.0.3"
   },
   "devDependencies": {
