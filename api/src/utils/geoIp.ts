@@ -10,8 +10,8 @@
  * location fields — a missing database must never break the page.
  *
  * Two database kinds are supported:
- *   - MMDB (MaxMind GeoLite2-City / ipinfo mmdb-lite) via maxmind-db-reader —
- *     the whole file is read into memory once at open; lookups are synchronous
+ *   - MMDB (MaxMind GeoLite2-City / ipinfo mmdb-lite) via the `maxmind` reader
+ *     — the whole file is read into memory once at open; lookups are synchronous
  *     and fast, and IPv6 works.
  *   - CSV (dp-ip single-IP rows, IP2Location LITE FromIP/ToIP ranges) parsed
  *     into a compact sorted range index with binary search. IPv4 only — v6
@@ -23,7 +23,7 @@ import fsp from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import readline from 'node:readline';
-import MaxmindDBReader from 'maxmind-db-reader';
+import { Reader as MmdbReader } from 'maxmind';
 import { pool } from '../db';
 import { openRepoFile } from '../fileRepo';
 
@@ -50,7 +50,7 @@ interface CsvIndex {
 }
 
 type LoadedDb =
-  | { fileId: string; sha256: string; kind: 'mmdb'; reader: ReturnType<typeof MaxmindDBReader.openSync> }
+  | { fileId: string; sha256: string; kind: 'mmdb'; reader: InstanceType<typeof MmdbReader> }
   | { fileId: string; sha256: string; kind: 'csv'; csv: CsvIndex };
 
 let loaded: LoadedDb | null = null;
@@ -232,10 +232,12 @@ function csvLookup(csv: CsvIndex, ipNum: number): GeoResult | null {
 
 // ── MMDB lookup ───────────────────────────────────────────────────────────────
 
-function mmdbLookup(reader: ReturnType<typeof MaxmindDBReader.openSync>, ip: string): GeoResult | null {
+function mmdbLookup(reader: InstanceType<typeof MmdbReader>, ip: string): GeoResult | null {
   let data: Record<string, any> | null = null;
   try {
-    data = reader.getGeoDataSync(ip) ?? null;
+    // The reader returns a typed GeoLite2 record (or null for unknown IPs);
+    // we only consume the country/city name fields below.
+    data = reader.get(ip) as unknown as Record<string, any> | null;
   } catch {
     return null; // unknown IP / unsupported family — best-effort
   }
@@ -343,8 +345,10 @@ async function ensureLoaded(): Promise<LoadedDb | null> {
 
     let db: LoadedDb;
     if (await sniffMmdb(TMP_PATH)) {
-      // openSync reads the whole file into memory — safe to drop the temp copy.
-      const reader = MaxmindDBReader.openSync(TMP_PATH);
+      // The Reader takes the whole file as an in-memory Buffer — safe to drop
+      // the temp copy.
+      const buf = await fsp.readFile(TMP_PATH);
+      const reader = new MmdbReader(buf);
       await fsp.unlink(TMP_PATH).catch(() => undefined);
       db = { fileId, sha256: opened.entry.sha256, kind: 'mmdb', reader };
     } else {
