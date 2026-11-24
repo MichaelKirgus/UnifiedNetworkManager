@@ -41,7 +41,10 @@
     "postcss": "^8.5.33",
     "tailwindcss": "^3.3.6",
     "typescript": "^5.3.2",
-    "vite": "^6.4.4",
-    "vitest": "^4.1.11"
+    "vite": "^6.4.6",
+    "vitest": "^4.1.12"
+  },
+  "overrides": {
+    "postcss-selector-parser": "^6.1.5"
   }
 }

@@ -9,5 +9,8 @@
   "devDependencies": {
     "drizzle-kit": "^0.31.11",
     "js-yaml": "^5.5.0"
+  },
+  "overrides": {
+    "@esbuild-kit/core-utils": { "esbuild": "^0.25.4" }
   }
 }
