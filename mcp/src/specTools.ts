@@ -263,6 +263,8 @@ export function generateTools(specPath: string): GeneratedTool[] {
           return await doFetch(`${plainBase.replace(/\/$/, '')}${urlPath}${suffix}`);
 
           async function doFetch(url: string, dispatcher?: Dispatcher): Promise<{ status: number; bodyText: string }> {
+            // `as RequestInit`: undici's Dispatcher type does not structurally
+            // match the undici-types copy that @types/node uses — safe at runtime.
             const res = await fetch(url, {
               method: method.toUpperCase(),
               headers: {
@@ -271,7 +273,7 @@ export function generateTools(specPath: string): GeneratedTool[] {
               },
               body: body !== undefined ? JSON.stringify(body) : undefined,
               ...(dispatcher ? { dispatcher } : {}),
-            });
+            } as RequestInit);
 
             const text = await res.text();
             return { status: res.status, bodyText: text || '(empty response)' };

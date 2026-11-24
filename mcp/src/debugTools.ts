@@ -88,7 +88,10 @@ async function probePath(endpoint: string, pathName: string): Promise<{ status?:
 
   /** Performs the GET; THROWS on transport failure so callers can fall back. */
   async function doProbe(url: string, dispatcher?: Dispatcher): Promise<{ status?: number; body?: unknown }> {
-    const res = await fetch(url, { signal: AbortSignal.timeout(PROBE_TIMEOUT_MS), ...(dispatcher ? { dispatcher } : {}) });
+    // `as RequestInit`: undici's Dispatcher type does not structurally match
+    // the undici-types copy that @types/node uses for RequestInit — safe at
+    // runtime, Node's fetch is undici-based and accepts a real Agent.
+    const res = await fetch(url, { signal: AbortSignal.timeout(PROBE_TIMEOUT_MS), ...(dispatcher ? { dispatcher } : {}) } as RequestInit);
     const text = await res.text();
     let body: unknown = text;
     try {
