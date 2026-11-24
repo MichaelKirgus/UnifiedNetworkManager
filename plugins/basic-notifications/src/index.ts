@@ -30,6 +30,7 @@
 
 import axios, { AxiosError } from 'axios';
 import nodemailer from 'nodemailer';
+import type { Transporter } from 'nodemailer';
 import type {
   MetricDescriptor,
   NotificationChannelDescriptor,
@@ -170,7 +171,7 @@ async function sendSmtp(req: NotifyRequestBody): Promise<NotifyResponseBody> {
   const prefix = strField(cfg.subjectPrefix ?? '');
   const subject = [prefix, req.title].filter(Boolean).join(' ');
 
-  let transport: nodemailer.Transporter;
+  let transport: Transporter;
   try {
     transport = nodemailer.createTransport({
       host,
