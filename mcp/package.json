@@ -28,7 +28,7 @@
     "@types/node": "^26.6.6",
     "@types/pg": "^8.23.1",
     "tsx": "^4.23.15",
-    "typescript": "^5.3.2"
+    "typescript": "^7.0.2"
   },
   "overrides": {
     "hono": "^4.13.21",
