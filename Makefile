@@ -144,10 +144,11 @@ sync:
 	# POSIX sh: no `case`/`for` inside line-continuations (dash parses them as
 	# one physical line — see the &> history); the mapping runs in its own
 	# script with real newlines.
-	@printf '%s\n' "$$(git diff --name-only $$LAST..$$HEAD 2>/dev/null | grep -v '^package-lock.json$$')" > .sync-changed-files || true
+	@rm -f .sync-changed-files .sync-services .sync-services-final
 	@if [ -z "$$LAST" ]; then \
 	  echo "api webapp mcp $(addsuffix -plugin,$(PLUGINS))" > .sync-services; \
 	else \
+	  git diff --name-only $$LAST..$$HEAD | grep -v '^package-lock.json$$' > .sync-changed-files || true; \
 	  sh scripts/sync-map-services.sh < .sync-changed-files > .sync-services; \
 	fi
 	@cat .sync-services | sort -u | tr '\n' ' ' > .sync-services-final
