@@ -95,7 +95,7 @@ plugin-tests:
 # Docker daemon directly (docker group) and only escalates when truly needed.
 up:
 	@echo "Starting infrastructure..."
-	@if command -v docker-compose &> /dev/null; then \
+	@if command -v docker-compose >/dev/null 2>&1; then \
 		docker-compose -f docker-compose.dev.yml up -d postgres mcp $(addsuffix -plugin,$(PLUGINS)); \
 	else \
 		docker compose -f docker-compose.dev.yml up -d postgres mcp $(addsuffix -plugin,$(PLUGINS)); \
@@ -104,9 +104,9 @@ up:
 
 down:
 	@echo "Stopping infrastructure..."
-	@if docker compose version &> /dev/null; then \
+	@if docker compose version >/dev/null 2>&1; then \
 		docker compose -f docker-compose.dev.yml down; \
-	elif command -v docker-compose &> /dev/null; then \
+	elif command -v docker-compose >/dev/null 2>&1; then \
 		docker-compose -f docker-compose.dev.yml down; \
 	else \
 		echo "Error: No docker-compose or docker compose found"; \
@@ -138,9 +138,9 @@ web-dev:
 # Clean up everything
 clean:
 	@echo "Cleaning up..."
-	@if docker compose version &> /dev/null; then \
+	@if docker compose version >/dev/null 2>&1; then \
 		docker compose -f docker-compose.dev.yml down -v; \
-	elif command -v docker-compose &> /dev/null; then \
+	elif command -v docker-compose >/dev/null 2>&1; then \
 		docker-compose -f docker-compose.dev.yml down -v; \
 	else \
 		echo "Error: No docker-compose or docker compose found"; \
