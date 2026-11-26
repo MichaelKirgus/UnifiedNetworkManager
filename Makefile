@@ -141,11 +141,13 @@ sync:
 	$(MAKE) build
 	# Recreate the core services (api/webapp/mcp) plus every plugin whose source
 	# changed since the last sync; a first sync (no marker file) recreates all.
-	CHANGED_SERVICES=$$( \
+	# POSIX sh: `case` is only used inside the subshell script below, where it
+	# never meets a line-continuation — the classic dash pitfall.
+	@CHANGED_SERVICES=$$( \
 	  if [ -z "$$LAST" ]; then \
 	    echo "api webapp mcp $(addsuffix -plugin,$(PLUGINS))"; \
 	  else \
-	    for f in $$(git diff --name-only $$LAST..$$HEAD); do \
+	    git diff --name-only $$LAST..$$HEAD | grep -v '^package-lock.json$$' | while read -r f; do \
 	      case "$$f" in \
 	        api/*) echo api ;; \
 	        webapp/*) echo webapp ;; \
