@@ -145,15 +145,23 @@ sync:
 	# one physical line — see the &> history); the mapping runs in its own
 	# script with real newlines.
 	@rm -f .sync-changed-files .sync-services .sync-services-final
-	@if [ -z "$$LAST" ]; then \
-	  echo "api webapp mcp $(addsuffix -plugin,$(PLUGINS))" > .sync-services; \
+	@if [ -z "$$LAST" ] || [ "$$LAST" != "$$HEAD" ]; then \
+	  if [ -z "$$LAST" ]; then \
+	    echo "api webapp mcp $(addsuffix -plugin,$(PLUGINS))" > .sync-services; \
+	  else \
+	    git diff --name-only $$LAST..$$HEAD | grep -v '^package-lock.json$$' > .sync-changed-files || true; \
+	    sh scripts/sync-map-services.sh < .sync-changed-files > .sync-services; \
+	  fi; \
 	else \
-	  git diff --name-only $$LAST..$$HEAD | grep -v '^package-lock.json$$' > .sync-changed-files || true; \
-	  sh scripts/sync-map-services.sh < .sync-changed-files > .sync-services; \
+	  echo "Already at $$(git log -1 --format='%h') — nothing to deploy."; \
 	fi
-	@cat .sync-services | sort -u | tr '\n' ' ' > .sync-services-final
-	@if grep -qx ALL .sync-services 2>/dev/null; then \
-	  echo "api webapp mcp $(addsuffix -plugin,$(PLUGINS))" > .sync-services-final; \
+	@if [ -f .sync-services ]; then \
+	  cat .sync-services | sort -u | tr '\n' ' ' > .sync-services-final; \
+	  if grep -qx ALL .sync-services 2>/dev/null; then \
+	    echo "api webapp mcp $(addsuffix -plugin,$(PLUGINS))" > .sync-services-final; \
+	  fi; \
+	else \
+	  : > .sync-services-final; \
 	fi
 	SERVICES=$$(cat .sync-services-final); \
 	echo "Recreating: $$SERVICES"; \
