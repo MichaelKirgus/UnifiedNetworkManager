@@ -128,33 +128,26 @@ sync:
 	fi
 	@echo "Pulling origin/main (ff-only)..."
 	git pull --ff-only origin main
-	HEAD=$$(git rev-parse HEAD); \
+	# NOTE: make runs each recipe line in its OWN /bin/sh — a variable set on
+	# one line is NOT visible on the next. The whole decision block below is
+	# therefore ONE logical line (one shell): read marker + HEAD, decide, and
+	# write .sync-services. Do not split it across recipe lines again.
+	@rm -f .sync-changed-files .sync-services .sync-services-final; \
 	LAST=$$(cat .last-synced-commit 2>/dev/null || echo ""); \
+	HEAD=$$(git rev-parse HEAD); \
 	if [ -z "$$LAST" ]; then \
 	  echo "First sync — rebuilding everything."; \
-	  CHANGED="api webapp mcp $(addsuffix -plugin,$(PLUGINS))"; \
-	else \
+	  echo "api webapp mcp $(addsuffix -plugin,$(PLUGINS))" > .sync-services; \
+	elif [ "$$LAST" != "$$HEAD" ]; then \
 	  echo "Changes since last sync ($$LAST -> $$HEAD):"; \
-	  git diff --name-only $$LAST..$$HEAD | grep -v '^package-lock.json$$' || true; \
-	fi
-	@echo "Building..."
-	$(MAKE) build
-	# Recreate the core services (api/webapp/mcp) plus every plugin whose source
-	# changed since the last sync; a first sync (no marker file) recreates all.
-	# POSIX sh: no `case`/`for` inside line-continuations (dash parses them as
-	# one physical line — see the &> history); the mapping runs in its own
-	# script with real newlines.
-	@rm -f .sync-changed-files .sync-services .sync-services-final
-	@if [ -z "$$LAST" ] || [ "$$LAST" != "$$HEAD" ]; then \
-	  if [ -z "$$LAST" ]; then \
-	    echo "api webapp mcp $(addsuffix -plugin,$(PLUGINS))" > .sync-services; \
-	  else \
-	    git diff --name-only $$LAST..$$HEAD | grep -v '^package-lock.json$$' > .sync-changed-files || true; \
-	    sh scripts/sync-map-services.sh < .sync-changed-files > .sync-services; \
-	  fi; \
+	  git diff --name-only $$LAST..$$HEAD | grep -v '^package-lock.json$$' > .sync-changed-files || true; \
+	  cat .sync-changed-files; \
+	  sh scripts/sync-map-services.sh < .sync-changed-files > .sync-services; \
 	else \
 	  echo "Already at $$(git log -1 --format='%h') — nothing to deploy."; \
 	fi
+	@echo "Building..."
+	$(MAKE) build
 	@if [ -f .sync-services ]; then \
 	  cat .sync-services | sort -u | tr '\n' ' ' > .sync-services-final; \
 	  if grep -qx ALL .sync-services 2>/dev/null; then \
