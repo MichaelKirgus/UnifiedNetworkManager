@@ -141,29 +141,20 @@ sync:
 	$(MAKE) build
 	# Recreate the core services (api/webapp/mcp) plus every plugin whose source
 	# changed since the last sync; a first sync (no marker file) recreates all.
-	# POSIX sh: `case` is only used inside the subshell script below, where it
-	# never meets a line-continuation — the classic dash pitfall.
-	@CHANGED_SERVICES=$$( \
-	  if [ -z "$$LAST" ]; then \
-	    echo "api webapp mcp $(addsuffix -plugin,$(PLUGINS))"; \
-	  else \
-	    git diff --name-only $$LAST..$$HEAD | grep -v '^package-lock.json$$' | while read -r f; do \
-	      case "$$f" in \
-	        api/*) echo api ;; \
-	        webapp/*) echo webapp ;; \
-	        mcp/*) echo mcp ;; \
-	        plugins/*/src/*|plugins/*/docs/*|plugins/*/Dockerfile|plugins/*/package.json) \
-	          echo "$$(basename "$$(dirname "$$f)")-plugin" ;; \
-	        packages/plugin-sdk/*|packages/snmp-client/*|packages/lancom-shared/*) \
-	          echo "ALL" ;; \
-	      esac; \
-	    done | sort -u; \
-	  fi ); \
-	if echo "$$CHANGED_SERVICES" | grep -qx ALL; then \
-	  SERVICES="api webapp mcp $(addsuffix -plugin,$(PLUGINS))"; \
+	# POSIX sh: no `case`/`for` inside line-continuations (dash parses them as
+	# one physical line — see the &> history); the mapping runs in its own
+	# script with real newlines.
+	@printf '%s\n' "$$(git diff --name-only $$LAST..$$HEAD 2>/dev/null | grep -v '^package-lock.json$$')" > .sync-changed-files || true
+	@if [ -z "$$LAST" ]; then \
+	  echo "api webapp mcp $(addsuffix -plugin,$(PLUGINS))" > .sync-services; \
 	else \
-	  SERVICES="$$CHANGED_SERVICES"; \
-	fi; \
+	  sh scripts/sync-map-services.sh < .sync-changed-files > .sync-services; \
+	fi
+	@cat .sync-services | sort -u | tr '\n' ' ' > .sync-services-final
+	@if grep -qx ALL .sync-services 2>/dev/null; then \
+	  echo "api webapp mcp $(addsuffix -plugin,$(PLUGINS))" > .sync-services-final; \
+	fi
+	SERVICES=$$(cat .sync-services-final); \
 	echo "Recreating: $$SERVICES"; \
 	if [ "$$SERVICES" != "" ]; then \
 	  docker compose -f docker-compose.dev.yml up -d --build $$SERVICES; \

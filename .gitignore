@@ -21,3 +21,6 @@ docker-compose.truenas.yaml
 
 # Per-machine sync marker (make sync) — not shared state
 .last-synced-commit
+.sync-changed-files
+.sync-services
+.sync-services-final
