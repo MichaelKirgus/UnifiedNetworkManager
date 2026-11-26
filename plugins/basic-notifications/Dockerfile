@@ -30,6 +30,9 @@ RUN cd plugins/basic-notifications && npm run build \
 # of dev-only vulnerable packages.
 
 COPY plugins/basic-notifications/LICENSE.md plugins/basic-notifications/
+# Built-in docs served by the API's asset proxy (GET /plugins/:id/asset) —
+# referenced from discovery.deviceSupport.docPath.
+COPY plugins/basic-notifications/docs/ plugins/basic-notifications/docs/
 
 WORKDIR /app/plugins/basic-notifications
 

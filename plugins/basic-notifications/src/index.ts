@@ -43,6 +43,7 @@ import {
   requirePluginKey,
   resolvePluginIdentity,
 } from '@unm/plugin-sdk';
+import { BASIC_NOTIFICATIONS_DEVICE_SUPPORT } from './deviceSupport';
 
 export const PLUGIN_UUID = '00000000-0000-4000-8000-0000000014';
 export const PLUGIN_NAME = 'Basic Notification Plugin';
@@ -119,6 +120,8 @@ const server = createPluginServer({
   identity,
   logTag: 'basic-notifications-plugin',
   discovery: {
+    // License/docs metadata for UNM's Plugins page (see ./deviceSupport.ts).
+    deviceSupport: BASIC_NOTIFICATIONS_DEVICE_SUPPORT,
     requiredSecretType: null,
     metrics: METRIC_DESCRIPTORS,
     options: [],

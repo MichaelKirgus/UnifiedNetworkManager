@@ -41,6 +41,7 @@ import { WledClientOptions, getCfg, getInfo, WledCfg, WledInfo } from './client'
 import { getWledUpdateRows } from './updates';
 import { wledActions, WledActionContext } from './actions';
 import { buildPlan, PlanningError } from './plan';
+import { WLED_DEVICE_SUPPORT } from './deviceSupport';
 
 export const PLUGIN_UUID = '00000000-0000-4000-8000-000000000016';
 export const PLUGIN_NAME = 'WLED Plugin';
@@ -168,6 +169,8 @@ const server = createPluginServer({
   iconsDir: path.join(__dirname, '../../icons'),
   assetsDir: path.join(__dirname, '../..'),
   discovery: {
+    // License/docs metadata for UNM's Plugins page (see ./deviceSupport.ts).
+    deviceSupport: WLED_DEVICE_SUPPORT,
     // Monitoring is credential-free — no primary secret needed. The optional
     // `pin` slot (below) carries the WLED settings PIN when one is set.
     requiredSecretType: null,
