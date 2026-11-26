@@ -104,6 +104,10 @@ function toZod(schema: unknown, spec: OpenApiSpec, seen = new Set<unknown>()): Z
         return z.array(toZod(items, spec, new Set(seen)));
       }
       case 'object': {
+        // Free-form object: `additionalProperties: true` (the standard OpenAPI
+        // form) must pass every key through — an empty z.object({}) would strip
+        // them all, since the MCP SDK parses tool arguments with these shapes.
+        if (s.additionalProperties === true) return z.record(z.string(), z.unknown());
         if (s.additionalProperties && typeof s.additionalProperties === 'object') {
           return z.record(z.string(), toZod(s.additionalProperties, spec, new Set(seen)));
         }
