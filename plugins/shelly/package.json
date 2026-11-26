@@ -1,0 +1,36 @@
+{
+  "name": "unm-plugin-shelly",
+  "version": "0.1.0",
+  "description": "UNM plugin for Shelly smart devices (Gen1 REST + Gen2+ JSON-RPC): monitoring, firmware updates, WLAN metrics",
+  "license": "EUPL-1.2",
+  "private": true,
+  "main": "dist/src/index.js",
+  "scripts": {
+    "dev": "ts-node-dev --respawn src/index.ts",
+    "build": "tsc",
+    "start": "node dist/src/index.js",
+    "test": "jest --passWithNoTests",
+    "smoke-test": "ts-node smoke-test.ts"
+  },
+  "dependencies": {
+    "@unm/plugin-sdk": "file:../../packages/plugin-sdk",
+    "axios": "^1.21.1",
+    "bonjour-service": "^1.2.1",
+    "express": "^5.2.1",
+    "cors": "^2.8.5"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.6",
+    "@types/cors": "^2.8.17",
+    "@types/jest": "^30.0.0",
+    "@types/node": "^26.6.6",
+    "jest": "^30.5.2",
+    "ts-jest": "^29.4.14",
+    "ts-node-dev": "^2.0.0",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.3.2"
+  },
+  "overrides": {
+    "brace-expansion@1": "^1.1.21"
+  }
+}

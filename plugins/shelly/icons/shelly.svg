@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+  <rect x="4" y="4" width="56" height="56" rx="12" fill="#f5f7fa" stroke="#2b3a4a" stroke-width="3"/>
+  <!-- wifi arcs -->
+  <path d="M20 38 a 14 14 0 0 1 24 0" fill="none" stroke="#2b3a4a" stroke-width="4" stroke-linecap="round"/>
+  <path d="M26 44 a 7 7 0 0 1 12 0" fill="none" stroke="#2b3a4a" stroke-width="4" stroke-linecap="round"/>
+  <!-- plug prongs -->
+  <rect x="27" y="10" width="5" height="12" rx="2.5" fill="#e8590c"/>
+  <rect x="36" y="10" width="5" height="12" rx="2.5" fill="#e8590c"/>
+  <circle cx="32" cy="49" r="3.5" fill="#2b3a4a"/>
+</svg>
