@@ -115,6 +115,60 @@ down:
 
 restart: down up
 
+# Sync this checkout to GitHub's main and redeploy: pull --ff-only (fails loudly
+# instead of merging when the tree has local edits — this VM/build machine is
+# expected to stay a clean mirror), rebuild everything, then recreate only the
+# containers whose source actually changed. The dev loop is: edit + test on the
+# workstation -> git push -> make sync here.
+sync:
+	@echo "Checking working tree..."
+	@if [ -n "$$(git status --porcelain | grep -v 'package-lock.json' || true)" ]; then \
+	  echo "Error: uncommitted changes present (see above) — commit or stash them first."; \
+	  exit 1; \
+	fi
+	@echo "Pulling origin/main (ff-only)..."
+	git pull --ff-only origin main
+	HEAD=$$(git rev-parse HEAD); \
+	LAST=$$(cat .last-synced-commit 2>/dev/null || echo ""); \
+	if [ -z "$$LAST" ]; then \
+	  echo "First sync — rebuilding everything."; \
+	  CHANGED="api webapp mcp $(addsuffix -plugin,$(PLUGINS))"; \
+	else \
+	  echo "Changes since last sync ($$LAST -> $$HEAD):"; \
+	  git diff --name-only $$LAST..$$HEAD | grep -v '^package-lock.json$$' || true; \
+	fi
+	@echo "Building..."
+	$(MAKE) build
+	# Recreate the core services (api/webapp/mcp) plus every plugin whose source
+	# changed since the last sync; a first sync (no marker file) recreates all.
+	CHANGED_SERVICES=$$( \
+	  if [ -z "$$LAST" ]; then \
+	    echo "api webapp mcp $(addsuffix -plugin,$(PLUGINS))"; \
+	  else \
+	    for f in $$(git diff --name-only $$LAST..$$HEAD); do \
+	      case "$$f" in \
+	        api/*) echo api ;; \
+	        webapp/*) echo webapp ;; \
+	        mcp/*) echo mcp ;; \
+	        plugins/*/src/*|plugins/*/docs/*|plugins/*/Dockerfile|plugins/*/package.json) \
+	          echo "$$(basename "$$(dirname "$$f)")-plugin" ;; \
+	        packages/plugin-sdk/*|packages/snmp-client/*|packages/lancom-shared/*) \
+	          echo "ALL" ;; \
+	      esac; \
+	    done | sort -u; \
+	  fi ); \
+	if echo "$$CHANGED_SERVICES" | grep -qx ALL; then \
+	  SERVICES="api webapp mcp $(addsuffix -plugin,$(PLUGINS))"; \
+	else \
+	  SERVICES="$$CHANGED_SERVICES"; \
+	fi; \
+	echo "Recreating: $$SERVICES"; \
+	if [ "$$SERVICES" != "" ]; then \
+	  docker compose -f docker-compose.dev.yml up -d --build $$SERVICES; \
+	fi
+	git rev-parse HEAD > .last-synced-commit
+	@echo "Sync complete at $$(git log -1 --format='%h %s')"
+
 stop-api:
 	@echo "Stopping API server..."
 	-fuser -k 3000/tcp
