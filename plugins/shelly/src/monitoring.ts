@@ -7,12 +7,18 @@
  * power meters). Detection already fetched /shelly, so model/name/mac/fw come
  * from the cached profile.
  *
+ * Gen2+ (JSON-RPC): ONE batched POST /rpc per poll — [GetDeviceInfo,
+ * GetStatus, WiFi/Wifi.GetStatus, Firmware.GetStatus] in a single round-trip,
+ * using whichever namespace family detection resolved (classic fw 1.x vs
+ * modern fw 2.x+). Per-method RPC errors degrade gracefully (that component's
+ * metrics are omitted); only a transport-level failure is critical.
+ *
  * Canonical contract: `system.swVersion` (running firmware) and `hostname`
  * are emitted every poll when the device reports them.
  */
 
 import type { Health } from '@unm/plugin-sdk';
-import { gen1Get, type ShellyAuth, type ShellyClientOptions, type ShellyErrorKind } from './client';
+import { gen1Get, rpc, type ShellyAuth, type ShellyClientOptions, type ShellyErrorKind } from './client';
 import type { DeviceProfile } from './detect';
 
 /** Outcome of one monitoring poll for one device. */
@@ -149,6 +155,74 @@ export async function collectGen1(
   // Model-specific extras — best effort across models.
   addRelayMetrics(metrics, s.relay ?? s.relays);
   addPowerMeterMetrics(metrics, s.meters);
+
+  return { metrics, health: warnings.length ? 'warning' : 'ok', warnings };
+}
+
+// ---------------------------------------------------------------------------
+// Gen2+ — JSON-RPC (batched)
+// ---------------------------------------------------------------------------
+
+/** The four methods polled in one batched round-trip, per namespace family. */
+export function gen2PollMethods(ns: 'classic' | 'modern'): string[] {
+  return ns === 'classic'
+    ? ['Shelly.GetDeviceInfo', 'Shelly.GetStatus', 'WiFi.GetStatus', 'Firmware.GetStatus']
+    : ['Sys.GetDeviceInfo', 'Sys.GetStatus', 'Wifi.GetStatus', 'Firmware.GetStatus'];
+}
+
+/** Collects one Gen2+ poll: ONE batched POST /rpc (four methods, one round-trip). */
+export async function collectGen2(
+  opts: ShellyClientOptions,
+  profile: DeviceProfile,
+  auth?: ShellyAuth,
+): Promise<CollectResult> {
+  const ns = profile.ns ?? 'classic';
+  const r = await rpc(opts, gen2PollMethods(ns).map((method) => ({ method })), auth);
+  if (!r.ok) return { metrics: {}, warnings: [], ...failureHealth(r) };
+
+  const [devRes, statusRes, wifiRes, fwRes] = r.results;
+  const devInfo = (devRes?.result ?? null) as Record<string, unknown> | null;
+  const status = (statusRes?.result ?? null) as Record<string, unknown> | null;
+  const wifi = (wifiRes?.result ?? null) as Record<string, unknown> | null;
+  const fw = (fwRes?.result ?? null) as Record<string, unknown> | null;
+
+  const metrics: Record<string, string | number> = {};
+  const warnings: string[] = [];
+
+  // Canonical — running firmware version every poll.
+  if (isStr(fw?.old_version)) metrics['system.swVersion'] = fw.old_version;
+  else if (isStr(devInfo?.fw_version)) metrics['system.swVersion'] = devInfo.fw_version;
+  else if (isStr(profile.fw)) metrics['system.swVersion'] = profile.fw;
+
+  if (isStr(devInfo?.name)) metrics['hostname'] = devInfo.name;
+  else if (isStr(profile.name)) metrics['hostname'] = profile.name;
+  if (isStr(devInfo?.id)) metrics['shelly.model'] = devInfo.id;
+  else if (isStr(profile.model)) metrics['shelly.model'] = profile.model;
+  if (isStr(devInfo?.mac)) metrics['shelly.mac'] = devInfo.mac;
+  else if (isStr(profile.mac)) metrics['shelly.mac'] = profile.mac;
+
+  const sys = (status?.sys ?? null) as Record<string, unknown> | null;
+  if (sys && isNum(sys.uptime)) metrics['shelly.uptimeSeconds'] = sys.uptime;
+  if (sys && isNum(sys.temperature_c) && sys.temperature_c >= OVERTEMP_C) {
+    warnings.push(`overtemperature (${sys.temperature_c} °C)`);
+  }
+
+  // RAM when the firmware reports it (not all generations do).
+  if (sys && isNum(sys.ram_free_bytes)) metrics['shelly.ramFreeBytes'] = sys.ram_free_bytes;
+  if (sys && isNum(sys.ram_total_bytes)) metrics['shelly.ramTotalBytes'] = sys.ram_total_bytes;
+
+  // WLAN — first-class: RSSI gauge + SSID/channel/BSSID/station IP.
+  addWifiMetrics(metrics, wifi ?? null, warnings);
+  if (wifi && isNum(wifi.channel)) metrics['shelly.wifiChannel'] = wifi.channel;
+  if (wifi && isStr(wifi.bssid)) metrics['shelly.wifiBssid'] = wifi.bssid;
+
+  if (typeof fw?.has_update === 'boolean') {
+    metrics['shelly.fwUpdateAvailable'] = fw.has_update ? 1 : 0;
+  }
+
+  // Component state from the (all-components) status object.
+  addRelayMetrics(metrics, status?.relay);
+  addPowerMeterMetrics(metrics, status?.powermeter);
 
   return { metrics, health: warnings.length ? 'warning' : 'ok', warnings };
 }
