@@ -53,9 +53,12 @@ const DOC_STATUS = {
   wifi_sta: { connected: true, ssid: 'Home', ip: '192.168.1.50', rssi: -73 },
   meters: [{ voltage: 220, current: 1.2, power: 264, total: 1.23 }],
   update: { has_update: false, new_version: '', old_version: '4.3.0' },
-  uptime: 3662,
-  ram: { total: 191800, free: 125472, threshold: 4096 },
-  fs: { total: 1067904, free: 823196 },
+  uptime: 3662, // seconds since boot (official docs)
+  ram_total: 191800,
+  ram_free: 125472,
+  ram_lwm: 4096,
+  fs_size: 1067904,
+  fs_free: 823196,
   relay: [{ ison: true }, { ison: false }],
 };
 
@@ -117,7 +120,7 @@ describe('collectGen1 — health verdicts', () => {
   });
 
   it('warns when free RAM is at/below the device threshold', async () => {
-    const dev = await startMockDevice({ ...DOC_STATUS, ram: { total: 191800, free: 2048, threshold: 4096 } });
+    const dev = await startMockDevice({ ...DOC_STATUS, ram_free: 2048 }); // below ram_lwm 4096
     try {
       const r = await collectGen1(optsFor(dev.port), PROFILE);
       expect(r.health).toBe('warning');
@@ -128,7 +131,7 @@ describe('collectGen1 — health verdicts', () => {
   });
 
   it('warns when flash is ≥90% used', async () => {
-    const dev = await startMockDevice({ ...DOC_STATUS, fs: { total: 1000, free: 50 } });
+    const dev = await startMockDevice({ ...DOC_STATUS, fs_size: 1000, fs_free: 50 });
     try {
       const r = await collectGen1(optsFor(dev.port), PROFILE);
       expect(r.health).toBe('warning');
@@ -139,7 +142,7 @@ describe('collectGen1 — health verdicts', () => {
   });
 
   it('stays ok below the flash threshold', async () => {
-    const dev = await startMockDevice({ ...DOC_STATUS, fs: { total: 1000, free: 150 } }); // 85% used < 90
+    const dev = await startMockDevice({ ...DOC_STATUS, fs_size: 1000, fs_free: 150 }); // 85% used < 90
     try {
       const r = await collectGen1(optsFor(dev.port), PROFILE);
       expect(r.health).toBe('ok');

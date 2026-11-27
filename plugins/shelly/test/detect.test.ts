@@ -137,6 +137,20 @@ describe('detectDevice — Gen2+ modern namespaces (fw 2.x+)', () => {
 });
 
 describe('detectDevice — failures and caching', () => {
+  it('surfaces an auth rejection from a transport-level 401 (Gen2 with local login enabled)', async () => {
+    const dev = await startMockDevice(
+      { status: 404, body: {} },
+      () => ({ status: 401, body: '' }), // both RPC probes rejected at the transport level
+    );
+    try {
+      await expect(detectDevice(optsFor(dev.port), undefined, 'test-auth')).rejects.toThrow(
+        /authentication rejected by device \(HTTP 401\)/,
+      );
+    } finally {
+      await dev.close();
+    }
+  });
+
   it('throws DetectionError when nothing answers, carrying the last failure reason', async () => {
     const dev = await startMockDevice(
       { status: 404, body: {} },

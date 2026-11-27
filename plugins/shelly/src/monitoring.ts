@@ -101,29 +101,42 @@ function addPowerMeterMetrics(metrics: Record<string, string | number>, meters: 
 export interface Gen1Status {
   wifi_sta?: { connected?: boolean; ssid?: string; ip?: string; rssi?: number } | null;
   update?: { has_update?: boolean; new_version?: string; old_version?: string } | null;
+  /** Seconds elapsed since boot (official Gen1 docs). */
   uptime?: number;
-  ram?: { total?: number; free?: number; threshold?: number } | null;
-  fs?: { total?: number; free?: number } | null;
+  /** Top-level on real hardware — NOT a nested object. */
+  ram_total?: number;
+  ram_free?: number;
+  /** Device low-RAM watermark in bytes (the device's own threshold). */
+  ram_lwm?: number;
+  fs_size?: number;
+  fs_free?: number;
   relay?: Array<{ ison?: boolean }>;
   relays?: Array<{ id?: number; ison?: boolean }>;
   meters?: Array<{ voltage?: number; current?: number; power?: number; total?: number }>;
 }
 
-/** Collects one Gen1 poll: GET /status (detection already ran GET /shelly). */
+/** Collects one Gen1 poll: GET /status + GET /shelly in parallel (the latter
+ *  carries the running firmware version, which /status does not report). */
 export async function collectGen1(
   opts: ShellyClientOptions,
   profile: DeviceProfile,
   auth?: ShellyAuth,
 ): Promise<CollectResult> {
-  const r = await gen1Get<Gen1Status>(opts, '/status', auth);
+  const [r, shelly] = await Promise.all([
+    gen1Get<Gen1Status>(opts, '/status', auth),
+    gen1Get<{ fw?: string }>(opts, '/shelly', auth),
+  ]);
   if (!r.ok) return { metrics: {}, warnings: [], ...failureHealth(r) };
 
   const s = r.data ?? {};
   const metrics: Record<string, string | number> = {};
   const warnings: string[] = [];
 
-  // Canonical — running firmware version every poll.
-  if (isStr(s.update?.old_version)) metrics['system.swVersion'] = s.update.old_version;
+  // Canonical — running firmware version every poll. The live /shelly probe wins
+  // so the version stays fresh immediately after a firmware update (the detection
+  // cache may still hold the pre-update value for up to its TTL).
+  if (isStr(shelly.data?.fw)) metrics['system.swVersion'] = shelly.data.fw;
+  else if (isStr(s.update?.old_version)) metrics['system.swVersion'] = s.update.old_version;
   else if (isStr(profile.fw)) metrics['system.swVersion'] = profile.fw;
 
   if (isStr(profile.name)) metrics['hostname'] = profile.name;
@@ -132,17 +145,17 @@ export async function collectGen1(
 
   if (isNum(s.uptime)) metrics['shelly.uptimeSeconds'] = s.uptime;
 
-  if (isNum(s.ram?.free) && isNum(s.ram?.total)) {
-    metrics['shelly.ramFreeBytes'] = s.ram.free;
-    metrics['shelly.ramTotalBytes'] = s.ram.total;
+  if (isNum(s.ram_free) && isNum(s.ram_total)) {
+    metrics['shelly.ramFreeBytes'] = s.ram_free;
+    metrics['shelly.ramTotalBytes'] = s.ram_total;
     // The device ships its own low-RAM threshold — use it when present.
-    const threshold = isNum(s.ram?.threshold) ? s.ram.threshold : 4096;
-    if (s.ram.free <= threshold) warnings.push(`RAM low (${s.ram.free} B free, threshold ${threshold} B)`);
+    const threshold = isNum(s.ram_lwm) ? s.ram_lwm : 4096;
+    if (s.ram_free <= threshold) warnings.push(`RAM low (${s.ram_free} B free, threshold ${threshold} B)`);
   }
 
-  if (isNum(s.fs?.free) && isNum(s.fs?.total)) {
-    metrics['shelly.fsFreeBytes'] = s.fs.free;
-    const usedPct = ((s.fs.total - s.fs.free) / s.fs.total) * 100;
+  if (isNum(s.fs_free) && isNum(s.fs_size)) {
+    metrics['shelly.fsFreeBytes'] = s.fs_free;
+    const usedPct = ((s.fs_size - s.fs_free) / s.fs_size) * 100;
     if (usedPct >= FLASH_FULL_PCT) warnings.push(`flash nearly full (${usedPct.toFixed(1)}% used)`);
   }
 
@@ -207,9 +220,10 @@ export async function collectGen2(
     warnings.push(`overtemperature (${sys.temperature_c} °C)`);
   }
 
-  // RAM when the firmware reports it (not all generations do).
-  if (sys && isNum(sys.ram_free_bytes)) metrics['shelly.ramFreeBytes'] = sys.ram_free_bytes;
-  if (sys && isNum(sys.ram_total_bytes)) metrics['shelly.ramTotalBytes'] = sys.ram_total_bytes;
+  // RAM when the firmware reports it (not all generations do). Field names
+  // per the official Gen2+ Sys.GetStatus docs: ram_free / ram_size (bytes).
+  if (sys && isNum(sys.ram_free)) metrics['shelly.ramFreeBytes'] = sys.ram_free;
+  if (sys && isNum(sys.ram_size)) metrics['shelly.ramTotalBytes'] = sys.ram_size;
 
   // WLAN — first-class: RSSI gauge + SSID/channel/BSSID/station IP.
   addWifiMetrics(metrics, wifi ?? null, warnings);

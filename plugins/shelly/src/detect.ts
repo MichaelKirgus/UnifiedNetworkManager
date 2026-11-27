@@ -116,10 +116,14 @@ export async function detectDevice(
   }
 
   // 4. Nothing answered — surface the most informative failure we saw.
+  // A Gen2 device with local login enabled answers /shelly with 404 and both
+  // RPC probes with a transport-level 401 — surface the auth rejection instead
+  // of the misleading "device answered HTTP 404" from the first probe.
+  const rejectedStatus = [shelly, classic, modern].find((r) => r.errorKind === 'auth-rejected')?.status;
   const reason =
-    shelly.errorKind === 'auth-rejected'
-      ? `GET /shelly rejected authentication (${shelly.status})`
-      : classic.results[0]?.error?.message ?? modern.results[0]?.error?.message ?? shelly.error ?? 'no probe answered';
+    rejectedStatus !== undefined
+      ? `authentication rejected by device (HTTP ${rejectedStatus}) — check the bound credentials`
+      : classic.results[0]?.error?.message ?? modern.results[0]?.error?.message ?? shelly.error;
   throw new DetectionError(`could not detect Shelly generation (last failure: ${reason})`);
 }
 
