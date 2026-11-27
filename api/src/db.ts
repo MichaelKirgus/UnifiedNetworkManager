@@ -2160,6 +2160,13 @@ await pool.query(`ALTER TABLE flow_micro ADD COLUMN IF NOT EXISTS "agentCount" I
   await pool.query(`ALTER TABLE threat_intel_sources ADD COLUMN IF NOT EXISTS "repoFileId" TEXT`);
   // Per-source notification severity for findings raised by this feed.
   await pool.query(`ALTER TABLE threat_intel_sources ADD COLUMN IF NOT EXISTS "severity" TEXT NOT NULL DEFAULT 'warning'`);
+  // Manual (pasted) source body — the pasted list IS the feed; NULL for URL feeds,
+  // which store '' in url. A source has exactly one input: URL or content.
+  await pool.query(`ALTER TABLE threat_intel_sources ADD COLUMN IF NOT EXISTS "content" TEXT`);
+  // Optional "Name: value" HTTP header sent with the feed download (URL feeds only).
+  await pool.query(`ALTER TABLE threat_intel_sources ADD COLUMN IF NOT EXISTS "authHeader" TEXT`);
+  // Consecutive fetch failures — drives the health pill + auto-pause threshold.
+  await pool.query(`ALTER TABLE threat_intel_sources ADD COLUMN IF NOT EXISTS "failCount" INTEGER NOT NULL DEFAULT 0`);
   await pool.query(`
     CREATE TABLE IF NOT EXISTS threat_iocs (
       id TEXT PRIMARY KEY,

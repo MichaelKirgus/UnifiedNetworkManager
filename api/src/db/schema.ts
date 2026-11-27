@@ -814,6 +814,17 @@ export const threatIntelSources = pgTable(
     // indicator tables remain authoritative for matching. NULL until the first
     // successful fetch (or when no file-repo backend is available).
     repoFileId: text('repoFileId'),
+    // Pasted list body for MANUAL sources (no URL): the pasted text IS the feed
+    // and is re-parsed on every fetch beat — same snapshot semantics as a URL
+    // download, no egress involved. NULL for URL feeds; url stores '' then.
+    content: text('content'),
+    // "Name: value" HTTP header sent with the feed download (e.g.
+    // "Authorization: Bearer *** or "X-Api-Key: ***"). NULL = none. Only used by
+    // URL sources — passed through the web-fetch broker to the plugin's origin request.
+    authHeader: text('authHeader'),
+    // Consecutive fetch failures — reset to 0 on success, +1 per failure. Drives
+    // the feed health pill and the auto-pause threshold (threatIntelAutoPauseAfterFailures).
+    failCount: integer('failCount').notNull().default(0),
     createdAt: text('createdAt').notNull(),
   },
   (table) => {

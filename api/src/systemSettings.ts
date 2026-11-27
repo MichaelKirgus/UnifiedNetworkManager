@@ -897,6 +897,19 @@ export const SETTING_DESCRIPTORS: SettingDescriptor[] = [
       'Safety cap on how many indicators one feed may contribute per fetch cycle (excess entries are skipped and counted in the source status — raise this if a large blocklist is truncated). The download itself is additionally bounded by a 64 MiB size limit.',
   },
   {
+    key: 'threatIntelAutoPauseAfterFailures',
+    label: 'Threat-intel auto-pause after failures',
+    type: 'integer',
+    category: 'Security',
+    unit: 'failures',
+    min: 0,
+    max: 100,
+    default: 5,
+    envVar: 'UNM_THREAT_INTEL_AUTO_PAUSE_AFTER_FAILURES',
+    help:
+      'A feed that fails this many consecutive fetches is automatically disabled (paused) and its health turns red — Re-enable it from the Security page once the upstream problem is gone — its stored indicators stop matching while paused (like a manually disabled feed) and come back without a re-fetch when enabled again. 0 disables auto-pause.',
+  },
+  {
     key: 'logRulesEnabled',
     label: 'Log rule detection',
     type: 'boolean',

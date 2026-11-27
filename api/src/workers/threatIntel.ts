@@ -22,6 +22,15 @@
  *         $options, [section] headers; unblock @@ rules and regex filters are
  *         skipped). Domains land in threat_domain_iocs (threat_iocs.ioc is INET
  *         and cannot hold names); a listed domain matches itself AND every subdomain.
+ *     A source is either a URL feed (downloaded through the web-fetch plugin) or
+ *     a PASTED list: its body lives in "content", url is '' and no egress happens
+ *     — handy for feeds that need an auth header or that only exist as a file. An
+ *     optional "authHeader" ("Name: value") is sent with URL fetches; the header
+ *     value itself is never logged. A source whose consecutive failures reach
+ *     threatIntelAutoPauseAfterFailures (0 = never) is auto-paused (disabled) so a
+ *     dead upstream stops being hammered. While paused its indicators stop
+ *     matching (like a manually disabled feed); re-enabling restores them without
+ *     a re-fetch.
  *     A fetch is an authoritative SNAPSHOT per source: all parsed values are
  *     upserted into the format's table, then rows not re-upserted in the cycle
  *     are pruned by lastSeenAt — indicators a feed drops disappear automatically.
@@ -206,6 +215,7 @@ export function matchDomain(nameRaw: string | null | undefined, cache: IocCache)
 
 export interface ParsedFeed {
   values: string[]; // deduped raw IP/CIDR strings (validated)
+  domains: string[]; // normalized domains (STIX bundles may carry both kinds)
   skipped: number; // unparseable lines / entries over the cap
 }
 
@@ -226,10 +236,10 @@ export function parseIpList(bytes: Buffer, maxIocs: number): ParsedFeed {
     }
     values.add(line);
   }
-  return { values: [...values], skipped };
+  return { values: [...values], domains: [], skipped };
 }
 
-/** STIX 2.x bundle — equality patterns of ipv4/ipv6 indicators. */
+/** STIX 2.x bundle — equality patterns of ipv4/ipv6 AND domain-name indicators. */
 export function parseStix(bytes: Buffer, maxIocs: number): ParsedFeed {
   let bundle: unknown;
   try {
@@ -243,16 +253,18 @@ export function parseStix(bytes: Buffer, maxIocs: number): ParsedFeed {
   // No leading '[' anchor: STIX OR patterns repeat the object reference
   // WITHOUT a bracket (…'a' OR ipv4-addr:value = 'b'), and every equality
   // value in an indicator's pattern is wanted. Negations (!=) never match.
-  const patternRe = /(?:ipv4|ipv6)-addr:value\s*=\s*'([^']+)'/g;
+  const addrRe = /(?:ipv4|ipv6)-addr:value\s*=\s*'([^']+)'/g;
+  const domainRe = /domain-name:value\s*=\s*'([^']+)'/g;
   const values = new Set<string>();
+  const domains = new Set<string>();
   let skipped = 0;
   for (const obj of objects) {
     if (!obj || typeof obj !== 'object') continue;
     const o = obj as { type?: unknown; pattern?: unknown };
     if (o.type !== 'indicator' || typeof o.pattern !== 'string') continue;
     let m: RegExpExecArray | null;
-    patternRe.lastIndex = 0;
-    while ((m = patternRe.exec(o.pattern)) !== null) {
+    addrRe.lastIndex = 0;
+    while ((m = addrRe.exec(o.pattern)) !== null) {
       const v = m[1];
       if (parseIocValue(v) === null) {
         skipped += 1;
@@ -264,8 +276,21 @@ export function parseStix(bytes: Buffer, maxIocs: number): ParsedFeed {
       }
       values.add(v);
     }
+    domainRe.lastIndex = 0;
+    while ((m = domainRe.exec(o.pattern)) !== null) {
+      const d = normalizeDomain(m[1]);
+      if (d === null) {
+        skipped += 1;
+        continue;
+      }
+      if (domains.size >= maxIocs) {
+        skipped += 1;
+        continue;
+      }
+      domains.add(d);
+    }
   }
-  return { values: [...values], skipped };
+  return { values: [...values], domains: [...domains], skipped };
 }
 
 /**
@@ -336,7 +361,7 @@ export function parseDomainList(bytes: Buffer, maxIocs: number): ParsedFeed {
     }
     values.add(d);
   }
-  return { values: [...values], skipped };
+  return { values: [...values], domains: [], skipped };
 }
 
 // ── Fetch cycle ──────────────────────────────────────────────────────────────
@@ -350,14 +375,59 @@ interface SourceRow {
   lastSuccessAt: string | null;
   /** Central file-repo row holding the raw snapshot of the last successful fetch (null = none yet). */
   repoFileId: string | null;
+  content: string | null; // manual (pasted) source body — null for URL feeds
+  authHeader: string | null; // "Name: value" sent with URL fetches; never logged
 }
 
-async function markSourceError(id: string, message: string): Promise<void> {
+/**
+ * UI health pill for a source: disabled or two+ consecutive failures read as
+ * down, one in-flight failure as degraded, a clean last fetch as ok.
+ */
+export function computeSourceHealth(s: { enabled: boolean; failCount: number }): 'ok' | 'degraded' | 'down' {
+  if (!s.enabled) return 'down';
+  if (s.failCount >= 2) return 'down';
+  if (s.failCount === 1) return 'degraded';
+  return 'ok';
+}
+
+/** Parses a stored "Name: value" auth header into name/value, or null when unset/malformed. */
+export function parseAuthHeader(raw: string | null | undefined): { name: string; value: string } | null {
+  if (!raw || typeof raw !== 'string') return null;
+  const i = raw.indexOf(':');
+  if (i <= 0) return null;
+  const name = raw.slice(0, i).trim();
+  const value = raw.slice(i + 1).trim();
+  if (!name || !value) return null;
+  return { name, value };
+}
+
+/**
+ * Records one fetch failure for a source (best-effort — a bookkeeping hiccup
+ * must never crash the worker): bumps the consecutive-failure counter and
+ * stores the error. When the counter reaches threatIntelAutoPauseAfterFailures
+ * (0 = never) the source is auto-paused — disabled so a dead upstream stops
+ * being hammered — while paused its indicators stop matching (like a manually
+ * disabled feed) and come back when the source is enabled again. A successful
+ * fetch resets the counter to 0.
+ */
+async function recordSourceFailure(source: SourceRow, message: string): Promise<void> {
   try {
-    await pool.query(`UPDATE threat_intel_sources SET "lastError" = $1 WHERE id = $2`, [message.slice(0, 500), id]);
+    const res = await pool.query<{ failCount: number }>(
+      `UPDATE threat_intel_sources SET "failCount" = "failCount" + 1, "lastError" = $1 WHERE id = $2 RETURNING "failCount"`,
+      [message.slice(0, 500), source.id]
+    );
+    const failCount = Number(res.rows[0]?.failCount ?? 0);
+    const values = await getEffectiveValues();
+    const threshold = Number(values.threatIntelAutoPauseAfterFailures) || 0;
+    if (threshold > 0 && failCount >= threshold) {
+      await pool.query(`UPDATE threat_intel_sources SET enabled = false WHERE id = $1`, [source.id]);
+      invalidateIocCache(); // a paused feed must stop matching immediately
+      // eslint-disable-next-line no-console
+      console.error(`[threat-intel] source "${source.name}" auto-paused after ${failCount} consecutive failures`);
+    }
   } catch (err) {
     // eslint-disable-next-line no-console
-    console.error('[threat-intel] failed to record source error:', err);
+    console.error('[threat-intel] failed to record source failure:', err);
   }
 }
 
@@ -369,17 +439,31 @@ async function fetchSource(source: SourceRow): Promise<void> {
   const values = await getEffectiveValues();
   const maxIocs = Number(values.threatIntelMaxIocsPerSource) || 250_000;
 
-  const provider = await resolveWebFetchProvider();
-  if (!provider) throw new Error('no web-fetch plugin online — egress unavailable');
+  let bytes: Buffer;
+  if (source.url === '' && source.content) {
+    // Manual (pasted) source — the stored body IS the feed. No download, no egress,
+    // no web-fetch provider needed.
+    bytes = Buffer.from(source.content, 'utf8');
+  } else {
+    const provider = await resolveWebFetchProvider();
+    if (!provider) throw new Error('no web-fetch plugin online — egress unavailable');
+    const header = parseAuthHeader(source.authHeader);
+    const fetched = await fetchViaWebFetch(provider, {
+      url: source.url,
+      maxBytes: MAX_FETCH_BYTES,
+      timeoutMs: FETCH_TIMEOUT_MS,
+      headers: header ? { [header.name]: header.value } : undefined,
+    });
+    bytes = fetched.bytes;
+  }
 
   const cycleStartIso = new Date().toISOString(); // rows not re-upserted after this are stale
-  const { bytes } = await fetchViaWebFetch(provider, { url: source.url, maxBytes: MAX_FETCH_BYTES, timeoutMs: FETCH_TIMEOUT_MS });
 
   // Domain-list feeds store names in threat_domain_iocs (threat_iocs.ioc is
   // INET and cannot hold them); ip/stix feeds keep using the address table.
   const isDomain = source.format === 'domain-list';
   const parsed: ParsedFeed = isDomain ? parseDomainList(bytes, maxIocs) : source.format === 'stix' ? parseStix(bytes, maxIocs) : parseIpList(bytes, maxIocs);
-  if (parsed.values.length === 0 && parsed.skipped > 0) {
+  if (parsed.values.length === 0 && parsed.domains.length === 0 && parsed.skipped > 0) {
     throw new Error(`feed returned no usable indicators (${parsed.skipped} unparseable entries)`);
   }
 
@@ -406,14 +490,34 @@ async function fetchSource(source: SourceRow): Promise<void> {
       );
     }
   }
+  if (parsed.domains.length > 0) {
+    // STIX bundles can carry domain-name indicators alongside IP ones.
+    for (let i = 0; i < parsed.domains.length; i += 1_000) {
+      const chunk = parsed.domains.slice(i, i + 1_000);
+      const ids = chunk.map(() => uuidv4());
+      await pool.query(
+        `INSERT INTO threat_domain_iocs (id, "sourceId", domain, "firstSeenAt", "lastSeenAt")
+         SELECT u.id, $1, u.val, $2, $2
+         FROM unnest($3::text[], $4::text[]) AS u(id, val)
+         ON CONFLICT ("sourceId", domain) DO UPDATE SET "lastSeenAt" = EXCLUDED."lastSeenAt"`,
+        [source.id, cycleStartIso, ids, chunk]
+      );
+    }
+  }
 
-  // Snapshot prune — indicators the feed no longer lists.
-  const table = isDomain ? 'threat_domain_iocs' : 'threat_iocs';
-  await pool.query(`DELETE FROM ${table} WHERE "sourceId" = $1 AND "lastSeenAt" < $2`, [source.id, cycleStartIso]);
-  const countRes = await pool.query(`SELECT COUNT(*)::int AS n FROM ${table} WHERE "sourceId" = $1`, [source.id]);
+  // Snapshot prune — indicators the feed no longer lists. STIX bundles can carry
+  // both kinds, so they always prune both tables; domain-list sources only ever
+  // touch threat_domain_iocs (their values are domains).
+  const tables = isDomain ? ['threat_domain_iocs'] : source.format === 'stix' ? ['threat_iocs', 'threat_domain_iocs'] : ['threat_iocs'];
+  let iocCount = 0;
+  for (const table of tables) {
+    await pool.query(`DELETE FROM ${table} WHERE "sourceId" = $1 AND "lastSeenAt" < $2`, [source.id, cycleStartIso]);
+    const countRes = await pool.query(`SELECT COUNT(*)::int AS n FROM ${table} WHERE "sourceId" = $1`, [source.id]);
+    iocCount += Number(countRes.rows[0]?.n ?? 0);
+  }
   await pool.query(
-    `UPDATE threat_intel_sources SET "iocCount" = $1, "lastSuccessAt" = $2, "lastError" = NULL WHERE id = $3`,
-    [Number(countRes.rows[0]?.n ?? 0), cycleStartIso, source.id]
+    `UPDATE threat_intel_sources SET "iocCount" = $1, "lastSuccessAt" = $2, "lastError" = NULL, "failCount" = 0 WHERE id = $3`,
+    [iocCount, cycleStartIso, source.id]
   );
 
   // Raw snapshot → central file repository (category 'threat-intel'): the exact
@@ -443,13 +547,13 @@ async function fetchSource(source: SourceRow): Promise<void> {
 
   iocCache = null; // the active set changed — rebuild on next use
   // eslint-disable-next-line no-console
-  console.log(`[threat-intel] fetched "${source.name}": ${parsed.values.length} indicators (${parsed.skipped} skipped)`);
+  console.log(`[threat-intel] fetched "${source.name}": ${parsed.values.length + parsed.domains.length} indicators (${parsed.skipped} skipped)`);
 }
 
 /** Fetches every enabled source whose interval has elapsed. One failure never breaks the beat. */
 async function fetchDueSources(intervalMs: number): Promise<void> {
   const now = Date.now();
-  const res = await pool.query<SourceRow>(`SELECT id, name, url, format, enabled, "lastSuccessAt", "repoFileId" FROM threat_intel_sources WHERE enabled`);
+  const res = await pool.query<SourceRow>(`SELECT id, name, url, format, enabled, "lastSuccessAt", "repoFileId", "content", "authHeader" FROM threat_intel_sources WHERE enabled`);
   for (const s of res.rows) {
     // Due when neither the last success nor the last attempt is recent — a
     // source that never succeeded fetches immediately; failures retry at the
@@ -464,7 +568,7 @@ async function fetchDueSources(intervalMs: number): Promise<void> {
       const msg = (err as Error).message;
       // eslint-disable-next-line no-console
       console.error(`[threat-intel] fetch of "${s.name}" failed:`, msg);
-      void markSourceError(s.id, msg);
+      void recordSourceFailure(s, msg);
     }
   }
 }
@@ -475,14 +579,14 @@ async function fetchDueSources(intervalMs: number): Promise<void> {
  * the work is queued; outcomes surface in each source's lastSuccessAt/lastError.
  */
 export async function triggerThreatIntelFetch(sourceId?: string): Promise<{ triggered: number }> {
-  const sql = sourceId ? `SELECT id, name, url, format, enabled, "lastSuccessAt", "repoFileId" FROM threat_intel_sources WHERE enabled AND id = $1` : `SELECT id, name, url, format, enabled, "lastSuccessAt", "repoFileId" FROM threat_intel_sources WHERE enabled`;
+  const sql = sourceId ? `SELECT id, name, url, format, enabled, "lastSuccessAt", "repoFileId", "content", "authHeader" FROM threat_intel_sources WHERE enabled AND id = $1` : `SELECT id, name, url, format, enabled, "lastSuccessAt", "repoFileId", "content", "authHeader" FROM threat_intel_sources WHERE enabled`;
   const res = await pool.query<SourceRow>(sql, sourceId ? [sourceId] : []);
   for (const s of res.rows) {
     attemptAt.set(s.id, Date.now());
     void fetchSource(s).catch((err) => {
       // eslint-disable-next-line no-console
       console.error(`[threat-intel] manual fetch of "${s.name}" failed:`, (err as Error).message);
-      void markSourceError(s.id, (err as Error).message);
+      void recordSourceFailure(s, (err as Error).message);
     });
   }
   return { triggered: res.rows.length };

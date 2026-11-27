@@ -3982,15 +3982,28 @@ export interface ThreatIntelSource {
   lastError: string | null;
   /** Central file-repo row holding the raw snapshot of the last successful fetch (downloadable); null until the first success. */
   repoFileId?: string | null;
+  /** Manual (pasted) source body — present for sources with an empty url; null for URL feeds. */
+  content: string | null;
+  /** One "Name: value" HTTP header sent with URL fetches (e.g. "Authorization: Bearer *** — never logged server-side. */
+  authHeader: string | null;
+  /** Consecutive fetch failures — drives the auto-pause and the health pill. */
+  failCount: number;
+  /** Derived UI state: 'ok' | 'degraded' (one failure) | 'down' (disabled or two+ failures). */
+  health: 'ok' | 'degraded' | 'down';
   createdAt: string;
 }
 
 export interface ThreatIntelSourceInput {
   name?: string;
+  /** http(s) feed URL — empty string for a manual source whose body is pasted into "content". */
   url?: string;
   format?: 'ip-list' | 'stix' | 'domain-list';
   enabled?: boolean;
   severity?: 'info' | 'warning' | 'critical';
+  /** Pasted feed body for manual sources (max 1 MiB). */
+  content?: string;
+  /** One "Name: value" HTTP header for authenticated feeds; empty string clears it. */
+  authHeader?: string;
 }
 
 /** One recent threat-intel finding (traffic involving a feed-listed IP, or a DNS query for a listed domain). */

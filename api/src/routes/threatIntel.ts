@@ -3,7 +3,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { pool } from '../db';
 import { getEffectiveSettingValue } from '../systemSettings';
 import { requireAuth, requirePermission } from '../auth/middleware';
-import { THREAT_INTEL_FORMATS, ThreatIntelFormat, getThreatIntelStats, invalidateIocCache, triggerThreatIntelFetch } from '../workers/threatIntel';
+import { THREAT_INTEL_FORMATS, ThreatIntelFormat, computeSourceHealth, getThreatIntelStats, invalidateIocCache, triggerThreatIntelFetch } from '../workers/threatIntel';
 import { deleteRepoFile } from '../fileRepo';
 
 /**
@@ -50,6 +50,9 @@ interface SourceRow {
   lastError: string | null;
   /** Central file-repo row holding the raw snapshot of the last successful fetch (null = none yet). */
   repoFileId?: string | null;
+  content?: string | null; // manual (pasted) source body — null for URL feeds
+  authHeader?: string | null; // "Name: value" sent with URL fetches
+  failCount?: number | string; // consecutive fetch failures (auto-pause input)
   createdAt: string;
 }
 
@@ -65,13 +68,17 @@ function sourceToJson(r: SourceRow) {
     lastSuccessAt: r.lastSuccessAt ? String(r.lastSuccessAt) : null,
     lastError: r.lastError ? String(r.lastError) : null,
     repoFileId: r.repoFileId ? String(r.repoFileId) : null,
+    content: r.content !== undefined && r.content !== null ? String(r.content) : null,
+    authHeader: r.authHeader !== undefined && r.authHeader !== null ? String(r.authHeader) : null,
+    failCount: Number(r.failCount ?? 0),
+    health: computeSourceHealth({ enabled: Boolean(r.enabled), failCount: Number(r.failCount ?? 0) }),
     createdAt: String(r.createdAt),
   };
 }
 
 /** Validates a source create/update body; returns the clean fields or an error string. */
-function validateSourceBody(body: Record<string, unknown>, partial: boolean): { name?: string; url?: string; format?: ThreatIntelFormat; severity?: ThreatIntelSeverity } | string {
-  const out: { name?: string; url?: string; format?: ThreatIntelFormat; severity?: ThreatIntelSeverity } = {};
+function validateSourceBody(body: Record<string, unknown>, partial: boolean): { name?: string; url?: string; format?: ThreatIntelFormat; severity?: ThreatIntelSeverity; content?: string; authHeader?: string | null } | string {
+  const out: { name?: string; url?: string; format?: ThreatIntelFormat; severity?: ThreatIntelSeverity; content?: string; authHeader?: string | null } = {};
   if (!partial || body.name !== undefined) {
     const name = typeof body.name === 'string' ? body.name.trim() : '';
     if (name.length < 1 || name.length > 100) return '"name" is required (1-100 characters)';
@@ -79,15 +86,33 @@ function validateSourceBody(body: Record<string, unknown>, partial: boolean): { 
   }
   if (!partial || body.url !== undefined) {
     const url = typeof body.url === 'string' ? body.url.trim() : '';
-    let ok = false;
-    try {
-      const u = new URL(url);
-      ok = u.protocol === 'http:' || u.protocol === 'https:';
-    } catch {
-      ok = false;
+    if (url !== '') {
+      let ok = false;
+      try {
+        const u = new URL(url);
+        ok = u.protocol === 'http:' || u.protocol === 'https:';
+      } catch {
+        ok = false;
+      }
+      if (!ok) return '"url" must be an http(s) URL';
     }
-    if (!ok) return '"url" must be an http(s) URL';
-    out.url = url;
+    out.url = url; // '' marks a manual source — the body lives in "content"
+  }
+  if (!partial || body.content !== undefined) {
+    const content = typeof body.content === 'string' ? body.content : '';
+    if (content.length > 2_048_576) return '"content" is too large (max 1 MiB)';
+    out.content = content;
+  }
+  if (!partial || body.authHeader !== undefined) {
+    const authHeader = typeof body.authHeader === 'string' ? body.authHeader.trim() : '';
+    if (authHeader.length > 512) return '"authHeader" is too large (max 512 characters)';
+    out.authHeader = authHeader || null; // empty string clears the header
+  }
+  if (!partial && !out.url && !out.content) {
+    return 'provide a feed "url" or pasted "content"';
+  }
+  if (partial && out.url === '' && out.content === undefined) {
+    return 'clearing "url" requires pasted "content" in the same update';
   }
   if (!partial || body.format !== undefined) {
     const format = typeof body.format === 'string' ? body.format : '';
@@ -109,7 +134,7 @@ router.get('/threat-intel', requireAuth, requirePermission('security:read'), asy
     const limit = parseLimit(q.limit, 50, 200);
 
     const [srcRes, hitRes] = await Promise.all([
-      pool.query<SourceRow>(`SELECT id, name, url, format, enabled, severity, "iocCount", "lastSuccessAt", "lastError", "repoFileId", "createdAt" FROM threat_intel_sources ORDER BY name`),
+      pool.query<SourceRow>(`SELECT id, name, url, format, enabled, severity, "iocCount", "lastSuccessAt", "lastError", "repoFileId", "content", "authHeader", "failCount", "createdAt" FROM threat_intel_sources ORDER BY name`),
       pool.query(
         `SELECT id, kind, severity, "srcIp", "dstIp", detail, context, "deviceId", "firstSeenAt", "lastSeenAt", occurrences, status
          FROM flow_security_findings WHERE kind IN ('ioc-hit', 'dns-ioc-hit') AND status = 'open'
@@ -175,15 +200,15 @@ router.post('/threat-intel/sources', requireAuth, requirePermission('system:writ
     const id = uuidv4();
     const nowIso = new Date().toISOString();
     await pool.query(
-      `INSERT INTO threat_intel_sources (id, name, url, format, severity, enabled, "iocCount", "lastSuccessAt", "lastError", "createdAt")
-       VALUES ($1, $2, $3, $4, $5, true, 0, NULL, NULL, $6)`,
-      [id, validated.name, validated.url, validated.format ?? 'ip-list', validated.severity ?? 'warning', nowIso]
+      `INSERT INTO threat_intel_sources (id, name, url, format, severity, enabled, "iocCount", "lastSuccessAt", "lastError", "content", "authHeader", "createdAt")
+       VALUES ($1, $2, $3, $4, $5, true, 0, NULL, NULL, $6, $7, $8)`,
+      [id, validated.name, validated.url ?? '', validated.format ?? 'ip-list', validated.severity ?? 'warning', validated.content ?? null, validated.authHeader ?? null, nowIso]
     );
 
     // First fetch is immediate — the beat's interval logic would otherwise wait.
     void triggerThreatIntelFetch(id);
 
-    const created = await pool.query<SourceRow>(`SELECT id, name, url, format, enabled, severity, "iocCount", "lastSuccessAt", "lastError", "repoFileId", "createdAt" FROM threat_intel_sources WHERE id = $1`, [id]);
+    const created = await pool.query<SourceRow>(`SELECT id, name, url, format, enabled, severity, "iocCount", "lastSuccessAt", "lastError", "repoFileId", "content", "authHeader", "failCount", "createdAt" FROM threat_intel_sources WHERE id = $1`, [id]);
     res.status(201).json(sourceToJson(created.rows[0]));
   } catch (error) {
     console.error('Error creating threat-intel source:', error);
@@ -215,6 +240,10 @@ router.patch('/threat-intel/sources/:id', requireAuth, requirePermission('system
       params.push(body.enabled);
       sets.push(`enabled = $${params.length}`);
     }
+    // Re-enabling a (possibly auto-paused) source starts with a clean failure slate.
+    if (body.enabled === true) {
+      sets.push(`"failCount" = 0`);
+    }
     if (sets.length === 0) {
       res.status(400).json({ error: 'no fields to update' });
       return;
@@ -222,13 +251,14 @@ router.patch('/threat-intel/sources/:id', requireAuth, requirePermission('system
 
     // A changed feed definition invalidates the previous snapshot — force an
     // immediate re-fetch by clearing lastSuccessAt.
-    if (validated.url !== undefined || validated.format !== undefined) {
+    const definitionChanged = validated.url !== undefined || validated.format !== undefined || validated.content !== undefined || validated.authHeader !== undefined;
+    if (definitionChanged) {
       sets.push(`"lastSuccessAt" = NULL`);
     }
 
     params.push(req.params.id);
     const upd = await pool.query(
-      `UPDATE threat_intel_sources SET ${sets.join(', ')} WHERE id = $${params.length} RETURNING id, name, url, format, enabled, severity, "iocCount", "lastSuccessAt", "lastError", "repoFileId", "createdAt"`,
+      `UPDATE threat_intel_sources SET ${sets.join(', ')} WHERE id = $${params.length} RETURNING id, name, url, format, enabled, severity, "iocCount", "lastSuccessAt", "lastError", "repoFileId", "content", "authHeader", "failCount", "createdAt`,
       params
     );
     if (upd.rows.length === 0) {
@@ -237,7 +267,7 @@ router.patch('/threat-intel/sources/:id', requireAuth, requirePermission('system
     }
 
     const row = upd.rows[0] as SourceRow;
-    if ((validated.url !== undefined || validated.format !== undefined) && row.enabled) {
+    if (definitionChanged && row.enabled) {
       void triggerThreatIntelFetch(row.id);
     }
     // Any enabled-state change must take effect immediately — the worker's

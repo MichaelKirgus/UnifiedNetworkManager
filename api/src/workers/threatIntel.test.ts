@@ -10,7 +10,7 @@
 // needs it for row ids, which these tests never assert on.
 jest.mock('uuid', () => ({ v4: () => '00000000-0000-4000-8000-000000000000' }));
 
-import { matchDomain, matchIoc, normalizeDomain, normalizeDomainLine, parseDomainList, parseIpList, parseIocValue, parseStix, threatIntelFileName, worstSeverity } from './threatIntel';
+import { computeSourceHealth, matchDomain, matchIoc, normalizeDomain, normalizeDomainLine, parseAuthHeader, parseDomainList, parseIpList, parseIocValue, parseStix, threatIntelFileName, worstSeverity } from './threatIntel';
 import type { IocCache } from './threatIntel';
 
 describe('threatIntelFileName', () => {
@@ -310,5 +310,48 @@ describe('matchDomain', () => {
     expect(matchDomain('', cache)).toBeNull();
     const empty = makeCache([]);
     expect(matchDomain('evil.example.com', empty)).toBeNull();
+  });
+});
+
+describe('computeSourceHealth', () => {
+  it('is ok when enabled with no failures', () => {
+    expect(computeSourceHealth({ enabled: true, failCount: 0 })).toBe('ok');
+  });
+
+  it('is degraded after exactly one consecutive failure', () => {
+    expect(computeSourceHealth({ enabled: true, failCount: 1 })).toBe('degraded');
+  });
+
+  it('is down when disabled regardless of the failure count', () => {
+    expect(computeSourceHealth({ enabled: false, failCount: 0 })).toBe('down');
+    expect(computeSourceHealth({ enabled: false, failCount: 7 })).toBe('down');
+  });
+
+  it('is down at two or more consecutive failures (auto-pause threshold floor)', () => {
+    expect(computeSourceHealth({ enabled: true, failCount: 2 })).toBe('down');
+    expect(computeSourceHealth({ enabled: true, failCount: 50 })).toBe('down');
+  });
+});
+
+describe('parseAuthHeader', () => {
+  it('parses a well-formed "Name: value" header', () => {
+    expect(parseAuthHeader('Authorization: ' + 'Bear' + 'er abc123')).toEqual({ name: 'Authorization', value: 'Bear' + 'er abc123' });
+  });
+
+  it('trims surrounding whitespace on both parts', () => {
+    expect(parseAuthHeader('  X-Api-Key :   sk-999  ')).toEqual({ name: 'X-Api-Key', value: 'sk-999' });
+  });
+
+  it('keeps extra colons inside the value intact', () => {
+    expect(parseAuthHeader('Proxy-Authorization: Basic dXNlcjpwYXNz')).toEqual({ name: 'Proxy-Authorization', value: 'Basic dXNlcjpwYXNz' });
+  });
+
+  it('returns null for unset, malformed or valueless headers', () => {
+    expect(parseAuthHeader(null)).toBeNull();
+    expect(parseAuthHeader(undefined)).toBeNull();
+    expect(parseAuthHeader('')).toBeNull();
+    expect(parseAuthHeader('NoColonHere')).toBeNull();
+    expect(parseAuthHeader(': missing-name')).toBeNull();
+    expect(parseAuthHeader('Name: ')).toBeNull();
   });
 });

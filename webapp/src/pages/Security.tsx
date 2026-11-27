@@ -1,5 +1,5 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { Bug, Download, Eye, FileSearch, Globe, Loader2, Pencil, RefreshCw, Radar, Rss, ShieldCheck, ShieldAlert, ShieldX, Info, Trash2 } from 'lucide-react';
+import { Bug, Download, Eye, FileSearch, Globe, Loader2, Pencil, Plus, RefreshCw, Radar, Rss, ShieldCheck, ShieldAlert, ShieldX, Info, Trash2 } from 'lucide-react';
 import { Link } from 'react-router-dom';
 import { useMemo, useState } from 'react';
 import clsx from 'clsx';
@@ -9,7 +9,7 @@ import { DataTable, DataTableColumn } from '../components/DataTable';
 import { ALL_PAGES, useServerTable } from '../components/useServerTable';
 import { DeviceChip } from '../components/DeviceChip';
 import { PageTabs } from '../components/PageTabs';
-import { api, ApiError, SecurityCheckRow, CvePackageRow, CveVulnerabilityRow, ThreatIntelSource, LogRule, LogRuleFeed, FeedSyncResult, LogRuleImportResult, DnsQueryEvent } from '../api/client';
+import { api, ApiError, SecurityCheckRow, CvePackageRow, CveVulnerabilityRow, ThreatIntelSource, ThreatIntelSourceInput, LogRule, LogRuleFeed, FeedSyncResult, LogRuleImportResult, DnsQueryEvent } from '../api/client';
 
 /** Check-kind pill — the vocabulary is shared across all plugins (SDK contract). */
 const KIND_STYLES: Record<string, string> = {
@@ -728,22 +728,36 @@ function saveBlob(blob: Blob, name: string): void {
   setTimeout(() => URL.revokeObjectURL(url), 10_000);
 }
 
-/** Edit dialog for one threat-intel source — URL/format/severity after creation. */
-function ThreatIntelSourceEditDialog({ source, onClose }: { source: ThreatIntelSource; onClose: () => void }) {
+/** Create/edit dialog for one threat-intel source — URL feed or pasted content, optional auth header. */
+function ThreatIntelSourceDialog({ source, onClose }: { source: ThreatIntelSource | null; onClose: () => void }) {
   const queryClient = useQueryClient();
-  const [name, setName] = useState(source.name);
-  const [url, setUrl] = useState(source.url);
-  const [format, setFormat] = useState<'ip-list' | 'stix' | 'domain-list'>(source.format);
-  const [severity, setSeverity] = useState<'info' | 'warning' | 'critical'>(source.severity ?? 'warning');
+  const [name, setName] = useState(source?.name ?? '');
+  const [url, setUrl] = useState(source?.url ?? '');
+  const [content, setContent] = useState(source?.content ?? '');
+  const [authHeader, setAuthHeader] = useState(source?.authHeader ?? '');
+  const [format, setFormat] = useState<'ip-list' | 'stix' | 'domain-list'>(source?.format ?? 'ip-list');
+  const [severity, setSeverity] = useState<'info' | 'warning' | 'critical'>(source?.severity ?? 'warning');
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  const isManual = url.trim() === '';
+  const canSave = name.trim() !== '' && (!isManual || content.trim() !== '');
+
   async function save() {
-    if (saving || !name.trim() || !url.trim()) return;
+    if (saving || !canSave) return;
     setSaving(true);
     setError(null);
     try {
-      await api.updateThreatIntelSource(source.id, { name: name.trim(), url: url.trim(), format, severity });
+      const body: ThreatIntelSourceInput = {
+        name: name.trim(),
+        url: url.trim(),
+        content: isManual ? content : undefined,
+        authHeader: authHeader.trim() || undefined,
+        format,
+        severity,
+      };
+      if (source) await api.updateThreatIntelSource(source.id, body);
+      else await api.addThreatIntelSource(body);
       void queryClient.invalidateQueries({ queryKey: ['threatIntel'] });
       onClose();
     } catch (err) {
@@ -755,17 +769,36 @@ function ThreatIntelSourceEditDialog({ source, onClose }: { source: ThreatIntelS
 
   const fieldCls = 'w-full rounded-md border border-border bg-background px-3 py-2 text-sm focus:border-focus-ring focus:outline-none';
   return (
-    <DialogShell title={`Edit feed "${source.name}"`} subtitle="Changing the URL or format forces an immediate re-fetch." onClose={onClose} maxWidth="max-w-lg">
+    <DialogShell
+      title={source ? `Edit feed "${source.name}"` : 'Add IOC feed'}
+      subtitle={source ? 'Changing the URL, content or format forces an immediate re-fetch.' : 'Point at a public feed URL or paste a blocklist / STIX bundle directly.'}
+      onClose={onClose}
+      maxWidth="max-w-lg"
+    >
       <div className="space-y-3">
         {error && <p className="rounded-md border border-danger-border bg-danger px-3 py-2 text-xs text-danger-fg">{error}</p>}
         <div>
           <label className="mb-1 block text-sm font-medium text-secondary">Name</label>
-          <input value={name} onChange={(e) => setName(e.target.value)} maxLength={100} className={fieldCls} />
+          <input value={name} onChange={(e) => setName(e.target.value)} maxLength={100} placeholder="e.g. Emerging Threats" className={fieldCls} />
         </div>
         <div>
           <label className="mb-1 block text-sm font-medium text-secondary">Feed URL</label>
-          <input value={url} onChange={(e) => setUrl(e.target.value)} className={`${fieldCls} font-mono`} />
+          <input value={url} onChange={(e) => setUrl(e.target.value)} placeholder={isManual ? 'leave empty to paste content below' : 'https://…/blocklist.txt'} className={`${fieldCls} font-mono`} />
         </div>
+        {isManual && (
+          <div>
+            <label className="mb-1 block text-sm font-medium text-secondary">Pasted feed content</label>
+            <textarea value={content} onChange={(e) => setContent(e.target.value)} rows={8} maxLength={2_048_576} placeholder={format === 'stix' ? '{ "type": "bundle", "objects": [ … ] }' : 'one entry per line (IP/CIDR or domain)'} className={`${fieldCls} font-mono text-xs`} />
+            <p className="mt-1 text-xs text-faint">Manual sources are parsed on every fetch cycle without any network download — handy for private or one-off blocklists.</p>
+          </div>
+        )}
+        {!isManual && (
+          <div>
+            <label className="mb-1 block text-sm font-medium text-secondary">Auth header (optional)</label>
+            <input value={authHeader} onChange={(e) => setAuthHeader(e.target.value)} maxLength={512} placeholder="Authorization: Bearer ***" className={`${fieldCls} font-mono`} />
+            <p className="mt-1 text-xs text-faint">Sent with the feed download via the web-fetch plugin; stored server-side and never logged.</p>
+          </div>
+        )}
         <div className="grid grid-cols-2 gap-3">
           <div>
             <label className="mb-1 block text-sm font-medium text-secondary">Format</label>
@@ -790,11 +823,11 @@ function ThreatIntelSourceEditDialog({ source, onClose }: { source: ThreatIntelS
           <button
             type="button"
             onClick={() => void save()}
-            disabled={saving || !name.trim() || !url.trim()}
+            disabled={saving || !canSave}
             className="inline-flex items-center gap-1.5 rounded-md bg-primary px-3 py-1.5 text-sm font-medium text-white hover:bg-primary-hover disabled:opacity-50"
           >
             {saving && <Loader2 size={14} className="animate-spin" />}
-            Save changes
+            {source ? 'Save changes' : 'Add feed'}
           </button>
         </div>
       </div>
@@ -811,14 +844,9 @@ function ThreatIntelSection() {
     refetchInterval: 30_000,
   });
 
-  // Add-source form state.
-  const [name, setName] = useState('');
-  const [url, setUrl] = useState('');
-  const [format, setFormat] = useState<'ip-list' | 'stix' | 'domain-list'>('ip-list');
-  const [severity, setSeverity] = useState<'info' | 'warning' | 'critical'>('warning');
+  // Source dialogs — one unified create/edit dialog (URL feed or pasted content).
   const [editing, setEditing] = useState<ThreatIntelSource | null>(null);
-  const [adding, setAdding] = useState(false);
-  const [addError, setAddError] = useState<string | null>(null);
+  const [creating, setCreating] = useState(false);
 
   // "Fetch now" runs one full cycle server-side — fire and forget; the
   // per-source lastSuccessAt/lastError surface the outcome.
@@ -833,23 +861,6 @@ function ThreatIntelSection() {
       console.warn('Threat-intel fetch reported an error:', (err as Error).message);
     } finally {
       setFetching(false);
-    }
-  }
-
-  async function addSource() {
-    if (adding || !name.trim() || !url.trim()) return;
-    setAdding(true);
-    setAddError(null);
-    try {
-      await api.addThreatIntelSource({ name: name.trim(), url: url.trim(), format, severity });
-      setName('');
-      setUrl('');
-      setSeverity('warning');
-      void queryClient.invalidateQueries({ queryKey: ['threatIntel'] });
-    } catch (err) {
-      setAddError((err as Error).message);
-    } finally {
-      setAdding(false);
     }
   }
 
@@ -900,11 +911,19 @@ function ThreatIntelSection() {
       key: 'url',
       width: 320,
       exportValue: (row) => row.url,
-      render: (row) => (
-        <a href={row.url} target="_blank" rel="noreferrer" className="font-mono text-xs text-info hover:underline break-all">
-          {row.url}
-        </a>
-      ),
+      render: (row) =>
+        row.url === '' ? (
+          <span
+            className="rounded bg-muted px-1.5 py-0.5 text-xs font-medium text-secondary"
+            title={`Manual source — ${(row.content ?? '').length.toLocaleString()} characters of pasted content, no network download`}
+          >
+            manual
+          </span>
+        ) : (
+          <a href={row.url} target="_blank" rel="noreferrer" className="font-mono text-xs text-info hover:underline break-all">
+            {row.url}
+          </a>
+        ),
     },
     {
       header: 'Format',
@@ -949,20 +968,42 @@ function ThreatIntelSection() {
       header: 'Status',
       key: 'status',
       width: 260,
-      render: (row) =>
-        row.enabled ? (
-          row.lastError ? (
-            <span className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-xs font-medium bg-danger/20 text-danger-fg" title={String(row.lastError)}>
-              {String(row.lastError).slice(0, 60)}{String(row.lastError).length > 60 ? '…' : ''}
+      render: (row) => {
+        const err = row.lastError ? String(row.lastError) : '';
+        if (!row.enabled) {
+          return row.failCount > 0 ? (
+            <span
+              className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-xs font-medium bg-danger/20 text-danger-fg"
+              title={`Auto-paused after ${row.failCount} consecutive failures${err ? ` — last error: ${err}` : ''}. Enable the feed to resume fetching.`}
+            >
+              auto-paused ({row.failCount}× failed)
             </span>
           ) : (
-            <span className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-xs font-medium bg-success/20 text-success-fg">
-              ok
+            <span className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-xs font-medium bg-muted text-secondary" title={err || undefined}>
+              disabled
             </span>
-          )
-        ) : (
-          <span className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-xs font-medium bg-muted text-secondary">disabled</span>
-        ),
+          );
+        }
+        if (row.health === 'down') {
+          return (
+            <span className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-xs font-medium bg-danger/20 text-danger-fg" title={err || undefined}>
+              {row.failCount}× failed{err ? ` — ${err.slice(0, 60)}${err.length > 60 ? '…' : ''}` : ''}
+            </span>
+          );
+        }
+        if (row.health === 'degraded') {
+          return (
+            <span className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-xs font-medium bg-warning/20 text-warning-fg" title={err || undefined}>
+              1 consecutive failure
+            </span>
+          );
+        }
+        return (
+          <span className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-xs font-medium bg-success/20 text-success-fg">
+            ok
+          </span>
+        );
+      },
     },
     {
       header: '',
@@ -1069,42 +1110,16 @@ function ThreatIntelSection() {
         />
       )}
 
-      {/* Add-source form */}
-      <div className="mt-3 flex flex-wrap items-end gap-2 rounded-md border border-border bg-muted/30 p-3">
-        <label className="flex flex-col gap-1 text-xs font-medium text-secondary">
-          Name
-          <input value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. Emerging Threats" className="w-44 rounded-md border border-border bg-background px-2 py-1.5 text-sm text-foreground" />
-        </label>
-        <label className="flex flex-col gap-1 text-xs font-medium text-secondary">
-          Feed URL
-          <input value={url} onChange={(e) => setUrl(e.target.value)} placeholder="https://…/blocklist.txt" className="w-72 rounded-md border border-border bg-background px-2 py-1.5 font-mono text-sm text-foreground" />
-        </label>
-        <label className="flex flex-col gap-1 text-xs font-medium text-secondary">
-          Format
-          <select value={format} onChange={(e) => setFormat(e.target.value as 'ip-list' | 'stix' | 'domain-list')} className="rounded-md border border-border bg-background px-2 py-1.5 text-sm text-foreground">
-            <option value="ip-list">IP list (one per line)</option>
-            <option value="stix">STIX 2.x bundle</option>
-            <option value="domain-list">Domain blocklist (Pi-hole / Adblock)</option>
-          </select>
-        </label>
-        <label className="flex flex-col gap-1 text-xs font-medium text-secondary">
-          Severity
-          <select value={severity} onChange={(e) => setSeverity(e.target.value as 'info' | 'warning' | 'critical')} className="rounded-md border border-border bg-background px-2 py-1.5 text-sm text-foreground" title="Notification severity for findings raised by this feed">
-            <option value="info">Info</option>
-            <option value="warning">Warning</option>
-            <option value="critical">Critical</option>
-          </select>
-        </label>
+      {/* Add-feed entry — opens the create dialog (URL feed or pasted content) */}
+      <div className="mt-3">
         <button
           type="button"
-          onClick={() => void addSource()}
-          disabled={adding || !name.trim() || !url.trim()}
-          className="inline-flex items-center gap-2 rounded-md bg-primary px-3 py-1.5 text-sm font-medium text-primary-fg hover:opacity-90 disabled:opacity-60"
+          onClick={() => setCreating(true)}
+          title="Add an IOC feed source — public URL or pasted blocklist / STIX bundle"
+          className="inline-flex items-center gap-2 rounded-md border border-border px-3 py-1.5 text-sm font-medium text-secondary hover:bg-muted"
         >
-          {adding && <Loader2 className="h-4 w-4 animate-spin" />}
-          Add feed
+          <Plus className="h-4 w-4" /> Add feed
         </button>
-        {addError && <span className="text-xs text-danger-fg">{addError}</span>}
       </div>
 
       {/* Recent hits */}
@@ -1136,8 +1151,16 @@ function ThreatIntelSection() {
         </div>
       )}
 
-      {/* Edit dialog (URL / format / severity) */}
-      {editing && <ThreatIntelSourceEditDialog source={editing} onClose={() => setEditing(null)} />}
+      {/* Create/edit dialog (URL feed or pasted content) */}
+      {(creating || editing) && (
+        <ThreatIntelSourceDialog
+          source={editing}
+          onClose={() => {
+            setCreating(false);
+            setEditing(null);
+          }}
+        />
+      )}
     </div>
   );
 }
