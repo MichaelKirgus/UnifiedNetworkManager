@@ -11,6 +11,9 @@
  *     plan appends a settle wait + inventory refresh (see src/plan.ts).
  *   shelly.reboot           (write) — Gen1 POST /reboot; Gen2+ Shelly.Reboot
  *     (classic) / Sys.Reboot (modern).
+ *   shelly.setRelay         (write) — sets a relay's state (the wall-switch
+ *     use case): Gen1 POST /relay/{id}?turn=on|off; Gen2+ (both namespaces)
+ *     Switch.Set {id, on} — the Switch component is stable across firmware.
  */
 
 import { ActionResult, ActionDescriptor, createRegistry } from '@unm/plugin-sdk';
@@ -113,5 +116,45 @@ const rebootAction: ActionDescriptor<ShellyActionContext> = {
   },
 };
 
+/** Sets a relay's state — the wall-switch / inline-relay use case. */
+const setRelayAction: ActionDescriptor<ShellyActionContext> = {
+  id: 'shelly.setRelay',
+  label: 'Set relay state',
+  description:
+    "Sets a relay's target state (Gen1: POST /relay/{id}?turn=on|off; Gen2+ both namespaces: Switch.Set {id, on}). Idempotent — safe to re-dispatch. Relay 0 by default; multi-relay models (Shelly 2, Plus 2PM, Pro 4) expose relays 0–3.",
+  module: 'Relays',
+  riskLevel: 'write' as const,
+  deviceCount: 1 as const,
+  timeoutMs: 15_000,
+  retryOnDispatchFailure: true, // idempotent set — re-dispatching is harmless
+  inputSchema: {
+    on: { type: 'boolean', required: true, description: 'Target state of the relay.' },
+    relayId: { type: 'number', required: false, min: 0, max: 8, description: 'Relay index (default 0).' },
+  },
+  async execute(ctx: ShellyActionContext, input: Record<string, unknown>): Promise<ActionResult> {
+    const on = input.on as boolean; // validated: required boolean
+    const relayId = input.relayId === undefined || input.relayId === null ? 0 : (input.relayId as number);
+
+    if (ctx.profile.gen === 1) {
+      const r = await gen1Post(ctx.client, `/relay/${relayId}?turn=${on ? 'on' : 'off'}`, ctx.auth);
+      if (!r.ok) {
+        return { success: false, details: { error: `Device rejected the relay set (${r.error ?? `HTTP ${r.status}`})` } };
+      }
+    } else {
+      // Gen2+ (classic AND modern namespaces): the Switch component is stable
+      // across firmware versions — Switch.Set {id, on} works on fw 1.x and 2.x+.
+      const r = await rpc(ctx.client, [{ method: 'Switch.Set', params: { id: relayId, on } }], ctx.auth);
+      if (!r.ok) {
+        return { success: false, details: { error: `Device rejected the relay set (${r.error ?? `HTTP ${r.status}`})` } };
+      }
+      const res = r.results[0];
+      if (!res?.ok) {
+        return { success: false, details: { error: `Switch.Set failed: ${res?.error?.message ?? 'unknown error'}` } };
+      }
+    }
+    return { success: true, applied: true, details: { note: `Relay ${relayId} set to ${on ? 'ON' : 'OFF'}.` } };
+  },
+};
+
 /** The full Shelly action registry. */
-export const shellyActions = createRegistry<ShellyActionContext>([firmwareUpdateAction, rebootAction]);
+export const shellyActions = createRegistry<ShellyActionContext>([firmwareUpdateAction, rebootAction, setRelayAction]);

@@ -38,6 +38,10 @@ function startMockDevice(): Promise<MockDevice> {
       } else if (req.url === '/ota?update=true') {
         res.statusCode = 200;
         res.end(JSON.stringify({ ota: 'pending' }));
+      } else if (/^\/relay\/\d+\?turn=(on|off)$/.test(req.url ?? '')) {
+        // Gen1 relay set — answers with the (pretend) resulting state.
+        res.statusCode = 200;
+        res.end(JSON.stringify({ ison: true }));
       } else if (req.url === '/reboot') {
         res.statusCode = 200;
         res.end('{}');
@@ -66,12 +70,13 @@ const GEN2_CLASSIC: DeviceProfile = { gen: 2, ns: 'classic', model: 'SWN-1PM', n
 const GEN2_MODERN: DeviceProfile = { gen: 2, ns: 'modern', model: 'Pro4Gen4', name: 'Pro 4 Gen4', mac: 'AABBCCDDEE01', fw: '2.0.5' };
 
 describe('shellyActions — registry shape', () => {
-  it('exposes both actions in the catalog with correct modules', () => {
+  it('exposes all three actions in the catalog with correct modules', () => {
     const ids = shellyActions.listCatalog().map((a) => a.id).sort();
-    expect(ids).toEqual(['shelly.firmware.update', 'shelly.reboot']);
-    expect(shellyActions.listModules().sort()).toEqual(['Firmware', 'System']);
+    expect(ids).toEqual(['shelly.firmware.update', 'shelly.reboot', 'shelly.setRelay']);
+    expect(shellyActions.listModules().sort()).toEqual(['Firmware', 'Relays', 'System']);
     expect(shellyActions.getAction('shelly.firmware.update')?.riskLevel).toBe('dangerous');
     expect(shellyActions.getAction('shelly.reboot')?.riskLevel).toBe('write');
+    expect(shellyActions.getAction('shelly.setRelay')?.riskLevel).toBe('write');
   });
 
   it('validates the stage enum — rejects unknown stages, accepts stable/beta/absent', () => {
@@ -85,6 +90,15 @@ describe('shellyActions — registry shape', () => {
   it('reboot takes no input', () => {
     const schema = shellyActions.getAction('shelly.reboot')!.inputSchema;
     expect(schema).toEqual({});
+  });
+
+  it('setRelay requires a boolean on; relayId is optional and bounded', () => {
+    const schema = shellyActions.getAction('shelly.setRelay')!.inputSchema;
+    expect(validateInput(schema, {})).toHaveLength(1); // missing on
+    expect(isValidInput(schema, { on: true })).toBe(true); // relayId defaults to 0
+    expect(isValidInput(schema, { on: false, relayId: 3 })).toBe(true);
+    expect(validateInput(schema, { on: true, relayId: -1 })).toHaveLength(1);
+    expect(validateInput(schema, { on: 'yes' })).toHaveLength(1);
   });
 });
 
@@ -223,6 +237,77 @@ describe('shelly.reboot — per generation', () => {
       expect(batch.map((b) => b.method)).toEqual(['Sys.Reboot']);
     } finally {
       await dev.close();
+    }
+  });
+});
+
+describe('shelly.setRelay — per generation', () => {
+  it('Gen1: POST /relay/{id}?turn=on|off (defaults to relay 0)', async () => {
+    const dev = await startMockDevice();
+    try {
+      const r = await shellyActions.getAction('shelly.setRelay')!.execute(ctxFor(dev.port, GEN1), { on: true });
+      expect(dev.hits).toEqual([{ method: 'POST', url: '/relay/0?turn=on' }]);
+      expect(r.success).toBe(true);
+      expect(r.applied).toBe(true);
+      expect(String((r.details as Record<string, unknown>)?.note)).toMatch(/ON/i);
+
+      await shellyActions.getAction('shelly.setRelay')!.execute(ctxFor(dev.port, GEN1), { on: false, relayId: 1 });
+      expect(dev.hits[1]).toEqual({ method: 'POST', url: '/relay/1?turn=off' });
+    } finally {
+      await dev.close();
+    }
+  });
+
+  it('Gen2 (classic AND modern): Switch.Set {id, on} — stable across namespaces', async () => {
+    const dev = await startMockDevice();
+    try {
+      const r = await shellyActions.getAction('shelly.setRelay')!.execute(ctxFor(dev.port, GEN2_CLASSIC), { on: true });
+      let batch = (dev.hits[0].body?.__batch ?? []) as Array<{ method: string; params?: Record<string, unknown> }>;
+      expect(batch).toMatchObject([{ method: 'Switch.Set', params: { id: 0, on: true } }]);
+      expect(r.success).toBe(true);
+
+      await shellyActions.getAction('shelly.setRelay')!.execute(ctxFor(dev.port, GEN2_MODERN), { on: false });
+      batch = (dev.hits[1].body?.__batch ?? []) as Array<{ method: string; params?: Record<string, unknown> }>;
+      expect(batch).toMatchObject([{ method: 'Switch.Set', params: { id: 0, on: false } }]);
+    } finally {
+      await dev.close();
+    }
+  });
+
+  it('surfaces a Gen1 HTTP 404 (unknown relay) as a failed action', async () => {
+    const server = http.createServer((_req, res) => {
+      res.statusCode = 404;
+      res.end(JSON.stringify({ error: 'no such relay' }));
+    });
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', () => r()));
+    const port = (server.address() as AddressInfo).port;
+    try {
+      const r = await shellyActions.getAction('shelly.setRelay')!.execute(ctxFor(port, GEN1), { on: true, relayId: 9 });
+      expect(r.success).toBe(false);
+      expect(String((r.details as Record<string, unknown>)?.error)).toMatch(/HTTP 404/);
+    } finally {
+      await new Promise<void>((r) => server.close(() => r()));
+    }
+  });
+
+  it('surfaces a per-method RPC error (Switch.Set) as a failed action', async () => {
+    const server = http.createServer((req, res) => {
+      let rawBody = '';
+      req.on('data', (c) => (rawBody += c));
+      req.on('end', () => {
+        const batch = JSON.parse(rawBody) as Array<{ id: number }>;
+        res.statusCode = 200;
+        res.end(JSON.stringify(batch.map((m) => ({ jsonrpc: '2.0', id: m.id, error: { code: -32602, message: 'Invalid params' } }))));
+      });
+    });
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', () => r()));
+    const port = (server.address() as AddressInfo).port;
+    try {
+      const r = await shellyActions.getAction('shelly.setRelay')!.execute(ctxFor(port, GEN2_MODERN), { on: true });
+      expect(r.success).toBe(false);
+      expect(String((r.details as Record<string, unknown>)?.error)).toMatch(/Invalid params/);
+    } finally {
+      await new Promise<void>((r) => server.close(() => r()));
     }
   });
 });

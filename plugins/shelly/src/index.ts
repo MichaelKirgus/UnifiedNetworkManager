@@ -140,6 +140,24 @@ const QUICK_ACTIONS: QuickAction[] = [
     kind: 'url',
     url: {},
   },
+  {
+    id: 'relay-on',
+    label: 'Relay ON',
+    description: 'Turn relay 0 ON (write — asks for confirmation). The form also lets you pick another relay.',
+    iconPath: '/icons/shelly.svg',
+    kind: 'action',
+    actionId: 'shelly.setRelay',
+    prefill: { on: true },
+  },
+  {
+    id: 'relay-off',
+    label: 'Relay OFF',
+    description: 'Turn relay 0 OFF (write — asks for confirmation). The form also lets you pick another relay.',
+    iconPath: '/icons/shelly.svg',
+    kind: 'action',
+    actionId: 'shelly.setRelay',
+    prefill: { on: false },
+  },
 ];
 
 const server = createPluginServer({

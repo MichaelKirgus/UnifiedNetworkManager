@@ -20,7 +20,7 @@ export const SHELLY_DEVICE_SUPPORT: DeviceSupport = {
   defaultCapabilities: [
     { name: 'monitoring', label: 'Monitoring' },
     { name: 'updates', label: 'Firmware updates' },
-    { name: 'configuration', label: 'Actions (firmware update, reboot)' },
+    { name: 'configuration', label: 'Actions (firmware update, reboot, relay control)' },
     { name: 'planning', label: 'Plan execution' },
     { name: 'quickActions', label: 'Quick actions' },
   ],

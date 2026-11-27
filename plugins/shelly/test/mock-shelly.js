@@ -5,7 +5,7 @@
  * Test-grade emulation of three Shelly profiles:
  *
  *   'gen1'         — legacy REST (ESP8266): GET /shelly (auth-free), GET /status,
- *                    GET /ota[?update=true], POST /reboot
+ *                    GET /ota[?update=true], POST /reboot, POST /relay/{id}?turn=on|off
  *   'gen2-classic' — JSON-RPC 2.0 with fw 1.x namespaces: Shelly.*, WiFi.*, Firmware.*
  *   'gen2-modern'  — JSON-RPC 2.0 with fw 2.x+ namespaces: Sys.*, Wifi.*, Firmware.*
  *
@@ -13,9 +13,13 @@
  *   - Reboot window: after an accepted firmware update or reboot the socket is
  *     destroyed for `rebootMs`, then the device "comes back" (an update bumps
  *     the running firmware to `latestFw` and clears the pending update).
- *   - Local login: when `authEnabled`, Gen1 requires HTTP Basic on /status and
- *     /ota; Gen2+ enforces the shellyun-auth cookie handshake (first request
- *     with valid Basic gets Set-Cookie, later requests may use the cookie).
+ *   - Local login: when `authEnabled`, Gen1 requires HTTP Basic on /status,
+ *     /ota and /relay; Gen2+ enforces the shellyun-auth cookie handshake (first
+ *     request with valid Basic gets Set-Cookie, later requests may use the cookie).
+ *   - Relay control: state.relays[] tracks each relay's ison; Gen1 POST
+ *     /relay/{id}?turn=on|off and (both namespaces) Switch.Set {id, on} all
+ *     mutate it. Out-of-range ids answer 404 (Gen1) / -32602 Invalid params
+ *     (RPC).
  *   - Unknown RPC methods answer with JSON-RPC error -32601 — this is what
  *     makes the plugin's namespace detection distinguish classic from modern.
  */
@@ -61,6 +65,8 @@ function startMockShelly(opts) {
     rssi: opts.rssi ?? -62,
     ssid: opts.ssid ?? 'KirgusNET_IoT',
     rebootMs: opts.rebootMs ?? 700,
+    // Relay states (index = relay id). Relay 0 starts ON like the status payloads.
+    relays: [true],
     // --- observability for assertions ---
     downUntil: 0,
     updateTriggers: 0,
@@ -128,11 +134,11 @@ function startMockShelly(opts) {
 
   const CLASSIC_METHODS = new Set([
     'Shelly.GetDeviceInfo', 'Shelly.GetStatus', 'WiFi.GetStatus',
-    'Firmware.GetStatus', 'Shelly.Update', 'Shelly.Reboot',
+    'Firmware.GetStatus', 'Shelly.Update', 'Shelly.Reboot', 'Switch.Set',
   ]);
   const MODERN_METHODS = new Set([
     'Sys.GetDeviceInfo', 'Sys.GetStatus', 'Wifi.GetStatus',
-    'Firmware.GetStatus', 'Firmware.Update', 'Sys.Reboot',
+    'Firmware.GetStatus', 'Firmware.Update', 'Sys.Reboot', 'Switch.Set',
   ]);
 
   function dispatchRpc(method, params) {
@@ -149,7 +155,7 @@ function startMockShelly(opts) {
         return {
           // Official Gen2+ docs: sys.uptime in SECONDS, RAM as ram_free/ram_size (bytes).
           sys: { uptime: 3600, temperature_c: 35, ram_free: 45000, ram_size: 87300 },
-          relay: [{ id: 0, ison: true }],
+          relay: state.relays.map((on, id) => ({ id, ison: on })),
         };
       case 'WiFi.GetStatus':
       case 'Wifi.GetStatus':
@@ -168,6 +174,16 @@ function startMockShelly(opts) {
         state.reboots += 1;
         beginDownWindow(false);
         return {};
+      case 'Switch.Set': {
+        // Gen2+ (both namespaces): Switch.Set {id, on} → {was_on}.
+        const id = Number(params?.id);
+        if (!Number.isInteger(id) || id < 0 || id >= state.relays.length || typeof params?.on !== 'boolean') {
+          return { __error: { code: -32602, message: 'Invalid params' } };
+        }
+        const wasOn = state.relays[id];
+        state.relays[id] = params.on;
+        return { was_on: wasOn };
+      }
       default:
         return { __error: { code: -32601, message: `Method not found: ${method}` } };
     }
@@ -209,7 +225,7 @@ function startMockShelly(opts) {
           ram_lwm: 4096,
           fs_size: 262144,
           fs_free: 200000,
-          relay: [{ ison: true }],
+          relay: state.relays.map((on) => ({ ison: on })),
         }));
         return;
       }
@@ -236,6 +252,21 @@ function startMockShelly(opts) {
         beginDownWindow(false);
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end('{}');
+        return;
+      }
+      const relayMatch = /^\/relay\/(\d+)$/.exec(url.pathname);
+      if (relayMatch) {
+        // Gen1: POST /relay/{id}?turn=on|off sets the state and answers with it.
+        const idx = Number(relayMatch[1]);
+        if (idx >= state.relays.length) {
+          res.writeHead(404, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: `no such relay: ${idx}` }));
+          return;
+        }
+        const turn = url.searchParams.get('turn');
+        if (turn === 'on' || turn === 'off') state.relays[idx] = turn === 'on';
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ison: state.relays[idx], was_just_set_up: false }));
         return;
       }
       res.writeHead(404, { 'Content-Type': 'application/json' });

@@ -104,7 +104,19 @@ async function main(): Promise<void> {
   );
   const rebootAction = (disc.actions ?? []).find((a: any) => a.id === 'shelly.reboot');
   check('reboot is write-level', rebootAction?.riskLevel === 'write', rebootAction);
+  const setRelayAction = (disc.actions ?? []).find((a: any) => a.id === 'shelly.setRelay');
+  check(
+    'setRelay is write-level with a boolean on input',
+    setRelayAction?.riskLevel === 'write' && setRelayAction?.inputSchema?.on?.type === 'boolean',
+    setRelayAction
+  );
   check('quick action webui advertised', (disc.quickActions ?? []).some((q: any) => q.id === 'webui' && q.kind === 'url'), disc.quickActions);
+  check(
+    'relay-on/relay-off quick actions target shelly.setRelay with prefill',
+    (disc.quickActions ?? []).some((q: any) => q.id === 'relay-on' && q.kind === 'action' && q.actionId === 'shelly.setRelay' && q.prefill?.on === true) &&
+      (disc.quickActions ?? []).some((q: any) => q.id === 'relay-off' && q.kind === 'action' && q.actionId === 'shelly.setRelay' && q.prefill?.on === false),
+    disc.quickActions
+  );
 
   // --- /monitoring — Gen1 happy path -------------------------------------------
   console.log('\n/monitoring (gen1 happy path)');
@@ -239,6 +251,33 @@ async function main(): Promise<void> {
   m = await mon(`localhost:${GEN1_PORT}`);
   check('device back after reboot (health ok, version unchanged)', m.data.health === 'ok' && m.data.metrics?.['system.swVersion'] === '4.5.1', [m.data.health, m.data.metrics?.['system.swVersion']]);
 
+  // --- /config — relay control (setRelay) ---------------------------------------
+  console.log('\n/config (gen1 setRelay)');
+  c = await post('/config', { deviceId: 'smoke-device', managementAddress: `localhost:${GEN1_PORT}`, actionId: 'shelly.setRelay', input: { on: false } });
+  check('Gen1 relay-off accepted', c.data.success === true, c.data);
+  m = await mon(`localhost:${GEN1_PORT}`);
+  check('Gen1 relay0On flipped to 0 (monitoring reflects the toggle)', m.data.metrics?.['shelly.relay0On'] === 0, m.data.metrics?.['shelly.relay0On']);
+  c = await post('/config', { deviceId: 'smoke-device', managementAddress: `localhost:${GEN1_PORT}`, actionId: 'shelly.setRelay', input: { on: true } });
+  check('Gen1 relay-on accepted', c.data.success === true, c.data);
+  m = await mon(`localhost:${GEN1_PORT}`);
+  check('Gen1 relay0On flipped back to 1', m.data.metrics?.['shelly.relay0On'] === 1, m.data.metrics?.['shelly.relay0On']);
+  c = await post('/config', { deviceId: 'smoke-device', managementAddress: `localhost:${GEN1_PORT}`, actionId: 'shelly.setRelay', input: { on: true, relayId: 5 } });
+  check('unknown relay rejected (Gen1 answers 404)', c.data.success === false && /HTTP 404/.test(String(c.data.result?.details?.error ?? '')), c.data);
+
+  console.log('\n/config (gen2 classic setRelay)');
+  c = await post('/config', { deviceId: 'smoke-device', managementAddress: `localhost:${CLASSIC_PORT}`, actionId: 'shelly.setRelay', input: { on: false } });
+  check('classic Switch.Set accepted', c.data.success === true, c.data);
+  check('classic device saw Switch.Set', classic.state.rpcCalls.includes('Switch.Set'), classic.state.rpcCalls);
+  m = await mon(`localhost:${CLASSIC_PORT}`);
+  check('classic relay0On flipped to 0', m.data.metrics?.['shelly.relay0On'] === 0, m.data.metrics?.['shelly.relay0On']);
+
+  console.log('\n/config (gen2 modern setRelay)');
+  c = await post('/config', { deviceId: 'smoke-device', managementAddress: `localhost:${MODERN_PORT}`, actionId: 'shelly.setRelay', input: { on: false } });
+  check('modern Switch.Set accepted', c.data.success === true, c.data);
+  check('modern device saw Switch.Set', modern.state.rpcCalls.includes('Switch.Set'), modern.state.rpcCalls);
+  m = await mon(`localhost:${MODERN_PORT}`);
+  check('modern relay0On flipped to 0', m.data.metrics?.['shelly.relay0On'] === 0, m.data.metrics?.['shelly.relay0On']);
+
   // --- /plan ----------------------------------------------------------------------
   console.log('\n/plan');
   let p = await post('/plan', {
@@ -264,6 +303,13 @@ async function main(): Promise<void> {
     devices: [{ deviceId: 'dev-gen1', managementAddress: `localhost:${GEN1_PORT}`, credentials: {} }],
   });
   check('reboot plan is a single step (no settle tail)', JSON.stringify((p.data?.plan?.steps ?? []).map((s: any) => s.actionId)) === '["shelly.reboot"]', p.data?.plan?.steps);
+
+  p = await post('/plan', {
+    intent: { actionId: 'shelly.setRelay', inputs: { on: false } },
+    devices: [{ deviceId: 'dev-gen1', managementAddress: `localhost:${GEN1_PORT}`, credentials: {} }],
+  });
+  check('setRelay plan is a single step (no settle tail)', JSON.stringify((p.data?.plan?.steps ?? []).map((s: any) => s.actionId)) === '["shelly.setRelay"]', p.data?.plan?.steps);
+  check('setRelay inputs land on the step', (p.data?.plan?.steps ?? [])[0]?.input?.on === false, p.data?.plan?.steps);
 
   p = await post('/plan', {
     intent: { actionId: 'shelly.firmware.update', inputs: {} },
