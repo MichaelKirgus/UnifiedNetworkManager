@@ -230,11 +230,16 @@ export function parseIpList(bytes: Buffer, maxIocs: number): ParsedFeed {
     }
     const line = rawLine.trim().replace(/,+$/, '');
     if (!line || line.startsWith('#') || line.startsWith(';') || /^https?:\/\//i.test(line)) continue;
-    if (parseIocValue(line) === null) {
+    // Many public lists append an inline comment after the entry — e.g.
+    // Spamhaus DROP's "1.10.16.0/20 ; SBL256894". Cut at the first ';' so the
+    // bare address still parses (IPs/CIDRs never contain ';').
+    const entry = line.split(';', 1)[0].trim();
+    if (!entry || /^https?:\/\//i.test(entry)) continue;
+    if (parseIocValue(entry) === null) {
       skipped += 1;
       continue;
     }
-    values.add(line);
+    values.add(entry);
   }
   return { values: [...values], domains: [], skipped };
 }

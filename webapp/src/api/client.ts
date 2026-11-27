@@ -4006,6 +4006,15 @@ export interface ThreatIntelSourceInput {
   authHeader?: string;
 }
 
+/** Built-in feed template from GET /threat-intel/source-templates — pre-fills the create dialog; nothing is created until saved. */
+export interface ThreatIntelSourceTemplate {
+  id: string;
+  name: string;
+  description: string;
+  url: string;
+  format: 'ip-list' | 'domain-list';
+}
+
 /** One recent threat-intel finding (traffic involving a feed-listed IP, or a DNS query for a listed domain). */
 export interface ThreatIntelHit {
   id: string;
@@ -5168,6 +5177,7 @@ export const api = {
   },
   // Threat intelligence (Security page) — IOC feed sources + worker status.
   threatIntel: () => apiFetch<ThreatIntelResponse>('/threat-intel'),
+  threatIntelSourceTemplates: () => apiFetch<{ templates: ThreatIntelSourceTemplate[] }>('/threat-intel/source-templates'),
   addThreatIntelSource: (body: ThreatIntelSourceInput) =>
     apiFetch<ThreatIntelSource>('/threat-intel/sources', { method: 'POST', body: JSON.stringify(body) }),
   updateThreatIntelSource: (id: string, body: ThreatIntelSourceInput) =>

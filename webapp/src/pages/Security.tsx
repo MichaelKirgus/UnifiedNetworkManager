@@ -9,7 +9,7 @@ import { DataTable, DataTableColumn } from '../components/DataTable';
 import { ALL_PAGES, useServerTable } from '../components/useServerTable';
 import { DeviceChip } from '../components/DeviceChip';
 import { PageTabs } from '../components/PageTabs';
-import { api, ApiError, SecurityCheckRow, CvePackageRow, CveVulnerabilityRow, ThreatIntelSource, ThreatIntelSourceInput, LogRule, LogRuleFeed, FeedSyncResult, LogRuleImportResult, DnsQueryEvent } from '../api/client';
+import { api, ApiError, SecurityCheckRow, CvePackageRow, CveVulnerabilityRow, ThreatIntelSource, ThreatIntelSourceInput, ThreatIntelSourceTemplate, LogRule, LogRuleFeed, FeedSyncResult, LogRuleImportResult, DnsQueryEvent } from '../api/client';
 
 /** Check-kind pill — the vocabulary is shared across all plugins (SDK contract). */
 const KIND_STYLES: Record<string, string> = {
@@ -729,13 +729,14 @@ function saveBlob(blob: Blob, name: string): void {
 }
 
 /** Create/edit dialog for one threat-intel source — URL feed or pasted content, optional auth header. */
-function ThreatIntelSourceDialog({ source, onClose }: { source: ThreatIntelSource | null; onClose: () => void }) {
+function ThreatIntelSourceDialog({ source, preset, onClose }: { source: ThreatIntelSource | null; preset?: ThreatIntelSourceTemplate | null; onClose: () => void }) {
   const queryClient = useQueryClient();
-  const [name, setName] = useState(source?.name ?? '');
-  const [url, setUrl] = useState(source?.url ?? '');
+  // `preset` (when creating) pre-fills the form from a template catalog entry.
+  const [name, setName] = useState(preset?.name ?? source?.name ?? '');
+  const [url, setUrl] = useState(preset?.url ?? source?.url ?? '');
   const [content, setContent] = useState(source?.content ?? '');
   const [authHeader, setAuthHeader] = useState(source?.authHeader ?? '');
-  const [format, setFormat] = useState<'ip-list' | 'stix' | 'domain-list'>(source?.format ?? 'ip-list');
+  const [format, setFormat] = useState<'ip-list' | 'stix' | 'domain-list'>(preset?.format ?? source?.format ?? 'ip-list');
   const [severity, setSeverity] = useState<'info' | 'warning' | 'critical'>(source?.severity ?? 'warning');
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -771,7 +772,13 @@ function ThreatIntelSourceDialog({ source, onClose }: { source: ThreatIntelSourc
   return (
     <DialogShell
       title={source ? `Edit feed "${source.name}"` : 'Add IOC feed'}
-      subtitle={source ? 'Changing the URL, content or format forces an immediate re-fetch.' : 'Point at a public feed URL or paste a blocklist / STIX bundle directly.'}
+      subtitle={
+        source
+          ? 'Changing the URL, content or format forces an immediate re-fetch.'
+          : preset
+            ? `Prefilled from the "${preset.name}" template — adjust anything before adding.`
+            : 'Point at a public feed URL or paste a blocklist / STIX bundle directly.'
+      }
       onClose={onClose}
       maxWidth="max-w-lg"
     >
@@ -847,6 +854,13 @@ function ThreatIntelSection() {
   // Source dialogs — one unified create/edit dialog (URL feed or pasted content).
   const [editing, setEditing] = useState<ThreatIntelSource | null>(null);
   const [creating, setCreating] = useState(false);
+  // Template catalog — static list of well-known public feeds; picking one pre-fills the create dialog.
+  const templatesQuery = useQuery({
+    queryKey: ['threatIntelSourceTemplates'],
+    queryFn: () => api.threatIntelSourceTemplates(),
+    staleTime: Infinity,
+  });
+  const [templatePreset, setTemplatePreset] = useState<ThreatIntelSourceTemplate | null>(null);
 
   // "Fetch now" runs one full cycle server-side — fire and forget; the
   // per-source lastSuccessAt/lastError surface the outcome.
@@ -1097,6 +1111,61 @@ function ThreatIntelSection() {
         </div>
       )}
 
+      {/* Template catalog — one-click starting feeds (same pattern as the Automation templates) */}
+      {templatesQuery.data && (
+        <details className="mb-4 rounded-md border border-border bg-muted/20" open={sources.length === 0}>
+          <summary className="cursor-pointer select-none px-3 py-2 text-sm font-medium text-secondary hover:text-foreground">
+            Templates — common public feeds ({templatesQuery.data.templates.length})
+            <span className="ml-2 text-xs font-normal text-faint">pick one to pre-fill the create dialog</span>
+          </summary>
+          <div className="grid gap-2 border-t border-border p-3 sm:grid-cols-2">
+            {templatesQuery.data.templates.map((t) => {
+              const added = sources.some((s) => s.name === t.name);
+              return (
+                <div key={t.id} className="flex items-start gap-3 rounded-md border border-border bg-background p-3">
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center gap-2">
+                      <span className="text-sm font-medium">{t.name}</span>
+                      <span
+                        className="rounded bg-muted px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-faint"
+                        title={`Format: ${t.format}`}
+                      >
+                        {t.format === 'ip-list' ? 'IP list' : 'Domain list'}
+                      </span>
+                    </div>
+                    <p className="mt-0.5 text-xs text-secondary">{t.description}</p>
+                    <a
+                      href={t.url}
+                      target="_blank"
+                      rel="noreferrer"
+                      title={t.url}
+                      className="mt-1 block truncate font-mono text-[11px] text-info hover:underline"
+                    >
+                      {t.url}
+                    </a>
+                  </div>
+                  {added ? (
+                    <span className="shrink-0 rounded-md bg-success/20 px-2 py-1 text-xs font-medium text-success-fg">Added</span>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setTemplatePreset(t);
+                        setCreating(true);
+                      }}
+                      title={`Pre-fill the create dialog with "${t.name}"`}
+                      className="shrink-0 rounded-md border border-border px-2.5 py-1 text-xs font-medium text-secondary hover:bg-muted"
+                    >
+                      Use
+                    </button>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        </details>
+      )}
+
       {/* Feed sources */}
       {data && (
         <DataTable
@@ -1106,7 +1175,7 @@ function ThreatIntelSection() {
           storageKey="threat-intel-sources"
           autoRefresh={{ intervalMs: 30_000, queries: [tiQuery] }}
           searchPlaceholder="Search feeds…"
-          emptyMessage={'No IOC feed sources yet — add one below (IP/CIDR list, STIX bundle or a domain blocklist in Pi-hole / Adblock style). Each fetch is an authoritative snapshot; matches raise "threat intel hit" findings.'}
+          emptyMessage={'No IOC feed sources yet — pick a template above or add one manually (IP/CIDR list, STIX bundle or a domain blocklist in Pi-hole / Adblock style). Each fetch is an authoritative snapshot; matches raise "threat intel hit" findings.'}
         />
       )}
 
@@ -1115,7 +1184,7 @@ function ThreatIntelSection() {
         <button
           type="button"
           onClick={() => setCreating(true)}
-          title="Add an IOC feed source — public URL or pasted blocklist / STIX bundle"
+          title="Add an IOC feed source — pick a template above, or use a public URL / pasted blocklist / STIX bundle"
           className="inline-flex items-center gap-2 rounded-md border border-border px-3 py-1.5 text-sm font-medium text-secondary hover:bg-muted"
         >
           <Plus className="h-4 w-4" /> Add feed
@@ -1151,13 +1220,15 @@ function ThreatIntelSection() {
         </div>
       )}
 
-      {/* Create/edit dialog (URL feed or pasted content) */}
+      {/* Create/edit dialog (URL feed or pasted content; templates pre-fill it) */}
       {(creating || editing) && (
         <ThreatIntelSourceDialog
           source={editing}
+          preset={templatePreset}
           onClose={() => {
             setCreating(false);
             setEditing(null);
+            setTemplatePreset(null);
           }}
         />
       )}

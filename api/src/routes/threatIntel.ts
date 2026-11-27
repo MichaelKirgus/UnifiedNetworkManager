@@ -4,6 +4,7 @@ import { pool } from '../db';
 import { getEffectiveSettingValue } from '../systemSettings';
 import { requireAuth, requirePermission } from '../auth/middleware';
 import { THREAT_INTEL_FORMATS, ThreatIntelFormat, computeSourceHealth, getThreatIntelStats, invalidateIocCache, triggerThreatIntelFetch } from '../workers/threatIntel';
+import { THREAT_INTEL_SOURCE_TEMPLATES } from '../threatIntelTemplates';
 import { deleteRepoFile } from '../fileRepo';
 
 /**
@@ -178,6 +179,11 @@ router.get('/threat-intel', requireAuth, requirePermission('security:read'), asy
     console.error('Error querying threat intel:', error);
     res.status(500).json({ error: 'Internal server error' });
   }
+});
+
+/** GET /v1/threat-intel/source-templates — built-in feed catalog for the Security page. */
+router.get('/threat-intel/source-templates', requireAuth, requirePermission('security:read'), (_req: Request, res: Response) => {
+  res.status(200).json({ templates: THREAT_INTEL_SOURCE_TEMPLATES });
 });
 
 /** POST /v1/threat-intel/sources — add a feed; the first fetch starts immediately. */

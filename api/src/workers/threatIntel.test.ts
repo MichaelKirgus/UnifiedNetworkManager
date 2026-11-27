@@ -159,6 +159,18 @@ describe('parseIpList', () => {
     expect(r.values).toEqual(['1.1.1.1', '2.2.2.2']);
     expect(r.skipped).toBe(2);
   });
+
+  it('strips inline "; comment" suffixes (Spamhaus DROP style) and stores the bare entry', () => {
+    const body = [
+      '; Spamhaus DROP List 2026/11/27',
+      '1.10.16.0/20 ; SBL256894',
+      '1.19.0.0/16 ; SBL434604',
+      '5.34.242.7 ; bare ip with comment',
+    ].join('\n');
+    const r = parseIpList(Buffer.from(body), 10_000);
+    expect(r.values).toEqual(['1.10.16.0/20', '1.19.0.0/16', '5.34.242.7']);
+    expect(r.skipped).toBe(0);
+  });
 });
 
 describe('parseStix', () => {
