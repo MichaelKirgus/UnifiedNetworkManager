@@ -1076,6 +1076,149 @@ export function internalRouter() {
     }
   });
 
+  // POST /plugin/firewall-sessions - accept one state-table walk's LIVE session
+  // rows from a plugin (OPNsense query_states full walk, RouterOS connection
+  // table). Body: { pluginId, deviceId, rows: [ { id, srcIp, dstIp, srcPort?,
+  // dstPort?, proto?, state?, timeoutSec?, iface?, queue? } ], snapshot?: { id,
+  // chunk, totalChunks } }.
+  // REPLACE-on-push per device: the batch is the device's current snapshot, so
+  // the API deletes the device's previous rows and inserts the new ones in one
+  // transaction. That keeps growth bounded (sum of the plugins' replication
+  // caps) with no retention worker, and a failed push simply leaves the last
+  // good snapshot in place. The API stamps collectedAtMs itself — it is the
+  // freshness signal the UI shows ("collected 42s ago").
+  //
+  // CHUNKED SNAPSHOTS: large tables are pushed as several requests sharing one
+  // `snapshot.id` (the plugin splits its walk into bounded chunks). The first
+  // request for a NEW id replaces the device's previous snapshot (delete+insert
+  // in one transaction); later chunks of the same id only append. Readers may
+  // therefore see a partially-replaced table while a multi-chunk push is in
+  // flight (a few seconds) — acceptable: the alternative (double-buffering)
+  // would double storage for the whole table, and the "Collected" freshness
+  // stamp already signals staleness. A legacy body without `snapshot` behaves
+  // exactly as before: this batch alone is the full snapshot.
+  const MAX_FIREWALL_SESSION_ROWS_PER_REQUEST = 50_000;
+  // Rows per single INSERT statement inside the chunk transaction. Postgres caps
+  // bind parameters at 65,535 per statement and firewallSessions has 12 columns,
+  // so 5k rows × 12 = 60k stays safely under (mirrors workers/flows.ts). A 25k
+  // chunk in ONE statement would hard-fail above ~5.4k rows and spike parse cost.
+  const SESSION_INSERT_BATCH_SIZE = 5_000;
+  // In-flight chunked snapshot per device (deviceId -> snapshotId): lets the
+  // handler tell "first chunk of a new snapshot" (replace) from "continuation
+  // chunk" (append). Lost on an API restart — harmless, because every walk
+  // pushes under a FRESH snapshot id, so the worst case is a partial table
+  // until the next walk replaces it.
+  const inFlightSessionSnapshots = new Map<string, string>();
+  router.post('/plugin/firewall-sessions', pluginAuth, async (req: Request, res: Response) => {
+    const body = req.body ?? {};
+    const pluginId = typeof body.pluginId === 'string' ? body.pluginId : '';
+    if (!pluginId) {
+      return res.status(400).json({ error: 'pluginId is required' });
+    }
+    const deviceId = typeof body.deviceId === 'string' ? body.deviceId.trim() : '';
+    if (!deviceId) {
+      return res.status(400).json({ error: 'deviceId is required' });
+    }
+    const rowsIn = Array.isArray(body.rows) ? body.rows : null;
+    if (!rowsIn) {
+      return res.status(400).json({ error: '"rows" array is required' });
+    }
+    // Optional chunked-snapshot descriptor (see route comment above). `chunk` /
+    // `totalChunks` are informational only — the handler keys off the id.
+    const snapIn = body.snapshot && typeof body.snapshot === 'object' ? (body.snapshot as Record<string, unknown>) : null;
+    const snapshotId = snapIn !== null && typeof snapIn.id === 'string' && snapIn.id.trim() !== '' ? snapIn.id.trim().slice(0, 128) : null;
+    if (snapIn !== null && snapshotId === null) {
+      return res.status(400).json({ error: 'snapshot.id is required when snapshot is present' });
+    }
+    if (rowsIn.length === 0 && snapshotId === null) {
+      return res.status(400).json({ error: '"rows" array with at least one entry is required' });
+    }
+
+    try {
+      const plugin = await db.query.plugins.findFirst({ where: eq(schema.plugins.id, pluginId) });
+      if (!plugin) {
+        return res.status(400).json({ error: `Unknown plugin id: ${pluginId}` });
+      }
+
+      let accepted = 0;
+      const batch = rowsIn.slice(0, MAX_FIREWALL_SESSION_ROWS_PER_REQUEST);
+      if (rowsIn.length > MAX_FIREWALL_SESSION_ROWS_PER_REQUEST) {
+        // eslint-disable-next-line no-console
+        console.warn(
+          `[firewall-sessions] plugin ${pluginId} sent ${rowsIn.length} rows in one request; ` +
+            `dropping the last ${rowsIn.length - MAX_FIREWALL_SESSION_ROWS_PER_REQUEST}`
+        );
+      }
+
+      const str = (v: unknown, maxLen: number): string | null => {
+        if (typeof v !== 'string') return null;
+        const s = v.trim();
+        return s === '' || s.length > maxLen ? null : s;
+      };
+      const portInt = (v: unknown): number | null => {
+        if (typeof v === 'boolean' || v === null) return null;
+        const n = typeof v === 'number' ? v : Number(v);
+        return Number.isFinite(n) && n >= 0 && n <= 65535 ? Math.trunc(n) : null;
+      };
+
+      // One timestamp for the WHOLE snapshot — every row of a push shares it,
+      // so "rows of device X" always read as one consistent moment.
+      const collectedAtMs = Date.now();
+      const rows: typeof schema.firewallSessions.$inferInsert[] = [];
+      for (const r of batch) {
+        if (!r || typeof r !== 'object') continue;
+        const srcIp = str(r.srcIp, 64) ?? '';
+        const dstIp = str(r.dstIp, 64) ?? '';
+        if (srcIp === '' && dstIp === '') continue; // unusable row — skip
+        rows.push({
+          id: typeof r.id === 'string' && r.id.trim() !== '' ? r.id.trim().slice(0, 128) : uuidv4(),
+          pluginId,
+          deviceId,
+          collectedAtMs,
+          srcIp,
+          dstIp,
+          srcPort: portInt(r.srcPort),
+          dstPort: portInt(r.dstPort),
+          proto: str(r.proto, 16) ?? null,
+          state: str(r.state, 32) ?? '',
+          timeoutSec: portInt(r.timeoutSec),
+          iface: str(r.iface, 64) ?? null,
+          queue: str(r.queue, 64) ?? null,
+        });
+      }
+
+      // A NEW snapshot (first chunk of an id not currently in flight for this
+      // device, or a legacy push without `snapshot`) replaces the device's
+      // previous rows; continuation chunks only append. One transaction either
+      // way, so a reader never sees delete-without-insert.
+      const isSnapshotStart = snapshotId === null || inFlightSessionSnapshots.get(deviceId) !== snapshotId;
+      if (rows.length > 0 || isSnapshotStart) {
+        await db.transaction(async (tx) => {
+          if (isSnapshotStart) {
+            await tx.delete(schema.firewallSessions).where(eq(schema.firewallSessions.deviceId, deviceId));
+          }
+          // Sub-batched inserts: one multi-row INSERT per SESSION_INSERT_BATCH_SIZE
+          // rows. A 25k chunk in a single statement would exceed Postgres's
+          // 65,535 bind-parameter limit (12 columns × rows) and spike parse cost —
+          // same pattern as workers/flows.ts.
+          for (let i = 0; i < rows.length; i += SESSION_INSERT_BATCH_SIZE) {
+            await tx.insert(schema.firewallSessions).values(rows.slice(i, i + SESSION_INSERT_BATCH_SIZE));
+          }
+        });
+      }
+      // Track the in-flight chunked snapshot; a legacy push is authoritative and
+      // resets the device's entry.
+      if (snapshotId !== null) inFlightSessionSnapshots.set(deviceId, snapshotId);
+      else inFlightSessionSnapshots.delete(deviceId);
+      accepted = rows.length;
+
+      res.status(201).json({ accepted, collectedAtMs });
+    } catch (error) {
+      console.error('Error ingesting firewall sessions:', error);
+      res.status(500).json({ error: 'Internal server error' });
+    }
+  });
+
   // POST /plugin/notifications - accept notification pushes from one plugin.
   // Body: { pluginId, notifications?: [ {severity?, title, message?, dedupeKey?, deviceId?, context?} ],
   //         resolve?: string[] } — `resolve` lists (plugin-prefixed) dedupe keys

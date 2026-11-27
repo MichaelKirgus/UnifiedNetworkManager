@@ -1,86 +1,14 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
+import { Activity, ListFilter } from 'lucide-react';
 import { Layout } from '../components/Layout';
 import { DataTable, DataTableColumn } from '../components/DataTable';
 import { DeviceChip } from '../components/DeviceChip';
+import { PageTabs } from '../components/PageTabs';
 import { RuleAddressCell } from '../components/FirewallAddressCell';
 import { formatBytes } from '../components/formatMetric';
-import { api, FirewallRuleRow, FirewallSessionRow } from '../api/client';
-
-/** "1h 23m" / "45s" style compact duration for session ages. */
-function fmtDurationSec(sec: number): string {
-  if (!Number.isFinite(sec) || sec < 0) return '—';
-  const h = Math.floor(sec / 3600);
-  const m = Math.floor((sec % 3600) / 60);
-  const s = Math.floor(sec % 60);
-  if (h > 0) return `${h}h ${m}m`;
-  if (m > 0) return `${m}m ${s}s`;
-  return `${s}s`;
-}
-
-/**
- * Live connection-state overview — one card per device reporting session data.
- * Reads the latest telemetry snapshot server-side (GET /firewall-sessions), so
- * this section tracks the same poll cadence as the rest of the page.
- */
-function SessionsSection() {
-  const sessionsQuery = useQuery({
-    queryKey: ['firewallSessions'],
-    queryFn: () => api.firewallSessions(),
-    refetchInterval: 30_000,
-  });
-
-  if (sessionsQuery.isLoading) return null; // don't flash an empty card while the rules table loads too
-  const devices = sessionsQuery.data?.devices ?? [];
-  if (devices.length === 0) return null; // no firewall-capable device reporting yet — section stays hidden
-
-  return (
-    <div className="mb-4 rounded-md border border-border bg-card p-3 shadow-sm">
-      <h2 className="mb-2 text-sm font-semibold text-foreground">Sessions</h2>
-      <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
-        {devices.map((d) => (
-          <SessionCard key={d.deviceId} row={d} />
-        ))}
-      </div>
-    </div>
-  );
-}
-
-function SessionCard({ row }: { row: FirewallSessionRow }) {
-  const pct = typeof row.stateLimit === 'number' && row.stateLimit > 0 ? (row.totalSessions / row.stateLimit) * 100 : null;
-  return (
-    <div className="rounded-md border border-border bg-muted/30 p-3">
-      <div className="mb-2 flex items-center justify-between gap-2">
-        <span className="truncate text-sm font-medium">{row.deviceName ?? row.deviceId}</span>
-        {pct !== null && (
-          <span
-            className={`shrink-0 rounded px-1.5 py-0.5 text-xs font-mono ${
-              pct >= 90 ? 'bg-danger/20 text-danger-fg' : pct >= 70 ? 'bg-warning/20 text-warning-fg' : 'bg-muted text-secondary'
-            }`}
-          >
-            {pct.toFixed(1)}% of limit
-          </span>
-        )}
-      </div>
-      <dl className="grid grid-cols-2 gap-x-3 gap-y-1 text-xs">
-        <dt className="text-muted-foreground">Active sessions</dt>
-        <dd className="text-right font-mono">{row.totalSessions.toLocaleString()}{typeof row.stateLimit === 'number' ? ` / ${row.stateLimit.toLocaleString()}` : ''}</dd>
-        <dt className="text-muted-foreground">Oldest session</dt>
-        <dd className="text-right font-mono">{row.oldestAgeSec !== null && row.oldestAgeSec !== undefined ? fmtDurationSec(row.oldestAgeSec) : '—'}</dd>
-        <dt className="text-muted-foreground">Adaptive timeouts</dt>
-        <dd className={`text-right font-medium ${row.adaptiveEnabled === true ? 'text-success-fg' : row.adaptiveEnabled === false ? 'text-warning-fg' : 'text-faint'}`}>
-          {row.adaptiveEnabled === null ? '—' : row.adaptiveEnabled ? `on (≥ ${(row.adaptiveStartStates ?? 0).toLocaleString()} states)` : 'off'}
-        </dd>
-        <dt className="text-muted-foreground">State table</dt>
-        <dd className="text-right font-mono text-faint" title="state-table lookups per second (latest inventory cycle)">
-          {row.stateTableSearchesRate !== null && row.stateTableSearchesRate !== undefined
-            ? `${(row.stateTableSearchesRate ?? 0).toFixed(1)}/s`
-            : '—'}
-        </dd>
-      </dl>
-    </div>
-  );
-}
+import { ALL_PAGES, useServerTable } from '../components/useServerTable';
+import { api, FirewallRuleRow, FirewallSessionLiveRow, FirewallSessionsPagedResponse } from '../api/client';
 
 /** Small colored pill for the rule kind (filter vs. NAT kinds). */
 const TYPE_STYLES: Record<FirewallRuleRow['ruleType'], string> = {
@@ -108,13 +36,13 @@ const ACTION_STYLES: Record<FirewallRuleRow['action'], string> = {
 
 function ActionBadge({ action }: { action: FirewallRuleRow['action'] }) {
   return (
-    <span className={`inline-flex rounded px-1.5 py-0.5 text-xs font-medium uppercase ${ACTION_STYLES[action] ?? 'bg-muted text-secondary'}`}>
+    <span className={`inline-flex rounded px-1.5 py-0.5 text-xs font-medium uppercase ${ACTION_STYLES[action] ?? ACTION_STYLES.other}`}>
       {action}
     </span>
   );
 }
 
-/** "—" for empty/unknown values (the API stores '' for any/unknown). */
+/** "—\" for empty/unknown values (the API stores '' for any/unknown). */
 function orDash(v?: string | null): string {
   return v && v.trim() !== '' ? v : '—';
 }
@@ -160,7 +88,53 @@ function addrPort(addr?: string, port?: string | null): string {
   return `${a}:${p}`;
 }
 
+/** "42s ago" / "5m ago" relative age from an epoch-ms timestamp. */
+function fmtAgo(ms: number): string {
+  const s = Math.max(0, Math.floor((Date.now() - ms) / 1000));
+  if (s < 60) return `${s}s ago`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m ago`;
+  const h = Math.floor(m / 60);
+  if (h < 48) return `${h}h ago`;
+  return `${Math.floor(h / 24)}d ago`;
+}
+
+/** "3d 2h" / "1h 5m" compact duration for the remaining session timeout. */
+function fmtTimeoutSec(sec?: number | null): string {
+  if (typeof sec !== 'number' || !Number.isFinite(sec) || sec <= 0) return '—';
+  const d = Math.floor(sec / 86400);
+  const h = Math.floor((sec % 86400) / 3600);
+  const m = Math.floor((sec % 3600) / 60);
+  if (d > 0) return `${d}d ${h}h`;
+  if (h > 0) return `${h}h ${m}m`;
+  if (m > 0) return `${m}m`;
+  return `${Math.floor(sec)}s`;
+}
+
+/** "10.0.0.5:443" with a numeric port (session rows carry ports as numbers). */
+function addrPortNum(addr?: string, port?: number | null): string {
+  const a = (addr ?? '').trim();
+  if (!a) return '—';
+  return typeof port === 'number' && port > 0 ? `${a}:${port}` : a;
+}
+
+type FwTab = 'rules' | 'sessions';
+
+/**
+ * Firewall — rules + live sessions. Two tabs, same design language as the
+ * other paginated pages: Rules is the classic client-side table (the API
+ * polls plugins every 30 s and upserts rows), Sessions is a SERVER-PAGINATED
+ * DataTable fed by GET /firewall-sessions — live state-table rows replicated
+ * continuously from every firewall device (OPNsense pf states, RouterOS
+ * /ip/firewall/connection) via POST /plugin/firewall-sessions. The API keeps
+ * only each device's latest snapshot (replace-on-push), so the table always
+ * shows current sessions across all firewalls; "Collected" shows how fresh
+ * each device's snapshot is. Gated by `firewall:read`.
+ */
 export default function Firewall() {
+  const [tab, setTab] = useState<FwTab>('rules');
+
+  // --- Rules tab (client-side table over the polled inventory) -------------
   // '' = all firewalls; otherwise the selected device's id.
   const [deviceFilter, setDeviceFilter] = useState('');
 
@@ -186,7 +160,43 @@ export default function Firewall() {
     [firewallQuery.data, deviceFilter]
   );
 
-  const columns: DataTableColumn<FirewallRuleRow>[] = [
+  // --- Sessions tab (server-paginated live rows) ---------------------------
+  const [sessionDevice, setSessionDevice] = useState('');
+  const [sessionSearchDraft, setSessionSearchDraft] = useState('');
+
+  // Options for the sessions device filter (all devices — only firewalls have rows).
+  const allDevicesQuery = useQuery({ queryKey: ['devices'], queryFn: api.devices });
+  const sessionDevices = useMemo(
+    () => (allDevicesQuery.data ?? []).slice().sort((a, b) => a.name.localeCompare(b.name)),
+    [allDevicesQuery.data]
+  );
+
+  const extra = useMemo(() => ({ sessionDevice }), [sessionDevice]);
+  const sessionsTable = useServerTable<{ sessionDevice: string }, FirewallSessionLiveRow, FirewallSessionsPagedResponse>({
+    fetcher: async (p) => {
+      const res = await api.firewallSessionsPaged({
+        deviceId: p.sessionDevice || undefined,
+        search: p.q,
+        page: p.pageSize === ALL_PAGES ? undefined : p.page,
+        pageSize: p.pageSize === ALL_PAGES ? undefined : p.pageSize,
+        all: p.pageSize === ALL_PAGES || undefined,
+        sort: p.sort?.key as 'collectedAtMs' | 'srcIp' | 'dstIp' | 'state' | undefined,
+        dir: p.sort?.dir,
+      });
+      return { ...res, total: res.total ?? 0 };
+    },
+    extra,
+    storageKey: 'firewall-sessions',
+  });
+
+  // Debounce the filter-bar search into the committed server query (300 ms).
+  useEffect(() => {
+    const t = setTimeout(() => sessionsTable.setQ(sessionSearchDraft.trim()), 300);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessionSearchDraft]);
+
+  const ruleColumns: DataTableColumn<FirewallRuleRow>[] = [
     {
       header: 'Device',
       key: 'deviceName',
@@ -317,48 +327,185 @@ export default function Firewall() {
     },
   ];
 
+  const sessionColumns: DataTableColumn<FirewallSessionLiveRow>[] = [
+    {
+      header: 'Device',
+      key: 'deviceName',
+      width: 200,
+      sortable: false, // the device filter select owns this axis
+      exportValue: (row) => row.deviceName ?? '',
+      render: (row) => (
+        <DeviceChip deviceName={row.deviceName} managementAddress={null} pluginName={row.pluginName} siteName={row.siteName} interfaces={[]} />
+      ),
+    },
+    {
+      header: 'Source',
+      key: 'srcIp',
+      width: 190,
+      exportValue: (row) => addrPortNum(row.srcIp, row.srcPort),
+      render: (row) => <span className="font-mono text-xs">{addrPortNum(row.srcIp, row.srcPort)}</span>,
+    },
+    {
+      header: 'Destination',
+      key: 'dstIp',
+      width: 190,
+      exportValue: (row) => addrPortNum(row.dstIp, row.dstPort),
+      render: (row) => <span className="font-mono text-xs">{addrPortNum(row.dstIp, row.dstPort)}</span>,
+    },
+    {
+      header: 'Proto',
+      key: 'proto',
+      width: 70,
+      sortable: false,
+      render: (row) => <span className="text-xs uppercase">{orDash(row.proto)}</span>,
+    },
+    {
+      // Connection state — pf (ESTABLISHED, SYN_SENT…) or RouterOS (established, time-wait…).
+      header: 'State',
+      key: 'state',
+      width: 140,
+      render: (row) => <span className="font-mono text-xs text-secondary">{orDash(row.state)}</span>,
+    },
+    {
+      // Remaining connection timeout — OPNsense pf reports it; RouterOS does not.
+      header: 'Timeout',
+      key: 'timeoutSec',
+      width: 90,
+      sortable: false,
+      render: (row) => <span className="font-mono text-xs text-muted-foreground">{fmtTimeoutSec(row.timeoutSec)}</span>,
+    },
+    {
+      // OPNsense interface name; RouterOS connection direction (in/out).
+      header: 'Iface',
+      key: 'iface',
+      width: 90,
+      sortable: false,
+      render: (row) => <span className="font-mono text-xs">{orDash(row.iface)}</span>,
+    },
+    {
+      // Freshness — the API stamps collectedAtMs at ingest, one value per whole
+      // push. Stale = that device's walk hasn't run recently (slow cadence or
+      // the appliance is unreachable).
+      header: 'Collected',
+      key: 'collectedAtMs',
+      width: 110,
+      render: (row) => {
+        const staleSec = Date.now() - row.collectedAtMs;
+        return (
+          <span className={`font-mono text-xs ${staleSec > 3_600_000 ? 'text-warning-fg' : 'text-muted-foreground'}`}>
+            {fmtAgo(row.collectedAtMs)}
+          </span>
+        );
+      },
+    },
+  ];
+
   return (
     <Layout title="Firewall">
+      <PageTabs
+        tabs={[
+          { id: 'rules', label: 'Rules', icon: <ListFilter className="h-3.5 w-3.5" />, count: firewallQuery.data?.length ?? null, loading: firewallQuery.isLoading },
+          { id: 'sessions', label: 'Sessions', icon: <Activity className="h-3.5 w-3.5" />, count: sessionsTable.data?.total ?? null, loading: sessionsTable.isFetching },
+        ]}
+        value={tab}
+        onChange={setTab}
+      />
 
-      {/* Live connection-state overview — hidden until a device reports session data. */}
-      <SessionsSection />
+      {tab === 'rules' && (
+        <>
+          {/* Device filter — narrow the rule table to one firewall (device). */}
+          {firewallQuery.data && ruleDevices.length > 0 && (
+            <div className="mb-3 flex items-center gap-2">
+              <label htmlFor="fw-device-filter" className="text-xs font-medium text-secondary">Firewall</label>
+              <select
+                id="fw-device-filter"
+                value={deviceFilter}
+                onChange={(e) => setDeviceFilter(e.target.value)}
+                className="w-64 rounded-md border border-border bg-background px-2 py-1.5 text-sm"
+              >
+                <option value="">All firewalls ({ruleDevices.length})</option>
+                {ruleDevices.map(([id, name]) => (
+                  <option key={id} value={id}>
+                    {name}
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
 
-      {/* Device filter — narrow the rule table to one firewall (device). */}
-      {firewallQuery.data && ruleDevices.length > 0 && (
-        <div className="mb-3 flex items-center gap-2">
-          <label htmlFor="fw-device-filter" className="text-xs font-medium text-secondary">Firewall</label>
-          <select
-            id="fw-device-filter"
-            value={deviceFilter}
-            onChange={(e) => setDeviceFilter(e.target.value)}
-            className="w-64 rounded-md border border-border bg-background px-2 py-1.5 text-sm"
-          >
-            <option value="">All firewalls ({ruleDevices.length})</option>
-            {ruleDevices.map(([id, name]) => (
-              <option key={id} value={id}>
-                {name}
-              </option>
-            ))}
-          </select>
-        </div>
+          {firewallQuery.isLoading && <p className="text-sm text-muted-foreground">Loading firewall rules...</p>}
+          {firewallQuery.isError && (
+            <p className="text-sm text-danger-fg">Failed to load firewall rules: {(firewallQuery.error as Error).message}</p>
+          )}
+          {firewallQuery.data && (
+            <DataTable
+              columns={ruleColumns}
+              rows={visibleRows ?? []}
+              rowKey={(row) => `${row.deviceId}|${row.pluginId}|${row.ruleType}|${row.vendorRuleId}`}
+              // Disabled rules are dimmed instead of hidden — they still matter.
+              rowClassName={(row) => (row.enabled ? undefined : 'opacity-50')}
+              storageKey="firewall-rules"
+              autoRefresh={{ intervalMs: 30_000, queries: [firewallQuery] }}
+              searchPlaceholder="Search firewall rules…"
+              emptyMessage="No firewall rules collected yet — assign an OPNsense or RouterOS plugin to a device and wait for the next poll."
+            />
+          )}
+        </>
       )}
 
-      {firewallQuery.isLoading && <p className="text-sm text-muted-foreground">Loading firewall rules...</p>}
-      {firewallQuery.isError && (
-        <p className="text-sm text-danger-fg">Failed to load firewall rules: {(firewallQuery.error as Error).message}</p>
-      )}
-      {firewallQuery.data && (
-        <DataTable
-          columns={columns}
-          rows={visibleRows ?? []}
-          rowKey={(row) => `${row.deviceId}|${row.pluginId}|${row.ruleType}|${row.vendorRuleId}`}
-          // Disabled rules are dimmed instead of hidden — they still matter.
-          rowClassName={(row) => (row.enabled ? undefined : 'opacity-50')}
-          storageKey="firewall-rules"
-          autoRefresh={{ intervalMs: 30_000, queries: [firewallQuery] }}
-          searchPlaceholder="Search firewall rules…"
-          emptyMessage="No firewall rules collected yet — assign an OPNsense or RouterOS plugin to a device and wait for the next poll."
-        />
+      {tab === 'sessions' && (
+        <>
+          {/* Filter bar — device + search (debounced into the server query). */}
+          <div className="mb-4 grid grid-cols-1 gap-3 rounded-md border border-border bg-card p-3 shadow-sm sm:grid-cols-2">
+            <div>
+              <label className="mb-1 block text-xs font-medium text-secondary">Device</label>
+              <select className="w-full rounded-md border border-border px-2.5 py-1.5 text-sm" value={sessionDevice} onChange={(e) => setSessionDevice(e.target.value)}>
+                <option value="">All devices</option>
+                {sessionDevices.map((d) => (
+                  <option key={d.id} value={d.id}>
+                    {d.name}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div>
+              <label className="mb-1 block text-xs font-medium text-secondary">Search</label>
+              <input
+                type="text"
+                className="w-full rounded-md border border-border px-2.5 py-1.5 text-sm"
+                placeholder="Source/destination IP, state or protocol…"
+                value={sessionSearchDraft}
+                onChange={(e) => setSessionSearchDraft(e.target.value)}
+              />
+            </div>
+          </div>
+
+          {sessionsTable.isError && (
+            <p className="text-sm text-danger-fg">Failed to load firewall sessions: {sessionsTable.error?.message}</p>
+          )}
+          <DataTable
+            columns={sessionColumns}
+            rows={sessionsTable.data?.rows ?? []}
+            rowKey={(row) => row.id}
+            storageKey="firewall-sessions"
+            isFetching={sessionsTable.isFetching}
+            showSearch={false} // the filter bar above owns search (debounced into table.q)
+            onSearch={sessionsTable.setQ}
+            externalSearch={sessionsTable.q || null}
+            serverPagination={{
+              total: sessionsTable.data?.total ?? 0,
+              page: sessionsTable.page,
+              pageSize: sessionsTable.pageSize,
+              onPageChange: sessionsTable.setPage,
+              onPageSizeChange: sessionsTable.setPageSize,
+              // Default sort is newest snapshot first (collectedAtMs desc).
+              sort: sessionsTable.sort,
+              onSortChange: sessionsTable.setSort,
+            }}
+            autoRefresh={{ intervalMs: 30_000, queries: [sessionsTable] }}
+            emptyMessage="No live sessions replicated yet — assign an OPNsense or RouterOS plugin to a firewall device and wait for its first state-table walk (OPNsense: up to 15 min, RouterOS: ~5 min)."
+          />
+        </>
       )}
     </Layout>
   );

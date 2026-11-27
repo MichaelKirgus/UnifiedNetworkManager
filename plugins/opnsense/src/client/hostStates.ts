@@ -92,7 +92,7 @@ function parseStatePageRows(rows: unknown[]): StateIdentity[] {
 async function fetchStatePage(
   client: AxiosInstance,
   current: number
-): Promise<{ states: StateIdentity[]; rawCount: number; total: number | null } | null> {
+): Promise<{ states: StateIdentity[]; rawCount: number; total: number | null; rawRows: Record<string, unknown>[] } | null> {
   let res;
   try {
     res = await post(client, '/api/diagnostics/firewall/query_states', { rowCount: STATE_WALK_PAGE_SIZE, current }, { timeoutMs: WALK_TIMEOUT_MS });
@@ -105,7 +105,14 @@ async function fetchStatePage(
   if (rows === null) return null;
   // configd's total_entries for the WHOLE table — used for drift detection.
   const t = Number(d['total']);
-  return { states: parseStatePageRows(rows), rawCount: rows.length, total: Number.isFinite(t) && t >= 0 ? Math.trunc(t) : null };
+  return {
+    states: parseStatePageRows(rows),
+    rawCount: rows.length,
+    total: Number.isFinite(t) && t >= 0 ? Math.trunc(t) : null,
+    // Raw page rows — consumed ONLY for session replication (parseSessionRows);
+    // the identity parse above is unchanged.
+    rawRows: rows.filter((r): r is Record<string, unknown> => !!r && typeof r === 'object'),
+  };
 }
 
 /** Result of one paginated full-table walk. */
@@ -114,6 +121,25 @@ export interface StateWalkResult {
   states: StateIdentity[];
   /** false when the table visibly changed size DURING the walk — churn deltas for this snapshot are unreliable and must be nulled. */
   consistent: boolean;
+  /**
+   * Live session rows sampled from this walk (capped, deduped by state id) —
+   * pushed to POST /plugin/firewall-sessions so the Firewall page's Sessions
+   * tab shows a current cross-device sample of the state table. Empty when
+   * collection was disabled (maxSessions = 0).
+   */
+  sessions: LiveSessionRow[];
+}
+
+/** Options for {@link walkAllStates}. */
+export interface StateWalkOptions {
+  /**
+   * Cap on live session rows collected during the walk (default
+   * SESSION_REPLICATION_MAX_ROWS, 0 disables collection). At the default the
+   * FULL table is replicated (the walk pages through everything anyway); only
+   * a table larger than the cap is sampled — first N rows encountered while
+   * paging. The API replaces the device's previous snapshot per push.
+   */
+  maxSessions?: number;
 }
 
 /**
@@ -149,9 +175,27 @@ export function isShortPageComplete(rawCount: number, total: number | null): boo
  * was destroyed) and must still be diffed. Public internet destinations are
  * dropped per page so only internal hosts reach the aggregation step.
  */
-export async function walkAllStates(client: AxiosInstance): Promise<StateWalkResult | null> {
+export async function walkAllStates(client: AxiosInstance, opts?: StateWalkOptions): Promise<StateWalkResult | null> {
+  const maxSessions = Math.max(0, Math.trunc(opts?.maxSessions ?? SESSION_REPLICATION_MAX_ROWS));
+
+  // Session replication piggybacks on the identity walk: each page's RAW rows
+  // are parsed into LiveSessionRows and kept until the cap is reached. The cap
+  // makes this a bounded SAMPLE of the table (first N rows encountered) — on a
+  // 284k-state box that fills within the first few pages, so no extra scans.
+  // Deduped by state id (a mutating table can repeat rows across page scans).
+  const sessionById = new Map<string, LiveSessionRow>();
+  const collectSessions = (rawRows: Record<string, unknown>[]): void => {
+    if (maxSessions === 0 || sessionById.size >= maxSessions) return; // cap reached — skip the parse cost
+    for (const row of parseSessionRows(rawRows)) {
+      if (sessionById.size >= maxSessions) break;
+      const key = row.id !== '' ? `id:${row.id}` : `${row.srcIp}:${row.dstIp}:${row.srcPort ?? ''}:${row.state}`;
+      if (!sessionById.has(key)) sessionById.set(key, row);
+    }
+  };
+
   const first = await fetchStatePage(client, 1);
   if (first === null) return null;
+  collectSessions(first.rawRows);
 
   // Dedupe by state id across pages (a mutating table can repeat rows).
   const byId = new Map<string, StateIdentity>();
@@ -162,21 +206,22 @@ export async function walkAllStates(client: AxiosInstance): Promise<StateWalkRes
   // completeness when configd's total agrees (see isShortPageComplete); a full
   // page with total ≤ page size is complete by construction.
   if (first.rawCount < STATE_WALK_PAGE_SIZE) {
-    return { states: [...byId.values()], consistent: isShortPageComplete(first.rawCount, first.total) };
+    return { states: [...byId.values()], consistent: isShortPageComplete(first.rawCount, first.total), sessions: [...sessionById.values()] };
   }
   if (totalLast !== null && totalLast <= STATE_WALK_PAGE_SIZE) {
-    return { states: [...byId.values()], consistent: true };
+    return { states: [...byId.values()], consistent: true, sessions: [...sessionById.values()] };
   }
 
   for (let page = 2; page <= MAX_STATE_WALK_PAGES; page++) {
     const res = await fetchStatePage(client, page);
     if (res === null) return null; // mid-walk failure → discard everything (a partial snapshot is useless for diffing)
+    collectSessions(res.rawRows);
     for (const s of res.states) byId.set(s.id, s);
     if (res.total !== null) totalLast = res.total;
     if (res.rawCount < STATE_WALK_PAGE_SIZE) break; // short page = last one
   }
 
-  return { states: [...byId.values()], consistent: isStateWalkConsistent(first.total, totalLast) };
+  return { states: [...byId.values()], consistent: isStateWalkConsistent(first.total, totalLast), sessions: [...sessionById.values()] };
 }
 
 /** Per-endpoint open-state counts for one snapshot (internal endpoints only). */
@@ -276,6 +321,18 @@ export async function fetchPfStateCount(client: AxiosInstance): Promise<number |
 export const DEFAULT_STATE_WALK_MAX_STATES = 1_000_000;
 
 /**
+ * Hard cap on live session rows collected per state-table walk for the
+ * Firewall page's Sessions tab (POST /plugin/firewall-sessions). Set to match
+ * DEFAULT_STATE_WALK_MAX_STATES — the walk is skipped above 1M states anyway,
+ * so at this cap the FULL table is replicated (prod firewalls run ~400k states;
+ * the API receives it as bounded 25k-row chunks, never one big request). Only
+ * a table between the cap and the skip threshold would be sampled. Memory: the
+ * dedup map holds at most this many rows (~200B each ≈ 200MB worst case) — the
+ * same order the identity walk already carries, so no new ceiling is added.
+ */
+export const SESSION_REPLICATION_MAX_ROWS = 1_000_000;
+
+/**
  * Decides whether the full state-table walk should be SKIPPED because the live
  * table exceeds `maxStates` (load control — see DEFAULT_STATE_WALK_MAX_STATES).
  * total=null (count probe failed) → do NOT skip: the cheap probe failing is no
@@ -283,4 +340,131 @@ export const DEFAULT_STATE_WALK_MAX_STATES = 1_000_000;
  */
 export function shouldSkipStateWalk(total: number | null, maxStates: number): boolean {
   return total !== null && maxStates > 0 && total > maxStates;
+}
+
+// ---------------------------------------------------------------------------
+// Live session snapshot (on-demand, single bounded page)
+// ---------------------------------------------------------------------------
+
+/**
+ * A single row from the live state table — one bounded page of
+ * `/api/diagnostics/firewall/query_states` (see `fetchLiveSessions`).
+ */
+export interface LiveSessionRow {
+  id: string;
+  srcIp: string;
+  dstIp: string;
+  srcPort: number | null;
+  dstPort: number | null;
+  proto: string;
+  state: string;
+  /** Remaining connection timeout in seconds (null when not reported). */
+  timeoutSec: number | null;
+  queue: string;
+  iface: string;
+}
+
+export interface LiveSessionsPage {
+  rows: LiveSessionRow[];
+  /** Total rows in the table (null when the appliance didn't report one). */
+  total: number | null;
+}
+
+function liveStr(r: Record<string, unknown>, ...keys: string[]): string {
+  for (const k of keys) {
+    const v = r[k];
+    if (typeof v === 'string' && v.trim() !== '') return v.trim();
+  }
+  return '';
+}
+
+function liveInt(v: unknown): number | null {
+  if (typeof v === 'number' && Number.isFinite(v) && v >= 0) return Math.trunc(v);
+  if (typeof v === 'string') {
+    const n = parseInt(v, 10);
+    if (Number.isFinite(n) && n >= 0) return n;
+  }
+  return null;
+}
+
+/** Accepts "297", "297s", "5m" or "1h5m" → seconds (null when unparseable). */
+function liveTimeoutSec(v: unknown): number | null {
+  if (typeof v === 'number' && Number.isFinite(v) && v >= 0) return Math.trunc(v);
+  if (typeof v !== 'string') return null;
+  const s = v.trim().toLowerCase();
+  if (s === '') return null;
+  let total = 0;
+  let matched = false;
+  for (const m of s.matchAll(/(\d+)([smhd])?/g)) {
+    const n = parseInt(m[1], 10);
+    const unit = m[2] ?? 's';
+    total += n * (unit === 'h' ? 3600 : unit === 'm' ? 60 : unit === 'd' ? 86_400 : 1);
+    matched = true;
+  }
+  return matched && s.replace(/\d|[smhd]/g, '') === '' ? total : null;
+}
+
+/** Splits "10.0.0.5(54321)" → { ip: '10.0.0.5', port: 54321 }. */
+function splitAddrPort(addr: string): { ip: string; port: number | null } {
+  const m = addr.match(/^(.*?)\((\d+)\)$/);
+  if (m) return { ip: m[1], port: liveInt(m[2]) };
+  return { ip: addr, port: null };
+}
+
+/**
+ * Parses raw query_states rows into LiveSessionRow values (tolerant of the
+ * key spellings configd has used across versions). Used both by
+ * `fetchLiveSessions` (single-page read) and by the identity walk's session
+ * collection — one parser, one row shape.
+ */
+export function parseSessionRows(rawRows: unknown[]): LiveSessionRow[] {
+  const rows: LiveSessionRow[] = [];
+  for (const raw of rawRows) {
+    if (!raw || typeof raw !== 'object') continue;
+    const r = raw as Record<string, unknown>;
+    const srcRaw = liveStr(r, 'src_addr', 'source', 'src');
+    const dstRaw = liveStr(r, 'dst_addr', 'destination', 'dst');
+    if (srcRaw === '' && dstRaw === '') continue; // no usable endpoints — not a session row
+    const src = splitAddrPort(srcRaw);
+    const dst = splitAddrPort(dstRaw);
+    rows.push({
+      id: liveStr(r, 'id'),
+      srcIp: src.ip,
+      dstIp: dst.ip,
+      srcPort: liveInt(r['src_port'] ?? r['sport']) ?? src.port,
+      dstPort: liveInt(r['dst_port'] ?? r['dport']) ?? dst.port,
+      proto: liveStr(r, 'proto', 'protocol').toUpperCase(),
+      state: liveStr(r, 'state'),
+      timeoutSec: liveTimeoutSec(r['timeout']),
+      queue: liveStr(r, 'queue'),
+      iface: liveStr(r, 'interface', 'if'),
+    });
+  }
+  return rows;
+}
+
+/**
+ * Fetches exactly ONE bounded page of the live state table.
+ *
+ * OPNsense's `query_states` performs a full scan of the state table on EVERY
+ * request — this is deliberately NOT part of the polling path and must never
+ * be paged in a loop (see the note in `parseStatePageRows`). Returns null when
+ * the endpoint is unavailable or answers with an unexpected shape.
+ */
+export async function fetchLiveSessions(
+  client: AxiosInstance,
+  limit: number,
+): Promise<LiveSessionsPage | null> {
+  let res;
+  try {
+    res = await post(client, '/api/diagnostics/firewall/query_states', { rowCount: limit, current: 1 }, { timeoutMs: WALK_TIMEOUT_MS });
+  } catch {
+    return null; // transport/auth failure — best-effort read
+  }
+  if (!res.ok || !res.data || typeof res.data !== 'object') return null;
+  const d = res.data as Record<string, unknown>;
+  const rawRows = Array.isArray(d['rows']) ? (d['rows'] as unknown[]) : null;
+  if (rawRows === null) return null;
+
+  return { rows: parseSessionRows(rawRows), total: liveInt(d['total']) };
 }

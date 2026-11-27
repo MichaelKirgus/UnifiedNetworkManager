@@ -8198,20 +8198,76 @@ paths:
   /firewall-sessions:
     get:
       tags: [Inventory]
-      summary: Per-device live connection-state overview (sessions + adaptive timeouts)
+      summary: Per-device live connection-state overview + replicated live session rows (paged)
       description: >-
-        One row per device whose latest telemetry snapshot reports firewall session
-        data (`firewall.states.*` — collected every poll by OS-capable plugins,
-        OPNsense today). Carries the current state count vs. limit, oldest session
-        age, the adaptive-timeout status (disabled at 0 states) and the state-table
-        counter rates from the inventory cycle. Non-firewall devices never appear.
+        Two modes on one endpoint. LEGACY (no pagination params): one row per
+        device whose latest telemetry snapshot reports firewall session data
+        (`firewall.states.*` — collected every poll by OS-capable plugins,
+        OPNsense today). Carries the current state count vs. limit, oldest
+        session age, the adaptive-timeout status (disabled at 0 states) and the
+        state-table counter rates from the inventory cycle. Non-firewall devices
+        never appear. PAGED (page/pageSize/all present): rows of the LIVE
+        session table replicated from every firewall-capable device — plugins
+        push their current state-table snapshot per walk via POST
+        /plugin/firewall-sessions and the API replaces the device's previous
+        rows, so this is always the freshest known sample per device (row
+        `collectedAtMs` says how fresh).
+      parameters:
+        - in: query
+          name: deviceId
+          required: false
+          schema: { type: string }
+          description: Filter to one device (paged mode)
+        - in: query
+          name: siteId
+          required: false
+          schema: { type: string }
+          description: Filter to devices belonging to a site (paged mode)
+        - in: query
+          name: search
+          required: false
+          schema: { type: string }
+          description: Case-insensitive match on source IP, destination IP, state, protocol or interface (paged mode)
+        # NOTE: no `default:` on these — the validator injects schema defaults into
+        # MISSING params, which would flip legacy callers into paged mode. The code
+        # applies its own defaults once paged mode is detected.
+        - in: query
+          name: page
+          required: false
+          schema: { type: integer, minimum: 1 }
+          description: Page number (1-based); enables paged mode with `total`/`page`/`pageSize` envelope fields
+        - in: query
+          name: pageSize
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 200 }
+          description: Rows per page (clamped to 200 max)
+        - in: query
+          name: all
+          required: false
+          schema: { type: boolean }
+          description: "true = return ALL matching rows in one unpaginated response — for exports and small filtered sets; wins over page/pageSize"
+        - in: query
+          name: sort
+          required: false
+          schema: { type: string, enum: [collectedAtMs, srcIp, dstIp, state] }
+          description: Sort field (paged mode) — default order is newest snapshot first
+        - in: query
+          name: dir
+          required: false
+          schema: { type: string, enum: [asc, desc] }
+          description: Sort direction (default desc = newest first)
       responses:
         '200':
-          description: Per-device session overview rows
+          description: >-
+            Legacy mode: per-device session overview rows (`devices` array).
+            Paged mode: `rows` limited to the requested slice plus `total`
+            (filtered row count) and `page`/`pageSize`.
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/FirewallSessionsResponse'
+        '400':
+          description: Invalid sort field or invalid pagination values
         '401':
           description: Authentication required
 

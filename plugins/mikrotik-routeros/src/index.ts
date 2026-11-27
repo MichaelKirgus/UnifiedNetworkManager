@@ -39,7 +39,7 @@ import { ActionContext, StepCredentials, validateInput } from './actions/types';
 import { buildPlan, PlanningError, PlanRequest } from './plan';
 import { PREFLIGHT_RESOLVERS } from './actions/preflight';
 import { DEFAULT_OPTIONS, MonitoringResult, RouterOsOptions, buildDescriptors, buildMetrics, getMonitoring } from './monitoring';
-import { fetchConnectionIdentities, countOpenStates, diffStates, buildHostStateRows } from './hostStates';
+import { fetchConnectionIdentities, countOpenStates, diffStates, buildHostStateRows, SESSION_REPLICATION_MAX_ROWS, type LiveConnectionRow } from './hostStates';
 import { collectSecurityChecks, type SecuritySettings } from './security';
 import { DEVICE_MODELS } from './deviceModels';
 
@@ -443,6 +443,10 @@ function resolveCredentials(body: Record<string, unknown>): { creds?: { username
 // the new one yields per-endpoint created/destroyed deltas. Only aggregated
 // rows are pushed to POST /plugin/host-states (never the raw connections). A
 // failed or empty walk keeps the old baseline untouched — no bogus churn spike.
+//
+// The same single GET ALSO pushes the full live connection table (capped, see
+// SESSION_REPLICATION_MAX_ROWS) to POST /plugin/firewall-sessions for the
+// Firewall page's "Sessions" tab — replace-on-push on the API side.
 
 const hostStatesApi = createApiClient(); // shared x-plugin-api-key, UNM_API_URL aware
 
@@ -469,6 +473,75 @@ async function pushHostStateBatch(deviceId: string, rows: { ip: string; openStat
       return false; // baseline NOT advanced — the next walk re-diffs against the same prev
     }
   }
+}
+
+/**
+ * Pushes one walk's live connection rows to POST /plugin/firewall-sessions
+ * (Firewall page "Sessions" tab) with a single retry. The API REPLACES this
+ * device's previous snapshot per push, so a failed push simply leaves the last
+ * good snapshot in place — nothing to roll back or re-diff. `direction` maps
+ * onto the API's iface field; RouterOS reports no per-connection timeout here.
+ */
+/** Rows per POST when pushing a session snapshot — keeps each body well under the API's 12 MiB JSON limit. */
+const SESSION_PUSH_CHUNK_SIZE = 25_000;
+/** Pause between chunk POSTs so consecutive large transactions don't stack on the API (smooths CPU/network spikes). */
+const SESSION_PUSH_CHUNK_DELAY_MS = 250;
+
+type SessionPushRow = { id: string; srcIp: string; dstIp: string; srcPort: number | null; dstPort: number | null; proto: string; state: string; iface: string | null };
+
+/** Posts one chunk of a session snapshot with a single retry. */
+async function postSessionChunk(deviceId: string, rows: SessionPushRow[], snapshot: { id: string; chunk: number; totalChunks: number }): Promise<boolean> {
+  const body = { pluginId: identity.effectiveUuid, deviceId, rows, snapshot };
+  try {
+    await hostStatesApi.post('/plugin/firewall-sessions', body);
+    return true;
+  } catch {
+    await new Promise((r) => setTimeout(r, 500));
+    try {
+      await hostStatesApi.post('/plugin/firewall-sessions', body);
+      return true;
+    } catch (err) {
+      logger.warn(`Session chunk ${snapshot.chunk + 1}/${snapshot.totalChunks} (${rows.length} rows) failed for device ${deviceId}`, {
+        context: { error: String((err as Error)?.message ?? err) },
+      });
+      return false;
+    }
+  }
+}
+
+/**
+ * Pushes one walk's live connection rows to POST /plugin/firewall-sessions (Firewall page "Sessions" tab).
+ * The RouterOS connection print returns the WHOLE table, so this replicates the full picture (up to the
+ * SESSION_REPLICATION_MAX_ROWS safety cap) as a CHUNKED SNAPSHOT: the first request for a new snapshot id
+ * replaces the device's previous rows on the API side, later chunks append. A failed chunk aborts the push —
+ * whatever the API stored stays in place until the next walk replaces it (last good data beats no data).
+ * An empty walk pushes one empty chunk, which CLEARS the device's rows (a genuinely empty table is a real
+ * observation, e.g. right after a reboot). `direction` maps onto the API's iface field; RouterOS reports no
+ * per-connection timeout here.
+ */
+async function pushSessionBatch(deviceId: string, rows: LiveConnectionRow[]): Promise<boolean> {
+  const mapped: SessionPushRow[] = rows.slice(0, SESSION_REPLICATION_MAX_ROWS).map((r) => ({
+    id: r.id,
+    srcIp: r.srcAddress,
+    dstIp: r.dstAddress,
+    srcPort: r.srcPort,
+    dstPort: r.dstPort,
+    proto: r.protocol,
+    state: r.state,
+    iface: r.direction || null,
+  }));
+  const totalChunks = Math.max(1, Math.ceil(mapped.length / SESSION_PUSH_CHUNK_SIZE));
+  const snapshotId = `s${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  for (let i = 0; i < totalChunks; i++) {
+    const ok = await postSessionChunk(deviceId, mapped.slice(i * SESSION_PUSH_CHUNK_SIZE, (i + 1) * SESSION_PUSH_CHUNK_SIZE), {
+      id: snapshotId,
+      chunk: i,
+      totalChunks,
+    });
+    if (!ok) return false; // partial snapshot remains until the next walk — do not keep appending onto a failed push
+    if (i < totalChunks - 1) await new Promise((r) => setTimeout(r, SESSION_PUSH_CHUNK_DELAY_MS));
+  }
+  return true;
 }
 
 /**
@@ -507,8 +580,18 @@ async function collectAndPushHostStates(
     httpPort: opts.httpPort,
   });
 
-  const states = await fetchConnectionIdentities(client);
-  if (states === null) return; // walk failed — baseline untouched, retry next beat
+  const walk = await fetchConnectionIdentities(client);
+  if (walk === null) return; // walk failed — baseline untouched, retry next beat
+  const { identities: states, liveRows } = walk;
+
+  // Session replication (Firewall page "Sessions" tab): push the full live
+  // connection table (capped). Independent of the host-state aggregation below
+  // — a failure only leaves the device's previous session snapshot in place
+  // (the API is replace-on-push), so it never touches the baseline. Pushed
+  // unconditionally: an empty table is a real observation too (e.g. just after
+  // a reboot) — the empty chunk carries a fresh snapshot id, so the API clears
+  // the device's previous rows instead of leaving them stale forever.
+  await pushSessionBatch(deviceId, liveRows);
 
   const open = countOpenStates(states);
   const diff = diffStates(entry.prev, states);

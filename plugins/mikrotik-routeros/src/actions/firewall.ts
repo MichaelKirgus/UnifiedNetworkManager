@@ -10,6 +10,7 @@
  * IMMEDIATELY — there is no staged model; every write is verified by re-read.
  */
 
+import { fetchLiveConnections } from '../hostStates';
 import { rosNumber, rosString } from '../routerosClient';
 import type { ActionContext, ActionDescriptor } from './types';
 
@@ -337,6 +338,27 @@ export const firewallAliasesReadAction: ActionDescriptor = {
   },
 };
 
+// --- firewall.sessions.read ----------------------------------------------------------------------------
+
+export const firewallSessionsReadAction: ActionDescriptor = {
+  id: 'firewall.sessions.read',
+  label: 'Read live connections (state table)',
+  description: "Lists active connections from /ip/firewall/connection — the router's live stateful-connection table. On-demand snapshot only; never part of the polling path.",
+  module: 'Firewall',
+  riskLevel: 'read',
+  deviceCount: 1,
+  inputSchema: { limit: { type: 'number', default: 100, min: 1, max: 500 } },
+  execute: async (ctx, input) => {
+    const n = Number(input.limit);
+    const limit = Math.min(500, Math.max(1, Number.isFinite(n) ? Math.trunc(n) : 100));
+    const rows = await fetchLiveConnections(ctx.client, limit);
+    if (rows === null) {
+      return { success: false, error: 'Could not read the live connection table (/ip/firewall/connection unavailable).' };
+    }
+    return { success: true, details: { count: rows.length, rows } };
+  },
+};
+
 /**
  * RouterOS stores an IPv4 `/32` entry as the BARE host (the prefix is dropped —
  * verified live on 7.21 LTS), so exact-string comparisons against stored rows
@@ -420,6 +442,7 @@ export const firewallActions: ActionDescriptor[] = [
   firewallRuleToggleAction,
   firewallRuleDeleteAction,
   firewallAliasesReadAction,
+  firewallSessionsReadAction,
   firewallAliasAddAction,
   firewallAliasDeleteAction,
 ];

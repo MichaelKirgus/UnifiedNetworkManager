@@ -1317,6 +1317,42 @@ export interface FirewallSessionRow {
   synfloodsDetectedTotal?: number | null;
 }
 
+/**
+ * One LIVE session row replicated from a firewall device (GET /firewall-sessions
+ * paged mode). The API replaces each device's snapshot on every plugin push, so
+ * the table always holds the most recent state-table sample per device —
+ * collectedAtMs is the freshness signal ("collected 42s ago").
+ */
+export interface FirewallSessionLiveRow {
+  id: string;
+  pluginId: string;
+  deviceId: string;
+  /** Epoch ms stamped by the API at ingest (one value per whole push). */
+  collectedAtMs: number;
+  srcIp: string;
+  dstIp: string;
+  srcPort?: number | null;
+  dstPort?: number | null;
+  proto?: string | null;
+  state: string;
+  /** Remaining connection timeout in seconds (OPNsense pf only). */
+  timeoutSec?: number | null;
+  /** Interface name (OPNsense) or connection direction (RouterOS in/out). */
+  iface?: string | null;
+  queue?: string | null;
+  deviceName: string | null;
+  siteName: string | null;
+  pluginName: string;
+}
+
+/** Response of GET /firewall-sessions in paged mode (page/pageSize/all sent). */
+export interface FirewallSessionsPagedResponse {
+  rows: FirewallSessionLiveRow[];
+  total: number;
+  page: number;
+  pageSize: number;
+}
+
 /** A physical port as reported by a device's latest telemetry snapshot. */
 export interface TopologyPort {
   name: string;
@@ -4819,6 +4855,25 @@ export const api = {
   },
   /** Per-device live connection-state overview (sessions + adaptive timeouts). */
   firewallSessions: () => apiFetch<{ devices: FirewallSessionRow[] }>('/firewall-sessions'),
+  /**
+   * LIVE session rows replicated from all firewall devices. Paged mode: pass
+   * page/pageSize/all → response gains total/page/pageSize (same contract as
+   * /firewall-events). Rows are the most recent state-table sample per device;
+   * collectedAtMs shows how fresh each snapshot is.
+   */
+  firewallSessionsPaged: (params?: { deviceId?: string; siteId?: string; search?: string; page?: number; pageSize?: number; all?: boolean; sort?: 'collectedAtMs' | 'srcIp' | 'dstIp' | 'state'; dir?: 'asc' | 'desc' }) => {
+    const qs = new URLSearchParams();
+    if (params?.deviceId) qs.set('deviceId', params.deviceId);
+    if (params?.siteId) qs.set('siteId', params.siteId);
+    if (params?.search) qs.set('search', params.search);
+    if (params?.page !== undefined) qs.set('page', String(params.page));
+    if (params?.pageSize !== undefined) qs.set('pageSize', String(params.pageSize));
+    if (params?.all !== undefined) qs.set('all', '1');
+    if (params?.sort) qs.set('sort', params.sort);
+    if (params?.dir) qs.set('dir', params.dir);
+    const suffix = qs.toString() ? `?${qs.toString()}` : '';
+    return apiFetch<FirewallSessionsPagedResponse>(`/firewall-sessions${suffix}`);
+  },
   routes: (params?: { deviceId?: string; siteId?: string; protocol?: 'static' | 'connected' | 'ospf' | 'bgp' | 'rip' | 'other' }) => {
     const qs = new URLSearchParams();
     if (params?.deviceId) qs.set('deviceId', params.deviceId);

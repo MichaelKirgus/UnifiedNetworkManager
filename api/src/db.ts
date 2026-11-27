@@ -1754,6 +1754,29 @@ export async function initDb(): Promise<void> {
     CREATE INDEX IF NOT EXISTS idx_firewall_events_ts_ms
       ON firewall_events ("tsMs")`);
 
+  // Live session rows replicated from every firewall-capable device (replace-
+  // on-push per device — see POST /plugin/firewall-sessions). Bounded by the
+  // plugins' replication caps, so no retention sweep is needed.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS firewall_sessions (
+      id TEXT PRIMARY KEY,
+      "pluginId" TEXT NOT NULL,
+      "deviceId" TEXT NOT NULL,
+      "collectedAtMs" BIGINT NOT NULL,
+      "srcIp" TEXT NOT NULL DEFAULT '',
+      "dstIp" TEXT NOT NULL DEFAULT '',
+      "srcPort" INTEGER,
+      "dstPort" INTEGER,
+      proto TEXT,
+      state TEXT NOT NULL DEFAULT '',
+      "timeoutSec" INTEGER,
+      iface TEXT,
+      queue TEXT
+    )`);
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS idx_firewall_sessions_device_collected_at
+      ON firewall_sessions ("deviceId", "collectedAtMs")`);
+
   // Security events — syslog lines ingested by the syslog-collector plugin
   // (UDP/TCP 514, RFC5424 + BSD) via POST /plugin/security-events. Append-only
   // log: `level` is the syslog severity normalized to UNM levels so the

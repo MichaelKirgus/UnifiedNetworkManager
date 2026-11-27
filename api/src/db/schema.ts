@@ -970,6 +970,48 @@ export const hostStates = pgTable(
   }
 );
 
+// Live firewall session rows replicated from every firewall-capable device
+// (see POST /plugin/firewall-sessions in routes/internal.ts). Unlike
+// host_states (append-only per-walk snapshots) this table holds each device's
+// CURRENT state-table snapshot: the API replaces the device's whole row set on
+// every push, so growth is bounded by sum(per-plugin replication caps) and no
+// retention worker is needed. `collectedAtMs` is stamped by the API at ingest
+// (the plugin clock is not trusted) — it tells the UI how fresh each row is.
+// Row fields are the union of what OPNsense's query_states and RouterOS's
+// /ip/firewall/connection expose; a field a platform doesn't report stays NULL
+// (e.g. timeoutSec is OPNsense-only, queue is pf-only).
+export const firewallSessions = pgTable(
+  'firewall_sessions',
+  {
+    id: text('id').primaryKey(),
+    // Self-reported by the sender (its effectiveUuid); validated against the
+    // plugins table at ingest — unknown ids are rejected with a 400.
+    pluginId: text('pluginId').notNull(),
+    deviceId: text('deviceId').notNull(),
+    // Epoch ms of the walk that produced this snapshot, stamped at ingest.
+    collectedAtMs: bigint('collectedAtMs', { mode: 'number' }).notNull(),
+    srcIp: text('srcIp').notNull().default(''),
+    dstIp: text('dstIp').notNull().default(''),
+    srcPort: integer('srcPort'),
+    dstPort: integer('dstPort'),
+    proto: text('proto'),
+    // Connection state as reported by the platform ("ESTABLISHED", "established", …).
+    state: text('state').notNull().default(''),
+    // Remaining connection timeout in seconds (OPNsense pf; NULL elsewhere).
+    timeoutSec: integer('timeoutSec'),
+    iface: text('iface'),
+    queue: text('queue'),
+  },
+  (table) => {
+    return {
+      idxFirewallSessionsDeviceCollectedAt: index('idx_firewall_sessions_device_collected_at').on(
+        table.deviceId,
+        table.collectedAtMs,
+      ),
+    };
+  }
+);
+
 // Self-metrics samples of the plugin processes themselves (see workers/pluginMetrics.ts).
 // The API polls each registered plugin's GET /metrics endpoint (auto-mounted by
 // @unm/plugin-sdk) and stores one row per sample. Powers the per-plugin health

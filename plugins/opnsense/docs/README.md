@@ -9,6 +9,7 @@ storage inventory and security checks.
 | Capability | Requirement | Notes |
 | --- | --- | --- |
 | Monitoring | — | System status, CPU/memory/disk gauges, per-interface traffic table (30 s cadence). |
+| Live session replication | — | The state table is replicated into UNM for the Firewall page's **Sessions** tab: a full-table snapshot on every host-state walk (default 15 min, up to 1M states), pushed as bounded 25k-row chunks so no single request spikes the API or the appliance. On-demand reads via the `firewall.sessions.read` action. |
 | Inventory | — | Hostname/version, ARP + NDP tables, configured networks (IP/CIDR/VLAN), DHCP leases, PPPoE tunnels, routes, firewall rules, services, gateways. 15-min window. |
 | Static DNS entries | — | The dnsmasq/unbound host-record table (`dnsEntries` metric) for the DNS page; backend auto-detected per appliance. |
 | Configuration actions | — | Single-device actions from the action catalog (reboot, service restarts, …). |

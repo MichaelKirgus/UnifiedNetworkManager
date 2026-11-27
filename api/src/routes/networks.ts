@@ -1699,6 +1699,125 @@ router.get('/firewall-events', requireAuth, requirePermission('firewall:read'), 
 // snapshots lack the key entirely. collectedAt is an ISO string, so lexicographic max = newest.
 router.get('/firewall-sessions', requireAuth, requirePermission('firewall:read'), async (_req, res: Response) => {
   try {
+    const q = _req.query as Record<string, string | undefined>;
+
+    // Paged mode — LIVE session rows replicated from every firewall device via
+    // POST /plugin/firewall-sessions (replace-on-push per device). Same contract
+    // as /firewall-events: page/pageSize/all present → paged envelope; legacy
+    // calls without pagination params keep the telemetry-summary shape below.
+    if (hasPaginationParams(q)) {
+      const parsed = parsePagination(q, { defaultPageSize: 50, maxPageSize: 200 });
+      if ('error' in parsed) {
+        res.status(400).json({ error: parsed.error });
+        return;
+      }
+      const pg = parsed;
+      const pagedEmpty = { rows: [], total: 0, ...envelopePage(pg, 0) };
+
+      // Sort — only the queryable axes are supported; default newest snapshot first.
+      let orderDir: 'asc' | 'desc' = 'desc';
+      if (q.sort !== undefined) {
+        if (!['collectedAtMs', 'srcIp', 'dstIp', 'state'].includes(q.sort)) {
+          res.status(400).json({ error: `"sort" must be one of: collectedAtMs, srcIp, dstIp, state` });
+          return;
+        }
+        if (q.dir === 'asc' || q.dir === 'desc') orderDir = q.dir;
+        else if (q.dir !== undefined) {
+          res.status(400).json({ error: `"dir" must be "asc" or "desc"` });
+          return;
+        }
+      }
+
+      // Device-level access control — scoped callers only see rows of their devices.
+      const allowed = await allowedDeviceIds(_req);
+      if (allowed !== null && allowed.size === 0) {
+        res.status(200).json(pagedEmpty);
+        return;
+      }
+      if (q.deviceId && allowed !== null && !allowed.has(q.deviceId)) {
+        res.status(200).json(pagedEmpty);
+        return;
+      }
+
+      let deviceClause;
+      if (q.deviceId && q.siteId) {
+        const device = await db.query.devices.findFirst({ where: eq(schema.devices.id, q.deviceId) });
+        if (!device || device.siteId !== q.siteId) {
+          res.status(200).json(pagedEmpty);
+          return;
+        }
+        deviceClause = eq(schema.firewallSessions.deviceId, q.deviceId);
+      } else if (q.deviceId) {
+        deviceClause = eq(schema.firewallSessions.deviceId, q.deviceId);
+      } else if (q.siteId) {
+        let siteDeviceIds = (await db.query.devices.findMany({ where: eq(schema.devices.siteId, q.siteId) })).map((d) => d.id);
+        if (allowed !== null) siteDeviceIds = siteDeviceIds.filter((id) => allowed.has(id));
+        if (siteDeviceIds.length === 0) {
+          res.status(200).json(pagedEmpty);
+          return;
+        }
+        deviceClause = inArray(schema.firewallSessions.deviceId, siteDeviceIds);
+      } else if (allowed !== null) {
+        deviceClause = inArray(schema.firewallSessions.deviceId, [...allowed]);
+      }
+
+      const search = typeof q.search === 'string' ? q.search.trim() : '';
+      let searchClause;
+      if (search) {
+        // LIKE on the text fields — good enough at this volume.
+        const pat = `%${search.replace(/[%_]/g, '')}%`;
+        searchClause = or(
+          like(schema.firewallSessions.srcIp, pat),
+          like(schema.firewallSessions.dstIp, pat),
+          like(schema.firewallSessions.state, pat),
+          like(schema.firewallSessions.proto, pat),
+          like(schema.firewallSessions.iface, pat),
+        );
+      }
+
+      // Single-column sort — literal arrays per branch so the element type stays
+      // the concrete SQL<...> drizzle's orderBy wants (a union-typed variable
+      // widens to SQLWrapper and is rejected). Mirrors /firewall-events.
+      const col = q.sort ?? 'collectedAtMs';
+      const dirFn = orderDir === 'asc' ? asc : desc;
+      const orderByClause =
+        col === 'srcIp' ? [dirFn(schema.firewallSessions.srcIp)]
+        : col === 'dstIp' ? [dirFn(schema.firewallSessions.dstIp)]
+        : col === 'state' ? [dirFn(schema.firewallSessions.state)]
+        : [dirFn(schema.firewallSessions.collectedAtMs)];
+      const baseClauses = [];
+      if (deviceClause) baseClauses.push(deviceClause);
+      if (searchClause) baseClauses.push(searchClause);
+
+      // Paged: LIMIT/OFFSET from the parsed params (null = all-mode, unbounded).
+      const lo = limitOffset(pg);
+      const where = baseClauses.length > 0 ? and(...baseClauses) : undefined;
+      const [rows, countRow] = await Promise.all([
+        db.query.firewallSessions.findMany({
+          where,
+          orderBy: orderByClause,
+          ...(lo ? { limit: lo.limit, offset: lo.offset } : {}),
+        }),
+        db.select({ n: sql<number>`count(*)::int` }).from(schema.firewallSessions).where(where),
+      ]);
+      const total = Number(countRow[0]?.n ?? 0);
+
+      // Device + plugin display names for the rows.
+      const deviceViews = await loadDeviceViews(Array.from(new Set(rows.map((r) => r.deviceId))));
+      const pluginNames = await loadPluginNames(Array.from(new Set(rows.map((r) => r.pluginId))));
+      res.status(200).json({
+        rows: rows.map((r) => ({
+          ...r,
+          deviceName: deviceViews.get(r.deviceId)?.name ?? null,
+          siteName: deviceViews.get(r.deviceId)?.siteName ?? null,
+          pluginName: pluginNames.get(r.pluginId) ?? r.pluginId,
+        })),
+        total,
+        ...envelopePage(pg, total),
+      });
+      return;
+    }
+
     const allowed = await allowedDeviceIds(_req);
     if (allowed !== null && allowed.size === 0) {
       res.status(200).json({ devices: [] });

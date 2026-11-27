@@ -68,7 +68,7 @@ import {
   fetchPfStats,
   FirewallEventRow,
 } from './client/firewallEvents';
-import { walkAllStates, countOpenStates, diffStates, buildHostStateRows, fetchPfStateCount, shouldSkipStateWalk, DEFAULT_STATE_WALK_MAX_STATES } from './client/hostStates';
+import { walkAllStates, countOpenStates, diffStates, buildHostStateRows, fetchPfStateCount, shouldSkipStateWalk, DEFAULT_STATE_WALK_MAX_STATES, type LiveSessionRow } from './client/hostStates';
 import { decideUpdateSearch, DEFAULT_UPDATE_CHECK_INTERVAL_SEC, type UpdateSearchEntry } from './updateSearch';
 import { collectServices } from './services';
 import { collectZfsViaSsh } from './zfsSsh';
@@ -2039,6 +2039,10 @@ async function collectAndPushDnsQueries(
 // rows are pushed to POST /plugin/host-states (never the raw states). A failed
 // or empty walk keeps the old baseline untouched — no bogus churn spike.
 //
+// The same walk ALSO samples live session rows (capped, see
+// SESSION_REPLICATION_MAX_ROWS) and pushes them to POST /plugin/firewall-sessions
+// for the Firewall page's "Sessions" tab — replace-on-push on the API side.
+//
 // LOAD GUARD: before starting the paginated walk, the cheap pf_states counter
 // is read; above `stateWalkMaxStates` live states the walk is skipped (warnOnce)
 // because each page costs one full table scan on the appliance — a 284k-state
@@ -2068,6 +2072,63 @@ async function pushHostStateBatch(deviceId: string, rows: { ip: string; openStat
       return false; // baseline NOT advanced — the next walk re-diffs against the same prev
     }
   }
+}
+
+/**
+ * Pushes one walk's sampled live session rows to POST /plugin/firewall-sessions
+ * (Firewall page "Sessions" tab) with a single retry. The API REPLACES this
+ * device's previous snapshot per push, so a failed push simply leaves the last
+ * good snapshot in place — nothing to roll back or re-diff.
+ */
+/** Rows per POST when pushing a session snapshot — keeps each body well under the API's 12 MiB JSON limit. */
+const SESSION_PUSH_CHUNK_SIZE = 25_000;
+/** Pause between chunk POSTs so consecutive large transactions don't stack on the API (smooths CPU/network spikes). */
+const SESSION_PUSH_CHUNK_DELAY_MS = 250;
+
+/** Posts one chunk of a session snapshot with a single retry. */
+async function postSessionChunk(
+  deviceId: string,
+  rows: LiveSessionRow[],
+  snapshot: { id: string; chunk: number; totalChunks: number }
+): Promise<boolean> {
+  const body = { pluginId: identity.effectiveUuid, deviceId, rows, snapshot };
+  try {
+    await eventApi.post('/plugin/firewall-sessions', body);
+    return true;
+  } catch {
+    await new Promise((r) => setTimeout(r, 500));
+    try {
+      await eventApi.post('/plugin/firewall-sessions', body);
+      return true;
+    } catch (err) {
+      logger.warn(`Session chunk ${snapshot.chunk + 1}/${snapshot.totalChunks} (${rows.length} rows) failed for device ${deviceId}`, {
+        context: { error: String((err as Error)?.message ?? err) },
+      });
+      return false;
+    }
+  }
+}
+
+/**
+ * Pushes one walk's live session rows to POST /plugin/firewall-sessions (Firewall page "Sessions" tab).
+ * The table is walked in FULL (up to SESSION_REPLICATION_MAX_ROWS) and pushed as a CHUNKED SNAPSHOT:
+ * the first request for a new snapshot id replaces the device's previous rows on the API side, later chunks append.
+ * A failed chunk aborts the push — whatever the API stored stays in place until the next walk replaces it (last good data beats no data).
+ * An empty walk pushes one empty chunk, which CLEARS the device's rows (a genuinely empty table is a real observation, e.g. right after a reboot).
+ */
+async function pushSessionBatch(deviceId: string, rows: LiveSessionRow[]): Promise<boolean> {
+  const totalChunks = Math.max(1, Math.ceil(rows.length / SESSION_PUSH_CHUNK_SIZE));
+  const snapshotId = `s${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  for (let i = 0; i < totalChunks; i++) {
+    const ok = await postSessionChunk(deviceId, rows.slice(i * SESSION_PUSH_CHUNK_SIZE, (i + 1) * SESSION_PUSH_CHUNK_SIZE), {
+      id: snapshotId,
+      chunk: i,
+      totalChunks,
+    });
+    if (!ok) return false; // partial snapshot remains until the next walk — do not keep appending onto a failed push
+    if (i < totalChunks - 1) await new Promise((r) => setTimeout(r, SESSION_PUSH_CHUNK_DELAY_MS));
+  }
+  return true;
 }
 
 /**
@@ -2129,6 +2190,15 @@ async function collectAndPushHostStates(
       `state-table walk for ${host} saw the table change size mid-walk — open-state counts updated, churn deltas skipped this cycle`
     );
   }
+
+  // Session replication (Firewall page "Sessions" tab): push the full live
+  // rows collected during THIS walk. Independent of the host-state aggregation
+  // below — a failure only leaves the device's previous session snapshot in
+  // place (the API is replace-on-push), so it never touches the baseline.
+  // Pushed unconditionally: an empty table is a real observation too (e.g. just
+  // after a reboot) — the empty chunk carries a fresh snapshot id, so the API
+  // clears the device's previous rows instead of leaving them stale forever.
+  await pushSessionBatch(String(deviceId), walk.sessions);
 
   const open = countOpenStates(states);
   const diff = walk.consistent ? diffStates(entry.prev, states) : null;

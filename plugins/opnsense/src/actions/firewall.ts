@@ -1,4 +1,5 @@
 import * as fw from '../client/firewall';
+import { fetchLiveSessions } from '../client/hostStates';
 import { ActionDescriptor } from './types';
 
 /**
@@ -42,6 +43,28 @@ export const firewallActions: ActionDescriptor[] = [
     execute: async (ctx) => {
       const res = await fw.searchAliases(ctx.client);
       return { success: res.ok, details: { rows: rowsOf(res as { ok: boolean; data: unknown }) } };
+    },
+  },
+
+  // ------------------------------------------------------------------
+  // Live sessions (state-table snapshot — on-demand only, NOT polled)
+  // ------------------------------------------------------------------
+
+  {
+    id: 'firewall.sessions.read',
+    label: 'Read live sessions (state table)',
+    module: 'Firewall',
+    riskLevel: 'read',
+    deviceCount: 1,
+    inputSchema: { limit: { type: 'number', default: 100, min: 1, max: 500 } },
+    execute: async (ctx, input) => {
+      const n = Number(input.limit);
+      const limit = Math.min(500, Math.max(1, Number.isFinite(n) ? Math.trunc(n) : 100));
+      const res = await fetchLiveSessions(ctx.client, limit);
+      if (res === null) {
+        return { success: false, error: 'Could not read the live state table (query_states unavailable).' };
+      }
+      return { success: true, details: { count: res.rows.length, total: res.total, rows: res.rows } };
     },
   },
 

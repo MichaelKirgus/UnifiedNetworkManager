@@ -9,6 +9,7 @@ console on top.
 | Capability | Requirement | Notes |
 | --- | --- | --- |
 | Monitoring | — | CPU/memory/disk gauges, uptime, per-interface throughput rates (30 s cadence). |
+| Live session replication | — | The connection table (`/ip/firewall/connection`) is replicated into UNM for the Firewall page's **Sessions** tab on every host-state walk; pushed as bounded 25k-row chunks so no single request spikes the API. On-demand reads via the `firewall.sessions.read` action. |
 | Inventory | — | Interfaces + addresses, ARP table, DHCP leases, routes (incl. `/ip/dns/static` as `dnsEntries` for the DNS page), firewall rules (filter + NAT), wireless clients. TTL-cached snapshot (default 60 s). |
 | Configuration actions | — | Single-device actions from the action catalog over REST. |
 | Planning / rollouts | — | Multi-device intents: `network.create`, `network.delete`, `dns.set`, `dns.delete`, `dns.rename` with a `/preflight` resolver for per-device attach-point suggestions. Pure REST writes — no extra credentials needed. |
