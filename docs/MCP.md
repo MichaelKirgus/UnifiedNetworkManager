@@ -17,6 +17,8 @@ The `mcp/` service exposes the UNM API to AI agents via the [Model Context Proto
 | `MCP_KEY` | Optional — when set, also gates the plain `/mcp` endpoint. |
 | `DATABASE_URL` | Postgres connection used by the debug SQL tool only (same DB as the API; rendered from the same `POSTGRES_*` vars in compose). |
 
+> **Privileged actions stay human.** Operations marked `x-2fa-required` in the spec (plan *execution*, retry, bulk-execute) are excluded from the MCP tool set — they need a 2FA-completed session. Plan *creation* is included: agents stage plans with `post_plans` / `post_plans_system`, humans execute them (or grant `token` in that user's `gateAmrs` on the Credential Policies page to let token sessions pass the gate).
+
 **VS Code MCP client config** (remote/HTTP transport):
 
 ```jsonc

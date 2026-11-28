@@ -73,7 +73,7 @@ router.get('/auth/policies/global', requireAuth, async (_req: Request, res: Resp
 // PUT /auth/policies/global — update the global default (partial updates ok).
 router.put('/auth/policies/global', requireAuth, requirePermission('auth:policies:write'), async (req: Request, res: Response) => {
   const body = (req.body ?? {}) as Record<string, unknown>;
-  const invalid = validatePolicyBody(body);
+  const invalid = validatePolicyBody(body, { global: true });
   if (invalid) {
     res.status(400).json({ error: invalid });
     return;

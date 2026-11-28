@@ -1983,12 +1983,13 @@ paths:
       tags: [Plans]
       summary: Create an execution plan from a plugin intent
       description: >-
-        Requires 2FA-completed session and permission `configs:apply`. Asks the
+        Requires permission `configs:apply` — no 2FA-completed session needed:
+        creation only STAGES the plan (agents with long-lived tokens use this),
+        while execution stays 2FA-gated (POST /plans/{id}/execute). Asks the
         plugin to build a plan for the given intent across the selected devices,
         creates every provisioned secret immediately (ref -> secret id map is
         returned on the plan), and persists all steps. Multi-device intents
         require exactly their declared device count.
-      x-2fa-required: true
       requestBody:
         required: true
         content:
@@ -2023,18 +2024,18 @@ paths:
       tags: [Plans]
       summary: Create a system plan for one local RADIUS/CA mutation
       description: >-
-        Requires a 2FA-completed session, permission `configs:apply`, AND the
-        action's domain permission (`radius:write` or `ca:manage`). Unlike POST
-        /plans this needs NO device and NO plugin — the step is executed by the
-        API's own plan executor (local mutation). The plan lands as 'ready' with
-        sentinel plugin/device ids; execution goes through the same 2FA-gated
-        POST /plans/{id}/execute. This makes RADIUS/CA changes auditable,
-        retryable, schedulable and automatable like every other config change.
+        Requires permission `configs:apply` (no 2FA-completed session — creation
+        is staging; execution stays 2FA-gated) AND the action's domain permission
+        (`radius:write` or `ca:manage`). Unlike POST /plans this needs NO device
+        and NO plugin — the step is executed by the API's own plan executor
+        (local mutation). The plan lands as 'ready' with sentinel plugin/device
+        ids; execution goes through the same 2FA-gated POST /plans/{id}/execute.
+        This makes RADIUS/CA changes auditable, retryable, schedulable and
+        automatable like every other config change.
 
         Provide EITHER `inputs` (a single step) OR a non-empty `steps` array of
         `{ input }` objects (bulk: one step per item, same action id). At most
         500 steps.
-      x-2fa-required: true
       requestBody:
         required: true
         content:
@@ -10922,7 +10923,9 @@ components:
         include 'webauthn' for passkey sessions). The policy is evaluated LIVE on
         each request, so admin changes apply immediately to existing sessions.
         Long-lived API tokens (`unm_…`, created via POST /tokens) are also accepted
-        as bearer credentials; they can never satisfy a 2FA requirement.
+        as bearer credentials. They satisfy a 2FA requirement only when the
+        user's credential policy grants 'token' in `gateAmrs` (a per-user opt-in
+        for service accounts/agents — it may not be set globally).
 
   schemas:
     Secret:

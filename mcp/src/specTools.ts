@@ -17,7 +17,8 @@ import { apiDispatcher, isTransportError, mtlsLive } from './mcpMtls.js';
  *
  * Excluded on purpose:
  *   - /auth/* endpoints (login/2FA are interactive; agents use long-lived tokens)
- *   - operations marked `x-2fa-required` (tokens can never carry a TOTP claim)
+ *   - operations marked `x-2fa-required` — plan EXECUTION stays human-gated
+ *     (plan creation is NOT marked, so agents can stage plans for humans to execute)
  */
 
 interface OpenApiSpec {
@@ -210,8 +211,10 @@ export function generateTools(specPath: string): GeneratedTool[] {
       const operation = pathItem[method];
       if (!operation || typeof operation !== 'object') continue;
 
-      // Interactive auth flows and 2FA-gated operations are out of scope:
-      // agents authenticate with long-lived tokens, which can never carry a TOTP claim.
+      // Interactive auth flows are out of scope (agents use long-lived tokens).
+      // 2FA-gated operations stay excluded: plan execution requires a
+      // 2FA-completed session — agents stage plans via the unmarked authoring
+      // endpoints, humans execute them.
       if (templatePath.startsWith('/auth/')) continue;
       if ((operation as Record<string, unknown>)['x-2fa-required'] === true) continue;
 

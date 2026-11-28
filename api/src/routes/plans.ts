@@ -576,10 +576,11 @@ router.post(
 
 // POST /plans — plan an intent across devices via the plugin's /plan endpoint,
 // fulfil its provisionRequests (secrets are created NOW), persist everything.
+// Authoring is open to any `configs:apply` holder (incl. long-lived API tokens
+// — agents stage plans this way); EXECUTION stays 2FA-gated (POST /plans/:id/execute).
 router.post(
   '/plans',
   requireAuth,
-  require2FA,
   requirePermission('configs:apply'),
   async (req, res) => {
     const body = req.body ?? {};
@@ -680,15 +681,15 @@ router.post(
 
 // POST /plans/system — create a SYSTEM plan for one local mutation (RADIUS / CA).
 // Unlike POST /plans this needs NO device and NO plugin: the step is executed by
-// the API's own plan executor via api/src/plans/systemActions.ts. The plan lands
-// as 'ready' with the sentinel plugin/device ids; execution goes through the
-// SAME 2FA-gated POST /plans/:id/execute (plus the action's domain permission,
-// re-checked there). This is what makes RADIUS/CA changes auditable, retryable,
-// schedulable and automatable like every other config change.
+// the API's own plan executor via api/src/plans/systemActions.ts. Like POST /plans
+// authoring is open to any `configs:apply` holder (incl. long-lived API tokens);
+// the plan lands as 'ready' with sentinel plugin/device ids and execution goes
+// through the SAME 2FA-gated POST /plans/:id/execute (plus the action's domain
+// permission, re-checked there). This is what makes RADIUS/CA changes auditable,
+// retryable, schedulable and automatable like every other config change.
 router.post(
   '/plans/system',
   requireAuth,
-  require2FA,
   requirePermission('configs:apply'),
   async (req, res) => {
     const body = req.body ?? {};

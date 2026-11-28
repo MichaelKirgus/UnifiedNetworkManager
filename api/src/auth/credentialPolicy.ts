@@ -13,7 +13,9 @@ import * as schema from '../db/schema';
  *      the policy or enrolling a method).
  *   2. `gateAmrs` — which JWT `amr` values satisfy require2FA (privileged
  *      endpoints like config-job submission). Evaluated LIVE per request, so
- *      admin changes apply immediately to existing sessions.
+ *      admin changes apply immediately to existing sessions. `'token'` is a
+ *      special gate AMR: when granted PER-USER it lets long-lived API-token
+ *      sessions pass the gate without OTP/passkey (service accounts / agents).
  *   3. Password rules — `minPasswordLength` (floor for new/reset passwords),
  *      `passwordMaxAgeDays` (force rotation after N days; null = off) and
  *      `inactiveDisableAfterDays` (auto-disable after N days without a login;
@@ -33,8 +35,13 @@ import * as schema from '../db/schema';
 
 export type SecondFactorMethod = 'totp' | 'webauthn';
 
-/** AMR values a session can carry after completing authentication. */
-export const KNOWN_AMRS = ['pwd', 'totp', 'webauthn'] as const;
+/**
+ * AMR values a session can carry: interactive logins end in 'pwd' + the
+ * completed second factor ('totp'/'webauthn'); long-lived API-token sessions
+ * carry ['token']. 'token' is only meaningful in gateAmrs (never a login step)
+ * and may only be granted per-user — see validatePolicyBody.
+ */
+export const KNOWN_AMRS = ['pwd', 'totp', 'webauthn', 'token'] as const;
 export type AmrValue = (typeof KNOWN_AMRS)[number];
 
 const SECOND_FACTOR_METHODS: SecondFactorMethod[] = ['totp', 'webauthn'];
@@ -199,8 +206,13 @@ export function isInactiveDisabled(policy: Pick<CredentialPolicy, 'inactiveDisab
   return Date.now() - ref > policy.inactiveDisableAfterDays * 24 * 60 * 60 * 1000;
 }
 
-/** Validates a policy body from the API. Returns an error message or null. */
-export function validatePolicyBody(body: unknown): string | null {
+/**
+ * Validates a policy body from the API. Returns an error message or null.
+ * Pass `{ global: true }` for the GLOBAL policy — there, `gateAmrs` may not
+ * contain 'token' (token-gate access is a per-user opt-in for service
+ * accounts/agents; granting it globally would let every token pass the gate).
+ */
+export function validatePolicyBody(body: unknown, opts: { global?: boolean } = {}): string | null {
   if (!body || typeof body !== 'object' || Array.isArray(body)) {
     return 'Request body must be an object';
   }
@@ -223,6 +235,12 @@ export function validatePolicyBody(body: unknown): string | null {
   // session, locking out privileged actions entirely.
   if (Array.isArray(obj.gateAmrs) && obj.gateAmrs.length === 0) {
     return 'gateAmrs must contain at least one AMR value';
+  }
+
+  // 'token' in the GLOBAL policy would let every long-lived API token on the
+  // instance pass the privileged-action gate — only per-user grants are allowed.
+  if (opts.global && Array.isArray(obj.gateAmrs) && obj.gateAmrs.includes('token')) {
+    return 'gateAmrs entry "token" may only be granted per-user, not in the global policy';
   }
 
   for (const key of ['minPasswordLength', 'passwordMaxAgeDays', 'inactiveDisableAfterDays', 'sessionTimeoutSeconds'] as const) {

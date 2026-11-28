@@ -193,7 +193,29 @@ export function PolicyEditor({
               {m === 'totp' ? 'TOTP sessions' : 'Passkey sessions'}
             </label>
           ))}
+          <label
+            className={`inline-flex items-center gap-2 text-sm ${mode === 'perUser' ? 'cursor-pointer' : 'cursor-not-allowed opacity-50'} text-secondary`}
+            title={mode === 'perUser' ? undefined : 'Per-user only — the global policy cannot grant token gate access'}
+          >
+            <input
+              type="checkbox"
+              disabled={mode !== 'perUser'}
+              checked={draftGate.has('token')}
+              onChange={() => {
+                toggle(draftGate, 'token', true, setDraftGate);
+              }}
+              className="h-4 w-4 rounded border-border text-foreground focus:ring-focus-ring"
+            />
+            Long-lived API token sessions
+          </label>
         </div>
+        {draftGate.has('token') && (
+          <p className="mt-2 text-xs leading-snug text-warning-fg">
+            ⚠️ Long-lived API tokens for this user pass the privileged-action gate (plan execution, config jobs) without
+            OTP/passkey. Intended for service accounts and agents — use permission-scoped, revocable tokens only, and
+            keep at least one interactive method checked.
+          </p>
+        )}
       </fieldset>
 
       <fieldset>

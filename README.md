@@ -30,7 +30,7 @@ One control plane for a mixed-vendor estate — here's what that looks like in p
 
 - **Open API** — vendor-neutral REST contract in [`openapi/`](openapi/unified-network-manager.openapi.yaml), validated at runtime on every request.
 - **Plugin system** — vendor adapters are independent microservices that self-register with the API; a device can carry **multiple plugins at once**, each with its own credentials. All 28 shipped plugins: [docs/PLUGINS.md](docs/PLUGINS.md).
-- **Authentication with RBAC + 2FA** — JWT auth, DB-backed roles, TOTP for privileged operations; credential verification delegated to the pluggable basic-auth identity provider.
+- **Authentication with RBAC + 2FA** — JWT auth, DB-backed roles, TOTP/passkey for privileged operations (gate AMRs configurable per user, incl. a per-user `token` grant for service accounts); credential verification delegated to the pluggable basic-auth identity provider.
 - **Secrets management** — device credentials encrypted at rest by the pluggable secrets-provider plugin (the API only ever stores ciphertext); generatable types (WireGuard keys, tunnel PSKs, OpenVPN CA) creatable from the UI or as part of a plan.
 - **Configuration workflows** — single-device config jobs plus multi-step [plans](docs/PLANS-AUTOMATIONS.md): dependencies, token substitution between step results, pre-write snapshots and secret provisioning.
 - **Automations** — ITTT-style rules (schedule / metric / log / device-status / flow / update triggers → intents, webhooks or notifications) with cooldowns, deferral windows and a template catalog.
@@ -116,7 +116,7 @@ before you can use anything else. There is no skip — once the wizard completes
 
 ## Security model
 
-RBAC (~58 permissions — full catalog in [docs/PERMISSIONS.md](docs/PERMISSIONS.md)), mandatory 2FA for privileged operations, secrets encrypted at rest by the pluggable secrets provider (the API only ever stores ciphertext), and long-lived API tokens with per-token permission narrowing.
+RBAC (~58 permissions — full catalog in [docs/PERMISSIONS.md](docs/PERMISSIONS.md)), mandatory 2FA for privileged operations (per-user gate AMRs — `totp`, `webauthn`, and a per-user-only `token` grant for service accounts), secrets encrypted at rest by the pluggable secrets provider (the API only ever stores ciphertext), and long-lived API tokens with per-token permission narrowing.
 
 > **Keep UNM off the public internet** — it holds credentials for every device and can write their configuration (firewalls included). Expose only via VPN or an authenticated reverse proxy (TLS termination + auth): [docs/SECURITY.md](docs/SECURITY.md) and [docs/REVERSE-PROXY.md](docs/REVERSE-PROXY.md).
 

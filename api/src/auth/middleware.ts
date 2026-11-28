@@ -159,9 +159,11 @@ export async function requireDeviceAccess(req: Request, res: Response, next: Nex
  * is resolved LIVE (per request, short-cached) so an admin changing which AMRs
  * satisfy the gate takes effect immediately for existing sessions — no waiting
  * out the 1h JWT TTL. A session passes when its `amr` claim intersects the
- * user's effective `gateAmrs`. Long-lived API tokens (amr ['token']) can never
- * pass, same as before. Used for privileged endpoints marked
- * `x-2fa-required: true` in the OpenAPI spec (e.g. config job submission).
+ * user's effective `gateAmrs`. Long-lived API-token sessions (amr ['token'])
+ * pass only when the user's policy grants 'token' in gateAmrs — a per-user
+ * opt-in for service accounts/agents (validatePolicyBody rejects it globally).
+ * Used for privileged endpoints marked `x-2fa-required: true` in the OpenAPI
+ * spec (e.g. plan execution, config job submission).
  */
 
 const GATE_POLICY_CACHE_TTL_MS = 5_000;
